@@ -4,48 +4,10 @@
 
 Quarry organizes core functionality into distinct packages under `internal/`, wired together at startup by `cmd/server/main.go`.
 
-```mermaid
-flowchart TD
-    Client["Client / Upstream Service"] -->|"HTTP Request (X-Service-Token)"| Router["HTTP Router & Middleware\n(RequestID, Metrics, Logging, Recovery, Auth)"]
-
-    subgraph API ["Transport Layer (internal/api)"]
-        Router --> H_Health["HealthHandler\nGET /health"]
-        Router --> H_Ingest["IngestHandler\nPOST /ingest"]
-        Router --> H_Query["QueryHandler\nPOST /query"]
-        Router --> H_Docs["ListDocumentsHandler\nGET /documents"]
-        Router --> H_File["FileHandler\nGET /documents/{id}/file"]
-        Router --> H_Delete["DeleteHandler\nDELETE /documents/{id}"]
-    end
-
-    subgraph AsyncWorker ["Asynchronous Ingestion (internal/worker)"]
-        H_Ingest -->|"AcceptDocument transaction"| Queue["PostgreSQL ingest_jobs"]
-        Queue --> WorkerLoop["Lease Claim Loops"]
-        WorkerLoop --> ChunkStage["ChunkStage\n(internal/chunker)"]
-        ChunkStage --> EmbedStage["EmbedStage\n(internal/embedder)"]
-        EmbedStage --> PersistStage["PersistStage\n(internal/pipeline)"]
-    end
-
-    subgraph QueryPipeline ["Query Pipeline (internal/pipeline)"]
-        H_Query --> Decompose["DecomposeStage\n(Multi-Need Signals)"]
-        Decompose --> RouteMode["RoutingStage\n(LOCAL vs GLOBAL)"]
-        RouteMode --> Retrieve["RetrievalStage\n(internal/retriever)"]
-        Retrieve --> Synthesis["SynthesisStage\n(internal/llm)"]
-    end
-
-    subgraph Stores ["Data & Cloud Services"]
-        PersistStage --> VectorDB[("Pinecone\nVector Store")]
-        WorkerLoop -->|"CompleteJob transaction"| RelDB[("PostgreSQL\nMetadata & Chunks")]
-        H_Ingest -.->|"Upload Source File"| ObjectStore[("AWS S3\nObject Store")]
-        H_File -.->|"Presign GET URL"| ObjectStore
-        H_Delete --> Cleanup["Cleanup Helper"]
-        Cleanup --> VectorDB
-        Cleanup --> RelDB
-        Cleanup --> ObjectStore
-        EmbedStage --> Bedrock["AWS Bedrock\n(Titan Embed V2)"]
-        Retrieve --> VectorDB
-        Synthesis --> BedrockLLM["AWS Bedrock\n(Nova Micro / Llama 4)"]
-    end
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/system-architecture-dark.gif">
+  <img alt="Quarry service architecture. A client service calls the HTTP router, which serves the health probes and routes token-protected requests to IngestHandler, the document handlers and QueryHandler. IngestHandler parses uploaded files in the extraction sandbox, stores originals in Amazon S3 and accepts the document and its job into PostgreSQL. The ingestion worker claims the job, runs ChunkStage, EmbedStage with Bedrock embeddings and PersistStage, which upserts vectors to Pinecone, and completes the job in PostgreSQL. A query runs through DecomposeStage, RoutingStage, which embeds the query, RetrievalStage, which searches Pinecone, and SynthesisStage, which calls Bedrock Converse. The document handlers presign and delete S3 files and list, report and delete PostgreSQL records." src="diagrams/system-architecture-light.gif">
+</picture>
 
 ### Package Responsibilities
 
