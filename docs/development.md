@@ -6,38 +6,10 @@ For contribution guidelines, environment setup, Conventional Commits formatting,
 
 ## Repository Layout
 
-```text
-cmd/
-  server/               Application entry point, dependency wiring, and graceful shutdown
-internal/
-  api/                  HTTP router, route registration, and middleware chaining
-    handler/            HTTP handlers (document, file, health, ingest, json, query)
-    middleware/         Structured JSON logging, panic recovery, and service token authentication
-  chunker/              Sliding-window text chunker and SHA-256 content fingerprinting
-  cleanup/              Multi-store document deletion coordinator (Pinecone, S3, PostgreSQL)
-  config/               Environment variable loading, default fallbacks, and validation boundaries
-  domain/               Domain types, shared interfaces, and default document label definitions
-  embedder/             Bedrock Titan Embed V2 provider and offline fake embedder
-  extractor/            Text extraction adapters for PDF, DOCX, DOC, and plain text
-  llm/                  Bedrock Converse client, model routing matrix, and offline fake converser
-  pipeline/             Ingestion stages (chunk, embed, persist) and query stages (decompose, route, retrieve, synthesize)
-  retriever/            Vector retrieval coordinator, LOCAL/GLOBAL mode decision tree, and fallback logic
-  store/
-    memory/             In-memory thread-safe vector store used in offline fake mode
-    pinecone/           Pinecone vector store driver and index connection pooling
-    postgres/           PostgreSQL client, connection pool, and embedded SQL migrations (001–006)
-    s3/                 AWS S3 client for raw object storage and presigned URL generation
-  worker/               PostgreSQL ingestion leases, parallel processors, retry and shutdown handling
-scripts/
-  cleanup/              CLI utility to delete specified document UUIDs from all stores
-  langeval/             Evaluation harness for response language compliance, latency, and chunk counts
-  simulate/             End-to-end API simulation runner testing full document lifecycles
-  validate/             Retrieval validation script verifying query modes and scoring
-test/
-  integration/          Integration tests using Testcontainers for isolated PostgreSQL testing
-  smoke/                Live smoke test suite targeting running services (opt-in via RUN_SMOKE=1)
-  unit/                 Unit tests covering chunking, extraction, fake mode, retriever, and router logic
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/repository-layout-dark.gif">
+  <img alt="Repository layout. cmd/server holds the entry point. internal/ holds api (handler, middleware), awsconf, chunker, cleanup, config, domain, embedder, extractor, llm, logctx, metrics, pipeline, retriever, store (memory, pinecone, postgres, s3), testutil (pgtest), textutil and worker. scripts/ holds cleanup, langeval, reconcile, simulate and validate. test/ holds integration, smoke and unit." src="diagrams/repository-layout-light.gif">
+</picture>
 
 ---
 
