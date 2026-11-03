@@ -203,40 +203,10 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
 
 The relational storage schema is defined across embedded SQL migrations applied in numeric order at service startup.
 
-```mermaid
-erDiagram
-    DOCUMENTS {
-        UUID id PK "gen_random_uuid()"
-        TEXT content "Full raw document text"
-        TEXT content_preview "First 120 chars for entity matching"
-        JSONB metadata "Arbitrary key-value metadata"
-        TEXT status "processing | completed | failed"
-        INTEGER chunk_count "Total chunks produced"
-        TEXT file_name "Original upload filename (nullable)"
-        TEXT file_type "Detected format: pdf, docx, doc (nullable)"
-        TEXT s3_key "Object store path key (nullable)"
-        TEXT doc_type "Label: default 'document'"
-        TIMESTAMPTZ created_at "NOW()"
-    }
-
-    CHUNKS {
-        UUID id PK "gen_random_uuid()"
-        UUID document_id FK "REFERENCES documents(id) ON DELETE CASCADE"
-        INTEGER chunk_index "Zero-based position within document"
-        TEXT text "Chunk text content"
-        INTEGER token_count "Estimated tokens"
-        TIMESTAMPTZ created_at "NOW()"
-    }
-
-    DOCUMENT_FINGERPRINTS {
-        TEXT fingerprint PK "SHA-256 hex string"
-        UUID document_id FK "REFERENCES documents(id) ON DELETE CASCADE"
-        TIMESTAMPTZ created_at "NOW()"
-    }
-
-    DOCUMENTS ||--o{ CHUNKS : "has (cascading)"
-    DOCUMENTS ||--o{ DOCUMENT_FINGERPRINTS : "deduplicates (cascading)"
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.gif">
+  <img alt="Data model. chunks (id, document_id, chunk_index, text, token_count, created_at) and document_fingerprints (fingerprint, document_id, created_at) reference documents with zero or more rows per document. ingest_jobs (document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at, updated_at) is keyed by document_id, so each document has at most one job. documents has id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at and completed_at." src="diagrams/database-schema-light.gif">
+</picture>
 
 ### Table Definitions
 
