@@ -133,6 +133,7 @@ Notable changes are grouped by release.
 
 ### Security
 
+- Upgrade `github.com/klauspost/compress` for GO-2026-6865, `golang.org/x/net` for GO-2026-6866 and GO-2026-6860, and `golang.org/x/crypto` for GO-2026-5932.
 - Wrap retrieved excerpts in per-request markers, place the question before them, and strip invisible characters from stored chunks before synthesis.
 - Stop logging query text; logs record its length and digest.
 
