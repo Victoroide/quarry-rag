@@ -82,6 +82,7 @@ Application connections default to `pool_max_conns=16` and `statement_timeout=30
 | `004_add_doc_type.sql` | Adds the `doc_type` column to `documents` and backfills values from `metadata->>'doc_type'`. |
 | `005_document_default.sql` | Sets the default column value for `doc_type` in `documents` to `'document'`. |
 | `006_ingest_jobs.sql` | Adds durable ingestion jobs, lease and failure tracking, completion timestamps and document fingerprints. Normalizes previously persisted processing rows with fingerprints to completed and requeues other processing rows. |
+| `007_document_collections.sql` | Adds collection labels to documents and an index on `(collection, id)`; existing rows belong to the default collection. |
 
 ## Metrics
 

@@ -16,10 +16,12 @@ JSON request bodies must be objects. Unknown request fields and duplicate
 top-level keys return 400 with `unknown field "<name>"` or
 `duplicate field "<name>"`. Trailing data after the object also returns 400.
 
-Document labels (`doc_type` and `filter_doc_type`) are trimmed and normalized to
-Unicode NFC, limited to 128 UTF-8 bytes, and must contain no control or Unicode
-format characters. An empty ingestion label uses the default `document`; an
-empty query filter imposes no document type restriction.
+Document labels (`doc_type`, `filter_doc_type` and `collection`) must be valid
+UTF-8, are trimmed and normalized to Unicode NFC, limited to 128 UTF-8 bytes,
+and must contain no control or Unicode format characters, including NUL. An
+empty `doc_type` uses the default `document`; an empty query filter imposes no
+document type restriction. An omitted or empty `collection` selects the default
+collection (`""`).
 
 Metadata is stored only in PostgreSQL. Its serialized JSON representation is
 limited to 65,536 bytes (64 KiB), including JSON escaping, with at most eight
@@ -111,6 +113,7 @@ Request fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `content` | string | yes | Document text content (maximum 1,000,000 bytes after JSON decoding) |
+| `collection` | string | no | Collection label that scopes content deduplication, using the label rules above |
 | `doc_type` | string | no | Document category label. Defaults to `"document"` if omitted |
 | `document_id` | string | no | Optional document UUID, retained in canonical form. Omitted or empty values generate a fresh UUID; malformed non-empty values return 400 |
 | `metadata` | object | no | Optional key-value metadata stored only in PostgreSQL, subject to the size, nesting and NUL limits above |
@@ -130,14 +133,15 @@ Response (Duplicate Document):
 
 When `document_id` is supplied, a completed document with the same content
 fingerprint returns `already_ingested` with that same identifier. In-flight duplicates return 202 `processing` with the same identifier. Failed duplicates return 202 and requeue that document. Different
-content under an existing identifier returns 409 with
+content or a different collection under an existing identifier returns 409 with
 `{"error":"conflict","message":"document_id already exists with different content"}`.
 Existing documents are never overwritten.
 
 Content deduplication across identifiers applies only when `document_id` is
-omitted or empty. A new caller-supplied identifier is retained even if another
-document has identical content. Document or fingerprint lookup failures return
-503 with `{"error":"unavailable","message":"document store unavailable"}`.
+omitted or empty, and only within the request's collection. A new
+caller-supplied identifier is retained even if another document has identical
+content. Document or fingerprint lookup failures return 503 with
+`{"error":"unavailable","message":"document store unavailable"}`.
 
 ```json
 {
@@ -184,6 +188,7 @@ Form fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `file` | file binary | yes | File to extract and ingest. Accepted formats: PDF, DOCX, DOC and UTF-8 or BOM-marked UTF-16 plain text (`.txt`, `.md`, `.markdown`) |
+| `collection` | string | no | Collection label with the same scope, default and validation rules as JSON ingestion; repeated fields return 400 |
 | `doc_type` | string | no | Document category label. Defaults to `"document"` if omitted |
 | `document_id` | string | no | Optional document UUID with the same identity and conflict rules as JSON requests, applied to extracted text |
 | `metadata` | JSON object string | no | Optional metadata with the same limits as JSON ingestion; duplicate top-level keys, trailing data and repeated metadata fields return 400. The stored object includes `source_file` set to the uploaded filename, overriding a caller value, and must still fit the size limit |
@@ -209,7 +214,7 @@ DOC extraction supports the main document text in Word 97–2003 binary document
 headers, footers, footnotes and comments are not extracted. Word 6/95 documents
 and encrypted files return 422.
 
-New uploads return 202 after durable acceptance with the retained or generated identifier. Completed duplicates return 200 `already_ingested`; in-flight duplicates return 202 with the same identifier; failed duplicates return 202 and are requeued. Without `document_id`, uploads use content deduplication. A configured source store must accept the original upload before document acceptance. New source objects are removed when acceptance does not retain them.
+New uploads return 202 after durable acceptance with the retained or generated identifier. Completed duplicates return 200 `already_ingested`; in-flight duplicates return 202 with the same identifier; failed duplicates return 202 and are requeued. Identity and deduplication follow the JSON ingestion rules above. A configured source store must accept the original upload before document acceptance. New source objects are removed when acceptance does not retain them.
 
 Error Status Codes:
 
@@ -377,6 +382,7 @@ Document summary fields:
 | Field | Type | Description |
 |---|---|---|
 | `document_id` | string | Document UUID |
+| `collection` | string | Collection label, always present; `""` for the default collection |
 | `doc_type` | string | Document category label |
 | `s3_key` | string | S3 object key, or omitted if no binary file was stored |
 | `status` | string | Ingestion state: `processing`, `completed` or `failed` |

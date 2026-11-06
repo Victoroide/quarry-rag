@@ -173,7 +173,7 @@ When `FakeMode` is active in `cmd/server/main.go`:
 2. **Embedding Provider**: Instantiates `internal/embedder.FakeEmbedder`, generating deterministic 1024-dimensional float arrays based on hashing input texts.
 3. **LLM Converser**: Instantiates `internal/llm.FakeConverser`, returning structured responses without invoking external APIs.
 4. **Object Storage**: S3 client initialization is skipped. Multipart file ingestion extracts text directly in memory and continues through chunking and indexing without storing the raw binary.
-5. **Relational Storage**: PostgreSQL is still utilized via `DATABASE_URL` for real schema migrations (001–006), metadata storage, and duplicate fingerprint tracking.
+5. **Relational Storage**: PostgreSQL is still utilized via `DATABASE_URL` for real schema migrations, metadata storage, and duplicate fingerprint tracking.
 
 Durable ingestion tests use disposable PostgreSQL databases and the offline vector store to cover restart recovery, terminal failures, deletion during processing, NUL handling and source upload failures. Lease and atomic acceptance tests live in `internal/store/postgres/jobs_test.go`; the short suite skips database-backed tests.
 
