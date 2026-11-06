@@ -68,6 +68,17 @@ RUN_SMOKE=1 go test ./test/smoke/... -count=1 -v -timeout 120s
 
 ---
 
+## Continuous Integration
+
+| Workflow | Trigger | Checks |
+|---|---|---|
+| [CI](../.github/workflows/ci.yml) | Pushes to `main` and pull requests | Lint; Test with race detection; Build service and runtime image; Check reachable vulnerabilities. |
+| [CodeQL](../.github/workflows/codeql.yml) | Pushes to `main`, pull requests targeting `main` and weekly | Analyze Go for security issues. |
+| [Dependency review](../.github/workflows/dependency-review.yml) | Pull requests | Review dependency changes; reject vulnerabilities of high severity or above. |
+| [Scorecard](../.github/workflows/scorecard.yml) | Pushes to `main`, weekly, branch protection changes and manual dispatch | Publish Scorecard results, retain the SARIF artifact for five days and upload it to code scanning. |
+
+---
+
 ## Operational Scripts
 
 The `scripts/` directory contains standalone administrative and evaluation tools:
