@@ -10,6 +10,7 @@ import (
 type DocumentSummary struct {
 	ID          string     `json:"document_id"`
 	DocType     string     `json:"doc_type"`
+	Collection  string     `json:"collection"`
 	S3Key       *string    `json:"s3_key,omitempty"`
 	Status      string     `json:"status"`
 	ChunkCount  int        `json:"chunk_count"`

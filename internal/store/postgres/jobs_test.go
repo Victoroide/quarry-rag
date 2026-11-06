@@ -33,6 +33,66 @@ func jobsAccept(t *testing.T, c *Client, content string) domain.DocumentID {
 	require.Equal(t, domain.AcceptAccepted, r.Outcome)
 	return r.DocumentID
 }
+
+func TestAcceptCollectionIdentity(t *testing.T) {
+	c := jobsDatabase(t)
+	req := jobsRequest("shared collection content")
+	req.Collection = "a"
+	req.Fingerprint = chunker.ScopedFingerprint(req.Collection, req.Document.Content)
+	a, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, a.Outcome)
+	req.Document.ID = domain.DocumentID(uuid.NewString())
+	again, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptInProgress, again.Outcome)
+	require.Equal(t, a.DocumentID, again.DocumentID)
+	job, err := c.ClaimJob(t.Context(), "collection", time.Minute, 5)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, req.Fingerprint, job.Document.Fingerprint)
+	ok, err := c.CompleteJob(t.Context(), *job, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	again, err = c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptDuplicate, again.Outcome)
+	require.Equal(t, a.DocumentID, again.DocumentID)
+	req.Collection = "b"
+	req.Fingerprint = chunker.ScopedFingerprint(req.Collection, req.Document.Content)
+	b, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, b.Outcome)
+	require.NotEqual(t, a.DocumentID, b.DocumentID)
+	for id, collection := range map[domain.DocumentID]string{a.DocumentID: "a", b.DocumentID: "b"} {
+		var stored, fingerprint string
+		require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT collection,fingerprint FROM documents WHERE id=$1`, string(id)).Scan(&stored, &fingerprint))
+		require.Equal(t, collection, stored)
+		mappedID, exists, lookupErr := c.CheckFingerprint(t.Context(), fingerprint)
+		require.NoError(t, lookupErr)
+		require.True(t, exists)
+		require.Equal(t, id, mappedID)
+	}
+}
+
+func TestAcceptCallerIDConflictsAcrossCollections(t *testing.T) {
+	c := jobsDatabase(t)
+	for _, collection := range []string{"", "a"} {
+		req := jobsRequest("caller collection content")
+		req.CallerSupplied = true
+		req.Collection = collection
+		req.Fingerprint = chunker.ScopedFingerprint(collection, req.Document.Content)
+		first, err := c.AcceptDocument(t.Context(), req)
+		require.NoError(t, err)
+		require.Equal(t, domain.AcceptAccepted, first.Outcome)
+		req.Collection = "b"
+		req.Fingerprint = chunker.ScopedFingerprint("b", req.Document.Content)
+		conflict, err := c.AcceptDocument(t.Context(), req)
+		require.NoError(t, err)
+		require.Equal(t, domain.AcceptConflict, conflict.Outcome)
+		require.Equal(t, first.DocumentID, conflict.DocumentID)
+	}
+}
 func TestAcceptIsAtomicUnderConcurrency(t *testing.T) {
 	c := jobsDatabase(t)
 	var wg sync.WaitGroup

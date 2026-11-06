@@ -12,10 +12,65 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/chunker"
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDocumentCollectionsUpgradePreservesIdentity(t *testing.T) {
+	client := migrationTestClient(t, startTestDatabase(t))
+	migrations, err := loadMigrations(testMigrationFiles)
+	require.NoError(t, err)
+	_, err = client.Pool.Exec(t.Context(), `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`)
+	require.NoError(t, err)
+	for _, m := range migrations {
+		if m.version > 6 {
+			continue
+		}
+		_, err = client.Pool.Exec(t.Context(), m.sql)
+		require.NoError(t, err)
+		_, err = client.Pool.Exec(t.Context(), `INSERT INTO schema_migrations(version,name,checksum) VALUES($1,$2,$3)`, m.version, m.name, m.checksum)
+		require.NoError(t, err)
+	}
+	const content = "Existing default collection content"
+	const id = "00000000-0000-4000-8000-000000000005"
+	fingerprint := chunker.Fingerprint(content)
+	_, err = client.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,status,fingerprint) VALUES($1,$2,'completed',$3)`, id, content, fingerprint)
+	require.NoError(t, err)
+	_, err = client.Pool.Exec(t.Context(), `INSERT INTO document_fingerprints(fingerprint,document_id) VALUES($1,$2)`, fingerprint, id)
+	require.NoError(t, err)
+	const legacyID = "00000000-0000-4000-8000-000000000006"
+	_, err = client.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,status) VALUES($1,'Legacy content without stored fingerprint','completed')`, legacyID)
+	require.NoError(t, err)
+	require.NoError(t, client.RunMigrations(t.Context()))
+	requireRecordedMigrations(t, client)
+	var collection, storedContent, storedFingerprint string
+	require.NoError(t, client.Pool.QueryRow(t.Context(), `SELECT collection,content,fingerprint FROM documents WHERE id=$1`, id).Scan(&collection, &storedContent, &storedFingerprint))
+	require.Empty(t, collection)
+	require.Equal(t, content, storedContent)
+	require.Equal(t, fingerprint, storedFingerprint)
+	result, err := client.AcceptDocument(t.Context(), jobsRequest(content))
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptDuplicate, result.Outcome)
+	require.Equal(t, domain.DocumentID(id), result.DocumentID)
+	req := jobsRequest("Legacy content without stored fingerprint")
+	req.Document.ID = legacyID
+	req.CallerSupplied = true
+	result, err = client.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptDuplicate, result.Outcome)
+	req.Collection = "archive"
+	req.Fingerprint = chunker.ScopedFingerprint(req.Collection, req.Document.Content)
+	result, err = client.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptConflict, result.Outcome)
+	var index string
+	require.NoError(t, client.Pool.QueryRow(t.Context(), `SELECT indexdef FROM pg_indexes WHERE tablename='documents' AND indexname='idx_documents_collection_id'`).Scan(&index))
+	require.Contains(t, index, "(collection, id)")
+	require.NoError(t, client.RunMigrations(t.Context()))
+}
 
 //go:embed migrations/*.sql
 var testMigrationFiles embed.FS

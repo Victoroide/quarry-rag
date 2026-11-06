@@ -111,7 +111,7 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 	if len(preview) > 120 {
 		preview = preview[:120]
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,file_name,file_type,s3_key,doc_type,status,fingerprint) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9)`, string(req.Document.ID), req.Document.Content, string(preview), encoded, req.Document.FileName, req.Document.FileType, req.Document.S3Key, metadata["doc_type"], req.Fingerprint)
+	_, err = tx.Exec(ctx, `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,file_name,file_type,s3_key,doc_type,status,fingerprint,collection) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9,$10)`, string(req.Document.ID), req.Document.Content, string(preview), encoded, req.Document.FileName, req.Document.FileType, req.Document.S3Key, metadata["doc_type"], req.Fingerprint, req.Collection)
 	if err != nil {
 		return result, err
 	}
