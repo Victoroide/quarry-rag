@@ -10,6 +10,21 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 )
 
+func TestScopedFingerprint(t *testing.T) {
+	if got := ScopedFingerprint("", "content"); got != Fingerprint("content") {
+		t.Fatalf("default collection changed fingerprint: %s", got)
+	}
+	if ScopedFingerprint("a", "content") == ScopedFingerprint("b", "content") {
+		t.Fatal("different collections share a fingerprint")
+	}
+	if ScopedFingerprint("ab", "c") == ScopedFingerprint("a", "bc") {
+		t.Fatal("collection and content boundaries are ambiguous")
+	}
+	if ScopedFingerprint("a", "content") == Fingerprint("content") {
+		t.Fatal("named collection shares the default fingerprint")
+	}
+}
+
 func TestLongSentenceIsBoundedWithoutLosingWords(t *testing.T) {
 	text := strings.Repeat("preservation archive storage ", 100)
 	chunks := NewChunker(20, 0).Chunk("document", text)

@@ -26,6 +26,7 @@ type AcceptRequest struct {
 	CallerSupplied bool
 	Fingerprint    string
 	DocType        string
+	Collection     string
 	MaxPending     int
 }
 

@@ -100,3 +100,31 @@ func TestListDocumentsPageBoundaries(t *testing.T) {
 	_, err = lister.ListDocumentsPage(t.Context(), "invalid", 1)
 	require.Error(t, err)
 }
+
+func TestDocumentSummariesIncludeCollections(t *testing.T) {
+	c, lister := listingDatabase(t)
+	_, err := c.Pool.Exec(t.Context(), `UPDATE documents SET collection='archive' WHERE id=$1`, listingSecondID)
+	require.NoError(t, err)
+	check := func(doc domain.DocumentSummary) {
+		t.Helper()
+		want := ""
+		if doc.ID == listingSecondID {
+			want = "archive"
+		}
+		require.Equal(t, want, doc.Collection)
+	}
+	require.NoError(t, lister.StreamDocuments(t.Context(), func(doc domain.DocumentSummary) error {
+		check(doc)
+		return nil
+	}))
+	page, err := lister.ListDocumentsPage(t.Context(), "", 10)
+	require.NoError(t, err)
+	require.Len(t, page, 3)
+	for _, doc := range page {
+		check(doc)
+		summary, getErr := lister.GetDocumentSummary(t.Context(), domain.DocumentID(doc.ID))
+		require.NoError(t, getErr)
+		require.NotNil(t, summary)
+		check(*summary)
+	}
+}

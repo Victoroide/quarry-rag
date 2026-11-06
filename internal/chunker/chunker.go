@@ -175,6 +175,14 @@ func Fingerprint(content string) string {
 	return fmt.Sprintf("%x", h)
 }
 
+// ScopedFingerprint preserves default fingerprints and isolates named collections.
+func ScopedFingerprint(collection, content string) string {
+	if collection == "" {
+		return Fingerprint(content)
+	}
+	return Fingerprint("quarry.collection.v1\x00" + collection + "\x00" + content)
+}
+
 func chunkID(docID string, index int) string {
 	h := sha256.Sum256([]byte(docID + strconv.Itoa(index)))
 	return fmt.Sprintf("%x", h[:16])
