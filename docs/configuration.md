@@ -8,61 +8,61 @@ The table below lists the environment variables recognized by the service:
 
 | Variable | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `SERVER_PORT` | string | `"8081"` | 1 to 65535 | TCP port on which the HTTP server listens. |
-| `METRICS_ADDR` | string | `""` (disabled) | Optional TCP listen address | Separate metrics listener; bind to a private interface and never expose publicly. |
-| `LOG_LEVEL` | string | `info` | `debug`, `info`, `warn`, `error` (case-insensitive, trimmed) | Minimum severity emitted to stderr as JSON. Access logs use info; recovered panics use error. |
-| `SHUTDOWN_DRAIN_DELAY` | duration | `5s` | 0s to 60s | Delay after readiness starts returning draining, before HTTP shutdown. A second termination signal skips the remaining delay. |
-| `HEALTH_CACHE_TTL` | duration | `10s` | 1s to 5m | Lifetime of the dependency snapshot shared by diagnostics and readiness. Concurrent requests share one refresh; failures are cached too. |
-| `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls and S3 object storage. Required when `GO_RAG_FAKE_MODE=false`. |
 | `AWS_ACCESS_KEY_ID` | string | `""` | Set together with `AWS_SECRET_ACCESS_KEY`, or leave both empty | Optional static AWS access key ID. When both keys are empty, AWS clients use the default credential chain. |
+| `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. Standard retries have a 10-second maximum backoff, no client-side retry quota, and include `ModelTimeoutException` and `ModelNotReadyException`. |
+| `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls and S3 object storage. Required when `GO_RAG_FAKE_MODE=false`. |
 | `AWS_SECRET_ACCESS_KEY` | string | `""` | Set together with `AWS_ACCESS_KEY_ID`, or leave both empty | Optional static AWS secret access key. |
 | `AWS_SESSION_TOKEN` | string | `""` | Optional string | Session token for temporary static AWS credentials. |
-| `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. Standard retries have a 10-second maximum backoff, no client-side retry quota, and include `ModelTimeoutException` and `ModelNotReadyException`. |
 | `BEDROCK_EMBED_MODEL` | string | `"amazon.titan-embed-text-v2:0"` | Non-empty string | Bedrock model identifier used for generating text embeddings. |
-| `BEDROCK_PRIMARY_MODEL` | string | `"amazon.nova-micro-v1:0"` | Non-empty string | Bedrock model identifier for low-latency reasoning and fast answer synthesis. |
 | `BEDROCK_FALLBACK_MODEL` | string | `"us.meta.llama4-maverick-17b-instruct-v1:0"` | Non-empty string | Bedrock model identifier for answer synthesis and fallback routing. |
-| `PINECONE_API_KEY` | string | `""` | Non-empty string | API key for authenticating with Pinecone vector indices. Required when `GO_RAG_FAKE_MODE=false`. |
-| `PINECONE_INDEX_NAME` | string | None | Required when `GO_RAG_FAKE_MODE=false` | Target Pinecone index, for example `quarry-rag`. There is no implicit default; missing values prevent startup with external services. Optional in offline mode. |
-| `PINECONE_ENVIRONMENT` | string | Unset | Ignored | Has no effect and is not stored in configuration. A non-empty value adds the startup warning `PINECONE_ENVIRONMENT is ignored`. Remove it from deployment configuration. |
-| `PINECONE_UPSERT_BATCH_SIZE` | integer | `100` | 1 to 1000 | Maximum records per vector upsert; each batch also has a 1.5 MiB estimated size limit. |
-| `PINECONE_TIMEOUT` | duration | `10s` | 1s to 2m | Timeout for each vector index request attempt. |
-| `PINECONE_MAX_ATTEMPTS` | integer | `5` | 1 to 10 | Maximum vector write and deletion attempts, including the first attempt; queries use at most three attempts. |
+| `BEDROCK_PRIMARY_MODEL` | string | `"amazon.nova-micro-v1:0"` | Non-empty string | Bedrock model identifier for low-latency reasoning and fast answer synthesis. |
+| `CHUNK_OVERLAP` | integer | `64` | >= 0 and < `CHUNK_TOKEN_SIZE` | Maximum estimated tokens retained from the previous chunk; overlap is reduced when needed to include new text within both limits. |
+| `CHUNK_TOKEN_SIZE` | integer | `512` | 2 to 8192 | Maximum estimated tokens per text chunk. Dense scripts count one token per character; chunks never exceed 30,000 bytes. |
 | `DATABASE_URL` | string | `""` | Valid PostgreSQL connection string | PostgreSQL connection string for document metadata and chunk storage. Always required in all modes. Defaults to 16 pooled connections and a 30-second statement timeout; override with `pool_max_conns` and `statement_timeout`. |
-| `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including running jobs. |
-| `INGEST_WORKERS` | integer | `2` | 1 to 32 | Parallel document claim loops per replica. |
-| `INGEST_MAX_ATTEMPTS` | integer | `5` | 1 to 20 | Maximum processing attempts before recording terminal failure. |
-| `INGEST_LEASE` | duration | `2m` | 30s to 30m | Lease duration, renewed every third of this interval. |
-| `INGEST_JOB_TIMEOUT` | duration | `15m` | 1m to 2h; greater than lease | Maximum processing time per attempt. |
-| `INGEST_POLL_INTERVAL` | duration | `1s` | 100ms to 1m | Polling interval for ready jobs across replicas. |
+| `EMBEDDING_DIMENSIONS` | integer | `1024` | 256, 512, or 1024 | Output vector dimensions requested from Bedrock Titan Embed V2. Responses with a different length or non-finite values are rejected. |
 | `EMBED_CONCURRENCY` | integer | `10` | 1 to 50 | Maximum number of concurrent embedding requests dispatched to AWS Bedrock. |
 | `EMBED_TIMEOUT` | duration | `15s` | 1s to 2m | Deadline for each embedding call, including waiting for a concurrency slot and all retries. An earlier caller deadline takes precedence. |
-| `LOCAL_RETRIEVAL_THRESHOLD` | float64 | `0.70` | 0.0 to 1.0 | Cosine similarity threshold for routing single-need queries to LOCAL retrieval mode. |
-| `QUERY_TIMEOUT` | duration | `60s` | 5s to 10m | Total retrieval and synthesis budget after query admission; earlier caller deadlines take precedence. |
-| `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries. |
-| `QUERY_CONCURRENCY` | integer | `32` | 1 to 1024 | Maximum concurrent queries per handler instance. |
-| `QUERY_QUEUE_TIMEOUT` | duration | `2s` | 0s to 60s | Maximum wait for query admission; zero rejects immediately when all slots are occupied. |
-| `MIN_RELEVANCE_SCORE` | float64 | `0` | 0 to 1, finite | Absolute evidence score floor applied before adaptive synthesis trimming; zero disables this floor. |
-| `HTTP_READ_TIMEOUT` | duration | `60s` | 5s to 30m | Maximum time to read a complete HTTP request, including the body. |
-| `HTTP_WRITE_TIMEOUT` | duration | `QUERY_TIMEOUT + 15s` | Greater than `QUERY_TIMEOUT` | Response write deadline; defaults to 75s with the default query budget. |
-| `HTTP_IDLE_TIMEOUT` | duration | `60s` | Positive | Idle keep-alive connection timeout. |
-| `MAX_CHUNKS_PER_QUERY` | integer | `10` | 1 to 100 | Maximum chunks retrieved per query. Requests with omitted or zero `max_chunks` use this value; larger requests are capped at this value. |
-| `MAX_ALLOWED_DOCUMENT_IDS` | integer | `25000` | 1 to 100000 | Maximum allowlist entries per query before deduplication; the 1 MiB query body limit also applies. Vector queries split lists into groups of at most 10000 IDs and merge the top results. |
-| `REQUIRE_DOCUMENT_ALLOWLIST` | boolean | `false` | Boolean | Require a non-null `allowed_document_ids` field on every query; an empty list is accepted and skips embedding and search. |
-| `CHUNK_TOKEN_SIZE` | integer | `512` | 2 to 8192 | Maximum estimated tokens per text chunk. Dense scripts count one token per character; chunks never exceed 30,000 bytes. |
-| `CHUNK_OVERLAP` | integer | `64` | >= 0 and < `CHUNK_TOKEN_SIZE` | Maximum estimated tokens retained from the previous chunk; overlap is reduced when needed to include new text within both limits. |
-| `EMBEDDING_DIMENSIONS` | integer | `1024` | 256, 512, or 1024 | Output vector dimensions requested from Bedrock Titan Embed V2. Responses with a different length or non-finite values are rejected. |
-| `S3_BUCKET` | string | `""` | Explicit bucket name | S3 bucket for original uploads. Empty disables source file storage with a startup warning. Startup checks bucket access within 10 seconds; a 403 or 404 prevents startup, while transient errors produce a warning and startup continues. |
-| `S3_EXPECTED_BUCKET_OWNER` | string | `""` | Empty or exactly 12 ASCII digits | Optional AWS account ID expected to own the bucket. Sent with uploads, deletions and bucket checks; omitted from presigned downloads. |
-| `MAX_UPLOAD_BYTES` | int64 | `20971520` (20 MiB) | 1 to 104857600 (100 MiB) | Maximum accepted request payload size for multipart file uploads in bytes. |
-| `EXTRACT_ISOLATION` | boolean | `true` | Boolean | Extract PDF, DOCX and DOC text in a separate process. Disabling this removes crash isolation and the child process limits. |
-| `EXTRACT_TIMEOUT` | duration | `30s` | 1s to 10m | Maximum wall-clock time for each isolated extraction. |
 | `EXTRACT_CONCURRENCY` | integer | `2` | 1 to 64 | Maximum concurrent multipart handlers, including upload reads and extraction. |
+| `EXTRACT_ISOLATION` | boolean | `true` | Boolean | Extract PDF, DOCX and DOC text in a separate process. Disabling this removes crash isolation and the child process limits. |
 | `EXTRACT_MEMORY_LIMIT_MB` | integer | `512` | 64 to 8192 | Soft Go memory limit per extraction child in MiB. This is not a hard process memory cap. |
 | `EXTRACT_QUEUE_TIMEOUT` | duration | `5s` | 0s to 60s | Maximum wait for an upload slot; zero rejects immediately when full. |
-| `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
+| `EXTRACT_TIMEOUT` | duration | `30s` | 1s to 10m | Maximum wall-clock time for each isolated extraction. |
 | `GO_RAG_FAKE_MODE` | boolean | `false` | Boolean (`true`, `false`, `1`, `0`) | Runs the service in offline fake mode using an in-memory vector store and mock model generators without AWS or Pinecone credentials. Never enable in production deployments. |
+| `HEALTH_CACHE_TTL` | duration | `10s` | 1s to 5m | Lifetime of the dependency snapshot shared by diagnostics and readiness. Concurrent requests share one refresh; failures are cached too. |
+| `HTTP_IDLE_TIMEOUT` | duration | `60s` | Positive | Idle keep-alive connection timeout. |
+| `HTTP_READ_TIMEOUT` | duration | `60s` | 5s to 30m | Maximum time to read a complete HTTP request, including the body. |
+| `HTTP_WRITE_TIMEOUT` | duration | `QUERY_TIMEOUT + 15s` | Greater than `QUERY_TIMEOUT` | Response write deadline; defaults to 75s with the default query budget. |
+| `INGEST_JOB_TIMEOUT` | duration | `15m` | 1m to 2h; greater than lease | Maximum processing time per attempt. |
+| `INGEST_LEASE` | duration | `2m` | 30s to 30m | Lease duration, renewed every third of this interval. |
+| `INGEST_MAX_ATTEMPTS` | integer | `5` | 1 to 20 | Maximum processing attempts before recording terminal failure. |
+| `INGEST_POLL_INTERVAL` | duration | `1s` | 100ms to 1m | Polling interval for ready jobs across replicas. |
+| `INGEST_WORKERS` | integer | `2` | 1 to 32 | Parallel document claim loops per replica. |
+| `LOCAL_RETRIEVAL_THRESHOLD` | float64 | `0.70` | 0.0 to 1.0 | Cosine similarity threshold for routing single-need queries to LOCAL retrieval mode. |
+| `LOG_LEVEL` | string | `info` | `debug`, `info`, `warn`, `error` (case-insensitive, trimmed) | Minimum severity emitted to stderr as JSON. Access logs use info; recovered panics use error. |
+| `MAX_ALLOWED_DOCUMENT_IDS` | integer | `25000` | 1 to 100000 | Maximum allowlist entries per query before deduplication; the 1 MiB query body limit also applies. Vector queries split lists into groups of at most 10000 IDs and merge the top results. |
+| `MAX_CHUNKS_PER_QUERY` | integer | `10` | 1 to 100 | Maximum chunks retrieved per query. Requests with omitted or zero `max_chunks` use this value; larger requests are capped at this value. |
+| `MAX_UPLOAD_BYTES` | int64 | `20971520` (20 MiB) | 1 to 104857600 (100 MiB) | Maximum accepted request payload size for multipart file uploads in bytes. |
+| `METRICS_ADDR` | string | `""` (disabled) | Optional TCP listen address | Separate metrics listener; bind to a private interface and never expose publicly. |
+| `MIN_RELEVANCE_SCORE` | float64 | `0` | 0 to 1, finite | Absolute evidence score floor applied before adaptive synthesis trimming; zero disables this floor. |
+| `PINECONE_API_KEY` | string | `""` | Non-empty string | API key for authenticating with Pinecone vector indices. Required when `GO_RAG_FAKE_MODE=false`. |
+| `PINECONE_ENVIRONMENT` | string | `""` | Ignored | Has no effect and is not stored in configuration. A non-empty value adds the startup warning `PINECONE_ENVIRONMENT is ignored`. Remove it from deployment configuration. |
+| `PINECONE_INDEX_NAME` | string | `""` | Required when `GO_RAG_FAKE_MODE=false` | Target Pinecone index, for example `quarry-rag`. There is no implicit default; missing values prevent startup with external services. Optional in offline mode. |
+| `PINECONE_MAX_ATTEMPTS` | integer | `5` | 1 to 10 | Maximum vector write and deletion attempts, including the first attempt; queries use at most three attempts. |
+| `PINECONE_TIMEOUT` | duration | `10s` | 1s to 2m | Timeout for each vector index request attempt. |
+| `PINECONE_UPSERT_BATCH_SIZE` | integer | `100` | 1 to 1000 | Maximum records per vector upsert; each batch also has a 1.5 MiB estimated size limit. |
+| `QUERY_CONCURRENCY` | integer | `32` | 1 to 1024 | Maximum concurrent queries per handler instance. |
+| `QUERY_QUEUE_TIMEOUT` | duration | `2s` | 0s to 60s | Maximum wait for query admission; zero rejects immediately when all slots are occupied. |
+| `QUERY_TIMEOUT` | duration | `60s` | 5s to 10m | Total retrieval and synthesis budget after query admission; earlier caller deadlines take precedence. |
+| `REQUIRE_DOCUMENT_ALLOWLIST` | boolean | `false` | Boolean | Require a non-null `allowed_document_ids` field on every query; an empty list is accepted and skips embedding and search. |
+| `S3_BUCKET` | string | `""` | Explicit bucket name | S3 bucket for original uploads. Empty disables source file storage with a startup warning. Startup checks bucket access within 10 seconds; a 403 or 404 prevents startup, while transient errors produce a warning and startup continues. |
+| `S3_EXPECTED_BUCKET_OWNER` | string | `""` | Empty or exactly 12 ASCII digits | Optional AWS account ID expected to own the bucket. Sent with uploads, deletions and bucket checks; omitted from presigned downloads. |
+| `SERVER_PORT` | string | `"8081"` | 1 to 65535 | TCP port on which the HTTP server listens. |
 | `SERVICE_TOKEN` | string | `""` | No whitespace or control characters after trimming | Shared secret merged with `SERVICE_TOKENS`. At least one token is required when `GO_RAG_FAKE_MODE=false`. |
 | `SERVICE_TOKENS` | comma-separated strings | `""` | No whitespace or control characters within a token after trimming | Additional secrets accepted in `X-Service-Token` for rotation. Tokens are trimmed, empty entries are dropped and duplicates are removed across both variables. Startup warns with only the count of tokens shorter than 32 bytes; use secrets of at least 32 bytes. An empty combined list leaves routes open only in offline mode. |
+| `SHUTDOWN_DRAIN_DELAY` | duration | `5s` | 0s to 60s | Delay after readiness starts returning draining, before HTTP shutdown. A second termination signal skips the remaining delay. |
+| `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
+| `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries. |
+| `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including running jobs. |
 
 ---
 

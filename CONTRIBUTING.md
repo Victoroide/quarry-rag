@@ -77,6 +77,14 @@ filename and checksum. Never edit an applied migration; add a new numbered file
 instead. Test both a fresh database and an upgrade from the previous schema
 with existing documents.
 
+## Documentation
+
+Document environment variables only in docs/configuration.md, in alphabetical
+order. Add one CHANGELOG.md bullet under Unreleased for each caller-visible
+change. Use relative links; the only URLs allowed are the README badge lines
+and the private reporting link in SECURITY.md. Changes that add behavior
+include tests that fail without the change.
+
 ## Commits and pull requests
 
 Use Conventional Commits subjects in this form:
@@ -92,6 +100,6 @@ Choose feat, fix, refactor, perf, test, docs, build, ci or chore as the type.
 Keep each pull request focused on one behavior. For a new API or schema change,
 describe the use case in an issue first. Fill in the What, Why and How sections,
 include the checks you ran, and explain compatibility or migration effects.
-Add regression tests for fixes and update the relevant documentation and
-CHANGELOG.md when caller-visible behavior changes. Wait for CI and maintainer
-review, then address feedback before the change is merged.
+Add regression tests for fixes and update the relevant documentation when
+caller-visible behavior changes. Wait for CI and maintainer review, then
+address feedback before the change is merged.
