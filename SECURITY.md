@@ -7,9 +7,10 @@ commits and forks are not supported. Review deployment changes before updating.
 
 ## Reporting a vulnerability
 
-Use GitHub private vulnerability reporting: open the repository's Security tab
-and select **Report a vulnerability**. If the button is unavailable, use the
-contact details on Victoroide's GitHub profile to arrange a private report.
+Use GitHub private vulnerability reporting:
+[report a vulnerability](https://github.com/Victoroide/quarry-rag/security/advisories/new).
+If the form is unavailable, use the contact details on Victoroide's GitHub
+profile to arrange a private report.
 Do not disclose an exploit in an issue, pull request or public discussion.
 
 Include the affected commit or image tag, expected and actual behavior, a minimal
