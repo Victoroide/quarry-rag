@@ -7,6 +7,7 @@ Notable changes are grouped by release.
 ### Added
 
 - OpenSSF Scorecard analysis publishes results for `main`, and the README shows CI, CodeQL, Scorecard, Go version and license badges with requirements, usage, configuration, operations, contributing and security sections.
+- Ingestion accepts an optional `collection` that scopes content deduplication; document summaries report it (migration 007).
 - Optional Prometheus-format metrics on `METRICS_ADDR` for requests, pipeline stages, ingestion jobs and routing modes.
 - `make reconcile` lists, and with `ARGS=-apply` removes, vectors and legacy namespaces that no stored document references.
 - Requests carry an `X-Request-ID`, accepted from callers or generated, that appears in structured access and panic logs; `LOG_LEVEL` sets verbosity.

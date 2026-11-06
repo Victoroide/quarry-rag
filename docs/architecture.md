@@ -210,10 +210,10 @@ The relational storage schema is defined across embedded SQL migrations applied 
 
 ### Table Definitions
 
-- **`documents`**: Stores primary document records, full content, status lifecycle (`processing`, `completed`, `failed`), extracted prefix preview, file metadata, object storage references, and document labels.
+- **`documents`**: Stores primary document records, full content, status lifecycle (`processing`, `completed`, `failed`), extracted prefix preview, file metadata, object storage references, document labels, and a non-null `collection TEXT` defaulting to `''` with an index on `(collection, id)`.
 - **`chunks`**: Stores segmented text blocks and approximate token counts linked to parent documents via cascading foreign keys.
 - **`ingest_jobs`**: Stores pending or running work, attempt counts, lease ownership and expiry, retry scheduling, and the latest error. Deleting a document cascades to its job.
-- **`document_fingerprints`**: Maps SHA-256 content hashes to document UUIDs, providing deduplication across ingest requests.
+- **`document_fingerprints`**: Maps collection-scoped SHA-256 content fingerprints to document UUIDs, providing deduplication across ingest requests.
 
 ---
 
@@ -238,7 +238,7 @@ The relational storage schema is defined across embedded SQL migrations applied 
 ### Worker Queue Mechanics
 
 - PostgreSQL stores accepted content and a pending job atomically before HTTP 202. `WORKER_QUEUE_SIZE` defaults to 1000 and bounds outstanding jobs across replicas, including running work.
-- Identical content without an explicit identifier selects its existing document atomically. Completed duplicates return 200; in-flight duplicates return 202; failed duplicates return 202 and requeue the original identifier. Explicit identifiers preserve caller identity and reject conflicting content with 409.
+- Identical content without an explicit identifier selects its existing document within its collection atomically. Completed duplicates return 200; in-flight duplicates return 202; failed duplicates return 202 and requeue the original identifier. Explicit identifiers preserve caller identity and reject conflicting content or collections with 409.
 - `INGEST_WORKERS` defaults to 2. Each loop claims due jobs with `FOR UPDATE SKIP LOCKED` and renews its lease every `INGEST_LEASE / 3`. Polling discovers persisted work even when a notification is missed or another replica accepts it.
 - Expired leases are reclaimed. Every attempt first removes existing vectors for the document. Retryable failures use exponential backoff from 5 seconds to 5 minutes plus up to 1 second of jitter. Processing failures that are permanent or exhaust attempts remove partial vectors under the live lease before recording `failed` and `last_error`. Jobs exhausted through expired leases are failed during claiming; their remaining vectors stay hidden by document status and are removed before any requeued attempt.
 - Deletion cascades to the job. Completion requires both a processing document and its owned lease; if deletion wins, the worker removes any late vectors.
