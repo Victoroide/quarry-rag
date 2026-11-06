@@ -1,5 +1,11 @@
 # Quarry
 
+[![CI](https://github.com/Victoroide/quarry-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/Victoroide/quarry-rag/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Victoroide/quarry-rag/actions/workflows/codeql.yml/badge.svg)](https://github.com/Victoroide/quarry-rag/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Victoroide/quarry-rag/badge)](https://scorecard.dev/viewer/?uri=github.com/Victoroide/quarry-rag)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/Victoroide/quarry-rag)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) microservice written in Go. It provides HTTP endpoints for backend applications and distributed services to ingest textual documents (raw JSON or multipart PDF, DOCX, DOC files), generate vector embeddings, persist document metadata, and answer natural-language queries grounded in the indexed corpus.
 
 ## Features
@@ -17,6 +23,13 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/system-architecture-dark.gif">
   <img alt="Quarry service architecture. A client service calls the HTTP router, which serves the health probes and routes token-protected requests to IngestHandler, the document handlers and QueryHandler. IngestHandler parses uploaded files in the extraction sandbox, stores originals in Amazon S3 and accepts the document and its job into PostgreSQL. The ingestion worker claims the job, runs ChunkStage, EmbedStage with Bedrock embeddings and PersistStage, which upserts vectors to Pinecone, and completes the job in PostgreSQL. A query runs through DecomposeStage, RoutingStage, which embeds the query, RetrievalStage, which searches Pinecone, and SynthesisStage, which calls Bedrock Converse. The document handlers presign and delete S3 files and list, report and delete PostgreSQL records." src="docs/diagrams/system-architecture-light.gif">
 </picture>
+
+## Requirements
+
+- Go at the version in [go.mod](go.mod) to build from source; the badge shows it, and [CONTRIBUTING.md](CONTRIBUTING.md) lists the tool versions.
+- PostgreSQL 14 or later in every mode.
+- Docker for the full test suite and image builds.
+- For external services, a Pinecone index, AWS Bedrock access to the embedding and synthesis models, and an optional S3 bucket. [Deployment](docs/deployment.md) covers index settings, model identifiers and permissions.
 
 ## Quick Start
 
@@ -44,6 +57,14 @@ export SERVICE_TOKEN="dev-token"
 go run ./cmd/server
 ```
 
+3. In another terminal, check readiness:
+
+```sh
+curl localhost:8081/readyz
+```
+
+The response is `{"status":"ready"}`.
+
 ### Docker Execution
 
 To run the containerized application using Docker Compose:
@@ -62,7 +83,7 @@ Set `PINECONE_INDEX_NAME=quarry-rag` to the name of your existing index. Externa
 docker-compose up --build -d
 ```
 
-## Minimal Examples
+## Usage
 
 ### Ingest a Document
 
@@ -76,6 +97,16 @@ curl -X POST localhost:8081/ingest \
   }'
 ```
 
+### Check Ingestion Status
+
+Replace `<document_id>` with the identifier returned by ingestion:
+
+```sh
+curl "localhost:8081/documents/<document_id>" -H "X-Service-Token: dev-token"
+```
+
+Ingestion is asynchronous: query after `status` changes from `processing` to `completed`; failed documents report `last_error`.
+
 ### Query the Corpus
 
 ```sh
@@ -88,19 +119,19 @@ curl -X POST localhost:8081/query \
   }'
 ```
 
-## Limits and Local Checks
+## Configuration
+
+The service reads configuration only from environment variables. [Configuration](docs/configuration.md) lists every variable with its default and bounds, and [.env.example](.env.example) is a starting point for Docker Compose.
+
+## Operations
+
+`GET /livez` and `GET /readyz` serve liveness and readiness probes, and `GET /health` reports dependency status. Setting `METRICS_ADDR` starts a separate Prometheus-format metrics listener. Logs are JSON on stderr and carry each request's `X-Request-ID`. [Deployment](docs/deployment.md) covers logging, probes, metrics, shutdown and token rotation.
+
+## Limits
 
 JSON ingestion accepts at most 1,000,000 bytes of decoded content. Its request-body cap is 8,097,152 bytes, allowing sixfold JSON escaping plus metadata overhead; queries accept a 1 MiB body. Every upload format enforces the same decoded-text limit. PDF extraction also enforces an 8 MiB decoded-stream budget. Oversized bodies return 413; extraction-limit failures return 422.
 
 The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing probe falls back to GLOBAL retrieval. If no authorized evidence remains, queries return `No relevant information was found to answer this question.` with zero synthesis token usage and no model call.
-
-With Go 1.27.3, golangci-lint and Docker available, run the full host checks and build:
-
-```sh
-make ci
-```
-
-`make test` runs the full race suite and needs a Docker daemon for isolated database tests. The Docker `test` stage runs the short suite without a daemon. Delete explicit documents with `make cleanup IDS="<uuid> <uuid>"`.
 
 ## Limitations
 
@@ -127,10 +158,24 @@ make ci
 | [API Reference](docs/api.md) | Route definitions, authentication headers, request and response structures, and HTTP status codes |
 | [Configuration](docs/configuration.md) | Environment variables, validation constraints, default parameters, and database schema migrations |
 | [Deployment](docs/deployment.md) | Container image build, non-root user execution, external service requirements, and token rotation |
-| [Development](docs/development.md) | Repository directory structure, unit and integration test suites, operational scripts, and fake mode mechanics |
+| [Development](docs/development.md) | Repository directory structure, unit and integration test suites, continuous integration workflows, operational scripts, and fake mode mechanics |
 
-For code contribution guidelines and security disclosure policies, refer to CONTRIBUTING.md and SECURITY.md.
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before opening a pull request.
+
+With the prerequisites listed in CONTRIBUTING.md available, run the full host checks and build:
+
+```sh
+make ci
+```
+
+`make test` runs the full race suite and needs a Docker daemon for isolated database tests. The Docker `test` stage runs the short suite without a daemon. Delete explicit documents with `make cleanup IDS="<uuid> <uuid>"`.
+
+## Security
+
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), which also states the deployment boundaries the service relies on.
 
 ## License
 
-MIT, see LICENSE
+[MIT](LICENSE)
