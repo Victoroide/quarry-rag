@@ -179,6 +179,59 @@ func TestDocTypeValidation(t *testing.T) {
 	}
 }
 
+func TestCollectionValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, label, normalized, message string
+	}{
+		{name: "too_long", label: strings.Repeat("x", 129), message: "collection exceeds maximum length of 128 bytes"},
+		{name: "multibyte_too_long", label: strings.Repeat("é", 65), message: "collection exceeds maximum length of 128 bytes"},
+		{name: "control", label: "a\nb", message: "collection must not contain control or format characters"},
+		{name: "format", label: "a\u202eb", message: "collection must not contain control or format characters"},
+		{name: "nul", label: "a\x00b", message: "collection must not contain control or format characters"},
+		{name: "normalized", label: "  cafe\u0301  ", normalized: "café"},
+		{name: "boundary", label: strings.Repeat("é", 64), normalized: strings.Repeat("é", 64)},
+		{name: "default", label: "  "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, upload := range []bool{false, true} {
+				store := &validationAcceptStore{}
+				var r *http.Request
+				if upload {
+					r = validationMultipartRequest(t, map[string]string{"collection": tc.label})
+				} else {
+					body, err := json.Marshal(map[string]string{"content": "document text", "collection": tc.label})
+					require.NoError(t, err)
+					r = validationJSONRequest(t, "/ingest", string(body))
+				}
+				rec := httptest.NewRecorder()
+				validationIngestHandler(store)(rec, r)
+				if tc.message != "" {
+					require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+					var apiErr APIError
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+					require.Equal(t, APIError{Error: "validation", Message: tc.message}, apiErr)
+					require.Empty(t, store.accepted)
+					continue
+				}
+				require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+				require.Len(t, store.accepted, 1)
+				require.Equal(t, tc.normalized, store.accepted[0].Collection)
+			}
+		})
+	}
+}
+
+func TestDocTypeValidationMessages(t *testing.T) {
+	for _, tc := range []struct{ value, message string }{
+		{strings.Repeat("x", 129), "document type exceeds maximum length of 128 bytes"},
+		{"a\x00b", "document type must not contain control or format characters"},
+		{"a\u202eb", "document type must not contain control or format characters"},
+	} {
+		_, apiErr := validateDocType(tc.value)
+		require.Equal(t, &APIError{Error: "validation", Message: tc.message}, apiErr)
+	}
+}
+
 func TestMetadataLimits(t *testing.T) {
 	depthEight := `{"value":` + strings.Repeat(`[`, 7) + `"x"` + strings.Repeat(`]`, 7) + `}`
 	depthNine := `{"value":` + strings.Repeat(`[`, 8) + `"x"` + strings.Repeat(`]`, 8) + `}`
@@ -205,6 +258,64 @@ func TestMetadataLimits(t *testing.T) {
 			} else {
 				require.Len(t, store.accepted, 1)
 			}
+		})
+	}
+}
+
+func TestMultipartCollectionSource(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, collection string
+		values                  []string
+		status                  int
+	}{
+		{"body_over_query", "query", "body", []string{"body"}, http.StatusAccepted},
+		{"query_only", "query", "", nil, http.StatusAccepted},
+		{"repeated", "", "", []string{"first", "second"}, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body bytes.Buffer
+			mw := multipart.NewWriter(&body)
+			file, err := mw.CreateFormFile("file", "report.pdf")
+			require.NoError(t, err)
+			_, err = file.Write([]byte("%PDF-1.4\nuploaded bytes"))
+			require.NoError(t, err)
+			for _, value := range tc.values {
+				require.NoError(t, mw.WriteField("collection", value))
+			}
+			require.NoError(t, mw.Close())
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/ingest?collection="+tc.query, &body)
+			r.Header.Set("Content-Type", mw.FormDataContentType())
+			store := &validationAcceptStore{}
+			rec := httptest.NewRecorder()
+			validationIngestHandler(store)(rec, r)
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			if tc.status == http.StatusBadRequest {
+				require.JSONEq(t, `{"error":"validation","message":"collection must be supplied at most once"}`, rec.Body.String())
+				require.Empty(t, store.accepted)
+				return
+			}
+			require.Len(t, store.accepted, 1)
+			require.Equal(t, tc.collection, store.accepted[0].Collection)
+		})
+	}
+}
+
+func TestMultipartLabelsRequireUTF8(t *testing.T) {
+	for _, tc := range []struct {
+		field, message string
+	}{
+		{"collection", "collection must be valid UTF-8"},
+		{"doc_type", "document type must be valid UTF-8"},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			store := &validationAcceptStore{}
+			rec := httptest.NewRecorder()
+			validationIngestHandler(store)(rec, validationMultipartRequest(t, map[string]string{tc.field: "a\xffb"}))
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			var apiErr APIError
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+			require.Equal(t, APIError{Error: "validation", Message: tc.message}, apiErr)
+			require.Empty(t, store.accepted)
 		})
 	}
 }
