@@ -32,7 +32,7 @@ func acceptIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker, cs
 		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return domain.AcceptConflict, errors.New("durable acceptance is unavailable")
 	}
-	req.Fingerprint = chunker.Fingerprint(req.Document.Content)
+	req.Fingerprint = chunker.ScopedFingerprint(req.Collection, req.Document.Content)
 	acceptCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 	defer cancel()
 	result, err := acceptor.AcceptDocument(acceptCtx, req)

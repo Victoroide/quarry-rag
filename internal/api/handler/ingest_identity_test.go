@@ -199,3 +199,19 @@ func TestIngestRequiresDurableAcceptor(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	require.JSONEq(t, `{"error":"unavailable","message":"document store unavailable"}`, rec.Body.String())
 }
+
+func TestIngestCollectionFingerprint(t *testing.T) {
+	for _, upload := range []bool{false, true} {
+		store := &validationAcceptStore{}
+		r := validationJSONRequest(t, "/ingest", `{"content":"document text","collection":"  cafe\u0301  "}`)
+		if upload {
+			r = validationMultipartRequest(t, map[string]string{"collection": "  cafe\u0301  "})
+		}
+		rec := httptest.NewRecorder()
+		validationIngestHandler(store)(rec, r)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		require.Len(t, store.accepted, 1)
+		require.Equal(t, "café", store.accepted[0].Collection)
+		require.Equal(t, chunker.ScopedFingerprint("café", "document text"), store.accepted[0].Fingerprint)
+	}
+}

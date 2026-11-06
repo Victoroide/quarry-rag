@@ -4,18 +4,26 @@ import (
 	"encoding/json"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 )
 
 func validateDocType(value string) (string, *APIError) {
+	return validateLabel("document type", value)
+}
+
+func validateLabel(field, value string) (string, *APIError) {
+	if !utf8.ValidString(value) {
+		return "", &APIError{Error: "validation", Message: field + " must be valid UTF-8"}
+	}
 	value = norm.NFC.String(strings.TrimSpace(value))
 	if len(value) > 128 {
-		return "", &APIError{Error: "validation", Message: "document type exceeds maximum length of 128 bytes"}
+		return "", &APIError{Error: "validation", Message: field + " exceeds maximum length of 128 bytes"}
 	}
 	for _, r := range value {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return "", &APIError{Error: "validation", Message: "document type must not contain control or format characters"}
+			return "", &APIError{Error: "validation", Message: field + " must not contain control or format characters"}
 		}
 	}
 	return value, nil

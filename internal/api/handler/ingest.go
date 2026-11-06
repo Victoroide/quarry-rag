@@ -36,6 +36,7 @@ type IngestRequest struct {
 	Content    string         `json:"content"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	DocType    string         `json:"doc_type,omitempty"`
+	Collection string         `json:"collection,omitempty"`
 }
 
 // IngestResponse is the POST /ingest response body.
@@ -53,6 +54,10 @@ func validateIngestRequest(req *IngestRequest) *APIError {
 	}
 	var apiErr *APIError
 	req.DocType, apiErr = validateDocType(req.DocType)
+	if apiErr != nil {
+		return apiErr
+	}
+	req.Collection, apiErr = validateLabel("collection", req.Collection)
 	if apiErr != nil {
 		return apiErr
 	}
@@ -100,7 +105,7 @@ func handleJSONIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	if !ok {
 		return
 	}
-	_, _ = acceptIngest(rw, r, wk, cs, domain.AcceptRequest{Document: domain.Document{ID: domain.DocumentID(docID), Content: req.Content, Metadata: req.Metadata}, CallerSupplied: req.DocumentID != "", DocType: req.DocType, MaxPending: opts.maxPending})
+	_, _ = acceptIngest(rw, r, wk, cs, domain.AcceptRequest{Document: domain.Document{ID: domain.DocumentID(docID), Content: req.Content, Metadata: req.Metadata}, CallerSupplied: req.DocumentID != "", DocType: req.DocType, Collection: req.Collection, MaxPending: opts.maxPending})
 }
 
 func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker, cs domain.ChunkStore, s3Client ObjectStore, maxUploadBytes int64, opts ingestOptions) {
@@ -188,7 +193,15 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		}
 	}
 	metadata["source_file"] = fileName
-	req := IngestRequest{Content: text, DocType: formDocType, Metadata: metadata}
+	collection := ""
+	if values, present := r.MultipartForm.Value["collection"]; present {
+		if len(values) != 1 {
+			writeJSONError(rw, http.StatusBadRequest, "validation", "collection must be supplied at most once")
+			return
+		}
+		collection = values[0]
+	}
+	req := IngestRequest{Content: text, DocType: formDocType, Collection: collection, Metadata: metadata}
 	if apiErr := validateIngestRequest(&req); apiErr != nil {
 		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
@@ -196,7 +209,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	formDocType = req.DocType
 	var s3Key *string
 	if s3Client != nil {
-		existingID, exists, lookupErr := cs.CheckFingerprint(r.Context(), chunker.Fingerprint(text))
+		existingID, exists, lookupErr := cs.CheckFingerprint(r.Context(), chunker.ScopedFingerprint(req.Collection, text))
 		if lookupErr != nil {
 			writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 			return
@@ -217,7 +230,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 			s3Key = &key
 		}
 	}
-	outcome, acceptErr := acceptIngest(rw, r, wk, cs, domain.AcceptRequest{Document: domain.Document{ID: domain.DocumentID(docID), Content: text, Metadata: metadata, FileName: &fileName, FileType: &ftStr, S3Key: s3Key}, CallerSupplied: suppliedID != "", DocType: formDocType, MaxPending: opts.maxPending})
+	outcome, acceptErr := acceptIngest(rw, r, wk, cs, domain.AcceptRequest{Document: domain.Document{ID: domain.DocumentID(docID), Content: text, Metadata: metadata, FileName: &fileName, FileType: &ftStr, S3Key: s3Key}, CallerSupplied: suppliedID != "", DocType: formDocType, Collection: req.Collection, MaxPending: opts.maxPending})
 	if s3Key != nil && outcome != domain.AcceptAccepted {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 		defer cancel()
