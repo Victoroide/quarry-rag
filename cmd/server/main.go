@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
@@ -31,6 +32,7 @@ import (
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
 )
@@ -50,13 +52,23 @@ func run() error {
 		return fmt.Errorf("startup: configuration error: %w", err)
 	}
 	slog.SetDefault(slog.New(logctx.NewHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))))
+	shutdownTracing, err := tracing.Setup(ctx, cfg.Tracing, buildVersion())
+	if err != nil {
+		return fmt.Errorf("startup: tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = shutdownTracing(shutdownCtx)
+	}()
+	ctx = tracing.WithContentCapture(ctx, cfg.Tracing.CaptureContent)
 	for _, warning := range cfg.Warnings {
 		slog.Warn(warning)
 	}
 	logger := slog.Default()
 	startupCtx, startupCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer startupCancel()
-	pgClient, err := pgstore.NewClient(startupCtx, cfg.DatabaseURL)
+	pgClient, err := pgstore.NewClient(startupCtx, cfg.DatabaseURL, pgstore.WithQueryTracer(tracing.NewQueryTracer()))
 	if err != nil {
 		return fmt.Errorf("startup: postgres: %w", err)
 	}
@@ -77,7 +89,6 @@ func run() error {
 	var (
 		emb         domain.EmbeddingProvider
 		vectorStore domain.VectorStore
-		vecDeleter  domain.VectorDeleter
 		amb         *llm.Ambassador
 		s3Client    *s3store.Client
 	)
@@ -86,10 +97,9 @@ func run() error {
 		logger.Warn("FAKE MODE ACTIVE: deterministic in-memory vector store, embedder, and LLM. No AWS/Pinecone/S3 calls will be made.")
 		mem := memstore.NewFakeVectorStore()
 		vectorStore = mem
-		vecDeleter = mem
 		emb = embedder.NewFakeEmbedder(cfg.EmbeddingDimensions)
 		amb = llm.NewAmbassador(cfg)
-		amb.SetClient(llm.NewFakeConverser())
+		amb.SetClient(tracing.WrapConverser(llm.NewFakeConverser(), "offline", cfg.BedrockFallbackModel))
 	} else {
 		pcClient, pcErr := pcstore.NewPineconeClient(startupCtx, cfg)
 		if pcErr != nil {
@@ -102,7 +112,6 @@ func run() error {
 		}()
 		pcDriver := pcstore.NewDriver(pcClient)
 		vectorStore = pcDriver
-		vecDeleter = pcDriver
 
 		bedrockEmb, embErr := embedder.NewBedrockEmbedder(startupCtx, cfg)
 		if embErr != nil {
@@ -115,7 +124,7 @@ func run() error {
 			return fmt.Errorf("startup: llm client: %w", llmErr)
 		}
 		amb = llm.NewAmbassador(cfg)
-		amb.SetClient(llmClient)
+		amb.SetClient(tracing.WrapConverser(llmClient, "aws.bedrock", cfg.BedrockFallbackModel))
 
 		if cfg.S3Bucket == "" {
 			logger.Warn("S3_BUCKET is not set; original files are not stored")
@@ -134,6 +143,17 @@ func run() error {
 			}
 			s3Client = s3c
 		}
+	}
+
+	provider, vectorSystem := "aws.bedrock", "pinecone"
+	if cfg.FakeMode {
+		provider, vectorSystem = "offline", "memory"
+	}
+	emb = tracing.WrapEmbedder(emb, provider, cfg.BedrockEmbedModel)
+	vectorStore = tracing.WrapVectorStore(vectorStore, vectorSystem)
+	vecDeleter, ok := vectorStore.(domain.VectorDeleter)
+	if !ok {
+		return errors.New("startup: vector store does not support deletion")
 	}
 
 	// Initialize chunker.
@@ -217,6 +237,13 @@ func run() error {
 	}
 	logger.Info("starting server", "address", srv.Addr)
 	return serve(signalCtx, srv, listener, probes, cfg.ShutdownDrainDelay, additional...)
+}
+
+func buildVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		return info.Main.Version
+	}
+	return ""
 }
 
 type httpEndpoint struct {
