@@ -29,7 +29,7 @@ type QueryRequest struct {
 	Mode               string   `json:"mode,omitempty"`
 	FilterDocType      string   `json:"filter_doc_type,omitempty"`
 	MaxChunks          int      `json:"max_chunks,omitempty"`
-	AllowedDocumentIDs []string `json:"allowed_document_ids,omitempty"`
+	AllowedDocumentIDs []string `json:"allowed_document_ids,omitzero"`
 }
 
 // ScoredChunkResponse is a single scored chunk in the query response.
