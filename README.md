@@ -16,6 +16,7 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 - **Grounded synthesis**: Generates answers in the language of the incoming question using AWS Bedrock models when evidence is available; empty results return a fixed English no-information answer without synthesis.
 - **Offline development mode**: Runs fully offline with deterministic in-memory vector storage and mock model providers via `GO_RAG_FAKE_MODE`.
 - **Service authentication**: Restricts operational and query routes with constant-time `X-Service-Token` verification.
+- **Tracing**: optional OpenTelemetry export over OTLP/HTTP, including LangSmith, for requests, pipeline stages, model calls and storage operations.
 
 ## Architecture Overview
 
@@ -125,7 +126,7 @@ The service reads configuration only from environment variables. [Configuration]
 
 ## Operations
 
-`GET /livez` and `GET /readyz` serve liveness and readiness probes, and `GET /health` reports dependency status. Setting `METRICS_ADDR` starts a separate Prometheus-format metrics listener. Logs are JSON on stderr and carry each request's `X-Request-ID`. [Deployment](docs/deployment.md) covers logging, probes, metrics, shutdown and token rotation.
+`GET /livez` and `GET /readyz` serve liveness and readiness probes, and `GET /health` reports dependency status. Setting `METRICS_ADDR` starts a separate Prometheus-format metrics listener. Logs are JSON on stderr and carry each request's `X-Request-ID`. [Deployment](docs/deployment.md) covers logging, probes, metrics, shutdown and token rotation, and [Tracing](docs/deployment.md#tracing) covers optional trace export, including LangSmith, sampling and content capture.
 
 ## Limits
 
@@ -147,7 +148,6 @@ The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing
 - **Concurrency limits apply per replica.** Query admission, embedding and extraction limits are process-local, so total concurrency grows with the replica count. Configure replica counts, retries and per-process limits to fit upstream quotas.
 - **The no-evidence answer is fixed English.** Empty authorized results skip synthesis and return `No relevant information was found to answer this question.` Evidence-backed synthesis is instructed to follow the question's language.
 - **Document allowlists have size limits.** `MAX_ALLOWED_DOCUMENT_IDS` defaults to 25,000 entries before deduplication, and the 1 MiB query-body cap also applies. These bounds limit request size and the number of vector queries needed for large scopes.
-- **The service does not export distributed traces.** Request IDs, structured logs and metrics provide correlation; no trace exporter or collector integration is configured.
 - **Offline mode does not measure hosted behavior.** Its vector writes are immediately consistent and its answer generator echoes prompt context. It exercises contracts and storage limits, while answer quality and hosted-index latency require external-service testing.
 
 ## Documentation

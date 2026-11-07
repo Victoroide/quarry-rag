@@ -66,6 +66,38 @@ The table below lists the environment variables recognized by the service:
 
 ---
 
+## Tracing
+
+Tracing is disabled unless a destination is explicitly enabled. Generic OTLP and
+LangSmith can be enabled together. Other OTLP exporter variables (including TLS
+and compression) and batch processor variables
+defined by the OpenTelemetry Go SDK pass through to the generic destination and
+processors respectively. LangSmith uses its own endpoint, headers, system trust
+store, protobuf encoding and 10-second export timeout, independent of generic
+exporter settings.
+
+| Variable | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `LANGSMITH_API_KEY` | string | `""` | Required when LangSmith is enabled, unless the SDK is disabled; no whitespace or control characters | LangSmith authentication key. Never logged. |
+| `LANGSMITH_ENDPOINT` | string | LangSmith US API address | Absolute HTTP or HTTPS API address, without credentials, query or fragment | Regional or self-hosted API address from LangSmith; self-hosted addresses include `/api/v1`. The service appends `/otel/v1/traces`. |
+| `LANGSMITH_PROJECT` | string | `""` | No control characters | Optional `Langsmith-Project` header; omitted to use the destination's default project. |
+| `LANGSMITH_TRACING` | boolean | `false` | Boolean | Enables LangSmith export independently of the generic exporter. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | string | SDK loopback collector address | SDK OTLP/HTTP endpoint | Base collector address; the SDK appends the trace path. Used only for the generic destination. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | string | `""` | SDK comma-separated, percent-encoded key-value pairs | Generic destination headers. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | string | `http/protobuf` | `http/protobuf` or `http/json` when tracing is enabled | Generic payload encoding. gRPC is unsupported. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | integer | `10000` | SDK timeout in milliseconds | Generic export deadline. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | string | SDK trace endpoint derived from the base address | SDK OTLP/HTTP endpoint | Complete trace address including its path; takes precedence over the base address. |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | string | Unset | SDK header encoding | Trace-specific generic headers; overrides the generic header setting. |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | string | Inherits generic protocol | `http/protobuf` or `http/json` when tracing is enabled | Trace-specific generic encoding. |
+| `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` | integer | Inherits generic timeout | SDK timeout in milliseconds | Trace-specific generic export deadline. |
+| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | boolean | `false` | Boolean | Adds question, prompt, document excerpt, embedding input and answer text to recorded spans. |
+| `OTEL_RESOURCE_ATTRIBUTES` | string | `""` | SDK comma-separated key-value pairs | Overrides resource attributes, including the default service name and build version. |
+| `OTEL_SDK_DISABLED` | boolean | `false` | Boolean | Disables both destinations even when otherwise enabled. |
+| `OTEL_SERVICE_NAME` | string | `quarry-rag` | SDK service name | Overrides the resource service name, taking precedence over resource attributes. |
+| `OTEL_TRACES_EXPORTER` | string | `none` | `none` or `otlp` | Explicitly enables the generic OTLP/HTTP exporter. Other values fail startup. |
+| `OTEL_TRACES_SAMPLER` | string | `parentbased_always_on` | `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off` or `parentbased_traceidratio`; other values fail startup when tracing is enabled | Selects sampling for both destinations. |
+| `OTEL_TRACES_SAMPLER_ARG` | string | Unset | A ratio from 0 to 1 for ratio samplers; malformed values fail startup when tracing is enabled | Ratio for ratio-based sampling. |
+
 ## Schema Migrations
 
 Database schema migrations are SQL files named with a three-digit version and a descriptive suffix, such as `006_add_index.sql`. Every file under `internal/store/postgres/migrations` matching `NNN_name.sql` is embedded in the binary automatically. Versions must be unique and are applied in ascending order by `internal/store/postgres/migrate.go`.

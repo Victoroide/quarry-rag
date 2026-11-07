@@ -33,6 +33,25 @@ Quarry organizes core functionality into distinct packages under `internal/`, wi
 
 ---
 
+### Tracing
+
+The `internal/tracing` package configures export and decorates provider and
+storage interfaces. Request middleware continues W3C trace context and baggage,
+then names server spans with the matched method and route. Query stages are
+sibling spans under that server span: `query.decompose`, `query.routing`,
+`query.retrieval` and `query.synthesis`. Embedding, vector search and model calls
+are client spans under the stage that invokes them. PostgreSQL query spans
+record parameterized statements without arguments, only within an existing span.
+Upload requests also contain extraction and optional object-upload spans;
+document deletion contains vector and optional object-deletion spans.
+
+Each background ingestion attempt starts a new `ingest.job` root with the
+document identifier, attempt and applied outcome. It contains `ingest.chunk`,
+`ingest.embed` and `ingest.persist`, their provider calls, and database operations.
+Each enabled destination receives the same sampled spans through a separate
+batch processor. See [deployment tracing](deployment.md#tracing) for operational
+setup and content-capture behavior.
+
 ## Ingest Pipeline
 
 The ingest pipeline processes text or binary documents through chunking, embedding, vector storage, and relational persistence.
