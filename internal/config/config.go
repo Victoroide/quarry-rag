@@ -93,6 +93,7 @@ type Config struct {
 	LogLevel          slog.Level
 	MetricsAddr       string
 	Warnings          []string
+	Tracing           TracingConfig
 }
 
 // Load reads configuration from environment variables, applies defaults,
@@ -143,6 +144,9 @@ func Load() (*Config, error) {
 		*setting.dst = value
 	}
 	var err error
+	if cfg.Tracing, err = loadTracing(); err != nil {
+		return nil, err
+	}
 	if cfg.LogLevel, err = envLogLevel(); err != nil {
 		return nil, err
 	}

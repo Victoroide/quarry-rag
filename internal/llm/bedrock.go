@@ -14,6 +14,9 @@ import (
 )
 
 const (
+	// DefaultMaxTokens bounds responses when no positive token limit is supplied.
+	DefaultMaxTokens = 4096
+
 	extractionTopP float32 = 0.9
 )
 
@@ -45,7 +48,7 @@ func NewClient(ctx context.Context, cfg *config.Config) (*Client, error) {
 	return &Client{
 		rt:      rt,
 		modelID: cfg.BedrockFallbackModel,
-		maxToks: 4096,
+		maxToks: DefaultMaxTokens,
 	}, nil
 }
 
