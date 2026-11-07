@@ -76,6 +76,32 @@ RUN_SMOKE=1 go test ./test/smoke/... -count=1 -v -timeout 120s
 | [CodeQL](../.github/workflows/codeql.yml) | Pushes to `main`, pull requests targeting `main` and weekly | Analyze Go for security issues. |
 | [Dependency review](../.github/workflows/dependency-review.yml) | Pull requests | Review dependency changes; reject vulnerabilities of high severity or above. |
 | [Scorecard](../.github/workflows/scorecard.yml) | Pushes to `main`, weekly, branch protection changes and manual dispatch | Publish Scorecard results, retain the SARIF artifact for five days and upload it to code scanning. |
+| [Release](../.github/workflows/release.yml) | Version tags matching `v*.*.*` | Builds archives and the runtime image, signs provenance, and publishes the release only after both builds and attestations succeed. |
+| [Release check](../.github/workflows/release-check.yml) | Pull requests changing Go sources, module dependencies, the Dockerfile or release scripts and workflows | Checks script behavior, builds archives and verifies checksums and bundled licenses. |
+
+## Releases
+
+Before publishing `vX.Y.Z`, move the entries under `## [Unreleased]` in
+`CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD` and leave a new empty Unreleased
+section above it. Merge that change, then create and push an annotated tag:
+
+```sh
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+The release workflow publishes nothing, neither the image nor the release, for
+tags whose CHANGELOG section is missing or empty.
+Tags containing a hyphen publish a prerelease. Asset names and verification
+commands are documented in [Deployment](deployment.md#releases).
+
+To check packaging locally without publishing:
+
+```sh
+bash .github/scripts/release-test.sh
+.github/scripts/build-release.sh v0.0.0-check "$(mktemp -d)"
+actionlint .github/workflows/release.yml .github/workflows/release-check.yml
+```
 
 ---
 

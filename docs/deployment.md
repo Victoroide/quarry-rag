@@ -39,10 +39,12 @@ The service is packaged using a multi-stage Docker build that outputs a minimal,
 
 ### Build Stages
 
+Both base images are pinned by multi-platform index digest in the Dockerfile. Dependabot updates their tags and digests together.
+
 1. **`base`**: Builds on `golang:1.27.3-alpine3.23`, installs compilation tools (`gcc`, `musl-dev`, `git`), and downloads Go modules.
 2. **`test`**: Runs static checks (`go vet ./...`) and the short suite with data race instrumentation (`go test -short ./... -count=1 -race`); Docker-backed tests run in full on the host or CI runner.
 3. **`lint`**: Compiles and executes `golangci-lint` (v2.15.0) against `.golangci.yml`.
-4. **`builder`**: Compiles the statically linked binary (`CGO_ENABLED=0 go build -o /bin/server ./cmd/server`).
+4. **`builder`**: Compiles the statically linked binary (`CGO_ENABLED=0 go build -o /bin/server ./cmd/server`) and collects the license and notice files of the Go standard library and every linked module.
 5. **`runtime`**: Uses the Alpine Linux runtime pinned in the Dockerfile. Installs CA certificates and timezone data, creates a dedicated system user and group (`app`, numeric UID/GID `10001:10001`), copies the compiled server binary containing the embedded migrations, and sets the non-root user as the execution user.
 
 For host verification, `make vet`, `make lint` and `make test` run directly with the local Go toolchain; the full test suite needs a Docker daemon. `make ci` runs those gates in order and then builds the runtime image. The image build's short suite skips Docker-backed database tests, with an explicit daemon requirement message.
@@ -65,6 +67,54 @@ docker run -d \
 ```
 
 ---
+
+## Releases
+
+Tagged releases contain an archive for every main package under `cmd/`. The
+binary for `cmd/server` is `quarry-server`; other command names gain the
+`quarry-` prefix unless they already have it. For example, `cmd/quarry-mcp`
+produces `quarry-mcp`.
+
+| Asset | Contents and targets |
+|-------|----------------------|
+| `<binary>_<version>_<os>_<arch>.tar.gz` | Linux and macOS (`linux`, `darwin`), each on `amd64` and `arm64` |
+| `<binary>_<version>_windows_<arch>.zip` | Every command except `quarry-server`, on `amd64` and `arm64` |
+| `quarry-rag_<version>_checksums.txt` | SHA-256 checksums for every archive |
+| `quarry-rag_<version>.intoto.jsonl` | Sigstore bundle containing signed SLSA build provenance for the archives and checksum file |
+
+Each archive has one top-level directory matching its filename without the
+archive extension. It contains the binary (`.exe` on Windows), `README.md`, the
+project `LICENSE` and the license and notice files of the Go standard library and
+every linked module under `licenses/`.
+The runtime image carries these notices at `/usr/share/licenses/quarry-rag`.
+The provenance provides SLSA build level 2; the runtime image digest is also
+attested and stored in the container registry.
+
+Download and verify a release, setting `tag` to its tag:
+
+```sh
+tag=v0.1.0
+version=${tag#v}
+dir=$(mktemp -d)
+gh release download "$tag" --repo Victoroide/quarry-rag --dir "$dir"
+cd "$dir"
+sha256sum -c "quarry-rag_${version}_checksums.txt"
+for f in *.tar.gz *.zip "quarry-rag_${version}_checksums.txt"; do
+  test -f "$f" || continue
+  gh attestation verify "$f" --repo Victoroide/quarry-rag \
+    --bundle "quarry-rag_${version}.intoto.jsonl" \
+    --signer-workflow Victoroide/quarry-rag/.github/workflows/release.yml \
+    --source-ref "refs/tags/$tag" --deny-self-hosted-runners
+done
+gh attestation verify "quarry-server_${version}_linux_amd64.tar.gz" --repo Victoroide/quarry-rag
+tar -tzf "quarry-server_${version}_linux_amd64.tar.gz" | grep -c '/licenses/'
+docker buildx imagetools inspect "ghcr.io/victoroide/quarry-rag:$version"
+gh attestation verify "oci://ghcr.io/victoroide/quarry-rag:$version" --repo Victoroide/quarry-rag
+```
+
+The license count must be greater than zero. The image manifest must include
+`linux/amd64` and `linux/arm64`. On macOS, use `shasum -a 256 -c` in place of
+`sha256sum -c` if needed.
 
 ## Document Extraction Processes
 
