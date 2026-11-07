@@ -1,4 +1,4 @@
-.PHONY: build test lint vet ci up down logs cleanup reconcile validate fuzz
+.PHONY: build test lint vet ci up down logs cleanup reconcile validate fuzz diagrams diagrams-check
 
 FUZZTIME ?= 30s
 
@@ -31,6 +31,7 @@ ci:
 	$(MAKE) vet
 	$(MAKE) lint
 	$(MAKE) test
+	$(MAKE) diagrams-check
 	docker build --target runtime -t quarry-rag:prod .
 
 # Start the full stack
@@ -52,3 +53,12 @@ reconcile:
 
 validate:
 	go run ./scripts/validate/main.go
+
+# Refresh the documentation images.
+diagrams:
+	go -C tools/diagrams run .
+
+# Validate sources, geometry and reproducible output.
+diagrams-check:
+	go -C tools/diagrams test ./...
+	go -C tools/diagrams run . -check

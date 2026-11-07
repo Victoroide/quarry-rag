@@ -7,9 +7,20 @@ For contribution guidelines, environment setup, Conventional Commits formatting,
 ## Repository Layout
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="diagrams/repository-layout-dark.gif">
-  <img alt="Repository layout. cmd/server holds the entry point. internal/ holds api (handler, middleware), awsconf, chunker, cleanup, config, domain, embedder, extractor, llm, logctx, metrics, pipeline, retriever, store (memory, pinecone, postgres, s3), testutil (pgtest), textutil and worker. scripts/ holds cleanup, langeval, reconcile, simulate and validate. test/ holds integration, smoke and unit." src="diagrams/repository-layout-light.gif">
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/repository-layout-dark.svg">
+  <img alt="Repository layout, from the directory listing to depth three. client/ Go client for the HTTP API. cmd/ Executable entry points. cmd/quarry-mcp/ Local MCP server over stdio. cmd/server/ Wiring and graceful shutdown. docs/ Service documentation. docs/diagrams/ Architecture, schema and layout. docs/diagrams/src/ Diagram placement sources. internal/ Private service packages. internal/api/ HTTP router. internal/api/handler/ Request handlers. internal/api/middleware/ Authentication, logs and metrics. internal/awsconf/ AWS credentials and retry policy. internal/chunker/ Text windows and fingerprints. internal/cleanup/ Document deletion across stores. internal/config/ Configuration and validation. internal/domain/ Shared types and interfaces. internal/embedder/ Titan V2 and offline embeddings. internal/extractor/ File parsing and process isolation. internal/llm/ Answer routing and Converse. internal/logctx/ Request log attributes. internal/metrics/ Prometheus text metrics. internal/pipeline/ Ingestion and query stages. internal/retriever/ LOCAL and GLOBAL retrieval. internal/store/ Storage adapters. internal/store/memory/ Offline vector index. internal/store/pinecone/ Hosted vector index. internal/store/postgres/ Documents, chunks and durable jobs. internal/store/s3/ Original files and signed downloads. internal/testutil/ Test support. internal/testutil/pgtest/ Disposable database containers. internal/textutil/ Unicode normalization. internal/tracing/ OpenTelemetry export and span helpers. internal/worker/ Leased ingestion and retry handling. scripts/ Operational commands. scripts/cleanup/ Delete selected documents. scripts/langeval/ Answer language and latency checks. scripts/reconcile/ Find and remove orphan vectors. scripts/simulate/ Exercise the service API. scripts/validate/ Check retrieval behavior. test/ Service test suites. test/integration/ Database and API integration. test/smoke/ Opt-in live service checks. test/unit/ Package behavior checks. tools/ Documentation support. tools/diagrams/ Vector image sources and checks. tools/diagrams/fonts/ Bundled typefaces and license. The highlight follows cmd/server, internal/api, internal/pipeline, internal/retriever, internal/llm and internal/store." src="diagrams/repository-layout-light.svg">
 </picture>
+
+The tree includes directories containing tracked files through depth three and omits `.git`, `.github`, `vendor` and `testdata`. The highlight follows the request path through the entry point, API, pipeline, retrieval, answer synthesis and storage packages.
+
+Regenerate and check the images after changing routes, schema or tracked directories:
+
+```sh
+make diagrams
+make diagrams-check
+```
+
+Placement is recorded in `docs/diagrams/src/`, with content and validation in `tools/diagrams/`. The checks cover source drift, geometry, text, contrast and reproducible output. The outlined images respect the reader's reduced-motion preference.
 
 ---
 
@@ -26,7 +37,7 @@ make test
 make ci
 ```
 
-`make ci` runs vet, lint and the full race suite in order, then builds the runtime image. `docker build --target test .` runs the short suite without requiring a nested Docker daemon.
+`make ci` runs vet, lint, the full race suite and the diagram check in order, then builds the runtime image. `docker build --target test .` runs the short suite without requiring a nested Docker daemon.
 
 ### 1. Unit Tests
 
@@ -82,7 +93,7 @@ Failing inputs are saved under the affected package's `testdata/fuzz/<Target>/` 
 
 | Workflow | Trigger | Checks |
 |---|---|---|
-| [CI](../.github/workflows/ci.yml) | Pushes to `main` and pull requests | Lint; Test with race detection; Build service and runtime image; Check reachable vulnerabilities. |
+| [CI](../.github/workflows/ci.yml) | Pushes to `main` and pull requests | Lint; Test with race detection; Build service and runtime image; Check reachable vulnerabilities; Check vector diagrams. |
 | [CodeQL](../.github/workflows/codeql.yml) | Pushes to `main`, pull requests targeting `main` and weekly | Analyze Go for security issues. |
 | [Dependency review](../.github/workflows/dependency-review.yml) | Pull requests | Review dependency changes; reject vulnerabilities of high severity or above. |
 | [Scorecard](../.github/workflows/scorecard.yml) | Pushes to `main`, weekly, branch protection changes and manual dispatch | Publish Scorecard results, retain the SARIF artifact for five days and upload it to code scanning. |
