@@ -14,6 +14,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
 )
@@ -69,9 +70,9 @@ func validateIngestRequest(req *IngestRequest) *APIError {
 //   - application/json: existing JSON body with "content" field
 //   - multipart/form-data: file upload with text extraction
 func IngestHandler(wk *worker.Worker, cs domain.ChunkStore, s3Client ObjectStore, maxUploadBytes int64, opts ...IngestOption) http.HandlerFunc {
-	options := ingestOptions{maxPending: 1000, extract: func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
+	options := ingestOptions{maxPending: 1000, extract: tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
 		return extractor.New(ft).Extract(ctx, bytes.NewReader(data))
-	}}
+	})}
 	for _, opt := range opts {
 		opt(&options)
 	}
@@ -164,7 +165,10 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	var text string
 	var extractErr error
 	if ft == extractor.FileTypeText {
-		text, extractErr = extractor.New(ft).Extract(r.Context(), bytes.NewReader(fileData))
+		extract := tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
+			return extractor.New(ft).Extract(ctx, bytes.NewReader(data))
+		})
+		text, extractErr = extract(r.Context(), ft, fileData)
 	} else {
 		text, extractErr = opts.extract(r.Context(), ft, fileData)
 	}

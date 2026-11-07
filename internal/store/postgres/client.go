@@ -19,11 +19,22 @@ type Client struct {
 	Pool *pgxpool.Pool
 }
 
+// Option customizes PostgreSQL pool construction.
+type Option func(*pgxpool.Config)
+
+// WithQueryTracer installs a query tracer on every pooled connection.
+func WithQueryTracer(tracer pgx.QueryTracer) Option {
+	return func(config *pgxpool.Config) { config.ConnConfig.Tracer = tracer }
+}
+
 // NewClient creates a PostgreSQL client from DATABASE_URL.
-func NewClient(ctx context.Context, databaseURL string) (*Client, error) {
+func NewClient(ctx context.Context, databaseURL string, opts ...Option) (*Client, error) {
 	config, err := poolConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: configure pool: %w", err)
+	}
+	for _, opt := range opts {
+		opt(config)
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

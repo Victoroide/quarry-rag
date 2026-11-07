@@ -10,8 +10,10 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func ingestDocumentID(rw http.ResponseWriter, supplied string) (string, bool) {
@@ -60,6 +62,7 @@ func acceptIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker, cs
 		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return result.Outcome, nil
 	}
+	trace.SpanFromContext(r.Context()).SetAttributes(tracing.DocumentAttributes(string(result.DocumentID))...)
 	rw.Header().Set("Content-Type", "application/json")
 	rw.WriteHeader(code)
 	if err = json.NewEncoder(rw).Encode(IngestResponse{DocumentID: string(result.DocumentID), Status: state}); err != nil {

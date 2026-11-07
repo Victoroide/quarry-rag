@@ -12,6 +12,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 )
 
@@ -49,7 +50,7 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, s3Client
 
 		var objects cleanup.ObjectDeleter
 		if s3Client != nil {
-			objects = s3Client
+			objects = tracing.WrapObjectStore(s3Client)
 		}
 		if err := cleanup.Remove(ctx, cs, pcDriver, objects, doc); err != nil {
 			if errors.Is(err, cleanup.ErrFileStorageUnavailable) {

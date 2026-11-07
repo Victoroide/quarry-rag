@@ -15,6 +15,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -55,7 +56,7 @@ func NewRouter(deps *RouterDeps) http.Handler {
 				return "", extractor.ErrExtractionUnavailable
 			}))
 		} else {
-			ingestOpts = append(ingestOpts, handler.WithExtractor(sb.Extract))
+			ingestOpts = append(ingestOpts, handler.WithExtractor(tracing.WrapExtract(sb.Extract)))
 		}
 	}
 	probes := deps.Probes
@@ -67,7 +68,7 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	mux.HandleFunc("GET /readyz", handler.ReadinessHandler(probes))
 	var objects handler.ObjectStore
 	if deps.S3Client != nil {
-		objects = deps.S3Client
+		objects = tracing.WrapObjectStore(deps.S3Client)
 	}
 	mux.HandleFunc("POST /ingest", middleware.RequireServiceTokens(tokens, handler.IngestHandler(deps.Worker, deps.ChunkStore, objects, deps.Config.MaxUploadBytes, ingestOpts...)))
 	mux.HandleFunc("POST /query", middleware.RequireServiceTokens(tokens, handler.QueryHandler(deps.Retriever, deps.Ambassador, deps.Config, deps.PGPool)))
@@ -75,5 +76,5 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	mux.HandleFunc("GET /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DocumentStatusHandler(deps.ChunkStore)))
 	mux.HandleFunc("GET /documents/{doc_id}/file", middleware.RequireServiceTokens(tokens, handler.FileHandler(deps.ChunkStore, deps.S3Client)))
 	mux.HandleFunc("DELETE /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DeleteHandler(deps.ChunkStore, deps.PineconeDriver, deps.S3Client)))
-	return middleware.RequestID(middleware.Metrics(middleware.Logging(middleware.Recovery(mux)), deps.Metrics))
+	return middleware.RequestID(middleware.Metrics(middleware.Tracing(middleware.Logging(middleware.Recovery(mux)), deps.Config.Tracing.CaptureContent), deps.Metrics))
 }
