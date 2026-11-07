@@ -1,4 +1,6 @@
-.PHONY: build test lint vet ci up down logs cleanup reconcile validate
+.PHONY: build test lint vet ci up down logs cleanup reconcile validate fuzz
+
+FUZZTIME ?= 30s
 
 # Run inside container — no host deps needed
 build:
@@ -14,6 +16,15 @@ lint:
 # Full tests need a running Docker daemon for isolated database containers.
 test:
 	go test -race -count=1 ./...
+
+fuzz:
+	go test -run='^$$' -fuzz='^FuzzResolveContext$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
+	go test -run='^$$' -fuzz='^FuzzExtractors$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
+	go test -run='^$$' -fuzz='^FuzzChunk$$' -fuzztime="$(FUZZTIME)" ./internal/chunker
+	go test -run='^$$' -fuzz='^FuzzSanitizeForPrompt$$' -fuzztime="$(FUZZTIME)" ./internal/textutil
+	go test -run='^$$' -fuzz='^FuzzNormalizeForIngest$$' -fuzztime="$(FUZZTIME)" ./internal/textutil
+	go test -run='^$$' -fuzz='^FuzzBuildSynthesisPrompt$$' -fuzztime="$(FUZZTIME)" ./internal/pipeline
+	go test -run='^$$' -fuzz='^FuzzDecodeJSONObject$$' -fuzztime="$(FUZZTIME)" ./internal/api/handler
 
 # Run host quality gates before building the runtime image.
 ci:

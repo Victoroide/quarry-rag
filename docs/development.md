@@ -15,7 +15,7 @@ For contribution guidelines, environment setup, Conventional Commits formatting,
 
 ## Test Suites
 
-The test suite is structured into three tiers:
+The tests are organized into four suites:
 
 Host targets mirror the full validation path:
 
@@ -66,6 +66,16 @@ To opt in to smoke testing against a configured service:
 RUN_SMOKE=1 go test ./test/smoke/... -count=1 -v -timeout 120s
 ```
 
+### 4. Fuzz Tests
+
+Fuzz targets cover format detection, document extraction, chunking, prompt sanitization, prompt markers and JSON request decoding. Their seed corpora execute as part of `go test ./...`. To explore generated inputs for every target locally:
+
+```sh
+make fuzz FUZZTIME=2m
+```
+
+Failing inputs are saved under the affected package's `testdata/fuzz/<Target>/` directory. Keep each reproducer with its fix so ordinary tests also check that regression.
+
 ---
 
 ## Continuous Integration
@@ -78,6 +88,7 @@ RUN_SMOKE=1 go test ./test/smoke/... -count=1 -v -timeout 120s
 | [Scorecard](../.github/workflows/scorecard.yml) | Pushes to `main`, weekly, branch protection changes and manual dispatch | Publish Scorecard results, retain the SARIF artifact for five days and upload it to code scanning. |
 | [Release](../.github/workflows/release.yml) | Version tags matching `v*.*.*` | Builds archives and the runtime image, signs provenance, and publishes the release only after both builds and attestations succeed. |
 | [Release check](../.github/workflows/release-check.yml) | Pull requests changing Go sources, module dependencies, the Dockerfile or release scripts and workflows | Checks script behavior, builds archives and verifies checksums and bundled licenses. |
+| [Fuzz](../.github/workflows/fuzz.yml) | Weekly and manual dispatch | Fuzz each target separately; upload failing inputs as artifacts retained for 14 days. |
 
 ## Releases
 
