@@ -17,6 +17,7 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 - **Offline development mode**: Runs fully offline with deterministic in-memory vector storage and mock model providers via `GO_RAG_FAKE_MODE`.
 - **Service authentication**: Restricts operational and query routes with constant-time `X-Service-Token` verification.
 - **Tracing**: optional OpenTelemetry export over OTLP/HTTP, including LangSmith, for requests, pipeline stages, model calls and storage operations.
+- **MCP server**: `quarry-mcp` exposes ingestion, queries and document management to MCP clients over stdio.
 
 ## Architecture Overview
 
@@ -156,6 +157,7 @@ The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing
 |---|---|
 | [Architecture](docs/architecture.md) | Package organization, sequence diagrams, database entity-relationship model, and runtime lifecycles |
 | [API Reference](docs/api.md) | Route definitions, authentication headers, request and response structures, and HTTP status codes |
+| [MCP Server](docs/mcp.md) | Local stdio command, client setup, tools and Go client package |
 | [Configuration](docs/configuration.md) | Environment variables, validation constraints, default parameters, and database schema migrations |
 | [Deployment](docs/deployment.md) | Container image build, non-root user execution, external service requirements, and token rotation |
 | [Development](docs/development.md) | Repository directory structure, unit and integration test suites, continuous integration workflows, operational scripts, and fake mode mechanics |
