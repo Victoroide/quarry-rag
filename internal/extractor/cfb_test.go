@@ -16,7 +16,7 @@ type cfbOptions struct {
 	cyclic       bool
 }
 
-func buildCFB(t *testing.T, streams []cfbStream, opts cfbOptions) []byte {
+func buildCFB(t testing.TB, streams []cfbStream, opts cfbOptions) []byte {
 	t.Helper()
 	const (
 		sectorSize = 512

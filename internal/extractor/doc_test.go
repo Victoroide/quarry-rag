@@ -86,7 +86,7 @@ type docPiece struct {
 	compressed bool
 }
 
-func docCompressedPiece(t *testing.T, text string) docPiece {
+func docCompressedPiece(t testing.TB, text string) docPiece {
 	t.Helper()
 	data, err := charmap.Windows1252.NewEncoder().Bytes([]byte(text))
 	if err != nil {
@@ -104,7 +104,7 @@ func docUnicodePiece(text string) docPiece {
 	return docPiece{data: data}
 }
 
-func docFixtureSize(t *testing.T, size int) uint32 {
+func docFixtureSize(t testing.TB, size int) uint32 {
 	t.Helper()
 	if size < 0 || size > 7<<20 {
 		t.Fatal("document fixture exceeds the container capacity")
@@ -113,7 +113,7 @@ func docFixtureSize(t *testing.T, size int) uint32 {
 	return uint32(size)
 }
 
-func docStreams(t *testing.T, pieces ...docPiece) (word, table []byte) {
+func docStreams(t testing.TB, pieces ...docPiece) (word, table []byte) {
 	t.Helper()
 	const textOffset = 0x0800
 	word = make([]byte, textOffset)
@@ -145,7 +145,7 @@ func docStreams(t *testing.T, pieces ...docPiece) (word, table []byte) {
 	return word, table
 }
 
-func docFixture(t *testing.T, pieces ...docPiece) []byte {
+func docFixture(t testing.TB, pieces ...docPiece) []byte {
 	t.Helper()
 	word, table := docStreams(t, pieces...)
 	return buildCFB(t, []cfbStream{{name: "WordDocument", data: word}, {name: "0Table", data: table}}, cfbOptions{})
