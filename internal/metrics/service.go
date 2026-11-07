@@ -6,12 +6,13 @@ var durationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5
 
 // Service holds the service's fixed metric families.
 type Service struct {
-	Registry      *Registry
-	HTTPRequests  *CounterVec
-	HTTPDuration  *HistogramVec
-	StageDuration *HistogramVec
-	IngestJobs    *CounterVec
-	QueryMode     *CounterVec
+	Registry        *Registry
+	HTTPRequests    *CounterVec
+	HTTPDuration    *HistogramVec
+	StageDuration   *HistogramVec
+	IngestJobs      *CounterVec
+	QueryMode       *CounterVec
+	IndexVisibility *CounterVec
 }
 
 // NewService creates the fixed metric families and pending-job gauge.
@@ -22,12 +23,13 @@ func NewService(pending func() float64) *Service {
 	}
 	r.NewGaugeFunc("quarry_ingest_jobs_pending", "Pending ingestion jobs in the shared database.", pending)
 	return &Service{
-		Registry:      r,
-		HTTPRequests:  r.NewCounterVec("quarry_http_requests_total", "HTTP requests.", "route", "code"),
-		HTTPDuration:  r.NewHistogramVec("quarry_http_request_duration_seconds", "HTTP request duration in seconds.", durationBuckets, "route"),
-		StageDuration: r.NewHistogramVec("quarry_pipeline_stage_duration_seconds", "Pipeline stage duration in seconds.", durationBuckets, "stage"),
-		IngestJobs:    r.NewCounterVec("quarry_ingest_jobs_total", "Applied ingestion job outcomes.", "result"),
-		QueryMode:     r.NewCounterVec("quarry_query_mode_total", "Queries by effective retrieval mode.", "mode"),
+		Registry:        r,
+		HTTPRequests:    r.NewCounterVec("quarry_http_requests_total", "HTTP requests.", "route", "code"),
+		HTTPDuration:    r.NewHistogramVec("quarry_http_request_duration_seconds", "HTTP request duration in seconds.", durationBuckets, "route"),
+		StageDuration:   r.NewHistogramVec("quarry_pipeline_stage_duration_seconds", "Pipeline stage duration in seconds.", durationBuckets, "stage"),
+		IngestJobs:      r.NewCounterVec("quarry_ingest_jobs_total", "Applied ingestion job outcomes.", "result"),
+		QueryMode:       r.NewCounterVec("quarry_query_mode_total", "Queries by effective retrieval mode.", "mode"),
+		IndexVisibility: r.NewCounterVec("quarry_index_visibility_waits_total", "Index visibility wait outcomes.", "result"),
 	}
 }
 

@@ -48,6 +48,9 @@ type IngestContext struct {
 	FileType   *string
 	S3Key      *string
 	DocType    string
+	// Stopping is closed when the worker stops claiming jobs; optional waits
+	// end early so the attempt can still complete.
+	Stopping <-chan struct{}
 }
 
 // NewIngestContext creates an initialized IngestContext.
