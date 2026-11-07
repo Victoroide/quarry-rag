@@ -1,0 +1,50 @@
+name: Release check
+
+on:
+  pull_request:
+    paths:
+      - '**.go'
+      - go.mod
+      - go.sum
+      - Dockerfile
+      - .github/scripts/**
+      - .github/workflows/release.yml
+      - .github/workflows/release-check.yml
+
+permissions:
+  contents: read
+
+jobs:
+  archives:
+    name: Check release archives
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check release scripts
+        run: bash .github/scripts/release-test.sh
+      - name: Build release archives
+        run: .github/scripts/build-release.sh v0.0.0-check dist
+      - name: Verify checksums and license contents
+        shell: bash
+        run: |
+          cd dist
+          sha256sum -c quarry-rag_0.0.0-check_checksums.txt
+          shopt -s nullglob
+          archives=(*.tar.gz *.zip)
+          test "${#archives[@]}" -gt 0
+          for archive in "${archives[@]}"; do
+            case "$archive" in
+              *.tar.gz) tar -tzf "$archive" > contents.txt ;;
+              *.zip) unzip -Z1 "$archive" > contents.txt ;;
+            esac
+            grep -qE '^[^/]+/LICENSE$' contents.txt
+            grep -qE '^[^/]+/licenses/std@go[^/]+/LICENSE$' contents.txt
+            grep -qE '^[^/]+/licenses/.+/[^/]+$' contents.txt
+          done
