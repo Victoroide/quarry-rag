@@ -36,6 +36,7 @@ Notable changes are grouped by release.
 
 - Ingestion waits up to `INDEX_VISIBILITY_TIMEOUT` (30 s by default) for new vectors to become searchable before marking a document completed.
 - **Breaking:** `PINECONE_INDEX_NAME` has no implicit default and is required when external services are enabled; missing values prevent startup. Offline mode does not require it.
+- The architecture, data model and repository layout diagrams are animated vector images with sequential flow highlights and reduced-motion support.
 - Examples use the index name `quarry-rag`.
 - `PINECONE_ENVIRONMENT` is ignored, is no longer stored in configuration, and emits a startup warning when non-empty.
 - Logs use leveled JSON records with structured attributes; unused routing code was removed.

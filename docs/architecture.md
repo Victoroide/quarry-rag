@@ -5,8 +5,8 @@
 Quarry organizes core functionality into distinct packages under `internal/`, wired together at startup by `cmd/server/main.go`.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="diagrams/system-architecture-dark.gif">
-  <img alt="Quarry service architecture. A client service calls the HTTP router, which serves the health probes and routes token-protected requests to IngestHandler, the document handlers and QueryHandler. IngestHandler parses uploaded files in the extraction sandbox, stores originals in Amazon S3 and accepts the document and its job into PostgreSQL. The ingestion worker claims the job, runs ChunkStage, EmbedStage with Bedrock embeddings and PersistStage, which upserts vectors to Pinecone, and completes the job in PostgreSQL. A query runs through DecomposeStage, RoutingStage, which embeds the query, RetrievalStage, which searches Pinecone, and SynthesisStage, which calls Bedrock Converse. The document handlers presign and delete S3 files and list, report and delete PostgreSQL records." src="diagrams/system-architecture-light.gif">
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/system-architecture-dark.svg">
+  <img alt="Quarry service architecture. The Go client and local stdio MCP server call the HTTP API. Public probes serve GET /health, GET /livez and GET /readyz. Token-protected routes serve ingestion, queries and document operations. Ingestion normally extracts binary uploads in a sandbox, decodes text uploads in process, optionally saves originals in S3, and accepts documents and durable jobs in PostgreSQL. The ingestion processor claims a job, chunks text, embeds with Bedrock Titan V2, persists vectors in Pinecone, then completes the job and saves chunks in PostgreSQL. Queries decompose, route LOCAL or GLOBAL with Bedrock embeddings, retrieve scoped visible evidence from Pinecone, and synthesize with Bedrock Converse. A representative ingestion span flows through OpenTelemetry to optional OTLP and LangSmith exporters. Document handlers serve GET /documents, GET /documents/{doc_id}, GET /documents/{doc_id}/file and DELETE /documents/{doc_id}." src="diagrams/system-architecture-light.svg">
 </picture>
 
 ### Package Responsibilities
@@ -225,8 +225,8 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
 The relational storage schema is defined across embedded SQL migrations applied in numeric order at service startup.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.gif">
-  <img alt="Data model. chunks (id, document_id, chunk_index, text, token_count, created_at) and document_fingerprints (fingerprint, document_id, created_at) reference documents with zero or more rows per document. ingest_jobs (document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at, updated_at) is keyed by document_id, so each document has at most one job. documents has id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at and completed_at." src="diagrams/database-schema-light.gif">
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.svg">
+  <img alt="Data model. documents contains id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at, completed_at and collection. chunks contains id, document_id, chunk_index, text, token_count and created_at. document_fingerprints contains fingerprint, document_id and created_at. ingest_jobs contains document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at and updated_at. Each child references documents.id with cascading deletion. A document has zero or more chunks and fingerprints and at most one ingestion job. PK denotes primary key and FK denotes foreign key; SQL types appear beside every column. Fingerprints are scoped to the collection; document_fingerprints stores the scoped digest." src="diagrams/database-schema-light.svg">
 </picture>
 
 ### Table Definitions

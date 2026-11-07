@@ -75,7 +75,7 @@ Both base images are pinned by multi-platform index digest in the Dockerfile. De
 4. **`builder`**: Compiles the statically linked binary (`CGO_ENABLED=0 go build -o /bin/server ./cmd/server`) and collects the license and notice files of the Go standard library and every linked module.
 5. **`runtime`**: Uses the Alpine Linux runtime pinned in the Dockerfile. Installs CA certificates and timezone data, creates a dedicated system user and group (`app`, numeric UID/GID `10001:10001`), copies the compiled server binary containing the embedded migrations, and sets the non-root user as the execution user.
 
-For host verification, `make vet`, `make lint` and `make test` run directly with the local Go toolchain; the full test suite needs a Docker daemon. `make ci` runs those gates in order and then builds the runtime image. The image build's short suite skips Docker-backed database tests, with an explicit daemon requirement message.
+For host verification, `make vet`, `make lint` and `make test` run directly with the local Go toolchain; the full test suite needs a Docker daemon. The [`make ci` description](development.md#test-suites) lists the combined checks.
 
 To compile the runtime image:
 
