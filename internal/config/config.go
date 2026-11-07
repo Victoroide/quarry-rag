@@ -74,6 +74,8 @@ type Config struct {
 	IngestJobTimeout   time.Duration
 	IngestPollInterval time.Duration
 
+	IndexVisibilityTimeout time.Duration
+
 	AWSSessionToken    string
 	AWSMaxAttempts     int
 	EmbedTimeout       time.Duration
@@ -184,6 +186,7 @@ func Load() (*Config, error) {
 		dst      *time.Duration
 		fallback time.Duration
 	}{
+		{"INDEX_VISIBILITY_TIMEOUT", &cfg.IndexVisibilityTimeout, 30 * time.Second},
 		{"INGEST_LEASE", &cfg.IngestLease, 2 * time.Minute},
 		{"INGEST_JOB_TIMEOUT", &cfg.IngestJobTimeout, 15 * time.Minute},
 		{"INGEST_POLL_INTERVAL", &cfg.IngestPollInterval, time.Second},
@@ -325,6 +328,9 @@ func (c *Config) validate() error {
 	}
 	if c.IngestPollInterval < 100*time.Millisecond || c.IngestPollInterval > time.Minute {
 		return fmt.Errorf("config: INGEST_POLL_INTERVAL must be between 100ms and 1m")
+	}
+	if c.IndexVisibilityTimeout < 0 || c.IndexVisibilityTimeout > 5*time.Minute || c.IndexVisibilityTimeout >= c.IngestJobTimeout {
+		return fmt.Errorf("config: INDEX_VISIBILITY_TIMEOUT must be between 0s and 5m and below INGEST_JOB_TIMEOUT")
 	}
 	if c.ShutdownDrainDelay < 0 || c.ShutdownDrainDelay > time.Minute {
 		return fmt.Errorf("config: SHUTDOWN_DRAIN_DELAY must be between 0s and 60s")

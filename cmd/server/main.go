@@ -166,7 +166,7 @@ func run() error {
 	ingestStages := []pipeline.Stage{
 		pipeline.NewChunkStage(chk),
 		pipeline.NewEmbedStage(emb, cfg.EmbedConcurrency),
-		pipeline.NewPersistStage(vectorStore),
+		pipeline.NewPersistStage(vectorStore, pipeline.WithVisibilityWait(cfg.IndexVisibilityTimeout)),
 	}
 
 	serviceMetrics := metrics.NewService(metrics.CachedGauge(10*time.Second, func() (float64, error) {
