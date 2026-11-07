@@ -33,6 +33,34 @@ gauge reads the shared PostgreSQL queue at most once every 10 seconds per proces
 and includes delayed retries, excluding running jobs. On database errors it keeps
 the last successful value, or `NaN` before its first successful refresh.
 
+## Tracing
+
+Select the OTLP exporter and configure a collector's HTTP trace endpoint using
+the [tracing settings](configuration.md#tracing). For LangSmith, enable its
+destination and provide an API key, optionally selecting a project and the
+region's or self-hosted API address shown in LangSmith. No collector is required
+when exporting directly to LangSmith. In an agent-based LangSmith workspace, set
+the project to the target agent environment's tracer session name, because the
+service addresses traces by project.
+
+Content capture sends prompts, questions, document excerpts, embedding inputs and
+answers outside the process. Enable it only for data that may be sent to every
+configured destination. Without it, query spans contain byte counts and a short
+digest rather than question text; model spans retain model settings and token
+counts. Export failures emit a warning without credentials or response bodies;
+LangSmith HTTP failures include only the response status code.
+
+Use the configured sampler to control export volume. Parent-based sampling
+follows incoming W3C trace context; ratio sampling can reduce newly created
+traces. LangSmith discards spans whose parent it never receives, so it receives a
+request that continues an incoming trace as a root span in the same trace; the
+generic destination keeps the caller's parent. Request IDs remain available as
+span attributes. Ingestion acceptance and background processing create separate
+traces correlated by `document_id`.
+Health probes are excluded from request tracing, and unparented database polling
+does not create traces. Shutdown flushes pending spans after HTTP, ingestion and
+storage shutdown, with a five-second deadline.
+
 ## Container Image
 
 The service is packaged using a multi-stage Docker build that outputs a minimal, non-root runtime container based on Alpine Linux.
