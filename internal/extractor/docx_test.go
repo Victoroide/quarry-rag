@@ -11,12 +11,12 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 )
 
-func docxBytes(t *testing.T, xml string) []byte {
+func docxBytes(t testing.TB, xml string) []byte {
 	t.Helper()
 	return docxPartsBytes(t, map[string]string{"word/document.xml": xml})
 }
 
-func docxPartsBytes(t *testing.T, parts map[string]string) []byte {
+func docxPartsBytes(t testing.TB, parts map[string]string) []byte {
 	t.Helper()
 	var out bytes.Buffer
 	writer := zip.NewWriter(&out)
