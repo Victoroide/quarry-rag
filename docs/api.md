@@ -99,6 +99,8 @@ curl localhost:8081/health
 
 Ingests textual content or document files for chunking, embedding, vector indexing, and relational storage. HTTP 202 means the document content and pending ingestion job have committed to PostgreSQL and survive restarts. Processing completes asynchronously. Content NUL characters are removed before validation and fingerprinting; metadata keys or values containing NUL return 400 `metadata must not contain NUL characters`.
 
+A document's `status` becomes `completed` after its vectors and chunks are stored and search returns its last vector. When the [visibility wait](architecture.md#ingestion-stages) is disabled or ends first, the document completes anyway and can take a moment to become searchable.
+
 - **Method**: `POST`
 - **Path**: `/ingest`
 - **Auth**: Required (`X-Service-Token`)
