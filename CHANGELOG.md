@@ -10,6 +10,7 @@ Notable changes are grouped by release.
 - Ingestion accepts an optional `collection` that scopes content deduplication; document summaries report it (migration 007).
 - Tagged releases publish archives for each command with checksums, third-party licenses and signed build provenance, and attest the runtime image; base images are pinned by digest.
 - Optional OpenTelemetry trace export over OTLP/HTTP, including LangSmith, for requests, pipeline stages, model calls and storage operations; disabled by default and without message content unless enabled.
+- `quarry-mcp`, a local stdio Model Context Protocol server for ingestion, queries and document management, and the `client` package, a typed Go client for the HTTP API.
 - Optional Prometheus-format metrics on `METRICS_ADDR` for requests, pipeline stages, ingestion jobs and routing modes.
 - `make reconcile` lists, and with `ARGS=-apply` removes, vectors and legacy namespaces that no stored document references.
 - Requests carry an `X-Request-ID`, accepted from callers or generated, that appears in structured access and panic logs; `LOG_LEVEL` sets verbosity.

@@ -98,6 +98,20 @@ exporter settings.
 | `OTEL_TRACES_SAMPLER` | string | `parentbased_always_on` | `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off` or `parentbased_traceidratio`; other values fail startup when tracing is enabled | Selects sampling for both destinations. |
 | `OTEL_TRACES_SAMPLER_ARG` | string | Unset | A ratio from 0 to 1 for ratio samplers; malformed values fail startup when tracing is enabled | Ratio for ratio-based sampling. |
 
+---
+
+## MCP Server Environment
+
+The local stdio command reads these variables separately from the HTTP service. Invalid settings prevent startup. See [MCP server usage](mcp.md).
+
+| Variable | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `QUARRY_MCP_FILE_ROOTS` | path list | `""` (disabled) | Existing directories separated by the OS path-list separator | Allowed roots for file ingestion; roots and file paths are resolved through symlinks. Only regular files with `.pdf`, `.docx`, `.doc`, `.txt`, `.md` or `.markdown` extensions are accepted, case-insensitively. |
+| `QUARRY_MCP_READ_ONLY` | boolean | `false` | Boolean | Registers only query, list and get tools. |
+| `QUARRY_SERVICE_TOKEN` | string | `""` | No whitespace or control characters after trimming | Sent only in the `X-Service-Token` request header. |
+| `QUARRY_TIMEOUT` | duration | `90s` | 1s to 10m | HTTP request timeout, including upload and response transfer. The default exceeds the service's default write timeout. |
+| `QUARRY_URL` | string | Required | Absolute HTTP or HTTPS address, or `host:port` for plain HTTP; no credentials, query or fragment | HTTP API base address; any path prefix is preserved. |
+
 ## Schema Migrations
 
 Database schema migrations are SQL files named with a three-digit version and a descriptive suffix, such as `006_add_index.sql`. Every file under `internal/store/postgres/migrations` matching `NNN_name.sql` is embedded in the binary automatically. Versions must be unique and are applied in ascending order by `internal/store/postgres/migrate.go`.
