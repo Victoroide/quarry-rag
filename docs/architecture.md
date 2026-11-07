@@ -88,6 +88,7 @@ sequenceDiagram
     Worker->>Worker: Chunk content
     Worker->>Embedder: Embed chunks concurrently
     Worker->>Pinecone: Upsert default namespace
+    Worker->>Pinecone: Query the last vector until it is returned (bounded)
     Worker->>Postgres: CompleteJob transaction
     Note over Postgres: Require processing status and owned lease; insert chunks and remove job
     alt Retryable failure
@@ -109,6 +110,7 @@ sequenceDiagram
    - Upserts vectors into Pinecone only under the default namespace (`""`), with `doc_id` metadata identifying each document.
    - Splits each vector upsert into batches of at most `PINECONE_UPSERT_BATCH_SIZE` records (default 100) and 1.5 MiB of estimated encoded data. Metadata above 40,960 serialized JSON bytes per record is rejected before writing.
    - Retries transient vector index failures with a per-attempt `PINECONE_TIMEOUT` and full-jitter exponential backoff from 200 ms, capped at 5 seconds. Writes and deletions use up to `PINECONE_MAX_ATTEMPTS` attempts; queries use at most three. Parent cancellation stops retries.
+   - After writing, searches with the last chunk's own embedding, filtered to the document and limited to ten results, until that chunk is returned. Searches start immediately and back off from 200 ms to 2 s for up to `INDEX_VISIBILITY_TIMEOUT`; when the wait expires, the document completes and the service logs a warning and [counts the outcome](configuration.md#metrics), while cancellation and lease loss stop processing. Each wait holds its ingestion worker, so sustained index lag lowers ingestion throughput. Chunk IDs are deterministic, so after a retry the search can match an earlier attempt's copy of the last vector before the index applies its removal.
 4. **Transactional completion**: The worker replaces chunk metadata and marks the document completed in one transaction guarded by document status and the current lease. Document content, metadata, preview and fingerprint already exist before acceptance returns.
 
 Before chunking, documents with recognizable HTML markup have comments, script and style content removed. Block elements become paragraph breaks, line-break elements become newlines, remaining tags are removed, and HTML entities are decoded. Plain text without markup retains comparison operators and literal entities.
@@ -266,7 +268,7 @@ The relational storage schema is defined across embedded SQL migrations applied 
 
 1. The process captures `SIGINT` or `SIGTERM`.
 2. HTTP shutdown stops new connections and waits up to 15 seconds for active requests.
-3. Worker shutdown stops new claims and waits up to 15 seconds for current jobs. At the deadline it cancels processing and releases each lease under a detached 5-second context without consuming an attempt. Pending jobs remain persisted.
+3. Worker shutdown stops new claims, ends visibility waits so their documents complete, and waits up to 15 seconds for current jobs. At the deadline it cancels processing and releases each lease under a detached 5-second context without consuming an attempt. Pending jobs remain persisted.
 4. Vector connections close after workers stop.
 5. The PostgreSQL pool closes last. A replacement replica resumes pending work; expired leases recover work after abrupt process loss.
 

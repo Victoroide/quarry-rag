@@ -32,6 +32,7 @@ The table below lists the environment variables recognized by the service:
 | `HTTP_IDLE_TIMEOUT` | duration | `60s` | Positive | Idle keep-alive connection timeout. |
 | `HTTP_READ_TIMEOUT` | duration | `60s` | 5s to 30m | Maximum time to read a complete HTTP request, including the body. |
 | `HTTP_WRITE_TIMEOUT` | duration | `QUERY_TIMEOUT + 15s` | Greater than `QUERY_TIMEOUT` | Response write deadline; defaults to 75s with the default query budget. |
+| `INDEX_VISIBILITY_TIMEOUT` | duration | `30s` | 0s to 5m; less than `INGEST_JOB_TIMEOUT` | Maximum wait after vector writes for search to return the document's last embedded chunk; zero disables waiting. Timeout logs a warning and allows completion. |
 | `INGEST_JOB_TIMEOUT` | duration | `15m` | 1m to 2h; greater than lease | Maximum processing time per attempt. |
 | `INGEST_LEASE` | duration | `2m` | 30s to 30m | Lease duration, renewed every third of this interval. |
 | `INGEST_MAX_ATTEMPTS` | integer | `5` | 1 to 20 | Maximum processing attempts before recording terminal failure. |
@@ -150,3 +151,8 @@ a 10-second cache, including failed refreshes. A failed refresh retains the last
 successful value, or reports `NaN` before any successful refresh. This gauge is
 shared across replicas through the database; do not sum it across replicas.
 Other counters and histograms describe the current process and reset on restart.
+
+`quarry_index_visibility_waits_total{result}` counts visibility waits by outcome:
+`visible` when search returns the document's last vector, and `timeout` when the
+wait expires or worker shutdown ends it first. Disabled waits and canceled
+attempts are not counted. The `persist` stage duration includes the wait.
