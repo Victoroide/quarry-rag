@@ -4,11 +4,16 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // StageID identifies a pipeline stage.
@@ -116,7 +121,14 @@ func RunIngestionPipeline(ctx context.Context, ic *IngestContext, stages []Stage
 			return results, fmt.Errorf("pipeline: context canceled before stage %s: %w", s.ID(), err)
 		}
 		start := time.Now()
-		err := s.Run(ctx, ic)
+		stageCtx, span := otel.Tracer("github.com/Victoroide/quarry-rag/internal/pipeline").Start(ctx, "ingest."+string(s.ID()), trace.WithAttributes(attribute.String(tracing.LangSmithKind, "chain"), attribute.String("quarry.stage", string(s.ID()))))
+		err := func() error {
+			defer finishStageSpan(span)
+			err := s.Run(stageCtx, ic)
+			span.SetAttributes(attribute.Int("quarry.ingest.chunks", len(ic.Chunks)))
+			tracing.RecordError(span, err)
+			return err
+		}()
 		metrics.FromContext(ctx).StageDuration.WithLabelValues(string(s.ID())).Observe(time.Since(start).Seconds())
 		results = append(results, StageResult{StageID: s.ID(), Err: err})
 		if err != nil {
@@ -145,7 +157,20 @@ func RunRetrievalPipeline(ctx context.Context, qc *QueryContext, stages []QueryS
 			return results, fmt.Errorf("pipeline: context canceled before stage %s: %w", s.ID(), err)
 		}
 		t0 := time.Now()
-		err := s.Run(ctx, qc)
+		name, kind := querySpanName(s.ID()), "chain"
+		if s.ID() == StageRetrieval {
+			kind = "retriever"
+		}
+		stageCtx, span := otel.Tracer("github.com/Victoroide/quarry-rag/internal/pipeline").Start(ctx, name, trace.WithAttributes(attribute.String(tracing.LangSmithKind, kind), attribute.String("quarry.stage", string(s.ID()))))
+		err := func() error {
+			defer finishStageSpan(span)
+			err := s.Run(stageCtx, qc)
+			if span.IsRecording() {
+				setQueryAttributes(stageCtx, span, s.ID(), qc)
+			}
+			tracing.RecordError(span, err)
+			return err
+		}()
 		elapsed := time.Since(t0)
 		qc.StageTimingsMS[string(s.ID())] = elapsed.Milliseconds()
 		metrics.FromContext(ctx).StageDuration.WithLabelValues(string(s.ID())).Observe(elapsed.Seconds())
@@ -160,4 +185,58 @@ func RunRetrievalPipeline(ctx context.Context, qc *QueryContext, stages []QueryS
 		}
 	}
 	return results, nil
+}
+
+func querySpanName(id StageID) string {
+	switch id {
+	case StageQueryDecomposition:
+		return "query.decompose"
+	case StageRetrievalRouting:
+		return "query.routing"
+	default:
+		return "query." + string(id)
+	}
+}
+
+func finishStageSpan(span trace.Span) {
+	defer span.End()
+	if recovered := recover(); recovered != nil {
+		tracing.RecordError(span, fmt.Errorf("pipeline stage panicked"))
+		panic(recovered)
+	}
+}
+
+func setQueryAttributes(ctx context.Context, span trace.Span, id StageID, qc *QueryContext) {
+	span.SetAttributes(
+		attribute.Int("quarry.query.sub_queries", len(qc.SubQueries)), attribute.String("quarry.retrieval.mode", qc.RetrievalMode),
+		attribute.Int("quarry.retrieval.chunks", len(qc.RetrievedChunks)), attribute.Float64("quarry.retrieval.top_score", qc.TopScore),
+		attribute.Int("quarry.synthesis.context_chunks", qc.ContextChunks), attribute.Int("quarry.synthesis.context_tokens", qc.ContextTokens),
+		attribute.String("quarry.synthesis.finish_reason", qc.FinishReason), attribute.Bool("quarry.synthesis.early_exit", qc.EarlyExit))
+	if !tracing.ContentCapture(ctx) {
+		span.SetAttributes(attribute.Int("quarry.query.bytes", len(qc.OriginalQuery)), attribute.String("quarry.query.digest", queryDigest(qc.OriginalQuery)))
+		return
+	}
+	switch id {
+	case StageRetrieval:
+		for i, result := range qc.RetrievedChunks {
+			text := []rune(result.Chunk.Text)
+			if len(text) > 4000 {
+				text = text[:4000]
+			}
+			docType, _ := result.Chunk.Metadata["doc_type"].(string)
+			if docType == "" {
+				docType = domain.DefaultDocType
+			}
+			metadata, err := json.Marshal(map[string]any{"doc_id": string(result.Chunk.DocumentID), "doc_type": docType, "chunk_index": result.Chunk.Index, "score": result.Score})
+			if err != nil {
+				continue
+			}
+			prefix := fmt.Sprintf("retrieval.documents.%d.document.", i)
+			span.SetAttributes(attribute.String(prefix+"content", string(text)), attribute.String(prefix+"metadata", string(metadata)))
+		}
+	case StageSynthesis:
+		input, _ := json.Marshal(map[string]string{"question": qc.OriginalQuery})
+		output, _ := json.Marshal(map[string]string{"answer": qc.FinalAnswer})
+		span.SetAttributes(attribute.String("input.value", string(input)), attribute.String("output.value", string(output)))
+	}
 }

@@ -13,7 +13,11 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/aws/smithy-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -150,6 +154,9 @@ func (w *Worker) ShutdownContext(ctx context.Context) error {
 }
 
 func (w *Worker) process(parent context.Context, job domain.Job) {
+	attrs := append(tracing.DocumentAttributes(string(job.Document.ID)), attribute.String(tracing.LangSmithKind, "chain"), attribute.Int("quarry.job.attempt", job.Attempts))
+	parent, span := otel.Tracer("github.com/Victoroide/quarry-rag/internal/worker").Start(parent, "ingest.job", trace.WithNewRoot(), trace.WithAttributes(attrs...))
+	defer span.End()
 	parent = metrics.WithService(parent, w.opts.Metrics)
 	timeoutCtx, stop := context.WithTimeout(parent, w.opts.JobTimeout)
 	defer stop()
@@ -187,6 +194,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 	ic.S3Key = job.Document.S3Key
 	ic.DocType = job.DocType
 	err := w.run(ctx, job, ic)
+	tracing.RecordError(span, err)
 	if parent.Err() != nil {
 		w.release(parent, job)
 		return
@@ -220,7 +228,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		stateCtx, stateCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 		defer stateCancel()
 		failErr := w.store.FailJob(stateCtx, job, err.Error())
-		w.recordOutcome(job, "failed", failErr)
+		w.recordOutcome(parent, job, "failed", failErr)
 		if errors.Is(failErr, domain.ErrJobNotOwned) {
 			w.compensateDeleted(parent, job)
 		}
@@ -233,13 +241,13 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		delay *= 2
 	}
 	delay = min(delay, 5*time.Minute) + time.Duration(rand.Int64N(int64(time.Second)+1)) // #nosec G404 -- Retry jitter does not require cryptographic randomness.
-	w.recordOutcome(job, "retried", w.store.RetryJob(stateCtx, job, delay, err.Error()))
+	w.recordOutcome(parent, job, "retried", w.store.RetryJob(stateCtx, job, delay, err.Error()))
 }
 
 func (w *Worker) release(ctx context.Context, job domain.Job) {
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	w.recordOutcome(job, "released", w.store.ReleaseJob(releaseCtx, job))
+	w.recordOutcome(ctx, job, "released", w.store.ReleaseJob(releaseCtx, job))
 }
 
 func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestContext) (err error) {
@@ -264,6 +272,7 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 		w.compensateDeleted(ctx, job)
 	} else {
 		w.opts.Metrics.IngestJobs.WithLabelValues("completed").Inc()
+		trace.SpanFromContext(ctx).SetAttributes(attribute.String("quarry.job.result", "completed"))
 	}
 	return nil
 }
@@ -304,9 +313,11 @@ func (w *Worker) logStateError(job domain.Job, err error) {
 	}
 }
 
-func (w *Worker) recordOutcome(job domain.Job, result string, err error) {
+func (w *Worker) recordOutcome(ctx context.Context, job domain.Job, result string, err error) {
 	w.logStateError(job, err)
+	tracing.RecordError(trace.SpanFromContext(ctx), err)
 	if err == nil {
 		w.opts.Metrics.IngestJobs.WithLabelValues(result).Inc()
+		trace.SpanFromContext(ctx).SetAttributes(attribute.String("quarry.job.result", result))
 	}
 }

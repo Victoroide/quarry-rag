@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -54,14 +55,18 @@ func hasMultiNeedSignal(query string) bool { return multiNeedPattern.MatchString
 
 // Run sets the sub-query count from surface cues without external calls.
 func (s *DecomposeStage) Run(ctx context.Context, qc *QueryContext) error {
-	digest := sha256.Sum256([]byte(qc.OriginalQuery))
-	slog.DebugContext(ctx, "decompose_stage", "query_bytes", len(qc.OriginalQuery), "query_digest", fmt.Sprintf("%x", digest[:6]))
+	slog.DebugContext(ctx, "decompose_stage", "query_bytes", len(qc.OriginalQuery), "query_digest", queryDigest(qc.OriginalQuery))
 	if hasMultiNeedSignal(qc.OriginalQuery) {
 		qc.SubQueries = []string{qc.OriginalQuery, qc.OriginalQuery}
 	} else {
 		qc.SubQueries = []string{qc.OriginalQuery}
 	}
 	return nil
+}
+
+func queryDigest(query string) string {
+	digest := sha256.Sum256([]byte(query))
+	return hex.EncodeToString(digest[:6])
 }
 
 // RoutingStage determines LOCAL or GLOBAL retrieval mode.
