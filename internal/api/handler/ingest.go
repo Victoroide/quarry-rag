@@ -35,7 +35,7 @@ const ingestJSONBodyLimit = 6*domain.MaxContentBytes + 2<<20
 type IngestRequest struct {
 	DocumentID string         `json:"document_id,omitempty"`
 	Content    string         `json:"content"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitzero"`
 	DocType    string         `json:"doc_type,omitempty"`
 	Collection string         `json:"collection,omitempty"`
 }

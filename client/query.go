@@ -13,7 +13,7 @@ type QueryRequest struct {
 	Mode               string   `json:"mode,omitempty"`
 	FilterDocType      string   `json:"filter_doc_type,omitempty"`
 	MaxChunks          int      `json:"max_chunks,omitempty"`
-	AllowedDocumentIDs []string `json:"allowed_document_ids,omitempty"`
+	AllowedDocumentIDs []string `json:"allowed_document_ids,omitzero"`
 }
 
 // MarshalJSON preserves an explicitly empty authorization scope.
