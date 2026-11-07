@@ -39,7 +39,7 @@ func durableDatabase(t *testing.T) *pgstore.Client {
 	return c
 }
 func durableWorker(c *pgstore.Client, v *memory.FakeVectorStore, e domain.EmbeddingProvider) *worker.Worker {
-	return worker.New(c, []pipeline.Stage{pipeline.NewChunkStage(chunker.NewChunker(32, 4)), pipeline.NewEmbedStage(e, 2), pipeline.NewPersistStage(v)}, v, worker.Options{Workers: 2, MaxAttempts: 3, Lease: time.Second, JobTimeout: time.Minute, PollInterval: 10 * time.Millisecond, Owner: "integration"})
+	return worker.New(c, []pipeline.Stage{pipeline.NewChunkStage(chunker.NewChunker(32, 4)), pipeline.NewEmbedStage(e, 2), pipeline.NewPersistStage(v, pipeline.WithVisibilityWait(time.Second))}, v, worker.Options{Workers: 2, MaxAttempts: 3, Lease: time.Second, JobTimeout: time.Minute, PollInterval: 10 * time.Millisecond, Owner: "integration"})
 }
 func durableSubmit(t *testing.T, w *worker.Worker, c domain.ChunkStore, body string) *httptest.ResponseRecorder {
 	t.Helper()

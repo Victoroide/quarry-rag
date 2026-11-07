@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -277,4 +278,43 @@ func TestTerminalCleanupKeepsHeartbeatActive(t *testing.T) {
 	w.Shutdown()
 	require.GreaterOrEqual(t, s.renewals.Load(), int32(3))
 	require.Equal(t, 2, vectors.calls)
+}
+
+type visibilityEmbedStage struct{}
+
+func (visibilityEmbedStage) ID() pipeline.StageID { return pipeline.StageEmbed }
+func (visibilityEmbedStage) Run(_ context.Context, ic *pipeline.IngestContext) error {
+	ic.Chunks = []domain.Chunk{{ID: "chunk", DocumentID: ic.DocumentID, Embedding: []float32{1, 0}}}
+	return nil
+}
+
+type laggingVectorStore struct {
+	domain.VectorStore
+	probed chan struct{}
+}
+
+func (*laggingVectorStore) Upsert(context.Context, string, []domain.Chunk) error { return nil }
+func (s *laggingVectorStore) QueryFiltered(context.Context, []float32, int, domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	select {
+	case s.probed <- struct{}{}:
+	default:
+	}
+	return nil, nil
+}
+
+func TestShutdownCompletesJobWaitingForVisibility(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := leaseStore(1)
+		vs := &laggingVectorStore{probed: make(chan struct{}, 1)}
+		stages := []pipeline.Stage{visibilityEmbedStage{}, pipeline.NewPersistStage(vs, pipeline.WithVisibilityWait(30*time.Second))}
+		w := New(s, stages, nil, Options{Workers: 1, MaxAttempts: 5, Lease: 2 * time.Minute, JobTimeout: 15 * time.Minute, PollInterval: time.Second, Owner: "test"})
+		w.Start(t.Context())
+		<-vs.probed
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		start := time.Now()
+		require.NoError(t, w.ShutdownContext(ctx))
+		require.Zero(t, time.Since(start))
+		require.Equal(t, "completed", <-s.events)
+	})
 }
