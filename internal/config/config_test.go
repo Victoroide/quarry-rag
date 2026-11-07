@@ -7,6 +7,45 @@ import (
 	"time"
 )
 
+func TestLoadIndexVisibilityTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name, value, jobTimeout string
+		want                    time.Duration
+		invalid                 bool
+	}{
+		{name: "default", want: 30 * time.Second},
+		{name: "disabled", value: "0s"},
+		{name: "fractional", value: "250ms", want: 250 * time.Millisecond},
+		{name: "upper bound", value: "5m", want: 5 * time.Minute},
+		{name: "negative", value: "-1ns", invalid: true},
+		{name: "above bound", value: "5m1ns", invalid: true},
+		{name: "malformed", value: "invalid", invalid: true},
+		{name: "equal job timeout", value: "5m", jobTimeout: "5m", invalid: true},
+		{name: "above job timeout", value: "5m", jobTimeout: "3m", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("INDEX_VISIBILITY_TIMEOUT", tc.value)
+			if tc.jobTimeout != "" {
+				t.Setenv("INGEST_JOB_TIMEOUT", tc.jobTimeout)
+			}
+			cfg, err := Load()
+			if tc.invalid {
+				if err == nil || !strings.Contains(err.Error(), "INDEX_VISIBILITY_TIMEOUT") {
+					t.Fatalf("expected INDEX_VISIBILITY_TIMEOUT error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.IndexVisibilityTimeout != tc.want {
+				t.Fatalf("visibility timeout = %v, want %v", cfg.IndexVisibilityTimeout, tc.want)
+			}
+		})
+	}
+}
+
 // baseValidConfig returns a Config that passes validate() in real (non-fake)
 // mode, so each test can flip exactly one field and assert the guard it targets.
 func baseValidConfig() *Config {
