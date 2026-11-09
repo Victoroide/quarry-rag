@@ -102,13 +102,13 @@ sequenceDiagram
 
 ### Ingestion Stages
 
-1. **ChunkStage**: Converts raw document text into sliding-window text chunks bounded by `CHUNK_TOKEN_SIZE` (default 512 estimated tokens, minimum 2) and 30,000 bytes. Sentence boundaries are preferred, including full-width terminators without following whitespace. Oversized sentences split by words, and oversized words split at rune boundaries. Each window includes new text and retains up to `CHUNK_OVERLAP` (default 64 estimated tokens) from the previous window when both limits permit, never more than half of that window. Generates a deterministic chunk ID for each chunk.
-2. **EmbedStage**: Embeds chunks concurrently up to `EMBED_CONCURRENCY`; the provider also enforces its shared request limit.
+1. **ChunkStage**: Converts raw document text into sliding-window text chunks bounded by [`CHUNK_TOKEN_SIZE`](configuration.md#environment-variables) and 30,000 bytes. Sentence boundaries are preferred, including full-width terminators without following whitespace. Oversized sentences split by words, and oversized words split at rune boundaries. Each window includes new text and retains up to `CHUNK_OVERLAP` estimated tokens from the previous window when both limits permit, never more than half of that window. Generates a deterministic chunk ID for each chunk.
+2. **EmbedStage**: Embeds chunks concurrently up to [`EMBED_CONCURRENCY`](configuration.md#environment-variables); the provider also enforces its shared request limit [per replica](deployment.md#concurrency-limits).
 3. **PersistStage**:
    - Assigns the caller's `doc_type` or falls back to the default `"document"`.
    - Injects `doc_type` into individual chunk metadata; document labels are stored at acceptance.
    - Upserts vectors into Pinecone only under the default namespace (`""`), with `doc_id` metadata identifying each document.
-   - Splits each vector upsert into batches of at most `PINECONE_UPSERT_BATCH_SIZE` records (default 100) and 1.5 MiB of estimated encoded data. Metadata above 40,960 serialized JSON bytes per record is rejected before writing.
+   - Splits each vector upsert into batches of at most [`PINECONE_UPSERT_BATCH_SIZE`](configuration.md#environment-variables) records and 1.5 MiB of estimated encoded data. Metadata above 40,960 serialized JSON bytes per record is rejected before writing.
    - Retries transient vector index failures with a per-attempt `PINECONE_TIMEOUT` and full-jitter exponential backoff from 200 ms, capped at 5 seconds. Writes and deletions use up to `PINECONE_MAX_ATTEMPTS` attempts; queries use at most three. Parent cancellation stops retries.
    - After writing, searches with the last chunk's own embedding, filtered to the document and limited to ten results, until that chunk is returned. Searches start immediately and back off from 200 ms to 2 s for up to `INDEX_VISIBILITY_TIMEOUT`; when the wait expires, the document completes and the service logs a warning and [counts the outcome](configuration.md#metrics), while cancellation and lease loss stop processing. Each wait holds its ingestion worker, so sustained index lag lowers ingestion throughput. Chunk IDs are deterministic, so after a retry the search can match an earlier attempt's copy of the last vector before the index applies its removal.
 4. **Transactional completion**: The worker replaces chunk metadata and marks the document completed in one transaction guarded by document status and the current lease. Document content, metadata, preview and fingerprint already exist before acceptance returns.
@@ -186,7 +186,7 @@ sequenceDiagram
 
 ### Query Time Budget
 
-Each handler admits up to `QUERY_CONCURRENCY` queries (default 32), waiting at most `QUERY_QUEUE_TIMEOUT` (default 2 seconds) before returning 503 with `Retry-After: 1`. Admission precedes all pipeline work. Each admitted query gets `QUERY_TIMEOUT` (default 60 seconds) across decomposition, routing, embedding, retrieval and synthesis. The synthesis call gets a nested `SYNTHESIS_TIMEOUT` (default 45 seconds); an earlier parent deadline always wins. Cancellation propagates to upstream calls and waiting queries.
+Each handler admits up to [`QUERY_CONCURRENCY`](configuration.md#environment-variables) queries [per replica](deployment.md#concurrency-limits), waiting at most `QUERY_QUEUE_TIMEOUT` before returning 503 with `Retry-After: 1`. Admission precedes all pipeline work. Each admitted query gets `QUERY_TIMEOUT` across decomposition, routing, embedding, retrieval and synthesis, with a nested `SYNTHESIS_TIMEOUT` for the synthesis call; an earlier parent deadline always wins. Cancellation propagates to upstream calls and waiting queries.
 
 The AWS SDK retryer is the single transport retry layer for Bedrock, configured with `AWS_MAX_ATTEMPTS`. The ambassador makes one client call per operation and does not add backoff or retry throttled requests. Structured-output correction remains separate; answer synthesis uses the plain-text path without correction calls. SDK retries and their backoff share the synthesis or embedding deadline. Timeout errors return 504, upstream throttling returns 503 with `Retry-After: 2`, empty synthesis returns 502, and other failures return a generic 500. Full errors are logged at error level.
 
@@ -202,7 +202,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
      - If no visible candidate remains, `GLOBAL` retrieval is selected.
      - If multi-need signals produced multiple sub-query requirements, `GLOBAL` mode is selected.
      - If a specific named entity is identified, `LOCAL` mode is selected.
-     - If the highest vector similarity score meets or exceeds `LOCAL_RETRIEVAL_THRESHOLD` (default 0.70), `LOCAL` mode is selected.
+     - If the highest vector similarity score meets or exceeds [`LOCAL_RETRIEVAL_THRESHOLD`](configuration.md#environment-variables), `LOCAL` mode is selected.
      - Otherwise, `GLOBAL` mode is selected.
    - `LOCAL` targets the matched entity's document, or the highest-scoring visible candidate's document when no entity matches.
 3. **RetrievalStage**:
@@ -211,7 +211,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
    - Retains the allowlist post-filter before synthesis as defense in depth. A nil allowlist allows all documents; an empty allowlist denies all documents.
    - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query; the top score is recomputed from visible chunks.
 4. **SynthesisStage**:
-   - When `MIN_RELEVANCE_SCORE` is positive, drops chunks below it before adaptive trimming; the default zero disables this floor. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).
+   - When [`MIN_RELEVANCE_SCORE`](configuration.md#environment-variables) is positive, drops chunks below it before adaptive trimming. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).
    - Applies adaptive chunk trimming: drops chunks scoring below 55% of the top chunk's score, bounds chunk counts (5 chunks for simple queries, 8 for multi-need queries), and truncates chunk bodies at sentence boundaries near 1200 runes.
    - Records the exact sanitized excerpts sent to synthesis and whether each body was cut. Retrieved chunks report their matching excerpt number and truncation flag through the [query response](api.md#post-query).
    - Selects synthesis model according to `SYNTHESIS_MODEL` (`fallback` defaults to Llama 4 Maverick, `primary` routes to Nova Micro, and `hybrid` dynamically routes based on multi-need detection).
@@ -246,7 +246,7 @@ The relational storage schema is defined across embedded SQL migrations applied 
 
 1. Configuration is loaded and validated against constraints from environment variables.
 2. The PostgreSQL connection pool (`pgxpool.Pool`) is established with a 30-second connection timeout.
-3. Embedded SQL migrations are discovered by version and applied once in ascending order within a PostgreSQL transaction guarded by an advisory lock. The `schema_migrations` table records versions and checksums; concurrent replicas wait for the lock, and subsequent startups skip applied SQL after verifying checksums.
+3. Embedded SQL migrations are applied in ascending order within a PostgreSQL transaction guarded by an advisory lock; see [Schema Migrations](configuration.md#schema-migrations).
 4. Storage drivers and model clients are initialized:
    - In standard mode: Pinecone index connection pools, AWS Bedrock embedder, AWS Bedrock LLM client, and S3 object storage client.
    - In offline fake mode: In-memory vector store, fake deterministic embedder, and fake converser.
@@ -254,31 +254,32 @@ The relational storage schema is defined across embedded SQL migrations applied 
 6. The HTTP router and middleware chain are registered with standard network listeners.
 7. HTTP server listener begins serving with explicit timeout parameters:
    - Header read timeout: 5 seconds
-   - Body read timeout: `HTTP_READ_TIMEOUT` (default 60 seconds)
-   - Response write timeout: `HTTP_WRITE_TIMEOUT` (defaults to `QUERY_TIMEOUT + 15s`, 75 seconds with the default query budget)
-   - Idle keep-alive timeout: `HTTP_IDLE_TIMEOUT` (default 60 seconds)
+   - Body read timeout: [`HTTP_READ_TIMEOUT`](configuration.md#environment-variables)
+   - Response write timeout: [`HTTP_WRITE_TIMEOUT`](configuration.md#environment-variables)
+   - Idle keep-alive timeout: [`HTTP_IDLE_TIMEOUT`](configuration.md#environment-variables)
 
 ### Worker Queue Mechanics
 
-- PostgreSQL stores accepted content and a pending job atomically before HTTP 202. `WORKER_QUEUE_SIZE` defaults to 1000 and bounds outstanding jobs across replicas, including running work.
+- PostgreSQL stores accepted content and a pending job atomically before HTTP 202. [`WORKER_QUEUE_SIZE`](configuration.md#environment-variables) bounds outstanding jobs across replicas, including running work.
 - Identical content without an explicit identifier selects its existing document within its collection atomically. Completed duplicates return 200; in-flight duplicates return 202; failed duplicates return 202 and requeue the original identifier. Explicit identifiers preserve caller identity and reject conflicting content or collections with 409.
-- `INGEST_WORKERS` defaults to 2. Each loop claims due jobs with `FOR UPDATE SKIP LOCKED` and renews its lease every `INGEST_LEASE / 3`. Polling discovers persisted work even when a notification is missed or another replica accepts it.
+- [`INGEST_WORKERS`](configuration.md#environment-variables) sets worker loops per process. Each loop claims due jobs with `FOR UPDATE SKIP LOCKED` and renews its lease every `INGEST_LEASE / 3`. Polling discovers persisted work even when a notification is missed or another replica accepts it.
 - Expired leases are reclaimed. Every attempt first removes existing vectors for the document. Retryable failures use exponential backoff from 5 seconds to 5 minutes plus up to 1 second of jitter. Processing failures that are permanent or exhaust attempts remove partial vectors under the live lease before recording `failed` and `last_error`. Jobs exhausted through expired leases are failed during claiming; their remaining vectors stay hidden by document status and are removed before any requeued attempt.
 - Deletion cascades to the job. Completion requires both a processing document and its owned lease; if deletion wins, the worker removes any late vectors.
 
 ### Graceful Shutdown Sequence
 
-1. The process captures `SIGINT` or `SIGTERM`.
-2. HTTP shutdown stops new connections and waits up to 15 seconds for active requests.
-3. Worker shutdown stops new claims, ends visibility waits so their documents complete, and waits up to 15 seconds for current jobs. At the deadline it cancels processing and releases each lease under a detached 5-second context without consuming an attempt. Pending jobs remain persisted.
+1. The process captures `SIGINT` or `SIGTERM` and marks readiness as draining while the API and any metrics listener keep serving for [`SHUTDOWN_DRAIN_DELAY`](configuration.md#environment-variables) (a second signal skips the remaining delay).
+2. The listeners then stop new connections together and wait up to 15 seconds for active requests.
+3. Worker shutdown stops new claims, ends visibility waits so their documents complete, and waits up to 15 seconds for current jobs. At the deadline it cancels processing and releases each lease under a detached 5-second context without consuming an attempt. Pending jobs remain persisted in PostgreSQL.
 4. Vector connections close after workers stop.
-5. The PostgreSQL pool closes last. A replacement replica resumes pending work; expired leases recover work after abrupt process loss.
+5. The PostgreSQL pool closes. A replacement replica resumes pending work; expired leases recover work after abrupt process loss.
+6. Pending trace spans flush last, with a five-second deadline.
 
 ### Extraction Boundaries
 
 JSON ingestion allows 1,000,000 decoded content bytes and a body cap of 8,097,152 bytes for escaping and metadata. Multipart uploads remain bounded by `MAX_UPLOAD_BYTES`. A concurrency slot is held before reading multipart data until the upload handler returns. When all slots remain occupied for `EXTRACT_QUEUE_TIMEOUT`, the request returns HTTP 503 with `busy` and `Retry-After: 5`.
 
-By default, PDF, DOCX and DOC extraction executes in a child process of the service binary. The child receives only the extraction flag, `GOMAXPROCS=1` and a soft Go memory limit through its environment. Each child has a 64 MiB maximum stack, a configurable wall-clock timeout (30 seconds by default), at most 100 MiB of source data, an 8 MiB stdout cap and a 64 KiB stderr cap. On Linux it attempts to set its OOM adjustment to 1000. A parser crash or exceeded output cap returns HTTP 422 with `document could not be parsed`; a timeout returns HTTP 422 with `document extraction exceeded the time limit`. If the child executable is unavailable, uploads return HTTP 503. `EXTRACT_ISOLATION=false` selects in-process extraction and removes the process boundary.
+By default, PDF, DOCX and DOC extraction executes in a child process of the service binary. The child receives only the extraction flag, `GOMAXPROCS=1` and a soft Go memory limit through its environment. Each child has a 64 MiB maximum stack, a wall-clock timeout set by [`EXTRACT_TIMEOUT`](configuration.md#environment-variables), at most 100 MiB of source data, an 8 MiB stdout cap and a 64 KiB stderr cap. On Linux it attempts to set `oom_score_adj=1000` so that memory pressure preferentially terminates the parser. A parser crash or exceeded output cap returns HTTP 422 with `document could not be parsed`; a timeout returns HTTP 422 with `document extraction exceeded the time limit`. If the child executable is unavailable, uploads return HTTP 503. `EXTRACT_ISOLATION=false` selects in-process extraction and removes the process boundary.
 
 PDF, DOCX, DOC and text extraction enforce the same 1,000,000-byte text limit. DOCX counts text and separators while parsing and bounds document XML at 16 MiB. Legacy DOC streams must declare a positive size no larger than the source file; stream reads respect cancellation and stop at the declared size. PDF extraction checks relevant decoded streams against a cumulative 8 MiB budget before text parsing; it also bounds source reads, page count, font count, Unicode font-map size and declarations, and stream nesting. It honors the caller's deadline and otherwise applies a 30-second default. Extraction-limit failures use HTTP 422.
 
@@ -290,21 +291,4 @@ The middleware order is `RequestID(Metrics(Logging(Recovery(mux))))`. Metrics re
 the matched route pattern after dispatch, so document identifiers and unmatched
 raw paths never become labels. Recovered failures retain their final HTTP status.
 The separate metrics listener serves Prometheus text without an additional module.
-
-- `quarry_http_requests_total{route,code}` counts HTTP responses.
-- `quarry_http_request_duration_seconds{route}` observes request duration.
-- `quarry_pipeline_stage_duration_seconds{stage}` observes executed ingestion and
-  retrieval stages, including stages that return an error.
-- `quarry_ingest_jobs_total{result}` counts successful `completed`, `retried`,
-  `failed` and `released` transitions made by the ingestion processor. Rejected or
-  failed state updates do not increment counters. Expired-lease cleanup performed
-  by the claim query is outside these processor outcome counters.
-- `quarry_ingest_jobs_pending` counts pending rows in `ingest_jobs`, including
-  delayed retries and excluding running jobs, with a shared 10-second cache per
-  process. Failed refreshes retain the last good value, or `NaN` initially.
-- `quarry_query_mode_total{mode}` counts each routed query once using its effective
-  `LOCAL` or `GLOBAL` mode, including queries that subsequently fail synthesis.
-
-`METRICS_ADDR` enables this listener; an empty value disables it. Both HTTP
-listeners remain available during the readiness drain delay and then shut down
-together before ingestion processing and storage connections close.
+See [Metrics](configuration.md#metrics) for metric series, labels and histogram buckets.

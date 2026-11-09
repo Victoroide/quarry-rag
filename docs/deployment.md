@@ -2,8 +2,8 @@
 
 ## Logging
 
-The service emits JSON logs to stderr. `LOG_LEVEL` sets the minimum severity:
-`debug`, `info` (default), `warn` or `error`. Each access log includes `method`,
+The service emits JSON logs to stderr at the minimum severity set by
+[`LOG_LEVEL`](configuration.md#environment-variables). Each access log includes `method`,
 `path`, `status`, `bytes`, `duration_ms`, `remote_addr` and `request_id`. The path
 excludes the query string; the remote address is the connecting peer, including
 its port. `bytes` counts response body bytes written, and `duration_ms` measures
@@ -19,19 +19,14 @@ Aborted handlers propagate to the HTTP server without a recovered panic error.
 
 ## Metrics
 
-`METRICS_ADDR` is empty by default. Set it to a listen address such as
+Set [`METRICS_ADDR`](configuration.md#environment-variables) to a listen address such as
 `127.0.0.1:9090` to serve `GET /metrics` separately from the API. Bind it to a
 private interface and never expose it publicly. The listener has no
 service-token authentication; restrict monitoring access with network policy or
 firewall rules. Container port publishing must preserve that private access.
-The listener uses bounded HTTP timeouts and shuts down with the API after the
-readiness drain delay, waiting for active scrapes within the shutdown deadline.
-
-Scrape the per-process counters and histograms for request status, latency,
-pipeline stages, ingestion outcomes and effective retrieval mode. The pending-job
-gauge reads the shared PostgreSQL queue at most once every 10 seconds per process
-and includes delayed retries, excluding running jobs. On database errors it keeps
-the last successful value, or `NaN` before its first successful refresh.
+The listener uses bounded HTTP timeouts and stops with the API during
+[graceful shutdown](architecture.md#graceful-shutdown-sequence). See
+[Metrics](configuration.md#metrics) for metric series, labels and histogram buckets.
 
 ## Tracing
 
@@ -58,8 +53,8 @@ generic destination keeps the caller's parent. Request IDs remain available as
 span attributes. Ingestion acceptance and background processing create separate
 traces correlated by `document_id`.
 Health probes are excluded from request tracing, and unparented database polling
-does not create traces. Shutdown flushes pending spans after HTTP, ingestion and
-storage shutdown, with a five-second deadline.
+does not create traces. Pending spans flush at the end of
+[graceful shutdown](architecture.md#graceful-shutdown-sequence).
 
 ## Container Image
 
@@ -146,9 +141,19 @@ The license count must be greater than zero. The image manifest must include
 
 ## Document Extraction Processes
 
-Each concurrent multipart upload starts at most one extraction child process. The service binary must be able to execute itself; the runtime filesystem and process policy must allow this. `EXTRACT_CONCURRENCY` defaults to two, and a slot is held while the upload is read as well as while its document is parsed.
+Each concurrent multipart upload starts at most one extraction child process. The service binary must be able to execute itself; the runtime filesystem and process policy must allow this.
 
-Size container memory to at least `base + EXTRACT_CONCURRENCY × EXTRACT_MEMORY_LIMIT_MB`, where `base` covers the server, buffered uploads and background ingestion. The child memory setting is a soft Go limit; allow additional headroom for runtime overhead and temporary allocations. Each child has a 64 MiB maximum stack and a 30-second default wall-clock timeout. On Linux it attempts to set `oom_score_adj=1000` so that memory pressure preferentially terminates the parser. Failure to execute a child makes document uploads return HTTP 503.
+Size container memory to at least `base + EXTRACT_CONCURRENCY × EXTRACT_MEMORY_LIMIT_MB`, where `base` covers the server, buffered uploads and background ingestion. The child memory setting is a soft Go limit; allow additional headroom for runtime overhead and temporary allocations. For child process sandboxing, stack limits, timeouts and termination semantics, see [Extraction Boundaries](architecture.md#extraction-boundaries).
+
+## Concurrency Limits
+
+Query admission, embedding and extraction limits are process-local, so the cluster-wide maximum is each per-replica value multiplied by the replica count. `QUERY_CONCURRENCY` bounds concurrent queries and therefore concurrent synthesis calls. `EMBED_CONCURRENCY` bounds concurrent embedding calls from ingestion and queries together. `EXTRACT_CONCURRENCY` bounds concurrent multipart uploads, which use local CPU and memory but no model quota.
+
+When replicas share an account quota expressed in concurrent requests, the largest per-replica value that stays within it is:
+
+`per-replica limit = floor(account quota / replicas)`
+
+Apply this formula to `QUERY_CONCURRENCY` and `EMBED_CONCURRENCY` with the quotas of the models they call, and to `EXTRACT_CONCURRENCY` when the deployment sets its own cluster-wide upload limit. Each result must stay within the variable's [bounds](configuration.md#environment-variables); a result below 1 means the quota cannot support that many replicas. Retries run inside these limits, so they add requests but not concurrency.
 
 ## Required External Services
 
@@ -160,14 +165,14 @@ In production deployments (`GO_RAG_FAKE_MODE=false`), the microservice connects 
 - **Extensions**: `pgcrypto` (applied automatically by migration 001).
 - **Configuration**: Provided via `DATABASE_URL`.
 - **Purpose**: Stores document records, status indicators, chunk texts, token counts, and SHA-256 content fingerprints.
-- **Operations**: Versioned startup migrations, duplicate fingerprint lookups, chunk insertion transactions, document status tracking, and inventory listings. Replicas may start concurrently: a transaction-scoped advisory lock serializes migration checks and changes. Applied versions and checksums are recorded in `schema_migrations`; restarts with no pending changes skip the migration SQL.
+- **Operations**: Versioned startup migrations, duplicate fingerprint lookups, chunk insertion transactions, document status tracking, and inventory listings. Replicas serialize migrations using an advisory lock; see [Schema Migrations](configuration.md#schema-migrations).
 
 ### 2. Pinecone (Vector Index)
 
 - **Configuration**: `PINECONE_API_KEY` and an explicit `PINECONE_INDEX_NAME`, for example `quarry-rag`. Both are required when external services are enabled; the index name has no default. `PINECONE_ENVIRONMENT` is ignored and logs a startup warning when non-empty; remove it from deployment configuration.
 - **API Version**: The v5 Go SDK uses Pinecone API version `2025-10`.
-- **Startup Requirements**: The index dimension must equal `EMBEDDING_DIMENSIONS` (default: 1024), the metric must be `cosine`, and the index must be ready. Startup fails if any requirement is unmet.
-- **Request Limits**: Upserts use at most `PINECONE_UPSERT_BATCH_SIZE` records (default 100) and 1.5 MiB of estimated encoded data per batch. `PINECONE_TIMEOUT` bounds each attempt (default 10 seconds), and `PINECONE_MAX_ATTEMPTS` limits write and deletion attempts (default 5).
+- **Startup Requirements**: The index dimension must equal [`EMBEDDING_DIMENSIONS`](configuration.md#environment-variables), the metric must be `cosine`, and the index must be ready. Startup fails if any requirement is unmet.
+- **Request Limits**: Upserts use at most [`PINECONE_UPSERT_BATCH_SIZE`](configuration.md#environment-variables) records and 1.5 MiB of estimated encoded data per batch. `PINECONE_TIMEOUT` bounds each attempt, and `PINECONE_MAX_ATTEMPTS` limits write and deletion attempts.
 - **Deletion**: If metadata-filter deletion returns `InvalidArgument`, `Unimplemented`, or `FailedPrecondition`, the service queries the default namespace with an exact `doc_id` filter and deletes the returned identifiers in batches of at most 1,000. Each identifier is deleted once per operation, so stale query results do not repeat deletions. Enumeration stops when no new identifiers appear or after deleting a result with fewer than 1,000 matches, and otherwise fails after 10 rounds. Missing vectors and namespaces are accepted as already deleted.
 - **Purpose**: High-dimensional vector search. Chunks are upserted only into the default namespace (`""`), which the SDK maps to `__default__` and the console displays as `__default__`, with `doc_id` metadata identifying each document. Per-document namespaces created by earlier versions are removed when their document is deleted. All namespace operations share one connection, which closes only when the client shuts down.
 
@@ -190,8 +195,8 @@ Confirm that `TestSmoke_PreexistingDocumentRemainsRetrievable` passes without sk
 
 - **Configuration**: `AWS_REGION` and model identifiers (`BEDROCK_EMBED_MODEL`, `BEDROCK_PRIMARY_MODEL`, `BEDROCK_FALLBACK_MODEL`). Static `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are optional and must be configured together; temporary static credentials also accept `AWS_SESSION_TOKEN`.
 - **Credentials**: IAM roles are supported. Without static keys, AWS clients use the default credential chain, including environment credentials, shared configuration files, web identity, container roles and instance roles.
-- **Query and proxy timeouts**: `QUERY_CONCURRENCY` bounds admitted queries per replica, and `QUERY_QUEUE_TIMEOUT` limits admission waits. Each admitted query has a `QUERY_TIMEOUT` budget (default 60 seconds), with a nested `SYNTHESIS_TIMEOUT` (default 45 seconds). Set proxy and load balancer response timeouts to at least `HTTP_WRITE_TIMEOUT`, which defaults to `QUERY_TIMEOUT + 15s` and must exceed the query budget. `HTTP_READ_TIMEOUT` and `HTTP_IDLE_TIMEOUT` both default to 60 seconds. Keep adequate margin for reading request bodies and waiting for admission when configuring write timeouts.
-- **Retries and Deadlines**: Bedrock and S3 use the same retry policy, with `AWS_MAX_ATTEMPTS` attempts (default 4), up to 10 seconds of backoff, no client-side retry quota and retries for `ModelTimeoutException` and `ModelNotReadyException`. The SDK is the only transport retry layer; the ambassador makes one client call per operation. Each embedding call has an `EMBED_TIMEOUT` deadline (default 15 seconds), including waiting for a concurrency slot and retries.
+- **Query and proxy timeouts**: `QUERY_CONCURRENCY` bounds admitted queries [per replica](#concurrency-limits), and `QUERY_QUEUE_TIMEOUT` limits admission waits. Each admitted query has a [`QUERY_TIMEOUT`](configuration.md#environment-variables) budget, with a nested `SYNTHESIS_TIMEOUT`. Set proxy and load balancer response timeouts to at least `HTTP_WRITE_TIMEOUT`. Keep adequate margin for reading request bodies and waiting for admission when configuring write timeouts.
+- **Retries and Deadlines**: Bedrock and S3 use the same retry policy, with [`AWS_MAX_ATTEMPTS`](configuration.md#environment-variables) attempts, up to 10 seconds of backoff, no client-side retry quota and retries for `ModelTimeoutException` and `ModelNotReadyException`. The SDK is the only transport retry layer; the ambassador makes one client call per operation. Each embedding call has an `EMBED_TIMEOUT` deadline, including waiting for a concurrency slot and retries.
 - **Required Model Access**:
   - Titan Embed Text V2 (`amazon.titan-embed-text-v2:0`): generates 1024-dimensional normalized text embeddings.
   - Nova Micro (`amazon.nova-micro-v1:0`): fast, low-latency reasoning and synthesis.
@@ -241,32 +246,23 @@ output fields and partial deletion failures.
 
 The service exposes three unauthenticated probe endpoints:
 
-- Use `GET /livez` for startup and liveness checks. It always returns HTTP 200 with `status: "ok"` while serving requests and makes no dependency calls.
-- Use `GET /readyz` for readiness checks. It returns HTTP 200 with `status: "ready"` when the cached PostgreSQL check succeeds, HTTP 503 with `status: "unavailable"` when that check fails, and HTTP 503 with `status: "draining"` during shutdown.
-- Use `GET /health` for diagnostics. It returns HTTP 200 with `status: "ok"` when all configured dependencies respond, or HTTP 503 with `status: "degraded"` otherwise. `postgres` reports database health; `neon` is a deprecated alias.
-- Diagnostics and readiness share a snapshot cached for `HEALTH_CACHE_TTL` (default 10 seconds). Concurrent callers share one refresh after expiry. Checks run concurrently against Pinecone, PostgreSQL and configured S3 storage, each with a 5-second timeout.
+- Use `GET /livez` for startup and liveness checks.
+- Use `GET /readyz` for readiness checks.
+- Use `GET /health` for diagnostics.
+
+See [Endpoints](api.md#endpoints) for probe responses and status codes.
 
 ---
 
 ## Graceful Shutdown
 
-The service handles graceful shutdown when receiving `SIGINT` or `SIGTERM`:
-
-1. Marks readiness as draining while continuing to serve requests for `SHUTDOWN_DRAIN_DELAY` (default 5 seconds). A second termination signal skips the remaining delay.
-2. Stops accepting new inbound HTTP requests and drains active requests with a 15-second deadline.
-3. Stops ingestion claims and waits up to 15 seconds for active jobs, then cancels them and releases their leases within a detached 5-second deadline. Pending jobs remain in PostgreSQL.
-4. Closes active Pinecone index client connections.
-5. Closes the PostgreSQL connection pool.
-
-Set the termination grace period to at least `SHUTDOWN_DRAIN_DELAY + 40s` (45 seconds with the default delay) to allow traffic removal, HTTP requests, worker completion and lease release to settle before sending `SIGKILL`. No preStop hook is needed.
-
-Replicas share the PostgreSQL ingestion queue and claim jobs with renewable leases. Accepted content survives restarts. Graceful shutdown releases unfinished leases without consuming an attempt; after abrupt termination, another replica reclaims expired leases. No pending document is dropped.
+Set the termination grace period to at least `SHUTDOWN_DRAIN_DELAY + 40s` to allow traffic removal, HTTP requests, worker completion and lease release to settle before sending `SIGKILL`. No preStop hook is needed. See [Graceful Shutdown Sequence](architecture.md#graceful-shutdown-sequence) for the internal shutdown order and queue recovery.
 
 ---
 
 ## Service Token Rotation
 
-The service accepts any token from `SERVICE_TOKENS` (comma-separated), merged with the optional `SERVICE_TOKEN` value, in the `X-Service-Token` header. Tokens are trimmed and deduplicated at startup; tokens containing whitespace or control characters after trimming prevent startup. Use secrets of at least 32 bytes. To rotate tokens without downtime:
+The service accepts any token configured in [`SERVICE_TOKENS` or `SERVICE_TOKEN`](configuration.md#environment-variables). To rotate tokens without downtime:
 
 1. Add the new token to `SERVICE_TOKENS`, keep the old token configured, and roll the deployment. Wait until every replica accepts both tokens before updating callers.
 2. Move callers to the new token and verify authenticated requests succeed.

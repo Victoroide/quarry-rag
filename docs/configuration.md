@@ -58,8 +58,8 @@ The table below lists the environment variables recognized by the service:
 | `S3_BUCKET` | string | `""` | Explicit bucket name | S3 bucket for original uploads. Empty disables source file storage with a startup warning. Startup checks bucket access within 10 seconds; a 403 or 404 prevents startup, while transient errors produce a warning and startup continues. |
 | `S3_EXPECTED_BUCKET_OWNER` | string | `""` | Empty or exactly 12 ASCII digits | Optional AWS account ID expected to own the bucket. Sent with uploads, deletions and bucket checks; omitted from presigned downloads. |
 | `SERVER_PORT` | string | `"8081"` | 1 to 65535 | TCP port on which the HTTP server listens. |
-| `SERVICE_TOKEN` | string | `""` | No whitespace or control characters after trimming | Shared secret merged with `SERVICE_TOKENS`. At least one token is required when `GO_RAG_FAKE_MODE=false`. |
-| `SERVICE_TOKENS` | comma-separated strings | `""` | No whitespace or control characters within a token after trimming | Additional secrets accepted in `X-Service-Token` for rotation. Tokens are trimmed, empty entries are dropped and duplicates are removed across both variables. Startup warns with only the count of tokens shorter than 32 bytes; use secrets of at least 32 bytes. An empty combined list leaves routes open only in offline mode. |
+| `SERVICE_TOKEN` | string | `""` | No whitespace or control characters after trimming | Shared secret merged with `SERVICE_TOKENS`; see [Service Token Rotation](deployment.md#service-token-rotation). At least one token is required when `GO_RAG_FAKE_MODE=false`. |
+| `SERVICE_TOKENS` | comma-separated strings | `""` | No whitespace or control characters within a token after trimming | Additional secrets accepted in `X-Service-Token` for rotation; see [Service Token Rotation](deployment.md#service-token-rotation). Tokens are trimmed, empty entries are dropped and duplicates are removed across both variables. Startup warns with only the count of tokens shorter than 32 bytes; use secrets of at least 32 bytes. An empty combined list leaves routes open only in offline mode. |
 | `SHUTDOWN_DRAIN_DELAY` | duration | `5s` | 0s to 60s | Delay after readiness starts returning draining, before HTTP shutdown. A second termination signal skips the remaining delay. |
 | `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
 | `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries. |
@@ -137,22 +137,30 @@ Set `METRICS_ADDR` to enable `GET /metrics` on a separate listener. The main API
 listener does not serve metrics. Bind the metrics listener to a private interface
 and restrict access to the monitoring system; it has no service-token check.
 
-Metrics use Prometheus text format. Request counts use `route` and `code` labels;
-request duration uses `route`. Routes are matched method and path patterns, or
-`unmatched` for requests with no matching pattern. Pipeline durations use `stage`,
-ingestion outcomes use `result`, and query counts use the effective `mode`
-(`LOCAL` or `GLOBAL`). All durations are in seconds. Histograms use boundaries
-0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60 and 120 seconds,
-plus the cumulative positive-infinity bucket.
+Metrics use Prometheus text format:
 
-`quarry_ingest_jobs_pending` counts database rows in the `pending` state,
-including delayed retries and excluding running leases. Concurrent scrapes share
-a 10-second cache, including failed refreshes. A failed refresh retains the last
-successful value, or reports `NaN` before any successful refresh. This gauge is
-shared across replicas through the database; do not sum it across replicas.
-Other counters and histograms describe the current process and reset on restart.
+- `quarry_http_requests_total{route,code}` counts HTTP responses.
+- `quarry_http_request_duration_seconds{route}` observes request duration.
+- `quarry_pipeline_stage_duration_seconds{stage}` observes executed ingestion and
+  retrieval stages, including stages that return an error.
+- `quarry_ingest_jobs_total{result}` counts successful `completed`, `retried`,
+  `failed` and `released` transitions made by the ingestion processor. Rejected or
+  failed state updates do not increment counters. Expired-lease cleanup performed
+  by the claim query is outside these processor outcome counters.
+- `quarry_ingest_jobs_pending` counts pending rows in `ingest_jobs`, including
+  delayed retries and excluding running jobs. Concurrent scrapes share a 10-second
+  cache per process, including failed refreshes. A failed refresh retains the last
+  good value, or `NaN` initially. This gauge is shared across replicas through the
+  database; do not sum it across replicas.
+- `quarry_query_mode_total{mode}` counts each routed query once using its effective
+  `LOCAL` or `GLOBAL` mode, including queries that subsequently fail synthesis.
+- `quarry_index_visibility_waits_total{result}` counts visibility waits by outcome:
+  `visible` when search returns the document's last vector, and `timeout` when the
+  wait expires or worker shutdown ends it first. Disabled waits and canceled
+  attempts are not counted. The `persist` stage duration includes the wait.
 
-`quarry_index_visibility_waits_total{result}` counts visibility waits by outcome:
-`visible` when search returns the document's last vector, and `timeout` when the
-wait expires or worker shutdown ends it first. Disabled waits and canceled
-attempts are not counted. The `persist` stage duration includes the wait.
+The `route` label holds the matched method and path pattern, or `unmatched` for
+requests with no matching pattern. All durations are in seconds. Histograms use
+boundaries 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60 and 120
+seconds, plus the cumulative positive-infinity bucket. Counters and histograms
+describe the current process and reset on restart.
