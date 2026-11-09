@@ -2,7 +2,7 @@
 
 ## System Components
 
-Quarry organizes core functionality into distinct packages under `internal/`, wired together at startup by `cmd/server/main.go`.
+Quarry organizes core functionality into distinct packages under `internal/`, wired together at startup by `cmd/server/main.go`. The system diagram illustrates the default hosted-vector deployment.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/system-architecture-dark.svg">
@@ -25,7 +25,7 @@ Quarry organizes core functionality into distinct packages under `internal/`, wi
 - **`internal/pipeline`**: Encapsulates sequential multi-stage pipelines:
   - **Ingestion Pipeline**: Executes `ChunkStage`, `EmbedStage`, and `PersistStage`.
   - **Query Pipeline**: Executes `DecomposeStage`, `RoutingStage`, `RetrievalStage`, `RerankStage` (when reranking is enabled), and `SynthesisStage`.
-- **`internal/store/postgres`**: Manages PostgreSQL connection pooling via `pgxpool`, applies embedded SQL migrations, and performs transactional CRUD queries on documents, chunks, and fingerprints.
+- **`internal/store/postgres`**: Manages PostgreSQL connection pooling via `pgxpool`, applies embedded SQL migrations, and performs transactional CRUD queries on documents, chunks, and fingerprints, with optional pgvector storage described in the [vector data model](#postgresql-vector-schema).
 - **`internal/store/pinecone`**: Implements vector storage drivers for Pinecone, sharing one connection across all namespaces (legacy document namespaces use handles derived from it, which are never closed individually; the connection closes when the client shuts down), with batched writes, retries, and metadata filtering.
 - **`internal/store/s3`**: Uploads source binaries, deletes stored objects, and generates presigned GET download URLs.
 - **`internal/cleanup`**: Provides multi-store deletion ensuring external vector and object records are purged before metadata records are removed.
@@ -87,10 +87,12 @@ sequenceDiagram
     end
     Worker->>Worker: Chunk content
     Worker->>Embedder: Embed chunks concurrently
-    Worker->>Pinecone: Upsert default namespace
-    Worker->>Pinecone: Query the last vector until it is returned (bounded)
+    opt Hosted vector index
+        Worker->>Pinecone: Upsert default namespace
+        Worker->>Pinecone: Query the last vector until it is returned (bounded)
+    end
     Worker->>Postgres: CompleteJob transaction
-    Note over Postgres: Require processing status and owned lease; insert chunks and remove job
+    Note over Postgres: Require processing status and owned lease; insert chunks and optional vectors, then remove job
     alt Retryable failure
         Worker->>Postgres: Reschedule with backoff and last_error
     else Permanent or exhausted failure
@@ -105,13 +107,14 @@ sequenceDiagram
 1. **ChunkStage**: Converts raw document text into sliding-window text chunks bounded by [`CHUNK_TOKEN_SIZE`](configuration.md#environment-variables) and 30,000 bytes. Sentence boundaries are preferred, including full-width terminators without following whitespace. Oversized sentences split by words, and oversized words split at rune boundaries. Each window includes new text and retains up to `CHUNK_OVERLAP` estimated tokens from the previous window when both limits permit, never more than half of that window. Generates a deterministic chunk ID for each chunk.
 2. **EmbedStage**: Embeds chunks concurrently up to [`EMBED_CONCURRENCY`](configuration.md#environment-variables); the provider also enforces its shared request limit [per replica](deployment.md#concurrency-limits).
 3. **PersistStage**:
+   - Transactional stores defer the vector write and skip visibility polling; completion owns persistence. The remaining write steps apply to hosted storage.
    - Assigns the caller's `doc_type` or falls back to the default `"document"`.
    - Injects `doc_type`, and `collection` when non-empty, into individual chunk metadata; document labels are stored at acceptance.
    - Upserts vectors into Pinecone only under the default namespace (`""`), with `doc_id` metadata identifying each document.
    - Splits each vector upsert into batches of at most [`PINECONE_UPSERT_BATCH_SIZE`](configuration.md#environment-variables) records and 1.5 MiB of estimated encoded data. Metadata above 40,960 serialized JSON bytes per record is rejected before writing.
    - Retries transient vector index failures with a per-attempt `PINECONE_TIMEOUT` and full-jitter exponential backoff from 200 ms, capped at 5 seconds. Writes and deletions use up to `PINECONE_MAX_ATTEMPTS` attempts; queries use at most three. Parent cancellation stops retries.
    - After writing, searches with the last chunk's own embedding, filtered to the document and limited to ten results, until that chunk is returned. Searches start immediately and back off from 200 ms to 2 s for up to `INDEX_VISIBILITY_TIMEOUT`; when the wait expires, the document completes and the service logs a warning and [counts the outcome](configuration.md#metrics), while cancellation and lease loss stop processing. Each wait holds its ingestion worker, so sustained index lag lowers ingestion throughput. Chunk IDs are deterministic, so after a retry the search can match an earlier attempt's copy of the last vector before the index applies its removal.
-4. **Transactional completion**: The worker replaces chunk metadata and marks the document completed in one transaction guarded by document status and the current lease. Document content, metadata, preview and fingerprint already exist before acceptance returns.
+4. **Transactional completion**: The worker replaces chunk metadata and, for the PostgreSQL vector backend, embeddings, then marks the document completed in one transaction guarded by document status and the current lease. Document content, metadata, preview and fingerprint already exist before acceptance returns.
 
 Before chunking, documents with recognizable HTML markup have comments, script and style content removed. Block elements become paragraph breaks, line-break elements become newlines, remaining tags are removed, and HTML entities are decoded. Plain text without markup retains comparison operators and literal entities.
 
@@ -136,7 +139,7 @@ sequenceDiagram
     participant Routing as RoutingStage
     participant Embedder as AWS Bedrock (Embedder)
     participant Retrieval as RetrievalStage
-    participant Pinecone as Pinecone
+    participant Pinecone as Vector Store
     participant Rerank as RerankStage
     participant Synthesis as SynthesisStage
     participant LLM as AWS Bedrock (LLM)
@@ -212,7 +215,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
      - Otherwise, `GLOBAL` mode is selected.
    - `LOCAL` targets the matched entity's document, or the highest-scoring visible candidate's document when no entity matches.
 3. **RetrievalStage**:
-   - Queries Pinecone using the embedding produced during routing.
+   - Queries the configured vector backend using the embedding produced during routing.
    - Both modes query the default namespace with `filter_doc_type`, `collection` and `allowed_document_ids` applied before top-K selection. `LOCAL` narrows the document filter to the routed document. If that query returns fewer than three chunks, it makes one additional query using the original authorized scope and document-type filter; results merge by chunk ID using the highest score, then sort and trim to top-K. `GLOBAL` queries the authorized scope once without a sparse-result fallback. Allowlists above 10000 IDs require one sequential query per group.
    - Retains the allowlist post-filter before synthesis as defense in depth. A nil allowlist allows all documents; an empty allowlist denies all documents.
    - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents, in the requested collection when one is set, contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query; the top score is recomputed from visible chunks.
@@ -232,7 +235,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
 
 ## Data Model
 
-The relational storage schema is defined across embedded SQL migrations applied in numeric order at service startup.
+The base relational schema is defined across embedded SQL migrations applied in numeric order at service startup. The data-model diagram shows this base schema only; the optional vector table is described below.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.svg">
@@ -248,6 +251,24 @@ The relational storage schema is defined across embedded SQL migrations applied 
 
 ---
 
+### PostgreSQL Vector Schema
+
+The optional `chunk_vectors` table is created dynamically after base migrations, under their advisory lock. It is separate from numbered migrations because installations using hosted vectors need no vector extension, and the embedding dimension is configured at startup. Startup creates the extension if needed and rejects a preexisting embedding column with a different type or dimension.
+
+| Column | Type | Purpose |
+|---|---|---|
+| `chunk_id` | `TEXT PRIMARY KEY` | Deterministic chunk identity. |
+| `document_id` | `UUID NOT NULL` | References `documents(id)` with cascading deletion. |
+| `chunk_index` | `INTEGER NOT NULL` | Position within the document. |
+| `doc_type` | `TEXT NOT NULL` | Claimed document type. |
+| `collection` | `TEXT NOT NULL DEFAULT ''` | Claimed collection label. |
+| `text` | `TEXT NOT NULL` | Chunk text. |
+| `kind`, `quality` | Nullable `TEXT` | Optional chunk labels. |
+| `token_count` | `INTEGER NOT NULL` | Estimated chunk tokens. |
+| `embedding` | `vector(n) NOT NULL` | Finite, nonzero cosine vector; dimension comes from [configuration](configuration.md#environment-variables). |
+
+An HNSW index uses `vector_cosine_ops`; B-tree indexes cover `document_id` and `collection`. Search joins completed documents and returns similarity as one minus cosine distance. Search ranks a limited inner query by cosine distance alone so the HNSW index can serve it, enables strict-order iterative index scans so type, ID and collection predicates are applied until the limit is filled, and orders equal scores by chunk ID within the results. Results remain approximate, and an iterative scan stops after `hnsw.max_scan_tuples` candidates. Completion replaces vector records inside the same transaction as chunks and document status.
+
 ## Lifecycle and Concurrency Model
 
 ### Server Initialization
@@ -256,7 +277,7 @@ The relational storage schema is defined across embedded SQL migrations applied 
 2. The PostgreSQL connection pool (`pgxpool.Pool`) is established with a 30-second connection timeout.
 3. Embedded SQL migrations are applied in ascending order within a PostgreSQL transaction guarded by an advisory lock; see [Schema Migrations](configuration.md#schema-migrations).
 4. Storage drivers and model clients are initialized:
-   - In standard mode: Pinecone index connection pools, AWS Bedrock embedder, AWS Bedrock LLM client, and S3 object storage client.
+   - In standard mode: the configured vector backend, AWS Bedrock embedder, AWS Bedrock LLM client, and S3 object storage client.
    - In offline fake mode: In-memory vector store, fake deterministic embedder, and fake converser.
 5. Ingestion stages and `INGEST_WORKERS` lease claim loops are started with a unique process owner.
 6. The HTTP router and middleware chain are registered with standard network listeners.

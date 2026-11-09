@@ -133,7 +133,7 @@ The `scripts/` directory contains standalone administrative and evaluation tools
 
 ### Document Cleanup (`scripts/cleanup`)
 
-Accepts one or more document UUIDs as command-line arguments and removes their records from Pinecone, S3, and PostgreSQL using one shared set of clients:
+Accepts one or more document UUIDs as command-line arguments and removes their records from the configured vector backend, S3, and PostgreSQL using one shared set of clients:
 
 ```sh
 make cleanup IDS="<document-uuid-1> <document-uuid-2>"

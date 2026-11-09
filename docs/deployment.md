@@ -157,7 +157,7 @@ Apply this formula to `QUERY_CONCURRENCY` and `EMBED_CONCURRENCY` with the quota
 
 ## Required External Services
 
-In production deployments (`GO_RAG_FAKE_MODE=false`), the microservice uses the following backing services. [PDF OCR](#optional-pdf-ocr) adds optional text detection.
+In production deployments (`GO_RAG_FAKE_MODE=false`), the microservice uses PostgreSQL and AWS Bedrock, with a selectable vector backend and optional S3 storage. See [configuration](configuration.md#environment-variables) for backend selection and credentials. [PDF OCR](#optional-pdf-ocr) adds optional text detection.
 
 ### 1. PostgreSQL (Metadata and Chunk Store)
 
@@ -169,7 +169,7 @@ In production deployments (`GO_RAG_FAKE_MODE=false`), the microservice uses the 
 
 ### 2. Pinecone (Vector Index)
 
-- **Configuration**: `PINECONE_API_KEY` and an explicit `PINECONE_INDEX_NAME`, for example `quarry-rag`. Both are required when external services are enabled; the index name has no default. `PINECONE_ENVIRONMENT` is ignored and logs a startup warning when non-empty; remove it from deployment configuration.
+- **Configuration**: `PINECONE_API_KEY` and an explicit `PINECONE_INDEX_NAME`, for example `quarry-rag`. Required settings depend on the selected backend; see [configuration](configuration.md#environment-variables). The index name has no default. `PINECONE_ENVIRONMENT` is ignored and logs a startup warning when non-empty; remove it from deployment configuration.
 - **API Version**: The v5 Go SDK uses Pinecone API version `2025-10`.
 - **Startup Requirements**: The index dimension must equal [`EMBEDDING_DIMENSIONS`](configuration.md#environment-variables), the metric must be `cosine`, and the index must be ready. Startup fails if any requirement is unmet.
 - **Request Limits**: Upserts use at most [`PINECONE_UPSERT_BATCH_SIZE`](configuration.md#environment-variables) records and 1.5 MiB of estimated encoded data per batch. `PINECONE_TIMEOUT` bounds each attempt, and `PINECONE_MAX_ATTEMPTS` limits write and deletion attempts.
@@ -190,6 +190,12 @@ RUN_SMOKE=1 SMOKE_EXISTING_DOCUMENT_ID="<pre-upgrade-document-uuid>" \
 ```
 
 Confirm that `TestSmoke_PreexistingDocumentRemainsRetrievable` passes without skipping: the direct index check must find the preexisting document's vectors, and a service query restricted to that document must return at least one chunk from it. If the direct check succeeds but the service reports `no_evidence`, check `MIN_RELEVANCE_SCORE` and the query before retrying. This check reads the document without reingesting or deleting it. The other smoke checks create and delete their own documents. Promote only after the staging suite passes. To roll back, revert the SDK upgrade and redeploy; stored documents and vectors are unaffected.
+
+### PostgreSQL Vectors
+
+The PostgreSQL vector backend requires pgvector 0.8 or later installed on the database server and a database role allowed to create its tables and indexes. The role must also be allowed to create the `vector` extension unless an administrator creates it beforehand; an existing extension requires no extension-creation privilege. The standard PostgreSQL image in the offline example does not include this extension; use a PostgreSQL distribution with pgvector available. Base PostgreSQL requirements remain as described above. The [vector schema](architecture.md#postgresql-vector-schema) is initialized at startup.
+
+Changing backends does not copy existing embeddings. Re-ingest documents with new identities in the target backend, or migrate their vectors before switching query traffic. Existing completed documents are not automatically queued again. Use the same backend across replicas sharing an ingestion queue. Bedrock access is still required for embeddings and synthesis; the PostgreSQL backend removes the Pinecone dependency only. Hosted-index reconciliation applies to Pinecone deployments.
 
 ### 3. AWS Bedrock (Embedding and LLM Models)
 

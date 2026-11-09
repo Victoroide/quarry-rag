@@ -13,7 +13,7 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 ## Features
 
 - **Durable document ingestion**: Accepts text or PDF, DOCX, DOC and UTF-8 or UTF-16 plain text uploads into PostgreSQL before responding, with content verification, atomic deduplication, parallel processing, leased retries and restart recovery.
-- **Adaptive retrieval**: Evaluates query complexity and similarity signals to route between LOCAL and GLOBAL vector search in Pinecone.
+- **Adaptive retrieval**: Evaluates query complexity and similarity signals to route between LOCAL and GLOBAL vector search using the configured backend.
 - **Optional reranking**: [Bedrock reranking](docs/api.md#post-query) orders retrieved evidence before synthesis context selection.
 - **Tenant and document filtering**: Supports metadata filtering by document type and query-time document ID allowlists enforced before synthesis.
 - **Grounded synthesis**: Generates answers in the language of the incoming question using AWS Bedrock models when evidence is available; see the [query API](docs/api.md#post-query) for empty results.
@@ -34,7 +34,7 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 - Go at the version in [go.mod](go.mod) to build from source; the badge shows it, and [CONTRIBUTING.md](CONTRIBUTING.md) lists the tool versions.
 - PostgreSQL 14 or later in every mode.
 - Docker for the full test suite and image builds.
-- For external services, a Pinecone index, AWS Bedrock access to the embedding and synthesis models, and an optional S3 bucket. [Deployment](docs/deployment.md) covers index settings, model identifiers and permissions.
+- AWS Bedrock access to the embedding and synthesis models, either a Pinecone index or the [PostgreSQL vector prerequisites](docs/deployment.md#postgresql-vectors), and an optional S3 bucket. [Deployment](docs/deployment.md) covers index settings, model identifiers and permissions.
 
 ## Installation
 
@@ -87,7 +87,7 @@ To run the containerized application using Docker Compose:
 cp .env.example .env
 ```
 
-Set `PINECONE_INDEX_NAME=quarry-rag` to the name of your existing index. External-service mode requires this value and has no implicit default; offline mode does not need it. Set `S3_BUCKET=your-owned-bucket` in `.env` for original file storage, and optionally set `S3_EXPECTED_BUCKET_OWNER` to the owner's 12-digit AWS account ID. Leaving `S3_BUCKET` empty disables original file storage.
+Select the vector backend and its credentials using [configuration](docs/configuration.md#environment-variables). Set `S3_BUCKET=your-owned-bucket` in `.env` for original file storage, and optionally set `S3_EXPECTED_BUCKET_OWNER` to the owner's 12-digit AWS account ID. Leaving `S3_BUCKET` empty disables original file storage.
 
 2. Start the container in detached mode:
 
@@ -152,8 +152,8 @@ The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing
 - **Image-only PDFs need the optional OCR integration.** PDF extraction reads embedded text. Without [`OCR_PROVIDER=textract`](docs/configuration.md#environment-variables), image-only PDFs return 422 with `no_text`. With OCR, text detection runs during ingestion and adds [Amazon Textract cost and latency](docs/deployment.md#optional-pdf-ocr). PDFs that contain embedded text are not sent to OCR, so scanned pages in mixed documents are not extracted.
 - **PDF layout fidelity depends on the parser.** Plain-text extraction does not reconstruct table structure or guarantee reading order and spacing in complex layouts. Check extracted content when layout carries meaning.
 - **Encrypted DOC files and Word 6/95 binaries are unsupported.** The DOC reader returns 422 with `encrypted` or `unsupported_version`, and the API accepts no decryption password. Convert these documents before uploading them.
-- **New documents can take a moment to become searchable.** Completion waits up to [`INDEX_VISIBILITY_TIMEOUT`](docs/configuration.md#environment-variables) for the hosted index to return a document's last written vector. If the wait ends first, the document completes anyway, the service logs a warning and counts it, and the document becomes searchable once the index catches up. After deletion, the PostgreSQL visibility check excludes the document from new answers even if vectors remain in the index temporarily.
-- **Ingestion processing is at least once.** Expired leases can cause an attempt to repeat, and a crash between external writes and cleanup can leave orphaned vectors. PostgreSQL and the vector index do not share a transaction; vectors without a completed document are excluded from answers. With ingestion paused, `make reconcile` previews eligible cleanup; deletion requires `ARGS="-apply"` and preserves processing documents and retryable jobs.
+- **Hosted-index documents can take a moment to become searchable.** Completion waits up to [`INDEX_VISIBILITY_TIMEOUT`](docs/configuration.md#environment-variables) for the hosted index to return a document's last written vector. If the wait ends first, the document completes anyway, the service logs a warning and counts it, and the document becomes searchable once the index catches up. The PostgreSQL vector store has no visibility delay after completion. After deletion, the PostgreSQL visibility check excludes the document from new answers even if vectors remain in the hosted index temporarily.
+- **Ingestion processing is at least once.** Expired leases can cause an attempt to repeat, and a crash between external writes and cleanup can leave orphaned vectors in the hosted index. PostgreSQL and the hosted index do not share a transaction; vectors without a completed document are excluded from answers. The PostgreSQL vector store writes embeddings in the completion transaction and cascades document deletion, leaving no orphan vectors. With ingestion paused, `make reconcile` previews eligible cleanup; deletion requires `ARGS="-apply"` and preserves processing documents and retryable jobs.
 - **Retrieved text can still steer answers.** Excerpt markers, sanitization and synthesis instructions reduce prompt injection, and optional Bedrock Guardrails ([`BEDROCK_GUARDRAIL_ID`](docs/configuration.md#environment-variables)) add prompt-attack and grounding checks. Hostile text in authorized documents can still influence an answer.
 - **Token counts are estimates.** The service uses text heuristics instead of a provider tokenizer. Chunk token estimates and the 30,000-byte chunk cap bound input size, but do not guarantee exact token counts or acceptance by every configured provider.
 - **Synthesis uses a bounded part of the evidence.** Excerpts are added in retrieval order, [reranked](docs/api.md#post-query) when enabled, while they fit `SYNTHESIS_CONTEXT_TOKENS` estimated tokens, skipping chunks below `SYNTHESIS_RELATIVE_SCORE_FLOOR` of the best vector score. Chunks left out are returned without an `excerpt` number, and a cut excerpt is marked `truncated`.

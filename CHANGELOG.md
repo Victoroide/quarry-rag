@@ -7,6 +7,7 @@ Notable changes are grouped by release.
 ### Added
 
 - Optional OCR of image-only PDF uploads through Amazon Textract (`OCR_PROVIDER=textract`, requires `S3_BUCKET`; migration 008).
+- Optional PostgreSQL vector store (`VECTOR_STORE=postgres`, pgvector) that writes vectors in the completion transaction.
 - The README shows release and Go reference badges and describes installing released artifacts.
 - Queries report which retrieved chunks reached synthesis (`excerpt`, `truncated`) and, with `include_citations`, return citations checked against their excerpts.
 - Queries and document listings accept a `collection` filter applied inside vector search; `make reconcile ARGS=-backfill-collections` labels vectors written before this release.
