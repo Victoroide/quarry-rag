@@ -12,6 +12,7 @@ Notable changes are grouped by release.
 ### Changed
 
 - The no-evidence answer follows `Accept-Language` for English, Spanish, Portuguese, French, German and Italian and sets `Content-Language`.
+- Documentation keeps each operational fact in one document and links to it elsewhere.
 
 ### Fixed
 
