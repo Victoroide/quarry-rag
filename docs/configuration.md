@@ -57,6 +57,8 @@ The table below lists the environment variables recognized by the service:
 | `QUERY_QUEUE_TIMEOUT` | duration | `2s` | 0s to 60s | Maximum wait for query admission; zero rejects immediately when all slots are occupied. |
 | `QUERY_TIMEOUT` | duration | `60s` | 5s to 10m | Total retrieval and synthesis budget after query admission; earlier caller deadlines take precedence. |
 | `REQUIRE_DOCUMENT_ALLOWLIST` | boolean | `false` | Boolean | Require a non-null `allowed_document_ids` field on every query; an empty list is accepted and skips embedding and search. |
+| `RERANK_MODEL_ARN` | string | `""` | Empty, or an `arn:` value without whitespace or control characters | Enables [reranking before synthesis](api.md#post-query); empty disables it. Ignored in offline fake mode. See [Bedrock permissions](deployment.md#3-aws-bedrock-embedding-and-llm-models). |
+| `RERANK_TIMEOUT` | duration | `5s` | 1s to 60s | Reranking call budget, including SDK retries and paginated results; earlier query or caller deadlines take precedence. |
 | `S3_BUCKET` | string | `""` | Explicit bucket name | S3 bucket for original uploads. Empty disables source file storage with a startup warning. Startup checks bucket access within 10 seconds; a 403 or 404 prevents startup, while transient errors produce a warning and startup continues. |
 | `S3_EXPECTED_BUCKET_OWNER` | string | `""` | Empty or exactly 12 ASCII digits | Optional AWS account ID expected to own the bucket. Sent with uploads, deletions and bucket checks; omitted from presigned downloads. |
 | `SERVER_PORT` | string | `"8081"` | 1 to 65535 | TCP port on which the HTTP server listens. |
@@ -158,6 +160,10 @@ Metrics use Prometheus text format:
   database; do not sum it across replicas.
 - `quarry_query_mode_total{mode}` counts each routed query once using its effective
   `LOCAL` or `GLOBAL` mode, including queries that subsequently fail synthesis.
+- `quarry_rerank_total{result}` counts optional reranking attempts: `reranked` for
+  success and `fallback` for errors, invalid results or an expired `RERANK_TIMEOUT`.
+  Disabled reranking, empty candidate lists and queries canceled or timed out during
+  reranking are not counted.
 - `quarry_index_visibility_waits_total{result}` counts visibility waits by outcome:
   `visible` when search returns the document's last vector, and `timeout` when the
   wait expires or worker shutdown ends it first. Disabled waits and canceled
