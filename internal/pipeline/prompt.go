@@ -7,9 +7,8 @@ import (
 	"strings"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/llm"
 	"github.com/Victoroide/quarry-rag/internal/textutil"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 )
 
 // synthesisSystemPrompt keeps answers grounded without imposing a document domain.
@@ -42,20 +41,8 @@ Retrieved excerpts appear between <excerpt-%s id="N"> and </excerpt-%s> markers.
 	return system, parts
 }
 
-func guardedSynthesisContent(parts [3]string) []brtypes.ContentBlock {
-	return []brtypes.ContentBlock{
-		&brtypes.ContentBlockMemberGuardContent{Value: &brtypes.GuardrailConverseContentBlockMemberText{
-			Value: brtypes.GuardrailConverseTextBlock{
-				Text: aws.String(parts[0]), Qualifiers: []brtypes.GuardrailConverseContentQualifier{brtypes.GuardrailConverseContentQualifierQuery},
-			},
-		}},
-		&brtypes.ContentBlockMemberGuardContent{Value: &brtypes.GuardrailConverseContentBlockMemberText{
-			Value: brtypes.GuardrailConverseTextBlock{
-				Text: aws.String(parts[1]), Qualifiers: []brtypes.GuardrailConverseContentQualifier{brtypes.GuardrailConverseContentQualifierGroundingSource},
-			},
-		}},
-		&brtypes.ContentBlockMemberText{Value: parts[2]},
-	}
+func guardedSynthesisContent(parts [3]string) []llm.Content {
+	return []llm.Content{{Text: parts[0], Qualifier: "query"}, {Text: parts[1], Qualifier: "grounding_source"}, {Text: parts[2]}}
 }
 
 var excerptMarkers = strings.NewReplacer("<excerpt-", "‹excerpt-", "</excerpt-", "‹/excerpt-")

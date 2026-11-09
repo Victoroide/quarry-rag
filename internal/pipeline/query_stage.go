@@ -18,7 +18,6 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/llm"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
-	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/aws/smithy-go"
 )
 
@@ -399,7 +398,7 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		system += "\n" + synthesisCitationInstruction
 	}
 	prompt := strings.Join(parts[:], "")
-	content := []brtypes.ContentBlock{&brtypes.ContentBlockMemberText{Value: prompt}}
+	content := []llm.Content{{Text: prompt}}
 	if s.cfg.BedrockGuardrailID != "" {
 		content = guardedSynthesisContent(parts)
 	}
@@ -417,9 +416,9 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		MultiNeed:     multiNeed,
 	})
 
-	messages := []brtypes.Message{
+	messages := []llm.Message{
 		{
-			Role:    brtypes.ConversationRoleUser,
+			Role:    "user",
 			Content: content,
 		},
 	}
@@ -443,7 +442,7 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	if err := synthesisCtx.Err(); err != nil {
 		return fmt.Errorf("synthesis_stage: %w", err)
 	}
-	qc.FinalAnswer = llm.ExtractText(result.Output)
+	qc.FinalAnswer = result.Text
 	if strings.TrimSpace(qc.FinalAnswer) == "" {
 		return ErrSynthesisEmpty
 	}
@@ -454,7 +453,7 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 			qc.Citations = VerifyStreamCitations(qc.FinalAnswer, qc.Excerpts)
 		}
 	}
-	switch result.Output.StopReason {
+	switch result.StopReason {
 	case "end_turn", "stop_sequence":
 		qc.FinishReason = "stop"
 	case "max_tokens":
@@ -466,13 +465,9 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	}
 
 	// Track token usage.
-	if result.Output != nil && result.Output.Usage != nil {
-		if result.Output.Usage.InputTokens != nil {
-			qc.TokenUsage.InputTokens = *result.Output.Usage.InputTokens
-		}
-		if result.Output.Usage.OutputTokens != nil {
-			qc.TokenUsage.OutputTokens = *result.Output.Usage.OutputTokens
-		}
+	if result.Usage != nil {
+		qc.TokenUsage.InputTokens = result.Usage.InputTokens
+		qc.TokenUsage.OutputTokens = result.Usage.OutputTokens
 		qc.TokenUsage.TotalTokens = qc.TokenUsage.InputTokens + qc.TokenUsage.OutputTokens
 	}
 
