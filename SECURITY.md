@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-There are no tagged releases yet. Security fixes are maintained on main; older
-commits and forks are not supported. Review deployment changes before updating.
+Security fixes target the latest release and main; older releases and forks
+are not supported. Review deployment changes before updating.
 
 ## Reporting a vulnerability
 
