@@ -1,0 +1,665 @@
+openapi: 3.1.0
+info:
+  title: Quarry HTTP API
+  version: unversioned
+  description: 'Behavior and limits: [API Reference](api.md).'
+externalDocs:
+  description: API Reference
+  url: api.md
+paths:
+  /health:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    get:
+      operationId: getHealth
+      summary: Inspect backing stores
+      description: 'See [GET /health](api.md#get-health).'
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Health'
+        '503':
+          $ref: '#/components/responses/Health'
+        '500':
+          $ref: '#/components/responses/Error'
+  /livez:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    get:
+      operationId: getLiveness
+      summary: Check process availability
+      description: 'See [GET /livez](api.md#get-livez).'
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Probe'
+        '500':
+          $ref: '#/components/responses/Error'
+  /readyz:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    get:
+      operationId: getReadiness
+      summary: Check readiness
+      description: 'See [GET /readyz](api.md#get-readyz).'
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Probe'
+        '503':
+          $ref: '#/components/responses/Probe'
+        '500':
+          $ref: '#/components/responses/Error'
+  /ingest:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    post:
+      operationId: ingestDocument
+      summary: Accept a document
+      description: 'See [POST /ingest](api.md#post-ingest).'
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MultipartIngestRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Ingest'
+        '202':
+          $ref: '#/components/responses/Ingest'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '413':
+          $ref: '#/components/responses/Error'
+        '415':
+          $ref: '#/components/responses/IngestError'
+        '422':
+          $ref: '#/components/responses/ExtractionError'
+        '500':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/IngestError'
+  /query:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    post:
+      operationId: queryDocuments
+      summary: Retrieve evidence and synthesize an answer
+      description: 'See [POST /query](api.md#post-query).'
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: Accept-Language
+          in: header
+          description: 'Language of the no-evidence answer; see [POST /query](api.md#post-query).'
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+      responses:
+        '200':
+          description: Query result
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Content-Language:
+              description: 'Language of the no-evidence answer; see [POST /query](api.md#post-query).'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '413':
+          $ref: '#/components/responses/Error'
+        '415':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '502':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/RetryableError'
+        '504':
+          $ref: '#/components/responses/Error'
+  /documents:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    get:
+      operationId: listDocuments
+      summary: List document summaries or legacy references
+      description: 'See [GET /documents](api.md#get-documents).'
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: limit
+          in: query
+          description: 'Page size; see [pagination](api.md#get-documents).'
+          schema:
+            type: integer
+        - name: after
+          in: query
+          description: 'Exclusive cursor; see [pagination](api.md#get-documents).'
+          schema:
+            type: string
+            format: uuid
+        - name: collection
+          in: query
+          description: 'Collection filter; see [GET /documents](api.md#get-documents).'
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Document inventory
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentList'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+  /documents/{doc_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+      - $ref: '#/components/parameters/DocumentID'
+    get:
+      operationId: getDocument
+      summary: Inspect document ingestion status
+      description: 'See [GET /documents/{doc_id}](api.md#get-documentsdoc_id).'
+      security:
+        - ServiceToken: []
+      responses:
+        '200':
+          description: Document summary
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentSummary'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deleteDocument
+      summary: Remove a document and its stored artifacts
+      description: 'See [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
+      security:
+        - ServiceToken: []
+      responses:
+        '200':
+          description: Deletion result
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+  /documents/{doc_id}/file:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+      - $ref: '#/components/parameters/DocumentID'
+    get:
+      operationId: getDocumentFile
+      summary: Obtain an original-file download address
+      description: 'See [GET /documents/{doc_id}/file](api.md#get-documentsdoc_idfile).'
+      security:
+        - ServiceToken: []
+      responses:
+        '200':
+          description: Original-file download
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+components:
+  securitySchemes:
+    ServiceToken:
+      type: apiKey
+      in: header
+      name: X-Service-Token
+  parameters:
+    RequestID:
+      name: X-Request-ID
+      in: header
+      description: 'Correlation value; see [Request IDs](api.md#request-ids).'
+      schema:
+        type: string
+    DocumentID:
+      name: doc_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  headers:
+    RequestID:
+      description: 'Correlation value; see [Request IDs](api.md#request-ids).'
+      schema:
+        type: string
+    RetryAfter:
+      description: 'Retry delay in seconds; see the matching endpoint in [API Reference](api.md).'
+      schema:
+        type: integer
+  responses:
+    Health:
+      description: Backing-store health
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HealthStatus'
+    Probe:
+      description: Probe status
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProbeStatus'
+    Ingest:
+      description: Ingestion acceptance result
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/IngestResponse'
+    Error:
+      description: 'Request failed; see the matching endpoint in [API Reference](api.md).'
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIError'
+    RetryableError:
+      description: 'Request failed; see [POST /query](api.md#post-query).'
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIError'
+    ExtractionError:
+      description: 'Extraction failed; see [multipart ingestion](api.md#variant-b-multipart-form-upload).'
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ExtractionError'
+    IngestError:
+      description: 'Request failed; see [POST /ingest](api.md#post-ingest).'
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/APIError'
+              - $ref: '#/components/schemas/ExtractionError'
+  schemas:
+    HealthStatus:
+      type: object
+      description: 'See [GET /health](api.md#get-health).'
+      additionalProperties: false
+      required: [status, pinecone, postgres, neon, s3]
+      properties:
+        status:
+          type: string
+        pinecone:
+          type: string
+        postgres:
+          type: string
+        neon:
+          type: string
+          deprecated: true
+        s3:
+          type: string
+    ProbeStatus:
+      type: object
+      description: 'See [liveness](api.md#get-livez) and [readiness](api.md#get-readyz).'
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+    IngestRequest:
+      type: object
+      description: 'See [JSON ingestion](api.md#variant-a-json-request).'
+      additionalProperties: false
+      required: [content]
+      properties:
+        document_id:
+          type: string
+        content:
+          type: string
+        metadata:
+          type: [object, 'null']
+          additionalProperties: true
+        doc_type:
+          type: string
+        collection:
+          type: string
+    MultipartIngestRequest:
+      type: object
+      description: 'See [multipart ingestion](api.md#variant-b-multipart-form-upload).'
+      additionalProperties: true
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+        document_id:
+          type: string
+        doc_type:
+          type: string
+        collection:
+          type: string
+        metadata:
+          type: string
+    IngestResponse:
+      type: object
+      description: 'See [POST /ingest](api.md#post-ingest).'
+      additionalProperties: false
+      required: [document_id, status]
+      properties:
+        document_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+    QueryRequest:
+      type: object
+      description: 'See [POST /query](api.md#post-query).'
+      additionalProperties: false
+      required: [query]
+      properties:
+        query:
+          type: string
+        mode:
+          type: string
+        filter_doc_type:
+          type: string
+        collection:
+          type: string
+        max_chunks:
+          type: integer
+        include_citations:
+          type: boolean
+        allowed_document_ids:
+          type: [array, 'null']
+          items:
+            type: string
+            format: uuid
+    QueryResponse:
+      type: object
+      description: 'See [POST /query](api.md#post-query).'
+      additionalProperties: false
+      required: [answer, mode, chunks_used, token_usage, scored_chunks]
+      properties:
+        finish_reason:
+          type: string
+        answer:
+          type: string
+        mode:
+          type: string
+        chunks_used:
+          type: integer
+        context_chunks:
+          type: integer
+        context_tokens:
+          type: integer
+        early_exit:
+          type: boolean
+        stage_timings_ms:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        token_usage:
+          $ref: '#/components/schemas/TokenUsage'
+        scored_chunks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScoredChunkResponse'
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/CitationResponse'
+    ScoredChunkResponse:
+      type: object
+      description: 'See [scored chunks](api.md#post-query).'
+      additionalProperties: false
+      required: [doc_id, doc_type, chunk_index, score, text]
+      properties:
+        doc_id:
+          type: string
+          format: uuid
+        doc_type:
+          type: string
+        chunk_index:
+          type: integer
+        score:
+          type: number
+          format: double
+        text:
+          type: string
+        kind:
+          type: string
+        quality:
+          type: string
+        excerpt:
+          type: integer
+        truncated:
+          type: boolean
+    CitationResponse:
+      type: object
+      description: 'See [citations](api.md#post-query).'
+      additionalProperties: false
+      required: [excerpt, doc_id, chunk_index, offset, verified, overlap]
+      properties:
+        excerpt:
+          type: integer
+        doc_id:
+          type: string
+          format: uuid
+        chunk_index:
+          type: integer
+        offset:
+          type: integer
+        verified:
+          type: boolean
+        overlap:
+          type: number
+          format: double
+    TokenUsage:
+      type: object
+      description: 'See [POST /query](api.md#post-query).'
+      additionalProperties: false
+      required: [input_tokens, output_tokens, total_tokens]
+      properties:
+        input_tokens:
+          type: integer
+          format: int32
+        output_tokens:
+          type: integer
+          format: int32
+        total_tokens:
+          type: integer
+          format: int32
+    DocumentList:
+      type: object
+      description: 'See [GET /documents](api.md#get-documents).'
+      additionalProperties: false
+      required: [documents, count]
+      properties:
+        documents:
+          type: array
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/DocumentSummary'
+              - $ref: '#/components/schemas/DocumentRef'
+        count:
+          type: integer
+        next_after:
+          type: [string, 'null']
+          format: uuid
+    DocumentSummary:
+      type: object
+      description: 'See [document summaries](api.md#get-documents).'
+      additionalProperties: false
+      required: [document_id, doc_type, collection, status, chunk_count, file_name, file_type, created_at, updated_at, completed_at]
+      properties:
+        document_id:
+          type: string
+          format: uuid
+        doc_type:
+          type: string
+        collection:
+          type: string
+        s3_key:
+          type: string
+        status:
+          type: string
+        chunk_count:
+          type: integer
+        file_name:
+          type: [string, 'null']
+        file_type:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+        last_error:
+          type: string
+    DocumentRef:
+      type: object
+      description: 'See [legacy document references](api.md#get-documents).'
+      additionalProperties: false
+      required: [document_id, doc_type]
+      properties:
+        document_id:
+          type: string
+          format: uuid
+        doc_type:
+          type: string
+        s3_key:
+          type: string
+    FileResponse:
+      type: object
+      description: 'See [GET /documents/{doc_id}/file](api.md#get-documentsdoc_idfile).'
+      additionalProperties: false
+      required: [url, expires_in]
+      properties:
+        url:
+          type: string
+          format: uri
+        expires_in:
+          type: integer
+    DeleteResponse:
+      type: object
+      description: 'See [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
+      additionalProperties: false
+      required: [deleted, doc_id]
+      properties:
+        deleted:
+          type: boolean
+        doc_id:
+          type: string
+          format: uuid
+    APIError:
+      type: object
+      description: 'See [error envelopes](api.md).'
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+    ExtractionError:
+      type: object
+      description: 'See [extraction error codes](api.md#variant-b-multipart-form-upload).'
+      additionalProperties: false
+      required: [error, message, code]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        code:
+          type: string
