@@ -4,6 +4,10 @@ Notable changes are grouped by release.
 
 ## [Unreleased]
 
+### Added
+
+- The README shows release and Go reference badges and describes installing released artifacts.
+
 ### Changed
 
 - The no-evidence answer follows `Accept-Language` for English, Spanish, Portuguese, French, German and Italian and sets `Content-Language`.

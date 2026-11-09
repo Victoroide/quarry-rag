@@ -5,6 +5,8 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Victoroide/quarry-rag/badge)](https://scorecard.dev/viewer/?uri=github.com/Victoroide/quarry-rag)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Victoroide/quarry-rag)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Victoroide/quarry-rag.svg)](https://pkg.go.dev/github.com/Victoroide/quarry-rag)
+[![Release](https://img.shields.io/github/v/release/Victoroide/quarry-rag)](https://github.com/Victoroide/quarry-rag/releases/latest)
 
 Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) microservice written in Go. It provides HTTP endpoints for backend applications and distributed services to ingest textual documents (raw JSON or multipart PDF, DOCX, DOC files), generate vector embeddings, persist document metadata, and answer natural-language queries grounded in the indexed corpus.
 
@@ -32,6 +34,13 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 - PostgreSQL 14 or later in every mode.
 - Docker for the full test suite and image builds.
 - For external services, a Pinecone index, AWS Bedrock access to the embedding and synthesis models, and an optional S3 bucket. [Deployment](docs/deployment.md) covers index settings, model identifiers and permissions.
+
+## Installation
+
+- **Container image:** `docker pull ghcr.io/victoroide/quarry-rag:<version>`, where `<version>` is a release number such as `0.1.0`, for `linux/amd64` and `linux/arm64`.
+- **Release archives:** `quarry-server` for Linux and macOS, and `quarry-mcp` for Linux, macOS and Windows, each for `amd64` and `arm64`. [Releases](docs/deployment.md#releases) describes checksum and provenance verification.
+- **MCP server:** install `quarry-mcp` with `go install` or from a release archive; see [Local MCP Server](docs/mcp.md#build-and-install).
+- **From source:** `go build -o bin/server ./cmd/server` with the Go version in [go.mod](go.mod).
 
 ## Quick Start
 

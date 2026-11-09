@@ -10,11 +10,13 @@ Build from the repository root:
 go build -o bin/quarry-mcp ./cmd/quarry-mcp
 ```
 
-To install a tagged release, replace `<version>` with its tag:
+To install the latest release, or a specific release tag in place of `latest`:
 
 ```sh
-go install github.com/Victoroide/quarry-rag/cmd/quarry-mcp@<version>
+go install github.com/Victoroide/quarry-rag/cmd/quarry-mcp@latest
 ```
+
+Prebuilt binaries are also published as release archives; see [Releases](deployment.md#releases).
 
 ## Client Configuration
 
