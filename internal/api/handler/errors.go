@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/aws/smithy-go"
 	"google.golang.org/grpc/codes"
@@ -69,6 +70,9 @@ func queryErrorResponse(err error) (code int, retry string, body APIError) {
 }
 
 func isUpstreamThrottled(err error) bool {
+	if errors.Is(err, domain.ErrUpstreamThrottled) {
+		return true
+	}
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.ErrorCode() {

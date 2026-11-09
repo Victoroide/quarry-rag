@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +17,13 @@ import (
 // Every field is populated from environment variables at startup.
 type Config struct {
 	ServerPort string
+
+	LLMProvider          string
+	EmbeddingProvider    string
+	OpenAIBaseURL        string
+	OpenAIAPIKey         string
+	OpenAIChatModel      string
+	OpenAIEmbeddingModel string
 
 	AWSRegion      string
 	AWSAccessKeyID string
@@ -140,6 +148,12 @@ func Load() (*Config, error) {
 		RerankModelARN:        os.Getenv("RERANK_MODEL_ARN"),
 		OCRProvider:           envOrDefault("OCR_PROVIDER", "none"),
 	}
+	cfg.LLMProvider = envOrDefault("LLM_PROVIDER", "bedrock")
+	cfg.EmbeddingProvider = envOrDefault("EMBEDDING_PROVIDER", "bedrock")
+	cfg.OpenAIBaseURL = os.Getenv("OPENAI_BASE_URL")
+	cfg.OpenAIAPIKey = os.Getenv("OPENAI_API_KEY")
+	cfg.OpenAIChatModel = os.Getenv("OPENAI_CHAT_MODEL")
+	cfg.OpenAIEmbeddingModel = os.Getenv("OPENAI_EMBEDDING_MODEL")
 	cfg.BedrockGuardrailID = os.Getenv("BEDROCK_GUARDRAIL_ID")
 	cfg.BedrockGuardrailVersion = os.Getenv("BEDROCK_GUARDRAIL_VERSION")
 	if os.Getenv("PINECONE_ENVIRONMENT") != "" {
@@ -248,6 +262,9 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	if err := c.validateProviders(); err != nil {
+		return err
+	}
 	if (c.BedrockGuardrailID == "") != (c.BedrockGuardrailVersion == "") {
 		return fmt.Errorf("config: BEDROCK_GUARDRAIL_ID and BEDROCK_GUARDRAIL_VERSION must be both set or both empty")
 	}
@@ -290,7 +307,9 @@ func (c *Config) validate() error {
 		{"DATABASE_URL", c.DatabaseURL},
 	}
 	if !c.FakeMode {
-		required = append(required, requirement{"AWS_REGION", c.AWSRegion})
+		if c.LLMProvider == "bedrock" || c.EmbeddingProvider == "bedrock" || c.S3Bucket != "" {
+			required = append(required, requirement{"AWS_REGION", c.AWSRegion})
+		}
 	}
 	if !c.FakeMode && c.VectorStore != "postgres" {
 		required = append(required,
@@ -341,7 +360,11 @@ func (c *Config) validate() error {
 	if c.MaxUploadBytes < 1 || c.MaxUploadBytes > 100<<20 {
 		return fmt.Errorf("config: MAX_UPLOAD_BYTES must be between 1 and 104857600")
 	}
-	if c.EmbeddingDimensions != 256 && c.EmbeddingDimensions != 512 && c.EmbeddingDimensions != 1024 {
+	if c.EmbeddingProvider == "openai" {
+		if c.EmbeddingDimensions < 1 || c.EmbeddingDimensions > 4096 {
+			return fmt.Errorf("config: EMBEDDING_DIMENSIONS must be between 1 and 4096")
+		}
+	} else if c.EmbeddingDimensions != 256 && c.EmbeddingDimensions != 512 && c.EmbeddingDimensions != 1024 {
 		return fmt.Errorf("config: EMBEDDING_DIMENSIONS must be 256, 512 or 1024")
 	}
 	if c.PineconeUpsertBatchSize < 1 || c.PineconeUpsertBatchSize > 1000 {
@@ -487,4 +510,40 @@ func envFloat64OrDefault(key string, fallback float64) (float64, error) {
 
 func envDurationOrDefault(key string, fallback time.Duration) (time.Duration, error) {
 	return parseEnv(key, fallback, time.ParseDuration)
+}
+
+func (c *Config) validateProviders() error {
+	if c.LLMProvider == "" {
+		c.LLMProvider = "bedrock"
+	}
+	if c.EmbeddingProvider == "" {
+		c.EmbeddingProvider = "bedrock"
+	}
+	for _, provider := range []struct{ name, value string }{{"LLM_PROVIDER", c.LLMProvider}, {"EMBEDDING_PROVIDER", c.EmbeddingProvider}} {
+		if provider.value != "bedrock" && provider.value != "openai" {
+			return fmt.Errorf("config: %s must be bedrock or openai", provider.name)
+		}
+	}
+	if c.LLMProvider == "openai" && (c.BedrockGuardrailID != "" || c.BedrockGuardrailVersion != "") {
+		return fmt.Errorf("config: Bedrock guardrails require LLM_PROVIDER=bedrock")
+	}
+	if c.LLMProvider != "openai" && c.EmbeddingProvider != "openai" {
+		return nil
+	}
+	base, err := url.Parse(c.OpenAIBaseURL)
+	if err != nil || base.Hostname() == "" || (base.Scheme != "http" && base.Scheme != "https") || base.User != nil || base.RawQuery != "" || base.ForceQuery || base.Fragment != "" || strings.ContainsAny(c.OpenAIBaseURL, "\r\n\t ") {
+		return fmt.Errorf("config: OPENAI_BASE_URL must be an absolute HTTP address without credentials, query or fragment")
+	}
+	if strings.ContainsFunc(c.OpenAIAPIKey, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		return fmt.Errorf("config: OPENAI_API_KEY must not contain whitespace or control characters")
+	}
+	for _, model := range []struct {
+		name, value string
+		required    bool
+	}{{"OPENAI_CHAT_MODEL", c.OpenAIChatModel, c.LLMProvider == "openai"}, {"OPENAI_EMBEDDING_MODEL", c.OpenAIEmbeddingModel, c.EmbeddingProvider == "openai"}} {
+		if model.required && (strings.TrimSpace(model.value) == "" || strings.ContainsFunc(model.value, unicode.IsControl)) {
+			return fmt.Errorf("config: %s must name a model", model.name)
+		}
+	}
+	return nil
 }

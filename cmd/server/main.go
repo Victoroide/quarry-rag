@@ -121,18 +121,17 @@ func run() error {
 			vectorStore = pcstore.NewDriver(pcClient)
 		}
 
-		bedrockEmb, embErr := embedder.NewBedrockEmbedder(startupCtx, cfg)
+		selectedEmb, embErr := newEmbeddingProvider(startupCtx, cfg)
 		if embErr != nil {
 			return fmt.Errorf("startup: embedder: %w", embErr)
 		}
-		emb = bedrockEmb
+		emb = selectedEmb
 
-		llmClient, llmErr := llm.NewClient(startupCtx, cfg)
+		selectedAmb, llmErr := newSynthesisProvider(startupCtx, cfg)
 		if llmErr != nil {
 			return fmt.Errorf("startup: llm client: %w", llmErr)
 		}
-		amb = llm.NewAmbassador(cfg)
-		amb.SetClient(tracing.WrapConverser(llmClient, "aws.bedrock", cfg.BedrockFallbackModel))
+		amb = selectedAmb
 
 		if cfg.S3Bucket == "" {
 			logger.Warn("S3_BUCKET is not set; original files are not stored")
@@ -154,12 +153,17 @@ func run() error {
 	}
 
 	provider, vectorSystem := "aws.bedrock", "pinecone"
+	embeddingModel := cfg.BedrockEmbedModel
+	if cfg.EmbeddingProvider == "openai" {
+		provider, embeddingModel = "openai", cfg.OpenAIEmbeddingModel
+	}
 	if cfg.FakeMode {
 		provider, vectorSystem = "offline", "memory"
+		embeddingModel = cfg.BedrockEmbedModel
 	} else if cfg.VectorStore == "postgres" {
 		vectorSystem = "postgresql"
 	}
-	emb = tracing.WrapEmbedder(emb, provider, cfg.BedrockEmbedModel)
+	emb = tracing.WrapEmbedder(emb, provider, embeddingModel)
 	vectorStore = tracing.WrapVectorStore(vectorStore, vectorSystem)
 	vecDeleter, ok := vectorStore.(domain.VectorDeleter)
 	if !ok {
