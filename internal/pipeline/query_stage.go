@@ -340,7 +340,7 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	}
 	if len(qc.RetrievedChunks) == 0 {
 		qc.FinishReason = "no_evidence"
-		qc.FinalAnswer = "No relevant information was found to answer this question."
+		qc.FinalAnswer, qc.ContentLanguage = noEvidenceAnswer(qc.AcceptLanguage)
 		qc.ContextTokens, qc.ContextChunks = 0, 0
 		qc.TokenUsage = domain.TokenUsage{}
 		qc.EarlyExit = true

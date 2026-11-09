@@ -54,6 +54,44 @@ func TestMinimumRelevanceScoreSkipsSynthesis(t *testing.T) {
 	require.Equal(t, "No relevant information was found to answer this question.", qc.FinalAnswer)
 	require.Equal(t, "no_evidence", qc.FinishReason)
 }
+
+func TestLocalizedNoEvidenceSkipsSynthesis(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		chunks []domain.ScoredChunk
+	}{
+		{"empty", nil},
+		{"below minimum relevance", []domain.ScoredChunk{{Chunk: domain.Chunk{Text: "weak evidence"}, Score: .79}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := synthesisDeadlineConfig(t)
+			client := &synthesisDeadlineClient{call: func(context.Context) (*bedrockruntime.ConverseOutput, error) {
+				return nil, errors.New("must not synthesize")
+			}}
+			amb := llm.NewAmbassador(cfg)
+			amb.SetClient(client)
+			qc := &QueryContext{
+				OriginalQuery:   "archive",
+				AcceptLanguage:  "es-MX",
+				RetrievedChunks: tc.chunks,
+				ContextTokens:   20,
+				ContextChunks:   1,
+				TokenUsage:      domain.TokenUsage{InputTokens: 10, OutputTokens: 3, TotalTokens: 13},
+			}
+			require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+			require.Zero(t, client.calls)
+			require.True(t, qc.EarlyExit)
+			require.Empty(t, qc.RetrievedChunks)
+			require.Equal(t, "No se encontró información relevante para responder esta pregunta.", qc.FinalAnswer)
+			require.Equal(t, "es", qc.ContentLanguage)
+			require.Equal(t, "no_evidence", qc.FinishReason)
+			require.Zero(t, qc.ContextTokens)
+			require.Zero(t, qc.ContextChunks)
+			require.Equal(t, domain.TokenUsage{}, qc.TokenUsage)
+		})
+	}
+}
+
 func TestSynthesisIsCalledOncePerAttemptPolicy(t *testing.T) {
 	for _, routed := range []bool{false, true} {
 		t.Run(fmt.Sprint(routed), func(t *testing.T) {

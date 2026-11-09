@@ -75,6 +75,9 @@ type QueryContext struct {
 	// non-nil empty = matches nothing.
 	AllowedDocumentIDs []string
 
+	// AcceptLanguage selects the fixed answer when no evidence remains.
+	AcceptLanguage string
+
 	// Populated by routing stage.
 	NamedEntity      string
 	EntityDocumentID string
@@ -97,6 +100,9 @@ type QueryContext struct {
 	ContextTokens int  // estimated synthesis input tokens (after compression)
 	ContextChunks int  // chunks actually sent to the LLM (after adaptive trim)
 	EarlyExit     bool // true if synthesis skipped (cache hit / no chunks)
+
+	// ContentLanguage identifies the language of the fixed no-evidence answer.
+	ContentLanguage string
 
 	// Per-stage timing in milliseconds — observability for tail-latency
 	// analysis. Filled by each stage and surfaced in the query response.
