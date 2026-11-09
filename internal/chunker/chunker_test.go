@@ -270,3 +270,12 @@ func sharedWordCount(previous, current []string) int {
 	}
 	return 0
 }
+
+func TestChunkKeepsSentenceSpacing(t *testing.T) {
+	for _, text := range []string{"一。二。", "一。 二。", "First. Second."} {
+		chunks := NewChunker(512, 64).Chunk("document", text)
+		if len(chunks) != 1 || chunks[0].Text != text {
+			t.Fatalf("Chunk(%q) = %+v, want one chunk with the source text", text, chunks)
+		}
+	}
+}

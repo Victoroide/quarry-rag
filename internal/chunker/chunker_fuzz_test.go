@@ -1,6 +1,7 @@
 package chunker
 
 import (
+	"strings"
 	"testing"
 	"unicode"
 	"unicode/utf8"
@@ -15,6 +16,8 @@ func FuzzChunk(f *testing.F) {
 			f.Add(text, limits[0], limits[1])
 		}
 	}
+	f.Add(strings.Repeat("ab ", (64<<10)/3+1)[:64<<10], uint16(8190), uint16(8191))
+	f.Add(strings.Repeat("😀", 8192), uint16(8190), uint16(4096))
 	f.Fuzz(func(t *testing.T, text string, size, overlap uint16) {
 		if len(text) > 64<<10 {
 			t.Skip()
@@ -22,6 +25,7 @@ func FuzzChunk(f *testing.F) {
 		budget := 2 + int(size)%8191
 		c := NewChunker(budget, int(overlap)%budget)
 		chunks := c.Chunk(domain.DocumentID("fuzz-document"), text)
+		assertChunkOutputBound(t, text, chunks)
 		again := c.Chunk(domain.DocumentID("fuzz-document"), text)
 		if len(chunks) != len(again) {
 			t.Fatal("chunk count is not deterministic")
