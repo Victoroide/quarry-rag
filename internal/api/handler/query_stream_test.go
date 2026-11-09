@@ -29,10 +29,12 @@ import (
 
 type queryStreamConverser struct {
 	llm.FakeConverser
-	call func(context.Context, func(string) error) (*bedrockruntime.ConverseOutput, error)
+	call     func(context.Context, func(string) error) (*bedrockruntime.ConverseOutput, error)
+	messages []brtypes.Message
 }
 
-func (c *queryStreamConverser) ConverseStreamWithModelAndSystem(ctx context.Context, _, _ string, _ []brtypes.Message, _ float32, _ int, fn func(string) error) (*bedrockruntime.ConverseOutput, error) {
+func (c *queryStreamConverser) ConverseStreamWithModelAndSystem(ctx context.Context, _, _ string, messages []brtypes.Message, _ float32, _ int, fn func(string) error) (*bedrockruntime.ConverseOutput, error) {
+	c.messages = messages
 	return c.call(ctx, fn)
 }
 
@@ -75,6 +77,104 @@ func recordedEvents(t *testing.T, body string) []recordedEvent {
 		events = append(events, recordedEvent{strings.TrimPrefix(lines[0], "event: "), data})
 	}
 	return events
+}
+
+func TestQueryStreamRerankingPreservesScoresAndSynthesisOrder(t *testing.T) {
+	for _, mode := range []string{"enabled", "disabled", "fallback", "timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := streamQueryConfig()
+			cfg.RerankTimeout = 5 * time.Millisecond
+			chunks := []domain.ScoredChunk{
+				{Chunk: domain.Chunk{ID: "orchard-0", DocumentID: "orchard", Text: "Orchard archive."}, Score: .9},
+				{Chunk: domain.Chunk{ID: "river-1", DocumentID: "river", Index: 1, Text: "River archive."}, Score: .8},
+			}
+			order := []domain.ScoredChunk{chunks[0], chunks[1]}
+			if mode == "enabled" {
+				order[0], order[1] = order[1], order[0]
+			}
+			calls := 0
+			var reranker retriever.Reranker
+			if mode != "disabled" {
+				reranker = queryReranker(func(ctx context.Context, question string, in []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+					calls++
+					require.Equal(t, "archive hours", question)
+					require.Equal(t, chunks, in)
+					if mode == "timeout" {
+						<-ctx.Done()
+						return nil, ctx.Err()
+					}
+					if mode == "fallback" {
+						return nil, errors.New("unavailable")
+					}
+					out := []domain.ScoredChunk{in[1], in[0]}
+					for i, score := range []float64{.75, 0} {
+						out[i].RerankScore = &score
+					}
+					return out, nil
+				})
+			}
+			rec := httptest.NewRecorder()
+			answer := order[0].Chunk.Text + " [1] " + order[1].Chunk.Text + " [2]"
+			c := &queryStreamConverser{call: func(_ context.Context, delta func(string) error) (*bedrockruntime.ConverseOutput, error) {
+				require.True(t, rec.Flushed)
+				require.Contains(t, rec.Body.String(), "event: context\n")
+				if err := delta(answer); err != nil {
+					return nil, err
+				}
+				return deadlineOutput(answer, brtypes.StopReasonEndTurn), nil
+			}}
+			amb := llm.NewAmbassador(cfg)
+			amb.SetClient(c)
+			ret := retriever.NewRetriever(citationQueryStore{chunks: chunks}, embedder.NewFakeEmbedder(8), .7, 10)
+			QueryHandler(ret, amb, cfg, nil, WithReranker(reranker))(rec, streamQueryRequest(t.Context(), `{"query":"archive hours","mode":"global","include_citations":true}`))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
+			events := recordedEvents(t, rec.Body.String())
+			require.Len(t, events, 3)
+			for i, name := range []string{"context", "delta", "done"} {
+				require.Equal(t, name, events[i].name)
+			}
+			require.Equal(t, "2", string(events[0].data["chunks_used"]))
+			require.Equal(t, "2", string(events[0].data["context_chunks"]))
+			var scored []ScoredChunkResponse
+			require.NoError(t, json.Unmarshal(events[0].data["scored_chunks"], &scored))
+			require.Len(t, scored, 2)
+			var rawChunks []map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(events[0].data["scored_chunks"], &rawChunks))
+			for i, chunk := range scored {
+				require.Equal(t, string(order[i].Chunk.DocumentID), chunk.DocID)
+				require.Equal(t, order[i].Score, chunk.Score)
+				require.Equal(t, i+1, chunk.Excerpt)
+				if mode == "enabled" {
+					require.NotNil(t, chunk.RerankScore)
+					require.Equal(t, []float64{.75, 0}[i], *chunk.RerankScore)
+					require.Contains(t, rawChunks[i], "rerank_score")
+				} else {
+					require.Nil(t, chunk.RerankScore)
+					require.NotContains(t, rawChunks[i], "rerank_score")
+				}
+			}
+			require.Len(t, c.messages, 1)
+			prompt := c.messages[0].Content[0].(*brtypes.ContentBlockMemberText).Value
+			require.Contains(t, prompt, "id=\"1\">\n"+order[0].Chunk.Text+"\n")
+			require.Contains(t, prompt, "id=\"2\">\n"+order[1].Chunk.Text+"\n")
+			require.JSONEq(t, `"`+answer+`"`, string(events[1].data["text"]))
+			var timings map[string]int64
+			require.NoError(t, json.Unmarshal(events[2].data["stage_timings_ms"], &timings))
+			_, timed := timings["rerank"]
+			require.Equal(t, mode != "disabled", timed)
+			require.JSONEq(t, `"stop"`, string(events[2].data["finish_reason"]))
+			var citations []CitationResponse
+			require.NoError(t, json.Unmarshal(events[2].data["citations"], &citations))
+			require.Len(t, citations, 2)
+			require.Equal(t, string(order[0].Chunk.DocumentID), citations[0].DocID)
+			if mode == "disabled" {
+				require.Zero(t, calls)
+			} else {
+				require.Equal(t, 1, calls)
+			}
+		})
+	}
 }
 
 func TestQueryStreamFramingOrderAndCitations(t *testing.T) {

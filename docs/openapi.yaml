@@ -522,6 +522,9 @@ components:
         score:
           type: number
           format: double
+        rerank_score:
+          type: number
+          format: double
         text:
           type: string
         kind:

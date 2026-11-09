@@ -162,6 +162,14 @@ func run() error {
 	// Initialize retriever.
 	ret := retriever.NewRetriever(vectorStore, emb, cfg.LocalRetrievalThreshold, cfg.MaxChunksPerQuery)
 
+	var reranker retriever.Reranker
+	if !cfg.FakeMode && cfg.RerankModelARN != "" {
+		reranker, err = retriever.NewBedrockReranker(startupCtx, cfg)
+		if err != nil {
+			return fmt.Errorf("startup: reranker: %w", err)
+		}
+	}
+
 	// Build ingestion pipeline stages.
 	ingestStages := []pipeline.Stage{
 		pipeline.NewChunkStage(chk),
@@ -208,6 +216,7 @@ func run() error {
 		PGPool:         pgClient.Pool,
 		Probes:         probes,
 		Metrics:        serviceMetrics,
+		Reranker:       reranker,
 	})
 
 	srv := &http.Server{

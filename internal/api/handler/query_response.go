@@ -31,15 +31,16 @@ func queryScoredChunks(qc *pipeline.QueryContext) []ScoredChunkResponse {
 			}
 		}
 		scoredChunks = append(scoredChunks, ScoredChunkResponse{
-			DocID:      string(sc.Chunk.DocumentID),
-			DocType:    docType,
-			ChunkIndex: sc.Chunk.Index,
-			Score:      sc.Score,
-			Text:       text,
-			Kind:       kind,
-			Quality:    quality,
-			Excerpt:    excerpt,
-			Truncated:  truncated,
+			DocID:       string(sc.Chunk.DocumentID),
+			DocType:     docType,
+			ChunkIndex:  sc.Chunk.Index,
+			Score:       sc.Score,
+			RerankScore: sc.RerankScore,
+			Text:        text,
+			Kind:        kind,
+			Quality:     quality,
+			Excerpt:     excerpt,
+			Truncated:   truncated,
 		})
 	}
 	return scoredChunks

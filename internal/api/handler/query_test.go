@@ -24,6 +24,54 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+type queryReranker func(context.Context, string, []domain.ScoredChunk) ([]domain.ScoredChunk, error)
+
+func (f queryReranker) Rerank(ctx context.Context, question string, chunks []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+	return f(ctx, question, chunks)
+}
+
+func TestQueryRerankScoresAreOptionalAndPreserveVectorScore(t *testing.T) {
+	for _, mode := range []string{"enabled", "disabled", "fallback"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := deadlineQueryConfig(t)
+			cfg.QueryTimeout, cfg.SynthesisTimeout = time.Second, 500*time.Millisecond
+			amb := llm.NewAmbassador(cfg)
+			amb.SetClient(llm.NewFakeConverser())
+			ret := retriever.NewRetriever(deadlineQueryStore{}, &deadlineEmbedder{release: closedQueryChannel()}, .7, 10)
+			var r retriever.Reranker
+			if mode != "disabled" {
+				r = queryReranker(func(_ context.Context, _ string, chunks []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+					if mode == "fallback" {
+						return nil, errors.New("unavailable")
+					}
+					score := 0.0
+					chunks[0].RerankScore = &score
+					return chunks, nil
+				})
+			}
+			rec := httptest.NewRecorder()
+			QueryHandler(ret, amb, cfg, nil, WithReranker(r)).ServeHTTP(rec, deadlineQueryRequest(t.Context()))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var got struct {
+				ScoredChunks []map[string]json.RawMessage `json:"scored_chunks"`
+				StageTimings map[string]int64             `json:"stage_timings_ms"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			_, timed := got.StageTimings["rerank"]
+			require.Equal(t, mode != "disabled", timed)
+			require.Len(t, got.ScoredChunks, 1)
+			require.JSONEq(t, "0.9", string(got.ScoredChunks[0]["score"]))
+			if mode == "enabled" {
+				require.Equal(t, "0", string(got.ScoredChunks[0]["rerank_score"]))
+			} else {
+				require.NotContains(t, got.ScoredChunks[0], "rerank_score")
+			}
+		})
+	}
+}
+
+func closedQueryChannel() chan struct{} { ch := make(chan struct{}); close(ch); return ch }
+
 type deadlineQueryStore struct{ domain.VectorStore }
 
 func (deadlineQueryStore) QueryAllNamespaces(context.Context, []float32, int, string) ([]domain.ScoredChunk, error) {

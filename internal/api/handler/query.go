@@ -42,15 +42,16 @@ type QueryRequest struct {
 // heuristics. Older chunks ingested before the classifier was added
 // will leave these fields empty; callers must treat that as "unknown".
 type ScoredChunkResponse struct {
-	DocID      string  `json:"doc_id"`
-	DocType    string  `json:"doc_type"`
-	ChunkIndex int     `json:"chunk_index"`
-	Score      float64 `json:"score"`
-	Text       string  `json:"text"`
-	Kind       string  `json:"kind,omitempty"`
-	Quality    string  `json:"quality,omitempty"`
-	Excerpt    int     `json:"excerpt,omitempty"`
-	Truncated  bool    `json:"truncated,omitempty"`
+	DocID       string   `json:"doc_id"`
+	DocType     string   `json:"doc_type"`
+	ChunkIndex  int      `json:"chunk_index"`
+	Score       float64  `json:"score"`
+	Text        string   `json:"text"`
+	Kind        string   `json:"kind,omitempty"`
+	Quality     string   `json:"quality,omitempty"`
+	Excerpt     int      `json:"excerpt,omitempty"`
+	Truncated   bool     `json:"truncated,omitempty"`
+	RerankScore *float64 `json:"rerank_score,omitempty"`
 }
 
 // CitationResponse links an answer marker to an excerpt and its lexical check.
@@ -109,7 +110,11 @@ func validateQueryRequest(req *QueryRequest) *APIError {
 }
 
 // QueryHandler returns an HTTP handler for POST /query.
-func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Config, pool *pgxpool.Pool) http.HandlerFunc {
+func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Config, pool *pgxpool.Pool, opts ...QueryOption) http.HandlerFunc {
+	options := queryOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
 	concurrency := cfg.QueryConcurrency
 	if concurrency <= 0 {
 		concurrency = 32
@@ -172,8 +177,11 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			pipeline.NewDecomposeStage(),
 			routing,
 			retrieval,
-			pipeline.NewSynthesisStage(amb, cfg),
 		}
+		if options.reranker != nil {
+			stages = append(stages, pipeline.NewRerankStage(options.reranker, cfg.RerankTimeout))
+		}
+		stages = append(stages, pipeline.NewSynthesisStage(amb, cfg))
 
 		_, err := pipeline.RunRetrievalPipeline(ctx, qc, stages)
 		if err == nil {

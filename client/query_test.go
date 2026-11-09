@@ -10,6 +10,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestQueryDecodesOptionalRerankScore(t *testing.T) {
+	for _, field := range []string{"", `,"rerank_score":0`, `,"rerank_score":0.75`} {
+		c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			_, err := w.Write([]byte(`{"scored_chunks":[{"score":0.9` + field + `}]}`))
+			require.NoError(t, err)
+		})
+		got, err := c.Query(t.Context(), client.QueryRequest{Query: "archive"})
+		require.NoError(t, err)
+		require.Equal(t, .9, got.ScoredChunks[0].Score)
+		if field == "" {
+			require.Nil(t, got.ScoredChunks[0].RerankScore)
+		} else {
+			require.NotNil(t, got.ScoredChunks[0].RerankScore)
+			if field == `,"rerank_score":0` {
+				require.Zero(t, *got.ScoredChunks[0].RerankScore)
+			} else {
+				require.Equal(t, .75, *got.ScoredChunks[0].RerankScore)
+			}
+		}
+	}
+}
+
 func TestQuery(t *testing.T) {
 	want := client.QueryRequest{Query: "synthetic question", Mode: "local", FilterDocType: "guide", MaxChunks: 4, AllowedDocumentIDs: []string{"00000000-0000-4000-8000-000000000001"}}
 	response := client.QueryResponse{Answer: "synthetic answer", Mode: "LOCAL", ChunksUsed: 1, ContextChunks: 1, FinishReason: "stop", ContextTokens: 20, StageTimings: map[string]int64{"synthesis": 1}, TokenUsage: client.TokenUsage{InputTokens: 10, OutputTokens: 3, TotalTokens: 13}, ScoredChunks: []client.ScoredChunkResponse{{DocID: "00000000-0000-4000-8000-000000000001", DocType: "guide", ChunkIndex: 2, Score: 0.9, Text: "synthetic evidence", Kind: "body", Quality: "high"}}}

@@ -33,6 +33,7 @@ type RouterDeps struct {
 	PGPool         *pgxpool.Pool
 	Probes         *handler.Probes
 	Metrics        *metrics.Service
+	Reranker       retriever.Reranker
 }
 
 // NewRouter wires all HTTP routes, handlers, and middleware.
@@ -71,7 +72,7 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		objects = tracing.WrapObjectStore(deps.S3Client)
 	}
 	mux.HandleFunc("POST /ingest", middleware.RequireServiceTokens(tokens, handler.IngestHandler(deps.Worker, deps.ChunkStore, objects, deps.Config.MaxUploadBytes, ingestOpts...)))
-	mux.HandleFunc("POST /query", middleware.RequireServiceTokens(tokens, handler.QueryHandler(deps.Retriever, deps.Ambassador, deps.Config, deps.PGPool)))
+	mux.HandleFunc("POST /query", middleware.RequireServiceTokens(tokens, handler.QueryHandler(deps.Retriever, deps.Ambassador, deps.Config, deps.PGPool, handler.WithReranker(deps.Reranker))))
 	mux.HandleFunc("GET /documents", middleware.RequireServiceTokens(tokens, handler.ListDocumentsHandler(deps.ChunkStore)))
 	mux.HandleFunc("GET /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DocumentStatusHandler(deps.ChunkStore)))
 	mux.HandleFunc("GET /documents/{doc_id}/file", middleware.RequireServiceTokens(tokens, handler.FileHandler(deps.ChunkStore, deps.S3Client)))
