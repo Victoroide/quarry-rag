@@ -88,3 +88,30 @@ func TestQueryRejectsNilRequestOption(t *testing.T) {
 	require.EqualError(t, err, "request option is required")
 	require.Nil(t, got)
 }
+
+func TestQueryCitationContract(t *testing.T) {
+	for _, citations := range []string{`[]`, `[{"excerpt":1,"doc_id":"source","chunk_index":4,"offset":8,"verified":false,"overlap":0.25}]`} {
+		t.Run(citations, func(t *testing.T) {
+			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				assert.Equal(t, "true", string(body["include_citations"]))
+				_, err := w.Write([]byte(`{"answer":"Archive [1]","scored_chunks":[{"doc_id":"source","chunk_index":4,"excerpt":1,"truncated":true}],"citations":` + citations + `}`))
+				assert.NoError(t, err)
+			})
+			var req client.QueryRequest
+			require.NoError(t, json.Unmarshal([]byte(`{"query":"archive","include_citations":true}`), &req))
+			got, err := c.Query(t.Context(), req)
+			require.NoError(t, err)
+			encoded, err := json.Marshal(got)
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &fields))
+			require.JSONEq(t, citations, string(fields["citations"]))
+			var chunks []map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(fields["scored_chunks"], &chunks))
+			require.Equal(t, "1", string(chunks[0]["excerpt"]))
+			require.Equal(t, "true", string(chunks[0]["truncated"]))
+		})
+	}
+}

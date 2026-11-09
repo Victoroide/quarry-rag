@@ -79,6 +79,95 @@ func deadlineAssertError(t *testing.T, rec *httptest.ResponseRecorder, code int,
 	require.Equal(t, kind, got.Error)
 }
 
+type citationQueryStore struct {
+	domain.VectorStore
+	chunks []domain.ScoredChunk
+}
+
+func (s citationQueryStore) QueryAllNamespaces(context.Context, []float32, int, string) ([]domain.ScoredChunk, error) {
+	return s.chunks, nil
+}
+
+func TestQueryReportsSynthesisContextAndOptionalCitations(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		include, evidence, markers bool
+	}{
+		{"default", false, true, true},
+		{"requested", true, true, true},
+		{"without markers", true, true, false},
+		{"no evidence", true, false, true},
+		{"no evidence by default", false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{MaxChunksPerQuery: 10, BedrockFallbackModel: "fallback", QueryTimeout: 5 * time.Second, SynthesisTimeout: 4 * time.Second}
+			var chunks []domain.ScoredChunk
+			if tc.evidence {
+				for i := range 7 {
+					text := "Archive evidence"
+					if i == 0 {
+						text += strings.Repeat(" record", 200)
+					}
+					chunks = append(chunks, domain.ScoredChunk{Chunk: domain.Chunk{ID: domain.ChunkID(fmt.Sprintf("chunk-%d", i)), DocumentID: "document", Index: i + 10, Text: text}, Score: 1})
+				}
+			}
+			answer := "Archive evidence"
+			if tc.markers {
+				answer += " [6] [1]."
+			}
+			amb := llm.NewAmbassador(cfg)
+			amb.SetClient(deadlineConverser(func(context.Context) (*bedrockruntime.ConverseOutput, error) {
+				require.True(t, tc.evidence, "no-evidence response called synthesis")
+				return deadlineOutput(answer, brtypes.StopReasonEndTurn), nil
+			}))
+			h := QueryHandler(retriever.NewRetriever(citationQueryStore{chunks: chunks}, embedder.NewFakeEmbedder(8), .7, 10), amb, cfg, nil)
+			body := fmt.Sprintf(`{"query":"archive","mode":"global","include_citations":%t}`, tc.include)
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/query", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var got map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			if !tc.include {
+				require.NotContains(t, got, "citations")
+			}
+			if !tc.evidence {
+				if tc.include {
+					require.JSONEq(t, `[]`, string(got["citations"]))
+				}
+				return
+			}
+			var scored []map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(got["scored_chunks"], &scored))
+			require.Len(t, scored, 7)
+			for i, chunk := range scored {
+				if i < 5 {
+					require.Equal(t, fmt.Sprint(i+1), string(chunk["excerpt"]))
+				} else {
+					require.NotContains(t, chunk, "excerpt")
+				}
+				if i == 0 {
+					require.Equal(t, "true", string(chunk["truncated"]))
+				} else {
+					require.NotContains(t, chunk, "truncated")
+				}
+			}
+			if tc.include && tc.markers {
+				require.JSONEq(t, `"Archive evidence [1]."`, string(got["answer"]))
+				require.JSONEq(t, `[{"excerpt":1,"doc_id":"document","chunk_index":10,"offset":17,"verified":true,"overlap":1}]`, string(got["citations"]))
+			} else {
+				encoded, err := json.Marshal(answer)
+				require.NoError(t, err)
+				require.JSONEq(t, string(encoded), string(got["answer"]))
+				if tc.include {
+					require.JSONEq(t, `[]`, string(got["citations"]))
+				}
+			}
+		})
+	}
+}
+
 func TestQueryTimesOutWith504(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
