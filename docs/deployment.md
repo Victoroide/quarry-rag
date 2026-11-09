@@ -193,6 +193,7 @@ Confirm that `TestSmoke_PreexistingDocumentRemainsRetrievable` passes without sk
 
 ### 3. AWS Bedrock (Embedding and LLM Models)
 
+- **Guardrail permission**: When [optional guardrails](configuration.md#environment-variables) are enabled, grant `bedrock:ApplyGuardrail` on the target guardrail ARN, `arn:aws:bedrock:{region}:{account-id}:guardrail/{guardrail-id}`, in addition to model invocation permissions. Create the guardrail and configure its prompt-attack and contextual grounding policies before enabling it in the service.
 - **Configuration**: `AWS_REGION` and model identifiers (`BEDROCK_EMBED_MODEL`, `BEDROCK_PRIMARY_MODEL`, `BEDROCK_FALLBACK_MODEL`). Static `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are optional and must be configured together; temporary static credentials also accept `AWS_SESSION_TOKEN`.
 - **Credentials**: IAM roles are supported. Without static keys, AWS clients use the default credential chain, including environment credentials, shared configuration files, web identity, container roles and instance roles.
 - **Query and proxy timeouts**: `QUERY_CONCURRENCY` bounds admitted queries [per replica](#concurrency-limits), and `QUERY_QUEUE_TIMEOUT` limits admission waits. Each admitted query has a [`QUERY_TIMEOUT`](configuration.md#environment-variables) budget, with a nested `SYNTHESIS_TIMEOUT`. Set proxy and load balancer response timeouts to at least `HTTP_WRITE_TIMEOUT`. Keep adequate margin for reading request bodies and waiting for admission when configuring write timeouts.

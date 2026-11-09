@@ -15,6 +15,8 @@ The table below lists the environment variables recognized by the service:
 | `AWS_SESSION_TOKEN` | string | `""` | Optional string | Session token for temporary static AWS credentials. |
 | `BEDROCK_EMBED_MODEL` | string | `"amazon.titan-embed-text-v2:0"` | Non-empty string | Bedrock model identifier used for generating text embeddings. |
 | `BEDROCK_FALLBACK_MODEL` | string | `"us.meta.llama4-maverick-17b-instruct-v1:0"` | Non-empty string | Bedrock model identifier for answer synthesis and fallback routing. |
+| `BEDROCK_GUARDRAIL_ID` | string | `""` (disabled) | Set together with `BEDROCK_GUARDRAIL_VERSION`; no whitespace or control characters | Optional Bedrock guardrail identifier attached to Converse requests. See [synthesis behavior](architecture.md#query-stages) and [required permissions](deployment.md#3-aws-bedrock-embedding-and-llm-models). |
+| `BEDROCK_GUARDRAIL_VERSION` | string | `""` (disabled) | Set together with `BEDROCK_GUARDRAIL_ID`; `DRAFT` or a positive decimal integer without leading zeros | Guardrail version to apply. |
 | `BEDROCK_PRIMARY_MODEL` | string | `"amazon.nova-micro-v1:0"` | Non-empty string | Bedrock model identifier for low-latency reasoning and fast answer synthesis. |
 | `CHUNK_OVERLAP` | integer | `64` | 0 to `CHUNK_TOKEN_SIZE/2` (integer division) | Maximum estimated tokens retained from the previous chunk. Each chunk starts at least halfway through the previous one, in estimated tokens and bytes, so total chunk text is at most twice the normalized input. |
 | `CHUNK_TOKEN_SIZE` | integer | `512` | 2 to 8192 | Maximum estimated tokens per text chunk. Dense scripts count one token per character; chunks never exceed 30,000 bytes. |
