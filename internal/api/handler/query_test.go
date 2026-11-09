@@ -186,6 +186,69 @@ func TestQueryReportsNoEvidence(t *testing.T) {
 	require.Empty(t, got.ScoredChunks)
 }
 
+func TestQueryNoEvidenceLanguage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+		tag    string
+		answer string
+	}{
+		{"missing", "", "en", "No relevant information was found to answer this question."},
+		{"spanish", "es-MX", "es", "No se encontró información relevante para responder esta pregunta."},
+		{"portuguese", "pt-BR", "pt", "Não foi encontrada informação relevante para responder a esta pergunta."},
+		{"french", "fr-CA", "fr", "Aucune information pertinente n'a été trouvée pour répondre à cette question."},
+		{"german", "de", "de", "Es wurden keine relevanten Informationen gefunden, um diese Frage zu beantworten."},
+		{"italian", "it", "it", "Non sono state trovate informazioni pertinenti per rispondere a questa domanda."},
+		{"unsupported", "zh", "en", "No relevant information was found to answer this question."},
+		{"malformed", "es;q=broken", "en", "No relevant information was found to answer this question."},
+		{"weighted", "en;q=0.2, es-MX;q=0.9", "es", "No se encontró información relevante para responder esta pregunta."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/query", strings.NewReader(`{"query":"archive","allowed_document_ids":[]}`))
+			req.Header.Set("Content-Type", "application/json")
+			if tc.header != "" {
+				req.Header.Set("Accept-Language", tc.header)
+			}
+			deadlineQueryHandler(deadlineQueryConfig(t), nil, nil)(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var got QueryResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			require.Equal(t, tc.answer, got.Answer)
+			require.Equal(t, tc.tag, rec.Header().Get("Content-Language"))
+			require.Equal(t, "no_evidence", got.FinishReason)
+			require.True(t, got.EarlyExit)
+			require.Zero(t, got.ChunksUsed)
+			require.Zero(t, got.ContextChunks)
+			require.Zero(t, got.ContextTokens)
+			require.Equal(t, domain.TokenUsage{}, got.TokenUsage)
+			require.Empty(t, got.ScoredChunks)
+		})
+	}
+}
+
+func TestQuerySynthesisDoesNotSetContentLanguage(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := deadlineQueryRequest(t.Context())
+	req.Header.Set("Accept-Language", "es")
+	deadlineQueryHandler(deadlineQueryConfig(t), embedder.NewFakeEmbedder(256), deadlineConverser(func(context.Context) (*bedrockruntime.ConverseOutput, error) {
+		return deadlineOutput("answer", brtypes.StopReasonEndTurn), nil
+	}))(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Empty(t, rec.Header().Get("Content-Language"))
+}
+
+func TestQueryNoEvidenceLanguageCombinesHeaderLines(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/query", strings.NewReader(`{"query":"archive","allowed_document_ids":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Add("Accept-Language", "en;q=0.2")
+	req.Header.Add("Accept-Language", "es-MX;q=0.9")
+	deadlineQueryHandler(deadlineQueryConfig(t), nil, nil)(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "es", rec.Header().Get("Content-Language"))
+}
+
 func TestQueryQueueHonorsCancellation(t *testing.T) {
 	entered := make(chan struct{}, 2)
 	cfg := deadlineQueryConfig(t)

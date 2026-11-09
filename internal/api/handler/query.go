@@ -132,6 +132,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			RequestedMode:      req.Mode,
 			FilterDocType:      req.FilterDocType,
 			AllowedDocumentIDs: req.AllowedDocumentIDs,
+			AcceptLanguage:     strings.Join(r.Header.Values("Accept-Language"), ","),
 		}
 
 		retrieval := pipeline.NewRetrievalStage(ret)
@@ -203,6 +204,9 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		slog.DebugContext(r.Context(), "query completed", "mode", qc.RetrievalMode, "chunks", len(qc.RetrievedChunks), "duration", time.Since(start))
 
 		w.Header().Set("Content-Type", "application/json")
+		if qc.EarlyExit && qc.ContentLanguage != "" {
+			w.Header().Set("Content-Language", qc.ContentLanguage)
+		}
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			slog.ErrorContext(r.Context(), "encode query response", "error", err)
