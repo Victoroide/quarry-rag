@@ -12,6 +12,7 @@ type queryInput struct {
 	Mode               string   `json:"mode,omitempty" jsonschema:"Retrieval mode: auto, local or global. Defaults to auto."`
 	FilterDocType      string   `json:"filter_doc_type,omitempty" jsonschema:"Only retrieve chunks from documents of this type."`
 	MaxChunks          int      `json:"max_chunks,omitempty" jsonschema:"Maximum evidence chunks, 0 to 100. 0 uses the service default; larger values are capped by the service."`
+	IncludeCitations   bool     `json:"include_citations,omitempty" jsonschema:"Request inline citation markers and lexical overlap checks against the synthesis excerpts."`
 	AllowedDocumentIDs []string `json:"allowed_document_ids,omitempty" jsonschema:"Document UUIDs the caller may read. Omit for unrestricted retrieval; an empty list matches no documents."`
 }
 
@@ -23,6 +24,8 @@ type queryOutput struct {
 	ContextChunks int               `json:"context_chunks"`
 	TokenUsage    client.TokenUsage `json:"token_usage"`
 	Chunks        []queryChunk      `json:"chunks"`
+	// Citations is present when the request asked for citations.
+	Citations []client.CitationResponse `json:"citations,omitzero"`
 }
 
 type queryChunk struct {
@@ -31,6 +34,8 @@ type queryChunk struct {
 	ChunkIndex int     `json:"chunk_index"`
 	Score      float64 `json:"score"`
 	Text       string  `json:"text"`
+	Excerpt    int     `json:"excerpt,omitempty"`
+	Truncated  bool    `json:"truncated,omitempty"`
 }
 
 func registerQueryTool(s *mcp.Server, api *client.Client, token string) {
@@ -41,8 +46,8 @@ func registerQueryTool(s *mcp.Server, api *client.Client, token string) {
 		}
 		chunks := make([]queryChunk, 0, len(response.ScoredChunks))
 		for _, c := range response.ScoredChunks {
-			chunks = append(chunks, queryChunk{DocID: c.DocID, DocType: c.DocType, ChunkIndex: c.ChunkIndex, Score: c.Score, Text: c.Text})
+			chunks = append(chunks, queryChunk{DocID: c.DocID, DocType: c.DocType, ChunkIndex: c.ChunkIndex, Score: c.Score, Text: c.Text, Excerpt: c.Excerpt, Truncated: c.Truncated})
 		}
-		return queryOutput{Answer: response.Answer, FinishReason: response.FinishReason, Mode: response.Mode, ChunksUsed: response.ChunksUsed, ContextChunks: response.ContextChunks, TokenUsage: response.TokenUsage, Chunks: chunks}, nil
+		return queryOutput{Answer: response.Answer, FinishReason: response.FinishReason, Mode: response.Mode, ChunksUsed: response.ChunksUsed, ContextChunks: response.ContextChunks, TokenUsage: response.TokenUsage, Chunks: chunks, Citations: response.Citations}, nil
 	})
 }

@@ -279,6 +279,59 @@ func TestListToolPaginationAndBounds(t *testing.T) {
 	assert.EqualValues(t, 1, calls.Load())
 }
 
+func TestQueryToolCitations(t *testing.T) {
+	for _, tc := range []struct {
+		name, citations string
+		include         bool
+	}{
+		{"requested", `[{"excerpt":1,"doc_id":"source","chunk_index":4,"offset":8,"verified":false,"overlap":0.25}]`, true},
+		{"empty", `[]`, true},
+		{"default", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "POST /query", r.Method+" "+r.URL.Path)
+				var body map[string]json.RawMessage
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				if tc.include {
+					assert.Equal(t, "true", string(body["include_citations"]))
+				} else {
+					assert.NotContains(t, body, "include_citations")
+				}
+				response := `{"answer":"Archive [1]","scored_chunks":[{"doc_id":"source","chunk_index":4,"excerpt":1,"truncated":true}]`
+				if tc.include {
+					response += `,"citations":` + tc.citations
+				}
+				_, err := io.WriteString(w, response+"}")
+				assert.NoError(t, err)
+			}))
+			defer s.Close()
+			cs := connectServer(t, config{baseURL: s.URL, timeout: time.Second})
+			arguments := map[string]any{"query": "archive"}
+			if tc.include {
+				arguments["include_citations"] = true
+			}
+			result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "quarry_query", Arguments: arguments})
+			require.NoError(t, err)
+			require.False(t, result.IsError, "%v", result.Content)
+			data, err := json.Marshal(result.StructuredContent)
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &fields))
+			if tc.include {
+				assert.JSONEq(t, tc.citations, string(fields["citations"]))
+			} else {
+				assert.NotContains(t, fields, "citations")
+			}
+			var chunks []map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(fields["chunks"], &chunks))
+			require.Len(t, chunks, 1)
+			assert.Equal(t, "1", string(chunks[0]["excerpt"]))
+			assert.Equal(t, "true", string(chunks[0]["truncated"]))
+		})
+	}
+}
+
 func TestFileToolRejectsEscapeWithoutHTTPCall(t *testing.T) {
 	var calls atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))

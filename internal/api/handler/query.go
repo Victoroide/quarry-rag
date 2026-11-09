@@ -29,6 +29,7 @@ type QueryRequest struct {
 	Mode               string   `json:"mode,omitempty"`
 	FilterDocType      string   `json:"filter_doc_type,omitempty"`
 	MaxChunks          int      `json:"max_chunks,omitempty"`
+	IncludeCitations   bool     `json:"include_citations,omitempty"`
 	AllowedDocumentIDs []string `json:"allowed_document_ids,omitzero"`
 }
 
@@ -46,6 +47,18 @@ type ScoredChunkResponse struct {
 	Text       string  `json:"text"`
 	Kind       string  `json:"kind,omitempty"`
 	Quality    string  `json:"quality,omitempty"`
+	Excerpt    int     `json:"excerpt,omitempty"`
+	Truncated  bool    `json:"truncated,omitempty"`
+}
+
+// CitationResponse links an answer marker to an excerpt and its lexical check.
+type CitationResponse struct {
+	Excerpt    int     `json:"excerpt"`
+	DocID      string  `json:"doc_id"`
+	ChunkIndex int     `json:"chunk_index"`
+	Offset     int     `json:"offset"`
+	Verified   bool    `json:"verified"`
+	Overlap    float64 `json:"overlap"`
 }
 
 // QueryResponse is the POST /query response body.
@@ -60,6 +73,7 @@ type QueryResponse struct {
 	StageTimings  map[string]int64      `json:"stage_timings_ms,omitempty"`
 	TokenUsage    domain.TokenUsage     `json:"token_usage"`
 	ScoredChunks  []ScoredChunkResponse `json:"scored_chunks"`
+	Citations     []CitationResponse    `json:"citations,omitzero"`
 }
 
 // APIError is a structured JSON error response.
@@ -131,6 +145,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			MaxChunks:          effectiveMaxChunks(req.MaxChunks, cfg.MaxChunksPerQuery),
 			RequestedMode:      req.Mode,
 			FilterDocType:      req.FilterDocType,
+			IncludeCitations:   req.IncludeCitations,
 			AllowedDocumentIDs: req.AllowedDocumentIDs,
 			AcceptLanguage:     strings.Join(r.Header.Values("Accept-Language"), ","),
 		}
@@ -177,6 +192,13 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 				text = string(runes[:600])
 			}
 
+			excerpt, truncated := 0, false
+			for i, sent := range qc.Excerpts {
+				if sent.Chunk.DocumentID == sc.Chunk.DocumentID && sent.Chunk.Index == sc.Chunk.Index && sent.Chunk.ID == sc.Chunk.ID {
+					excerpt, truncated = i+1, qc.Truncated[i]
+					break
+				}
+			}
 			scoredChunks = append(scoredChunks, ScoredChunkResponse{
 				DocID:      string(sc.Chunk.DocumentID),
 				DocType:    docType,
@@ -185,6 +207,8 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 				Text:       text,
 				Kind:       kind,
 				Quality:    quality,
+				Excerpt:    excerpt,
+				Truncated:  truncated,
 			})
 		}
 
@@ -199,6 +223,12 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			StageTimings:  qc.StageTimingsMS,
 			TokenUsage:    qc.TokenUsage,
 			ScoredChunks:  scoredChunks,
+		}
+		if req.IncludeCitations {
+			resp.Citations = make([]CitationResponse, 0, len(qc.Citations))
+			for _, citation := range qc.Citations {
+				resp.Citations = append(resp.Citations, CitationResponse{Excerpt: citation.Excerpt, DocID: string(citation.DocumentID), ChunkIndex: citation.ChunkIndex, Offset: citation.Offset, Verified: citation.Verified, Overlap: citation.Overlap})
+			}
 		}
 
 		slog.DebugContext(r.Context(), "query completed", "mode", qc.RetrievalMode, "chunks", len(qc.RetrievedChunks), "duration", time.Since(start))

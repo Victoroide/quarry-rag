@@ -13,6 +13,7 @@ type QueryRequest struct {
 	Mode               string   `json:"mode,omitempty"`
 	FilterDocType      string   `json:"filter_doc_type,omitempty"`
 	MaxChunks          int      `json:"max_chunks,omitempty"`
+	IncludeCitations   bool     `json:"include_citations,omitempty"`
 	AllowedDocumentIDs []string `json:"allowed_document_ids,omitzero"`
 }
 
@@ -38,6 +39,18 @@ type ScoredChunkResponse struct {
 	Text       string  `json:"text"`
 	Kind       string  `json:"kind,omitempty"`
 	Quality    string  `json:"quality,omitempty"`
+	Excerpt    int     `json:"excerpt,omitempty"`
+	Truncated  bool    `json:"truncated,omitempty"`
+}
+
+// CitationResponse links an answer marker to an excerpt and its lexical check.
+type CitationResponse struct {
+	Excerpt    int     `json:"excerpt"`
+	DocID      string  `json:"doc_id"`
+	ChunkIndex int     `json:"chunk_index"`
+	Offset     int     `json:"offset"`
+	Verified   bool    `json:"verified"`
+	Overlap    float64 `json:"overlap"`
 }
 
 // TokenUsage reports synthesis usage.
@@ -59,6 +72,7 @@ type QueryResponse struct {
 	StageTimings  map[string]int64      `json:"stage_timings_ms,omitempty"`
 	TokenUsage    TokenUsage            `json:"token_usage"`
 	ScoredChunks  []ScoredChunkResponse `json:"scored_chunks"`
+	Citations     []CitationResponse    `json:"citations,omitzero"`
 }
 
 // RequestOption configures an individual HTTP request.
