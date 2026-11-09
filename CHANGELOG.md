@@ -10,6 +10,7 @@ Notable changes are grouped by release.
 - Queries report which retrieved chunks reached synthesis (`excerpt`, `truncated`) and, with `include_citations`, return citations checked against their excerpts.
 - Queries and document listings accept a `collection` filter applied inside vector search; `make reconcile ARGS=-backfill-collections` labels vectors written before this release.
 - `docs/openapi.yaml` describes the HTTP API in OpenAPI 3.1, and a test keeps it in sync with the router and handler types.
+- Optional Bedrock Guardrails for answer synthesis (`BEDROCK_GUARDRAIL_ID`, `BEDROCK_GUARDRAIL_VERSION`), with the question and excerpts marked for prompt-attack and grounding checks.
 
 ### Changed
 
