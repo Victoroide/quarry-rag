@@ -121,6 +121,9 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 			ic.Chunks[i].Metadata = make(map[string]any)
 		}
 		ic.Chunks[i].Metadata["doc_type"] = docType
+		if ic.Collection != "" {
+			ic.Chunks[i].Metadata["collection"] = ic.Collection
+		}
 	}
 
 	// Upsert vectors to the default namespace with doc_id metadata.

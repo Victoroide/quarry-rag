@@ -2,11 +2,13 @@ package domain
 
 import "context"
 
-// VectorFilter restricts a search by document type and document IDs.
+// VectorFilter restricts a search by collection, document type and document IDs.
 // A nil ID list is unrestricted; an empty non-nil list matches nothing.
 type VectorFilter struct {
 	DocType     string
 	DocumentIDs []string
+
+	Collection string
 }
 
 // MatchesNothing reports whether the filter excludes every document.

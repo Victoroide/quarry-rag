@@ -151,7 +151,7 @@ func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration
 		}
 		var metadata []byte
 		var fingerprint *string
-		err = c.Pool.QueryRow(ctx, `SELECT content,metadata,file_name,file_type,s3_key,doc_type,fingerprint FROM documents WHERE id=$1`, id).Scan(&j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType, &j.Document.S3Key, &j.DocType, &fingerprint)
+		err = c.Pool.QueryRow(ctx, `SELECT content,metadata,file_name,file_type,s3_key,doc_type,fingerprint,collection FROM documents WHERE id=$1`, id).Scan(&j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType, &j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}

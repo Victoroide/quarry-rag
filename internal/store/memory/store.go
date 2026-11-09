@@ -110,7 +110,7 @@ func validateMetadata(c domain.Chunk) error {
 		"doc_id": string(c.DocumentID), "chunk_index": float64(c.Index),
 		"text": c.Text, "token_count": float64(c.TokenCount),
 	}
-	for _, key := range []string{"doc_type", "kind", "quality"} {
+	for _, key := range []string{"doc_type", "kind", "quality", "collection"} {
 		if value, ok := c.Metadata[key]; ok {
 			metadata[key] = value
 		}
@@ -180,6 +180,11 @@ func (s *FakeVectorStore) query(namespace string, embedding []float32, topK int,
 		}
 		if filter.DocType != "" {
 			if dt, _ := c.Metadata["doc_type"].(string); dt != filter.DocType {
+				continue
+			}
+		}
+		if filter.Collection != "" {
+			if collection, _ := c.Metadata["collection"].(string); collection != filter.Collection {
 				continue
 			}
 		}

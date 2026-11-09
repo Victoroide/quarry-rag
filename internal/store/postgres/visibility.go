@@ -11,6 +11,8 @@ import (
 // Visibility uses document records to determine which evidence is available.
 type Visibility struct {
 	Pool *pgxpool.Pool
+
+	Collection string
 }
 
 // VisibleDocumentIDs returns the visible documents among the supplied IDs.
@@ -34,8 +36,13 @@ func (v Visibility) VisibleDocumentIDs(ctx context.Context, ids []string) (map[s
 		return visible, nil
 	}
 
-	rows, err := v.Pool.Query(ctx, `SELECT d.id::text FROM documents d
-        WHERE d.id = ANY($1::uuid[]) AND d.status = 'completed'`, queryIDs)
+	query := `SELECT d.id::text FROM documents d WHERE d.id = ANY($1::uuid[]) AND d.status = 'completed'`
+	args := []any{queryIDs}
+	if v.Collection != "" {
+		query += ` AND d.collection = $2`
+		args = append(args, v.Collection)
+	}
+	rows, err := v.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: visible documents: %w", err)
 	}

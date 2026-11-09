@@ -185,6 +185,9 @@ func (r *Retriever) queryFiltered(ctx context.Context, embedding []float32, topK
 	if store, ok := r.vectorStore.(domain.FilteredVectorStore); ok {
 		return store.QueryFiltered(ctx, embedding, topK, filter)
 	}
+	if filter.Collection != "" {
+		return nil, fmt.Errorf("retriever: vector store does not support collection filtering")
+	}
 	chunks, err := r.vectorStore.QueryAllNamespaces(ctx, embedding, topK, filter.DocType)
 	if err != nil {
 		return nil, err
