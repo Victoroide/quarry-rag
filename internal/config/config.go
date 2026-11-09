@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Config holds all operational parameters for the service.
@@ -23,6 +24,9 @@ type Config struct {
 	BedrockEmbedModel    string
 	BedrockPrimaryModel  string
 	BedrockFallbackModel string
+
+	BedrockGuardrailID      string
+	BedrockGuardrailVersion string
 
 	PineconeAPIKey    string
 	PineconeIndexName string
@@ -125,6 +129,8 @@ func Load() (*Config, error) {
 		S3ExpectedBucketOwner: os.Getenv("S3_EXPECTED_BUCKET_OWNER"),
 		AWSSessionToken:       os.Getenv("AWS_SESSION_TOKEN"),
 	}
+	cfg.BedrockGuardrailID = os.Getenv("BEDROCK_GUARDRAIL_ID")
+	cfg.BedrockGuardrailVersion = os.Getenv("BEDROCK_GUARDRAIL_VERSION")
 	if os.Getenv("PINECONE_ENVIRONMENT") != "" {
 		cfg.Warnings = append(cfg.Warnings, "PINECONE_ENVIRONMENT is ignored")
 	}
@@ -227,6 +233,21 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	if (c.BedrockGuardrailID == "") != (c.BedrockGuardrailVersion == "") {
+		return fmt.Errorf("config: BEDROCK_GUARDRAIL_ID and BEDROCK_GUARDRAIL_VERSION must be both set or both empty")
+	}
+	if c.BedrockGuardrailID != "" {
+		if strings.ContainsFunc(c.BedrockGuardrailID, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+			return fmt.Errorf("config: BEDROCK_GUARDRAIL_ID must not contain whitespace or control characters")
+		}
+		if c.BedrockGuardrailVersion != "DRAFT" {
+			version := c.BedrockGuardrailVersion
+			if version[0] < '1' || version[0] > '9' || strings.IndexFunc(version, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+				return fmt.Errorf("config: BEDROCK_GUARDRAIL_VERSION must be DRAFT or a positive integer")
+			}
+		}
+	}
+
 	type requirement struct {
 		name  string
 		value string

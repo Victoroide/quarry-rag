@@ -61,6 +61,43 @@ func TestLoadSynthesisBudgetDefaultsAndBounds(t *testing.T) {
 	}
 }
 
+func TestLoadBedrockGuardrails(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, version string
+		invalid           bool
+	}{
+		{name: "disabled"},
+		{name: "draft", id: "guardrail", version: "DRAFT"},
+		{name: "published", id: "guardrail", version: "12"},
+		{name: "missing version", id: "guardrail", invalid: true},
+		{name: "missing identifier", version: "1", invalid: true},
+		{name: "zero", id: "guardrail", version: "0", invalid: true},
+		{name: "negative", id: "guardrail", version: "-1", invalid: true},
+		{name: "signed", id: "guardrail", version: "+1", invalid: true},
+		{name: "fractional", id: "guardrail", version: "1.5", invalid: true},
+		{name: "leading zero", id: "guardrail", version: "01", invalid: true},
+		{name: "lowercase draft", id: "guardrail", version: "draft", invalid: true},
+		{name: "blank identifier", id: " ", version: "1", invalid: true},
+		{name: "padded identifier", id: "guardrail ", version: "1", invalid: true},
+		{name: "blank version", id: "guardrail", version: " ", invalid: true},
+		{name: "padded version", id: "guardrail", version: " 1 ", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("BEDROCK_GUARDRAIL_ID", tc.id)
+			t.Setenv("BEDROCK_GUARDRAIL_VERSION", tc.version)
+			_, err := Load()
+			if tc.invalid {
+				if err == nil || !strings.Contains(err.Error(), "BEDROCK_GUARDRAIL") {
+					t.Fatalf("expected guardrail configuration error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLoadIndexVisibilityTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name, value, jobTimeout string

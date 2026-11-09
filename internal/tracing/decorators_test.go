@@ -238,3 +238,18 @@ func TestStorageAndExtractionDecorators(t *testing.T) {
 	require.EqualValues(t, 12, spanAttrs(spans[3])["quarry.extract.bytes"].AsInt64())
 	require.Equal(t, "text", spanAttrs(spans[3])["quarry.extract.file_type"].AsString())
 }
+
+func TestModelDecoratorCapturesGuardedText(t *testing.T) {
+	recorder := recordSpans(t)
+	converser, ok := WrapConverser(fixtureModelConverser{}, "aws.bedrock", "default-model").(llm.ModelConverser)
+	require.True(t, ok)
+	messages := []brtypes.Message{{Role: brtypes.ConversationRoleUser, Content: []brtypes.ContentBlock{
+		&brtypes.ContentBlockMemberGuardContent{Value: &brtypes.GuardrailConverseContentBlockMemberText{Value: brtypes.GuardrailConverseTextBlock{Text: aws.String("guarded-question "), Qualifiers: []brtypes.GuardrailConverseContentQualifier{brtypes.GuardrailConverseContentQualifierQuery}}}},
+		&brtypes.ContentBlockMemberText{Value: "closing"},
+	}}}
+	_, err := converser.ConverseWithModelAndSystem(WithContentCapture(t.Context(), true), "fixture-model", "fixture-system", messages, 0.25, 80)
+	require.NoError(t, err)
+	spans := recorder.Ended()
+	require.Len(t, spans, 1)
+	require.Equal(t, "guarded-question closing", spanAttrs(spans[0])["gen_ai.prompt.1.content"].AsString())
+}

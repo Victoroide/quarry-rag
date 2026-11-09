@@ -60,8 +60,8 @@ func (c *converser) call(ctx context.Context, model, system string, messages []b
 		for _, message := range messages {
 			var text strings.Builder
 			for _, block := range message.Content {
-				if b, ok := block.(*brtypes.ContentBlockMemberText); ok {
-					text.WriteString(b.Value)
+				if value, ok := llm.BlockText(block); ok {
+					text.WriteString(value)
 				}
 			}
 			prefix := fmt.Sprintf("gen_ai.prompt.%d.", index)
