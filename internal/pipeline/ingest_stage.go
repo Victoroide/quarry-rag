@@ -126,6 +126,10 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 		}
 	}
 
+	if _, transactional := s.vectorStore.(domain.TransactionalVectorStore); transactional {
+		return ctx.Err()
+	}
+
 	// Upsert vectors to the default namespace with doc_id metadata.
 	if err := s.vectorStore.Upsert(ctx, "", ic.Chunks); err != nil {
 		return fmt.Errorf("persist_stage: upsert to default namespace: %w", err)

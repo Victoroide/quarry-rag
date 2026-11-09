@@ -102,17 +102,24 @@ func run() error {
 		amb = llm.NewAmbassador(cfg)
 		amb.SetClient(tracing.WrapConverser(llm.NewFakeConverser(), "offline", cfg.BedrockFallbackModel))
 	} else {
-		pcClient, pcErr := pcstore.NewPineconeClient(startupCtx, cfg)
-		if pcErr != nil {
-			return fmt.Errorf("startup: pinecone: %w", pcErr)
-		}
-		defer func() {
-			if closeErr := pcClient.Close(); closeErr != nil {
-				slog.Error("close pinecone", "error", closeErr)
+		if cfg.VectorStore == "postgres" {
+			pgVectors, vectorErr := pgstore.NewVectorStore(startupCtx, pgClient, cfg.EmbeddingDimensions)
+			if vectorErr != nil {
+				return fmt.Errorf("startup: postgres vectors: %w", vectorErr)
 			}
-		}()
-		pcDriver := pcstore.NewDriver(pcClient)
-		vectorStore = pcDriver
+			vectorStore = pgVectors
+		} else {
+			pcClient, pcErr := pcstore.NewPineconeClient(startupCtx, cfg)
+			if pcErr != nil {
+				return fmt.Errorf("startup: pinecone: %w", pcErr)
+			}
+			defer func() {
+				if closeErr := pcClient.Close(); closeErr != nil {
+					slog.Error("close pinecone", "error", closeErr)
+				}
+			}()
+			vectorStore = pcstore.NewDriver(pcClient)
+		}
 
 		bedrockEmb, embErr := embedder.NewBedrockEmbedder(startupCtx, cfg)
 		if embErr != nil {
@@ -149,6 +156,8 @@ func run() error {
 	provider, vectorSystem := "aws.bedrock", "pinecone"
 	if cfg.FakeMode {
 		provider, vectorSystem = "offline", "memory"
+	} else if cfg.VectorStore == "postgres" {
+		vectorSystem = "postgresql"
 	}
 	emb = tracing.WrapEmbedder(emb, provider, cfg.BedrockEmbedModel)
 	vectorStore = tracing.WrapVectorStore(vectorStore, vectorSystem)

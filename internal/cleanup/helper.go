@@ -69,11 +69,13 @@ func New(ctx context.Context, cfg *config.Config) (*Cleaner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres connect: %w", err)
 	}
-	pc, err := pcstore.NewPineconeClient(ctx, cfg)
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("pinecone connect: %w", err), pg.Close(ctx))
+	cleaner := &Cleaner{metadata: pg}
+	if cfg.VectorStore != "postgres" {
+		cleaner.vectors, err = pcstore.NewPineconeClient(ctx, cfg)
+		if err != nil {
+			return nil, errors.Join(fmt.Errorf("pinecone connect: %w", err), pg.Close(ctx))
+		}
 	}
-	cleaner := &Cleaner{metadata: pg, vectors: pc}
 	if cfg.S3Bucket != "" {
 		cleaner.objects, err = s3store.New(ctx, cfg)
 		if err != nil {
@@ -92,10 +94,18 @@ func (c *Cleaner) Delete(ctx context.Context, docID string) error {
 	if doc == nil {
 		return fmt.Errorf("%w: %s", ErrDocumentNotFound, docID)
 	}
-	return Remove(ctx, c.metadata, c.vectors, c.objects, doc)
+	var vectors domain.VectorDeleter
+	if c.vectors != nil {
+		vectors = c.vectors
+	}
+	return Remove(ctx, c.metadata, vectors, c.objects, doc)
 }
 
 // Close releases the shared store connections.
 func (c *Cleaner) Close(ctx context.Context) error {
-	return errors.Join(c.vectors.Close(), c.metadata.Close(ctx))
+	var vectorErr error
+	if c.vectors != nil {
+		vectorErr = c.vectors.Close()
+	}
+	return errors.Join(vectorErr, c.metadata.Close(ctx))
 }

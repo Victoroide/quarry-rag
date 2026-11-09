@@ -356,3 +356,37 @@ func TestLoadParsesEnvironmentOnceAndRejectsMalformedValues(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadVectorStoreSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, store, fake   string
+		noPinecone, invalid bool
+	}{
+		{name: "postgres without Pinecone", store: "postgres", noPinecone: true},
+		{name: "default needs Pinecone", noPinecone: true, invalid: true},
+		{name: "pinecone needs Pinecone", store: "pinecone", noPinecone: true, invalid: true},
+		{name: "fake postgres", store: "postgres", fake: "true", noPinecone: true},
+		{name: "unknown", store: "unknown", invalid: true},
+		{name: "unknown fake", store: "unknown", fake: "true", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("VECTOR_STORE", tc.store)
+			if tc.fake != "" {
+				t.Setenv("GO_RAG_FAKE_MODE", tc.fake)
+			}
+			if tc.noPinecone {
+				t.Setenv("PINECONE_API_KEY", "")
+				t.Setenv("PINECONE_INDEX_NAME", "")
+			}
+			_, err := Load()
+			if tc.invalid {
+				if err == nil {
+					t.Fatal("expected invalid store configuration")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
