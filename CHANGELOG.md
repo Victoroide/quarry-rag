@@ -7,6 +7,7 @@ Notable changes are grouped by release.
 ### Added
 
 - The README shows release and Go reference badges and describes installing released artifacts.
+- Queries report which retrieved chunks reached synthesis (`excerpt`, `truncated`) and, with `include_citations`, return citations checked against their excerpts.
 
 ### Changed
 

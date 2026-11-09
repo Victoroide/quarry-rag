@@ -282,6 +282,7 @@ Request fields:
 | `mode` | string | no | Retrieval mode: `"auto"` (default), `"local"`, or `"global"`. Case-insensitive. `local` answers mainly from the most relevant authorized document (named entity or best match), topped up from the authorized scope when that document has fewer than 3 matching chunks. With no visible candidate, `local` uses `global`. Explicit `global` skips the routing probe |
 | `filter_doc_type` | string | no | Restricts vector retrieval to chunks matching the given `doc_type`, using the label normalization and limits above |
 | `max_chunks` | int | no | Requested chunks to retrieve (0 to 100), capped by `MAX_CHUNKS_PER_QUERY`. Omitted or zero uses that configured maximum (default 10) |
+| `include_citations` | bool | no | Request numbered inline citations and lexical checks against the excerpts sent to synthesis; defaults to false |
 | `allowed_document_ids` | array of strings | no | Tenant/role allowlist of UUIDs, at most `MAX_ALLOWED_DOCUMENT_IDS` entries (default 25000). IDs are canonicalized and deduplicated. Omitted or `null` means unrestricted unless `REQUIRE_DOCUMENT_ALLOWLIST=true`, which makes a non-null field mandatory. An empty list (`[]`) returns the no-information answer without embedding or search. The allowlist is applied inside vector search and routing |
 
 Response fields (200 OK):
@@ -298,6 +299,22 @@ Response fields (200 OK):
 | `stage_timings_ms` | map[string]int64 | Execution timings for pipeline stages in milliseconds (optional) |
 | `token_usage` | object | LLM token usage metrics (`input_tokens`, `output_tokens`, `total_tokens`) |
 | `scored_chunks` | array | Retrieved chunks ordered by similarity score |
+| `citations` | array | Citation checks; present whenever `include_citations` is true, including an empty array when no markers or evidence remain; otherwise omitted |
+
+Each `citations` entry contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `excerpt` | int | One-based index of the excerpt sent to synthesis |
+| `doc_id` | string | Source document identifier |
+| `chunk_index` | int | Source chunk index |
+| `offset` | int | Zero-based Unicode code point index of the marker's `[` in the cleaned answer; references in one list marker share the offset |
+| `verified` | bool | Whether the rounded lexical overlap is at least 0.30; this is not an entailment check |
+| `overlap` | number | Fraction of distinct sentence tokens also found in the excerpt, rounded to two decimal places; zero for a sentence without tokens |
+
+With `include_citations`, markers match `[n]` or comma-separated lists of one-to-three-digit numbers, such as `[1, 2]`; adjacent markers are allowed. Numbers outside the excerpt range are removed. A marker with no valid numbers is removed with one preceding space. Retained markers list each valid number once, as comma-separated decimal numbers. Other bracketed text is unchanged. Without this option the answer is unchanged.
+
+The referencing sentence begins after the previous `.`, `!`, `?`, `。`, `！`, `？` or newline before the marker and excludes other citation markers. Tokens are maximal runs of letters, combining marks and digits after NFC normalization and lowercasing, ignoring invisible format characters; runs of at least three code points or containing a digit are kept. Dense-script runs (Han, Hiragana, Katakana, Hangul, Thai, Lao, Khmer, Myanmar and Tibetan) use character bigrams, and script-neutral letters such as `ー` stay in the run they follow. Lexical checks use the actual sanitized, possibly truncated excerpt body rather than the response snippet.
 
 Malformed allowlist entries return 400 `allowed_document_ids must contain UUIDs`; a missing or null required allowlist returns 400 `allowed_document_ids is required`. Lists above `MAX_ALLOWED_DOCUMENT_IDS` return 400 before deduplication.
 
@@ -322,6 +339,8 @@ Scored chunk fields:
 | `text` | string | Chunk text excerpt, truncated safely to a maximum of 600 runes without splitting UTF-8 characters |
 | `kind` | string | Classification category if populated during ingestion (optional) |
 | `quality` | string | Quality rating if populated during ingestion (optional) |
+| `excerpt` | int | One-based prompt excerpt number; omitted when this chunk did not reach synthesis |
+| `truncated` | bool | True when the excerpt body was cut before synthesis; omitted otherwise. This describes synthesis truncation, independently of the response snippet limit |
 
 Error Status Codes:
 
