@@ -10,20 +10,21 @@ The table below lists the environment variables recognized by the service:
 |---|---|---|---|---|
 | `AWS_ACCESS_KEY_ID` | string | `""` | Set together with `AWS_SECRET_ACCESS_KEY`, or leave both empty | Optional static AWS access key ID. When both keys are empty, AWS clients use the default credential chain. |
 | `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. Standard retries have a 10-second maximum backoff, no client-side retry quota, and include `ModelTimeoutException` and `ModelNotReadyException`. |
-| `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls and S3 object storage. Required when `GO_RAG_FAKE_MODE=false`. |
+| `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls and S3 object storage. Required outside offline mode when either provider uses Bedrock or original-file storage is enabled. |
 | `AWS_SECRET_ACCESS_KEY` | string | `""` | Set together with `AWS_ACCESS_KEY_ID`, or leave both empty | Optional static AWS secret access key. |
 | `AWS_SESSION_TOKEN` | string | `""` | Optional string | Session token for temporary static AWS credentials. |
 | `BEDROCK_EMBED_MODEL` | string | `"amazon.titan-embed-text-v2:0"` | Non-empty string | Bedrock model identifier used for generating text embeddings. |
 | `BEDROCK_FALLBACK_MODEL` | string | `"us.meta.llama4-maverick-17b-instruct-v1:0"` | Non-empty string | Bedrock model identifier for answer synthesis and fallback routing. |
-| `BEDROCK_GUARDRAIL_ID` | string | `""` (disabled) | Set together with `BEDROCK_GUARDRAIL_VERSION`; no whitespace or control characters | Optional Bedrock guardrail identifier attached to Converse and ConverseStream requests. See [synthesis behavior](architecture.md#query-stages) and [required permissions](deployment.md#3-aws-bedrock-embedding-and-llm-models). |
+| `BEDROCK_GUARDRAIL_ID` | string | `""` (disabled) | Requires `LLM_PROVIDER=bedrock`; set together with `BEDROCK_GUARDRAIL_VERSION`; no whitespace or control characters | Optional Bedrock guardrail identifier attached to Converse and ConverseStream requests. See [synthesis behavior](architecture.md#query-stages) and [required permissions](deployment.md#3-aws-bedrock-embedding-and-llm-models). |
 | `BEDROCK_GUARDRAIL_VERSION` | string | `""` (disabled) | Set together with `BEDROCK_GUARDRAIL_ID`; `DRAFT` or a positive decimal integer without leading zeros | Guardrail version to apply. |
 | `BEDROCK_PRIMARY_MODEL` | string | `"amazon.nova-micro-v1:0"` | Non-empty string | Bedrock model identifier for low-latency reasoning and fast answer synthesis. |
 | `CHUNK_OVERLAP` | integer | `64` | 0 to `CHUNK_TOKEN_SIZE/2` (integer division) | Maximum estimated tokens retained from the previous chunk. Each chunk starts at least halfway through the previous one, in estimated tokens and bytes, so total chunk text is at most twice the normalized input. |
 | `CHUNK_TOKEN_SIZE` | integer | `512` | 2 to 8192 | Maximum estimated tokens per text chunk. Dense scripts count one token per character; chunks never exceed 30,000 bytes. |
 | `DATABASE_URL` | string | `""` | Valid PostgreSQL connection string | PostgreSQL connection string for document metadata and chunk storage. Always required in all modes. Defaults to 16 pooled connections and a 30-second statement timeout; override with `pool_max_conns` and `statement_timeout`. |
-| `EMBEDDING_DIMENSIONS` | integer | `1024` | 256, 512, or 1024 | Output vector dimensions requested from Bedrock Titan Embed V2. Responses with a different length or non-finite values are rejected. Must match the existing PostgreSQL vector column dimension when that backend is selected. |
-| `EMBED_CONCURRENCY` | integer | `10` | 1 to 50 | Maximum number of concurrent embedding requests dispatched to AWS Bedrock. |
-| `EMBED_TIMEOUT` | duration | `15s` | 1s to 2m | Deadline for each embedding call, including waiting for a concurrency slot and all retries. An earlier caller deadline takes precedence. |
+| `EMBEDDING_DIMENSIONS` | integer | `1024` | Bedrock: 256, 512, or 1024; OpenAI-compatible: 1 to 4096 | Embedding vector dimensions: requested from Bedrock Titan; with an OpenAI-compatible provider, the model's output size. Responses with a different length, missing values or non-finite values are rejected. Must match the vector index dimensions; the PostgreSQL vector backend accepts at most 2000. |
+| `EMBEDDING_PROVIDER` | string | `bedrock` | `bedrock` or `openai` | Embedding backend; selected independently of the synthesis provider. |
+| `EMBED_CONCURRENCY` | integer | `10` | 1 to 50 | Maximum number of concurrent embedding requests dispatched to the selected provider. |
+| `EMBED_TIMEOUT` | duration | `15s` | 1s to 2m | Deadline for each embedding call after acquiring a concurrency slot, including retries when supported. The caller context also bounds waiting for a slot. An earlier caller deadline takes precedence. |
 | `EXTRACT_CONCURRENCY` | integer | `2` | 1 to 64 | Maximum concurrent multipart handlers, including upload reads and extraction. |
 | `EXTRACT_ISOLATION` | boolean | `true` | Boolean | Extract PDF, DOCX and DOC text in a separate process. Disabling this removes crash isolation and the child process limits. |
 | `EXTRACT_MEMORY_LIMIT_MB` | integer | `512` | 64 to 8192 | Soft Go memory limit per extraction child in MiB. This is not a hard process memory cap. |
@@ -40,6 +41,7 @@ The table below lists the environment variables recognized by the service:
 | `INGEST_MAX_ATTEMPTS` | integer | `5` | 1 to 20 | Maximum processing attempts before recording terminal failure. |
 | `INGEST_POLL_INTERVAL` | duration | `1s` | 100ms to 1m | Polling interval for ready jobs across replicas. |
 | `INGEST_WORKERS` | integer | `2` | 1 to 32 | Parallel document claim loops per replica. |
+| `LLM_PROVIDER` | string | `bedrock` | `bedrock` or `openai` | Answer synthesis backend. Bedrock guardrails with `openai` fail startup validation. |
 | `LOCAL_RETRIEVAL_THRESHOLD` | float64 | `0.70` | 0.0 to 1.0 | Cosine similarity threshold for routing single-need queries to LOCAL retrieval mode. |
 | `LOG_LEVEL` | string | `info` | `debug`, `info`, `warn`, `error` (case-insensitive, trimmed) | Minimum severity emitted to stderr as JSON. Access logs use info; recovered panics use error. |
 | `MAX_ALLOWED_DOCUMENT_IDS` | integer | `25000` | 1 to 100000 | Maximum allowlist entries per query before deduplication; the 1 MiB query body limit also applies. Vector queries split lists into groups of at most 10000 IDs and merge the top results. |
@@ -49,6 +51,10 @@ The table below lists the environment variables recognized by the service:
 | `MIN_RELEVANCE_SCORE` | float64 | `0` | 0 to 1, finite | Absolute evidence score floor applied before adaptive synthesis trimming; zero disables this floor. |
 | `OCR_PROVIDER` | string | `none` | `none` or `textract`; `textract` requires `S3_BUCKET` | Enables [image-only PDF OCR](api.md#image-only-pdf-ocr) after the parser finds no text. Offline fake mode never calls Textract and keeps the parser-only behavior. |
 | `OCR_TIMEOUT` | duration | `10m` | Positive; below `INGEST_JOB_TIMEOUT` when OCR is enabled | Total Textract start, polling and result pagination budget per ingestion attempt. Earlier job cancellation takes precedence. |
+| `OPENAI_API_KEY` | secret string | `""` | Optional; no whitespace or control characters | Bearer credential read only from configuration. Sent only to the configured endpoint; redirects are rejected. Keep it in secret storage and out of logs. |
+| `OPENAI_BASE_URL` | string | `""` | Required when either provider is `openai`; absolute HTTP or HTTPS address without credentials, query or fragment | Explicit API base address, including its version prefix when required. Endpoint paths are appended to this address; there is no implicit public endpoint. Use HTTPS for remote endpoints. |
+| `OPENAI_CHAT_MODEL` | string | `""` | Required when `LLM_PROVIDER=openai` | Chat completion model name; replaces Bedrock synthesis routing for this provider. |
+| `OPENAI_EMBEDDING_MODEL` | string | `""` | Required when `EMBEDDING_PROVIDER=openai` | Embedding model name. Choose a model and dimensions supported by the endpoint and vector index. |
 | `PINECONE_API_KEY` | string | `""` | Non-empty string | API key for authenticating with Pinecone vector indices. Required when `GO_RAG_FAKE_MODE=false` and `VECTOR_STORE=pinecone`. |
 | `PINECONE_ENVIRONMENT` | string | `""` | Ignored | Has no effect and is not stored in configuration. A non-empty value adds the startup warning `PINECONE_ENVIRONMENT is ignored`. Remove it from deployment configuration. |
 | `PINECONE_INDEX_NAME` | string | `""` | Required when `GO_RAG_FAKE_MODE=false` and `VECTOR_STORE=pinecone` | Target Pinecone index, for example `quarry-rag`. There is no implicit default. Optional with PostgreSQL vectors or offline mode. |
@@ -68,9 +74,9 @@ The table below lists the environment variables recognized by the service:
 | `SERVICE_TOKENS` | comma-separated strings | `""` | No whitespace or control characters within a token after trimming | Additional secrets accepted in `X-Service-Token` for rotation; see [Service Token Rotation](deployment.md#service-token-rotation). Tokens are trimmed, empty entries are dropped and duplicates are removed across both variables. Startup warns with only the count of tokens shorter than 32 bytes; use secrets of at least 32 bytes. An empty combined list leaves routes open only in offline mode. |
 | `SHUTDOWN_DRAIN_DELAY` | duration | `5s` | 0s to 60s | Delay after readiness starts returning draining, before HTTP shutdown. A second termination signal skips the remaining delay. |
 | `SYNTHESIS_CONTEXT_TOKENS` | integer | `2400` | 256 to 100000 | Maximum sum of estimated tokens in sanitized synthesis excerpt bodies; excludes prompt instructions, the question and markers. |
-| `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
+| `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Bedrock model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
 | `SYNTHESIS_RELATIVE_SCORE_FLOOR` | float64 | `0.55` | 0 to 1, finite | Minimum candidate score relative to the best retrieved score. |
-| `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries. |
+| `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries with Bedrock. |
 | `VECTOR_STORE` | string | `"pinecone"` | `pinecone` or `postgres` | Persistent vector backend; offline fake mode always uses memory. PostgreSQL vectors require the [deployment prerequisites](deployment.md#postgresql-vectors). |
 | `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including running jobs. |
 

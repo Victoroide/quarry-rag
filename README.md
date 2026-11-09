@@ -16,7 +16,7 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 - **Adaptive retrieval**: Evaluates query complexity and similarity signals to route between LOCAL and GLOBAL vector search using the configured backend.
 - **Optional reranking**: [Bedrock reranking](docs/api.md#post-query) orders retrieved evidence before synthesis context selection.
 - **Tenant and document filtering**: Supports metadata filtering by document type and query-time document ID allowlists enforced before synthesis.
-- **Grounded synthesis**: Generates answers in the language of the incoming question using AWS Bedrock models when evidence is available; see the [query API](docs/api.md#post-query) for empty results.
+- **Grounded synthesis**: Generates answers in the language of the incoming question using Bedrock or OpenAI-compatible chat models when evidence is available; see the [query API](docs/api.md#post-query) for empty results.
 - **Offline development mode**: Runs fully offline with deterministic in-memory vector storage and mock model providers via `GO_RAG_FAKE_MODE`.
 - **Service authentication**: Restricts operational and query routes with constant-time `X-Service-Token` verification.
 - **Tracing**: optional OpenTelemetry export over OTLP/HTTP, including LangSmith, for requests, pipeline stages, model calls and storage operations.
@@ -34,7 +34,7 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 - Go at the version in [go.mod](go.mod) to build from source; the badge shows it, and [CONTRIBUTING.md](CONTRIBUTING.md) lists the tool versions.
 - PostgreSQL 14 or later in every mode.
 - Docker for the full test suite and image builds.
-- AWS Bedrock access to the embedding and synthesis models, either a Pinecone index or the [PostgreSQL vector prerequisites](docs/deployment.md#postgresql-vectors), and an optional S3 bucket. [Deployment](docs/deployment.md) covers index settings, model identifiers and permissions.
+- For external services, access to Bedrock or OpenAI-compatible chat and embedding providers, either a Pinecone index or the [PostgreSQL vector prerequisites](docs/deployment.md#postgresql-vectors), and an optional S3 bucket. [Deployment](docs/deployment.md) covers index settings, providers and permissions.
 
 ## Installation
 
