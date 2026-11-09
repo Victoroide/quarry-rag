@@ -9,7 +9,7 @@ The table below lists the environment variables recognized by the service:
 | Variable | Type | Default | Constraints | Description |
 |---|---|---|---|---|
 | `AWS_ACCESS_KEY_ID` | string | `""` | Set together with `AWS_SECRET_ACCESS_KEY`, or leave both empty | Optional static AWS access key ID. When both keys are empty, AWS clients use the default credential chain. |
-| `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. Standard retries have a 10-second maximum backoff, no client-side retry quota, and include `ModelTimeoutException` and `ModelNotReadyException`. |
+| `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. See [AWS retries](deployment.md#3-aws-bedrock-embedding-and-llm-models) for retry policy details. |
 | `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls, Bedrock reranking and S3 object storage. Required outside offline mode when either provider uses Bedrock, reranking is enabled, or original-file storage is enabled. |
 | `AWS_SECRET_ACCESS_KEY` | string | `""` | Set together with `AWS_ACCESS_KEY_ID`, or leave both empty | Optional static AWS secret access key. |
 | `AWS_SESSION_TOKEN` | string | `""` | Optional string | Session token for temporary static AWS credentials. |
@@ -20,7 +20,7 @@ The table below lists the environment variables recognized by the service:
 | `BEDROCK_PRIMARY_MODEL` | string | `"amazon.nova-micro-v1:0"` | Non-empty string | Bedrock model identifier for low-latency reasoning and fast answer synthesis. |
 | `CHUNK_OVERLAP` | integer | `64` | 0 to `CHUNK_TOKEN_SIZE/2` (integer division) | Maximum estimated tokens retained from the previous chunk. Each chunk starts at least halfway through the previous one, in estimated tokens and bytes, so total chunk text is at most twice the normalized input. |
 | `CHUNK_TOKEN_SIZE` | integer | `512` | 2 to 8192 | Maximum estimated tokens per text chunk. Dense scripts count one token per character; chunks never exceed 30,000 bytes. |
-| `DATABASE_URL` | string | `""` | Valid PostgreSQL connection string | PostgreSQL connection string for document metadata and chunk storage. Always required in all modes. Defaults to 16 pooled connections and a 30-second statement timeout; override with `pool_max_conns` and `statement_timeout`. |
+| `DATABASE_URL` | string | `""` | Valid PostgreSQL connection string | PostgreSQL connection string for document metadata and chunk storage. Always required in all modes. Pool size and statement timeout defaults are described under [Schema Migrations](#schema-migrations). |
 | `EMBEDDING_DIMENSIONS` | integer | `1024` | Bedrock: 256, 512, or 1024; OpenAI-compatible: 1 to 4096 | Embedding vector dimensions: requested from Bedrock Titan; with an OpenAI-compatible provider, the model's output size. Responses with a different length, missing values or non-finite values are rejected. Must match the vector index dimensions; the PostgreSQL vector backend accepts at most 2000. |
 | `EMBEDDING_PROVIDER` | string | `bedrock` | `bedrock` or `openai` | Embedding backend; selected independently of the synthesis provider. |
 | `EMBED_CONCURRENCY` | integer | `10` | 1 to 50 | Maximum number of concurrent embedding requests dispatched to the selected provider. |
@@ -47,7 +47,7 @@ The table below lists the environment variables recognized by the service:
 | `MAX_ALLOWED_DOCUMENT_IDS` | integer | `25000` | 1 to 100000 | Maximum allowlist entries per query before deduplication; the 1 MiB query body limit also applies. Vector queries split lists into groups of at most 10000 IDs and merge the top results. |
 | `MAX_CHUNKS_PER_QUERY` | integer | `10` | 1 to 100 | Maximum chunks retrieved per query. Requests with omitted or zero `max_chunks` use this value; larger requests are capped at this value. |
 | `MAX_UPLOAD_BYTES` | int64 | `20971520` (20 MiB) | 1 to 104857600 (100 MiB) | Maximum accepted request payload size for multipart file uploads in bytes. |
-| `METRICS_ADDR` | string | `""` (disabled) | Optional TCP listen address | Separate metrics listener; bind to a private interface and never expose publicly. |
+| `METRICS_ADDR` | string | `""` (disabled) | Optional TCP listen address | Separate metrics listener. See [Metrics](deployment.md#metrics) for listener exposure guidance. |
 | `MIN_RELEVANCE_SCORE` | float64 | `0` | 0 to 1, finite | Absolute evidence score floor applied before adaptive synthesis trimming; zero disables this floor. |
 | `OCR_PROVIDER` | string | `none` | `none` or `textract`; `textract` requires `S3_BUCKET` | Enables [image-only PDF OCR](api.md#image-only-pdf-ocr) after the parser finds no text. Offline fake mode never calls Textract and keeps the parser-only behavior. |
 | `OCR_TIMEOUT` | duration | `10m` | Positive; below `INGEST_JOB_TIMEOUT` when OCR is enabled | Total Textract start, polling and result pagination budget per ingestion attempt. Earlier job cancellation takes precedence. |
@@ -152,8 +152,7 @@ The optional vector schema is initialized separately after base migrations, unde
 ## Metrics
 
 Set `METRICS_ADDR` to enable `GET /metrics` on a separate listener. The main API
-listener does not serve metrics. Bind the metrics listener to a private interface
-and restrict access to the monitoring system; it has no service-token check.
+listener does not serve metrics. See [Metrics](deployment.md#metrics) for listener exposure guidance.
 
 Metrics use Prometheus text format:
 

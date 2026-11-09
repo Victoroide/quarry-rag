@@ -155,6 +155,10 @@ When replicas share an account quota expressed in concurrent requests, the large
 
 Apply this formula to `QUERY_CONCURRENCY` and `EMBED_CONCURRENCY` with the quotas of the models they call, and to `EXTRACT_CONCURRENCY` when the deployment sets its own cluster-wide upload limit. Each result must stay within the variable's [bounds](configuration.md#environment-variables); a result below 1 means the quota cannot support that many replicas. Retries run inside these limits, so they add requests but not concurrency.
 
+PostgreSQL connections also add up across replicas. Each replica opens one pool of at most `pool_max_conns` connections, set in [`DATABASE_URL`](configuration.md#environment-variables); startup migrations use this pool. Maintenance connections are administrative sessions plus the separate pools of `make cleanup` and `make reconcile`, each capped by the same setting. The total must fit within `max_connections` less the server's reserved slots, such as `superuser_reserved_connections`:
+
+`replicas × pool_max_conns + maintenance connections ≤ max_connections − reserved slots`
+
 ## Required External Services
 
 In production deployments (`GO_RAG_FAKE_MODE=false`), the microservice uses PostgreSQL and AWS Bedrock, with a selectable vector backend and optional S3 storage. See [configuration](configuration.md#environment-variables) for backend selection and credentials. [PDF OCR](#optional-pdf-ocr) adds optional text detection.
@@ -202,8 +206,8 @@ Changing backends does not copy existing embeddings. Re-ingest documents with ne
 - **Guardrail permission**: When [optional guardrails](configuration.md#environment-variables) are enabled, grant `bedrock:ApplyGuardrail` on the target guardrail ARN, `arn:aws:bedrock:{region}:{account-id}:guardrail/{guardrail-id}`, in addition to model invocation permissions. Create the guardrail and configure its prompt-attack and contextual grounding policies before enabling it in the service.
 - **Configuration**: `AWS_REGION` and model identifiers (`BEDROCK_EMBED_MODEL`, `BEDROCK_PRIMARY_MODEL`, `BEDROCK_FALLBACK_MODEL`). Static `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are optional and must be configured together; temporary static credentials also accept `AWS_SESSION_TOKEN`.
 - **Credentials**: IAM roles are supported. Without static keys, AWS clients use the default credential chain, including environment credentials, shared configuration files, web identity, container roles and instance roles.
-- **Query and proxy timeouts**: `QUERY_CONCURRENCY` bounds admitted queries [per replica](#concurrency-limits), and `QUERY_QUEUE_TIMEOUT` limits admission waits. Each admitted query has a [`QUERY_TIMEOUT`](configuration.md#environment-variables) budget, with a nested `SYNTHESIS_TIMEOUT`. Set proxy and load balancer response timeouts to at least `HTTP_WRITE_TIMEOUT`. Keep adequate margin for reading request bodies and waiting for admission when configuring write timeouts.
-- **Retries and Deadlines**: Bedrock and S3 use the same retry policy, with [`AWS_MAX_ATTEMPTS`](configuration.md#environment-variables) attempts, up to 10 seconds of backoff, no client-side retry quota and retries for `ModelTimeoutException` and `ModelNotReadyException`. The SDK is the only transport retry layer; the ambassador makes one client call per operation. Each embedding call has an [`EMBED_TIMEOUT`](configuration.md#environment-variables) deadline.
+- **Query and proxy timeouts**: Admitted queries run under the [query time budget](architecture.md#query-time-budget). Set proxy and load balancer response timeouts to at least `HTTP_WRITE_TIMEOUT`. Keep adequate margin for reading request bodies and waiting for admission when configuring write timeouts.
+- **Retries and Deadlines**: Bedrock and S3 use the same retry policy: the SDK's standard retries with [`AWS_MAX_ATTEMPTS`](configuration.md#environment-variables) attempts, a 10-second maximum backoff, no client-side retry quota, and `ModelTimeoutException` and `ModelNotReadyException` added to the retryable errors. Each embedding call has an [`EMBED_TIMEOUT`](configuration.md#environment-variables) deadline. See the [query time budget](architecture.md#query-time-budget) for the single transport retry layer.
 - **Required Model Access**:
   - Titan Embed Text V2 (`amazon.titan-embed-text-v2:0`): generates 1024-dimensional normalized text embeddings.
   - Nova Micro (`amazon.nova-micro-v1:0`): fast, low-latency reasoning and synthesis.
@@ -265,19 +269,11 @@ make reconcile ARGS="-limit=10000 -page=100"
 make reconcile ARGS="-apply -limit=10000 -page=100"
 ```
 
-Without `-apply`, the command only reads and prints JSON counts and a bounded
-sample. It preserves stored documents, processing documents and failed documents
-with retry jobs. Default-namespace vectors with missing or invalid `doc_id`, a
-missing document row, or a terminally failed document are eligible. UUID-named
-legacy namespaces are eligible only when no document row exists.
-
-The default limit is 100000 vectors across selected default-namespace IDs and
-the reported counts of whole legacy namespaces; namespaces that exceed the
-remaining budget are skipped. Counts are eventually consistent, so use a quiet
-index and rerun the dry run after deletion has propagated. Pod-based indexes
-without vector listing support reconcile legacy namespaces only and report that
-limitation on stderr. See the operational scripts documentation for page sizes,
-output fields and partial deletion failures.
+Without `-apply`, the command only reads. Counts are eventually consistent, so
+run it against a quiet index. The [operational scripts documentation](development.md#orphan-reconciliation-scriptsreconcile)
+describes which vectors and namespaces are selected, default limits, page sizes,
+output fields, index limitations, partial deletion failures and verification
+after deletion.
 
 If documents already have collection labels, complete the
 [collection metadata backfill](development.md#collection-metadata-backfill) once
