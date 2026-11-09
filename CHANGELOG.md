@@ -15,6 +15,7 @@ Notable changes are grouped by release.
 
 - The no-evidence answer follows `Accept-Language` for English, Spanish, Portuguese, French, German and Italian and sets `Content-Language`.
 - Documentation keeps each operational fact in one document and links to it elsewhere.
+- Synthesis context is selected by `SYNTHESIS_CONTEXT_TOKENS` estimated tokens and `SYNTHESIS_RELATIVE_SCORE_FLOOR` instead of at most 5 excerpts (8 for multi-part questions) cut near 1,200 characters.
 
 ### Fixed
 

@@ -175,7 +175,7 @@ sequenceDiagram
     alt No authorized evidence
         Synthesis-->>Handler: No-information answer (see query API)
     else Evidence available
-    Synthesis->>Synthesis: trimChunksForSynthesis (relative score floor 0.55, max count cap, rune cutoff)
+    Synthesis->>Synthesis: trimChunksForSynthesis (relative score floor, estimated token budget)
     Synthesis->>Synthesis: Route model (Nova Micro vs Llama 4 based on SYNTHESIS_MODEL & multi-need)
     Synthesis->>LLM: ConverseRoutedPlain (system prompt: answer in question's language)
     LLM-->>Synthesis: Synthesized answer & token usage
@@ -212,7 +212,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
    - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents, in the requested collection when one is set, contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query; the top score is recomputed from visible chunks.
 4. **SynthesisStage**:
    - When [`MIN_RELEVANCE_SCORE`](configuration.md#environment-variables) is positive, drops chunks below it before adaptive trimming. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).
-   - Applies adaptive chunk trimming: drops chunks scoring below 55% of the top chunk's score, bounds chunk counts (5 chunks for simple queries, 8 for multi-need queries), and truncates chunk bodies at sentence boundaries near 1200 runes.
+   - Selects sanitized excerpt bodies in score order using the [configured token budget and relative score floor](configuration.md#environment-variables). The first body that does not fit is cut at the last period or newline within the remaining budget if at least 64 estimated tokens can be retained; selection then stops. The best-scoring excerpt is always retained; without such a boundary it is cut at the budget.
    - Records the exact sanitized excerpts sent to synthesis and whether each body was cut. Retrieved chunks report their matching excerpt number and truncation flag through the [query response](api.md#post-query).
    - Selects synthesis model according to `SYNTHESIS_MODEL` (`fallback` defaults to Llama 4 Maverick, `primary` routes to Nova Micro, and `hybrid` dynamically routes based on multi-need detection).
    - Places the question before the retrieved excerpts and wraps each excerpt in a numbered marker with a random per-request boundary. Removes invisible format and control characters from the question and stored chunks, preserves newlines and tabs, and escapes excerpt marker prefixes inside their text. Estimates tokens over the complete system and user prompts, including markers.
