@@ -12,6 +12,8 @@ import (
 type ListOptions struct {
 	Limit int
 	After string
+
+	Collection string
 }
 
 // DocumentSummary describes a document and its collection without content or metadata.
@@ -57,6 +59,9 @@ func (c *Client) ListDocuments(ctx context.Context, opts ListOptions) (*Document
 	query := url.Values{"limit": {strconv.Itoa(opts.Limit)}}
 	if opts.After != "" {
 		query.Set("after", opts.After)
+	}
+	if opts.Collection != "" {
+		query.Set("collection", opts.Collection)
 	}
 	var response DocumentPage
 	if err := c.jsonRequest(ctx, http.MethodGet, "/documents?"+query.Encode(), nil, &response); err != nil {

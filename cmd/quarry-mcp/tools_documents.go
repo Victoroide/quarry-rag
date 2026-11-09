@@ -11,6 +11,8 @@ import (
 type listInput struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"Documents per page, 1 to 1000."`
 	After string `json:"after,omitempty" jsonschema:"Continue after this document ID, taken from next_after."`
+
+	Collection string `json:"collection,omitempty" jsonschema:"Only list documents with this collection label; empty means all collections."`
 }
 
 type documentInput struct {
@@ -31,7 +33,7 @@ func registerDocumentTools(s *mcp.Server, api *client.Client, cfg config) error 
 	schema.Properties["limit"].Maximum = new(float64(1000))
 	schema.Properties["limit"].Default = []byte("100")
 	addAPITool(s, &mcp.Tool{Name: "quarry_list_documents", Description: "List a page of document summaries and ingestion statuses", Annotations: readAnnotations(), InputSchema: schema}, cfg.token, func(ctx context.Context, input listInput) (listOutput, error) {
-		page, err := api.ListDocuments(ctx, client.ListOptions{Limit: input.Limit, After: input.After})
+		page, err := api.ListDocuments(ctx, client.ListOptions{Limit: input.Limit, After: input.After, Collection: input.Collection})
 		if err != nil {
 			return listOutput{}, err
 		}

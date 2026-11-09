@@ -115,3 +115,11 @@ func TestQueryCitationContract(t *testing.T) {
 		})
 	}
 }
+
+func TestQueryCollectionEncoding(t *testing.T) {
+	encoded, err := json.Marshal(client.QueryRequest{Query: "archive", Collection: "café"})
+	require.NoError(t, err)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &body))
+	require.Equal(t, "café", body["collection"])
+}

@@ -14,6 +14,8 @@ type queryInput struct {
 	MaxChunks          int      `json:"max_chunks,omitempty" jsonschema:"Maximum evidence chunks, 0 to 100. 0 uses the service default; larger values are capped by the service."`
 	IncludeCitations   bool     `json:"include_citations,omitempty" jsonschema:"Request inline citation markers and lexical overlap checks against the synthesis excerpts."`
 	AllowedDocumentIDs []string `json:"allowed_document_ids,omitempty" jsonschema:"Document UUIDs the caller may read. Omit for unrestricted retrieval; an empty list matches no documents."`
+
+	Collection string `json:"collection,omitempty" jsonschema:"Only retrieve documents with this collection label; empty means all collections."`
 }
 
 type queryOutput struct {

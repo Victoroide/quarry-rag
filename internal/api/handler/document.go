@@ -81,6 +81,15 @@ func ListDocumentsHandler(cs domain.ChunkStore) http.HandlerFunc {
 			listDocumentSummaries(w, r, lister)
 			return
 		}
+		collection, apiErr := listingCollection(r)
+		if apiErr != nil {
+			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			return
+		}
+		if collection != "" {
+			writeJSONError(w, http.StatusInternalServerError, "internal", "collection filtering is unavailable")
+			return
+		}
 		docs, err := cs.ListDocuments(r.Context())
 		if err != nil {
 			slog.ErrorContext(r.Context(), "list documents", "error", err)

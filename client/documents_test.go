@@ -63,3 +63,13 @@ func TestDocumentIDIsOnePathSegment(t *testing.T) {
 	_, err := c.GetDocument(t.Context(), "id/with?reserved#characters")
 	require.NoError(t, err)
 }
+
+func TestListDocumentsCollectionEncoding(t *testing.T) {
+	c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "café & reports", r.URL.Query().Get("collection"))
+		require.Equal(t, "100", r.URL.Query().Get("limit"))
+		writeJSON(t, w, client.DocumentPage{Documents: []client.DocumentSummary{}})
+	})
+	_, err := c.ListDocuments(t.Context(), client.ListOptions{Collection: "café & reports"})
+	require.NoError(t, err)
+}

@@ -31,6 +31,8 @@ type QueryRequest struct {
 	MaxChunks          int      `json:"max_chunks,omitempty"`
 	IncludeCitations   bool     `json:"include_citations,omitempty"`
 	AllowedDocumentIDs []string `json:"allowed_document_ids,omitzero"`
+
+	Collection string `json:"collection,omitempty"`
 }
 
 // ScoredChunkResponse is a single scored chunk in the query response.
@@ -99,6 +101,10 @@ func validateQueryRequest(req *QueryRequest) *APIError {
 	}
 	var apiErr *APIError
 	req.FilterDocType, apiErr = validateDocType(req.FilterDocType)
+	if apiErr != nil {
+		return apiErr
+	}
+	req.Collection, apiErr = validateLabel("collection", req.Collection)
 	return apiErr
 }
 
@@ -148,13 +154,14 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			IncludeCitations:   req.IncludeCitations,
 			AllowedDocumentIDs: req.AllowedDocumentIDs,
 			AcceptLanguage:     strings.Join(r.Header.Values("Accept-Language"), ","),
+			Collection:         req.Collection,
 		}
 
 		retrieval := pipeline.NewRetrievalStage(ret)
 		routing := pipeline.NewRoutingStage(ret)
 		if pool != nil {
-			retrieval = pipeline.NewRetrievalStageWithVisibility(ret, pgstore.Visibility{Pool: pool})
-			routing = pipeline.NewRoutingStageWithScope(ret, pgstore.Visibility{Pool: pool}, pgstore.Previews{Pool: pool})
+			retrieval = pipeline.NewRetrievalStageWithVisibility(ret, pgstore.Visibility{Pool: pool, Collection: req.Collection})
+			routing = pipeline.NewRoutingStageWithScope(ret, pgstore.Visibility{Pool: pool, Collection: req.Collection}, pgstore.Previews{Pool: pool})
 		}
 		stages := []pipeline.QueryStage{
 			pipeline.NewDecomposeStage(),

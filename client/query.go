@@ -15,6 +15,8 @@ type QueryRequest struct {
 	MaxChunks          int      `json:"max_chunks,omitempty"`
 	IncludeCitations   bool     `json:"include_citations,omitempty"`
 	AllowedDocumentIDs []string `json:"allowed_document_ids,omitzero"`
+
+	Collection string `json:"collection,omitempty"`
 }
 
 // MarshalJSON preserves an explicitly empty authorization scope.

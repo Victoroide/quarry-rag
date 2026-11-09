@@ -213,3 +213,25 @@ func TestDocumentSummaryStorageErrors(t *testing.T) {
 		require.Equal(t, "internal", body["error"])
 	}
 }
+
+func TestListingCollectionRejectsUnsupportedStores(t *testing.T) {
+	for name, store := range map[string]domain.ChunkStore{"legacy": summaryLegacyStore{}, "summaries": summaryStore{}} {
+		t.Run(name, func(t *testing.T) {
+			for _, query := range []string{"collection=archive", "collection=archive&limit=1"} {
+				rec := summaryRequest(t, handler.ListDocumentsHandler(store), "/documents?"+query, "")
+				require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			}
+			for _, query := range []string{"collection=a&collection=b", "collection=a%00b", "collection=%FF"} {
+				rec := summaryRequest(t, handler.ListDocumentsHandler(store), "/documents?"+query, "")
+				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestListingRejectsMalformedCollectionEncoding(t *testing.T) {
+	for _, query := range []string{"collection=%zz", "collection=a;b"} {
+		rec := summaryRequest(t, handler.ListDocumentsHandler(summaryStore{}), "/documents?"+query, "")
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+}
