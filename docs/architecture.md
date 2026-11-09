@@ -102,7 +102,7 @@ sequenceDiagram
 
 ### Ingestion Stages
 
-1. **ChunkStage**: Converts raw document text into sliding-window text chunks bounded by `CHUNK_TOKEN_SIZE` (default 512 estimated tokens, minimum 2) and 30,000 bytes. Sentence boundaries are preferred, including full-width terminators without following whitespace. Oversized sentences split by words, and oversized words split at rune boundaries. Each window includes new text and retains up to `CHUNK_OVERLAP` (default 64 estimated tokens) from the previous window when both limits permit. Generates a deterministic chunk ID for each chunk.
+1. **ChunkStage**: Converts raw document text into sliding-window text chunks bounded by `CHUNK_TOKEN_SIZE` (default 512 estimated tokens, minimum 2) and 30,000 bytes. Sentence boundaries are preferred, including full-width terminators without following whitespace. Oversized sentences split by words, and oversized words split at rune boundaries. Each window includes new text and retains up to `CHUNK_OVERLAP` (default 64 estimated tokens) from the previous window when both limits permit, never more than half of that window. Generates a deterministic chunk ID for each chunk.
 2. **EmbedStage**: Embeds chunks concurrently up to `EMBED_CONCURRENCY`; the provider also enforces its shared request limit.
 3. **PersistStage**:
    - Assigns the caller's `doc_type` or falls back to the default `"document"`.
