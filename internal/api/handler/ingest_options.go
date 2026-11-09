@@ -10,6 +10,12 @@ type ingestOptions struct {
 	maxPending int
 	extract    func(context.Context, extractor.FileType, []byte) (string, error)
 	limiter    *extractor.Limiter
+	ocr        bool
+}
+
+// WithOCR enables deferred text detection for image-only PDF uploads.
+func WithOCR(enabled bool) IngestOption {
+	return func(opts *ingestOptions) { opts.ocr = enabled }
 }
 
 // IngestOption configures file extraction and upload admission.

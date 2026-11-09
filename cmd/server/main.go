@@ -26,6 +26,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/llm"
 	"github.com/Victoroide/quarry-rag/internal/logctx"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
+	"github.com/Victoroide/quarry-rag/internal/ocr"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	memstore "github.com/Victoroide/quarry-rag/internal/store/memory"
@@ -192,7 +193,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("startup: hostname: %w", err)
 	}
-	w := worker.New(pgClient, ingestStages, vecDeleter, worker.Options{Metrics: serviceMetrics, Workers: cfg.IngestWorkers, MaxAttempts: cfg.IngestMaxAttempts, Lease: cfg.IngestLease, JobTimeout: cfg.IngestJobTimeout, PollInterval: cfg.IngestPollInterval, Owner: hostname + "-" + uuid.NewString()})
+	var textDetector worker.TextExtractor
+	if cfg.OCRProvider == "textract" && !cfg.FakeMode {
+		detector, detectorErr := ocr.New(startupCtx, cfg)
+		if detectorErr != nil {
+			return fmt.Errorf("startup: ocr: %w", detectorErr)
+		}
+		textDetector = detector
+	}
+	w := worker.New(pgClient, ingestStages, vecDeleter, worker.Options{Metrics: serviceMetrics, Workers: cfg.IngestWorkers, MaxAttempts: cfg.IngestMaxAttempts, Lease: cfg.IngestLease, JobTimeout: cfg.IngestJobTimeout, PollInterval: cfg.IngestPollInterval, Owner: hostname + "-" + uuid.NewString(), OCR: textDetector})
 	w.Start(ctx)
 	defer func() {
 		shutdownCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)

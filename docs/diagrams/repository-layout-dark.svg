@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 920" role="img" fill="#e6edf3">
 <title>Repository layout</title>
-<desc>Repository layout, from the directory listing to depth three. client/ Go client for the HTTP API. cmd/ Executable entry points. cmd/quarry-mcp/ Local MCP server over stdio. cmd/server/ Wiring and graceful shutdown. docs/ Service documentation. docs/diagrams/ Architecture, schema and layout. docs/diagrams/src/ Diagram placement sources. internal/ Private service packages. internal/api/ HTTP router. internal/api/handler/ Request handlers. internal/api/middleware/ Authentication, logs and metrics. internal/awsconf/ AWS credentials and retry policy. internal/chunker/ Text windows and fingerprints. internal/cleanup/ Document deletion across stores. internal/config/ Configuration and validation. internal/domain/ Shared types and interfaces. internal/embedder/ Titan V2 and offline embeddings. internal/extractor/ File parsing and process isolation. internal/llm/ Answer routing and Converse. internal/logctx/ Request log attributes. internal/metrics/ Prometheus text metrics. internal/pipeline/ Ingestion and query stages. internal/retriever/ LOCAL and GLOBAL retrieval. internal/store/ Storage adapters. internal/store/memory/ Offline vector index. internal/store/pinecone/ Hosted vector index. internal/store/postgres/ Documents, chunks and durable jobs. internal/store/s3/ Original files and signed downloads. internal/testutil/ Test support. internal/testutil/pgtest/ Disposable database containers. internal/textutil/ Unicode normalization. internal/tracing/ OpenTelemetry export and span helpers. internal/worker/ Leased ingestion and retry handling. scripts/ Operational commands. scripts/cleanup/ Delete selected documents. scripts/langeval/ Answer language and latency checks. scripts/reconcile/ Find and remove orphan vectors. scripts/simulate/ Exercise the service API. scripts/validate/ Check retrieval behavior. test/ Service test suites. test/integration/ Database and API integration. test/smoke/ Opt-in live service checks. test/unit/ Package behavior checks. tools/ Documentation support. tools/diagrams/ Vector image sources and checks. tools/diagrams/fonts/ Bundled typefaces and license. The highlight follows cmd/server, internal/api, internal/pipeline, internal/retriever, internal/llm and internal/store.</desc>
-<style>@keyframes n3{0%{opacity:0}2.5%{opacity:0}5%{opacity:1}7.5%{opacity:0}100%{opacity:0}}@keyframes n8{0%{opacity:0}10%{opacity:0}12.5%{opacity:1}15%{opacity:0}100%{opacity:0}}@keyframes n18{0%{opacity:0}32.5%{opacity:0}35%{opacity:1}37.5%{opacity:0}100%{opacity:0}}@keyframes n21{0%{opacity:0}17.5%{opacity:0}20%{opacity:1}22.5%{opacity:0}100%{opacity:0}}@keyframes n22{0%{opacity:0}25%{opacity:0}27.5%{opacity:1}30%{opacity:0}100%{opacity:0}}@keyframes n23{0%{opacity:0}40%{opacity:0}42.5%{opacity:1}45%{opacity:0}100%{opacity:0}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
+<desc>Repository layout, from the directory listing to depth three. client/ Go client for the HTTP API. cmd/ Executable entry points. cmd/quarry-mcp/ Local MCP server over stdio. cmd/server/ Wiring and graceful shutdown. docs/ Service documentation. docs/diagrams/ Architecture, schema and layout. docs/diagrams/src/ Diagram placement sources. internal/ Private service packages. internal/api/ HTTP router. internal/api/handler/ Request handlers. internal/api/middleware/ Authentication, logs and metrics. internal/awsconf/ AWS credentials and retry policy. internal/chunker/ Text windows and fingerprints. internal/cleanup/ Document deletion across stores. internal/config/ Configuration and validation. internal/domain/ Shared types and interfaces. internal/embedder/ Titan V2 and offline embeddings. internal/extractor/ File parsing and process isolation. internal/llm/ Answer routing and Converse. internal/logctx/ Request log attributes. internal/metrics/ Prometheus text metrics. internal/ocr/ Asynchronous PDF text detection. internal/pipeline/ Ingestion and query stages. internal/retriever/ LOCAL and GLOBAL retrieval. internal/store/ Storage adapters. internal/store/memory/ Offline vector index. internal/store/pinecone/ Hosted vector index. internal/store/postgres/ Documents, chunks and durable jobs. internal/store/s3/ Original files and signed downloads. internal/testutil/ Test support. internal/testutil/pgtest/ Disposable database containers. internal/textutil/ Unicode normalization. internal/tracing/ OpenTelemetry export and span helpers. internal/worker/ Leased ingestion and retry handling. scripts/ Operational commands. scripts/cleanup/ Delete selected documents. scripts/langeval/ Answer language and latency checks. scripts/reconcile/ Find and remove orphan vectors. scripts/simulate/ Exercise the service API. scripts/validate/ Check retrieval behavior. test/ Service test suites. test/integration/ Database and API integration. test/smoke/ Opt-in live service checks. test/unit/ Package behavior checks. tools/ Documentation support. tools/diagrams/ Vector image sources and checks. tools/diagrams/fonts/ Bundled typefaces and license. The highlight follows cmd/server, internal/api, internal/pipeline, internal/retriever, internal/llm and internal/store.</desc>
+<style>@keyframes n3{0%{opacity:0}2.5%{opacity:0}5%{opacity:1}7.5%{opacity:0}100%{opacity:0}}@keyframes n8{0%{opacity:0}10%{opacity:0}12.5%{opacity:1}15%{opacity:0}100%{opacity:0}}@keyframes n18{0%{opacity:0}32.5%{opacity:0}35%{opacity:1}37.5%{opacity:0}100%{opacity:0}}@keyframes n22{0%{opacity:0}17.5%{opacity:0}20%{opacity:1}22.5%{opacity:0}100%{opacity:0}}@keyframes n23{0%{opacity:0}25%{opacity:0}27.5%{opacity:1}30%{opacity:0}100%{opacity:0}}@keyframes n24{0%{opacity:0}40%{opacity:0}42.5%{opacity:1}45%{opacity:0}100%{opacity:0}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
 <defs>
 <path id="r2c" d="M63 175L105 -102L206 -102L130 175L63 175"/>
 <path id="r2d" d="M390 -351L390 -270L70 -270L70 -351L390 -351"/>
@@ -95,7 +95,7 @@
 </defs>
 <rect class="background" x="0" y="0" width="840" height="920" rx="14" fill="#0d1117"/>
 <g fill="none" stroke="#30363d" stroke-width="1" stroke-dasharray="4 4">
-<rect class="group" x="16" y="88" width="392" height="796" rx="14"/>
+<rect class="group" x="16" y="88" width="392" height="799" rx="14"/>
 <rect class="group" x="432" y="88" width="392" height="48" rx="14"/>
 <rect class="group" x="432" y="152" width="392" height="112" rx="14"/>
 <rect class="group" x="432" y="280" width="392" height="112" rx="14"/>
@@ -129,7 +129,7 @@
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#1c3a5e">
-<rect class="hit" x="53" y="127" width="342" height="28" rx="9" opacity="0" style="animation:n8 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="53" y="126" width="342" height="27" rx="9" opacity="0" style="animation:n8 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
@@ -152,26 +152,28 @@
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#1c3a5e">
-<rect class="hit" x="53" y="427" width="342" height="28" rx="9" opacity="0" style="animation:n18 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="53" y="416" width="342" height="27" rx="9" opacity="0" style="animation:n18 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
-</g>
-<g fill="#1c3a5e">
-<rect class="hit" x="53" y="517" width="342" height="28" rx="9" opacity="0" style="animation:n21 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#1c3a5e">
-<rect class="hit" x="53" y="547" width="342" height="28" rx="9" opacity="0" style="animation:n22 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="53" y="532" width="342" height="27" rx="9" opacity="0" style="animation:n22 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#1c3a5e">
-<rect class="hit" x="53" y="577" width="342" height="28" rx="9" opacity="0" style="animation:n23 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="53" y="561" width="342" height="27" rx="9" opacity="0" style="animation:n23 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+</g>
+<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
+</g>
+<g fill="#1c3a5e">
+<rect class="hit" x="53" y="590" width="342" height="27" rx="9" opacity="0" style="animation:n24 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
@@ -528,13 +530,13 @@
 <use href="#r65" x="10768"/>
 <use href="#r73" x="11351"/>
 </g>
-<g transform="translate(64 147) scale(0.014)">
+<g transform="translate(64 146) scale(0.014)">
 <use href="#s61"/>
 <use href="#s70" x="574"/>
 <use href="#s69" x="1198"/>
 <use href="#s2f" x="1460"/>
 </g>
-<g fill="#9198a1" transform="translate(101.225 147) scale(0.012)">
+<g fill="#9198a1" transform="translate(101.225 146) scale(0.012)">
 <use href="#r48"/>
 <use href="#r54" x="743"/>
 <use href="#r54" x="1389"/>
@@ -546,7 +548,7 @@
 <use href="#r65" x="4849"/>
 <use href="#r72" x="5432"/>
 </g>
-<g transform="translate(88 177) scale(0.014)">
+<g transform="translate(88 175) scale(0.014)">
 <use href="#s68"/>
 <use href="#s61" x="612"/>
 <use href="#s6e" x="1187"/>
@@ -556,7 +558,7 @@
 <use href="#s72" x="3275"/>
 <use href="#s2f" x="3672"/>
 </g>
-<g fill="#9198a1" transform="translate(155.774 177) scale(0.012)">
+<g fill="#9198a1" transform="translate(155.774 175) scale(0.012)">
 <use href="#r52"/>
 <use href="#r65" x="644"/>
 <use href="#r71" x="1227"/>
@@ -573,7 +575,7 @@
 <use href="#r72" x="7331"/>
 <use href="#r73" x="7707"/>
 </g>
-<g transform="translate(88 207) scale(0.014)">
+<g transform="translate(88 204) scale(0.014)">
 <use href="#s6d"/>
 <use href="#s69" x="900"/>
 <use href="#s64" x="1162"/>
@@ -586,7 +588,7 @@
 <use href="#s65" x="5074"/>
 <use href="#s2f" x="5665"/>
 </g>
-<g fill="#9198a1" transform="translate(183.672 207) scale(0.012)">
+<g fill="#9198a1" transform="translate(183.672 204) scale(0.012)">
 <use href="#r41"/>
 <use href="#r75" x="690"/>
 <use href="#r74" x="1281"/>
@@ -617,7 +619,7 @@
 <use href="#r63" x="14120"/>
 <use href="#r73" x="14691"/>
 </g>
-<g transform="translate(64 237) scale(0.014)">
+<g transform="translate(64 233) scale(0.014)">
 <use href="#s61"/>
 <use href="#s77" x="574"/>
 <use href="#s73" x="1414"/>
@@ -627,7 +629,7 @@
 <use href="#s66" x="3766"/>
 <use href="#s2f" x="4155"/>
 </g>
-<g fill="#9198a1" transform="translate(138.952 237) scale(0.012)">
+<g fill="#9198a1" transform="translate(138.952 233) scale(0.012)">
 <use href="#r41"/>
 <use href="#r57" x="690"/>
 <use href="#r53" x="1675"/>
@@ -657,7 +659,7 @@
 <use href="#r63" x="14346"/>
 <use href="#r79" x="14917"/>
 </g>
-<g transform="translate(64 267) scale(0.014)">
+<g transform="translate(64 262) scale(0.014)">
 <use href="#s63"/>
 <use href="#s68" x="583"/>
 <use href="#s75" x="1195"/>
@@ -667,7 +669,7 @@
 <use href="#s72" x="3580"/>
 <use href="#s2f" x="3977"/>
 </g>
-<g fill="#9198a1" transform="translate(136.368 267) scale(0.012)">
+<g fill="#9198a1" transform="translate(136.368 262) scale(0.012)">
 <use href="#r54"/>
 <use href="#r65" x="646"/>
 <use href="#r78" x="1229"/>
@@ -695,7 +697,7 @@
 <use href="#r74" x="13517"/>
 <use href="#r73" x="13844"/>
 </g>
-<g transform="translate(64 297) scale(0.014)">
+<g transform="translate(64 291) scale(0.014)">
 <use href="#s63"/>
 <use href="#s6c" x="583"/>
 <use href="#s65" x="844"/>
@@ -705,7 +707,7 @@
 <use href="#s70" x="3234"/>
 <use href="#s2f" x="3858"/>
 </g>
-<g fill="#9198a1" transform="translate(134.707 297) scale(0.012)">
+<g fill="#9198a1" transform="translate(134.707 291) scale(0.012)">
 <use href="#r44"/>
 <use href="#r6f" x="722"/>
 <use href="#r63" x="1321"/>
@@ -735,7 +737,7 @@
 <use href="#r65" x="14481"/>
 <use href="#r73" x="15064"/>
 </g>
-<g transform="translate(64 327) scale(0.014)">
+<g transform="translate(64 320) scale(0.014)">
 <use href="#s63"/>
 <use href="#s6f" x="583"/>
 <use href="#s6e" x="1191"/>
@@ -744,7 +746,7 @@
 <use href="#s67" x="2454"/>
 <use href="#s2f" x="3079"/>
 </g>
-<g fill="#9198a1" transform="translate(123.804 327) scale(0.012)">
+<g fill="#9198a1" transform="translate(123.804 320) scale(0.012)">
 <use href="#r43"/>
 <use href="#r6f" x="730"/>
 <use href="#r6e" x="1330"/>
@@ -772,7 +774,7 @@
 <use href="#r6f" x="12114"/>
 <use href="#r6e" x="12713"/>
 </g>
-<g transform="translate(64 357) scale(0.014)">
+<g transform="translate(64 349) scale(0.014)">
 <use href="#s64"/>
 <use href="#s6f" x="624"/>
 <use href="#s6d" x="1233"/>
@@ -781,7 +783,7 @@
 <use href="#s6e" x="2969"/>
 <use href="#s2f" x="3581"/>
 </g>
-<g fill="#9198a1" transform="translate(130.831 357) scale(0.012)">
+<g fill="#9198a1" transform="translate(130.831 349) scale(0.012)">
 <use href="#r53"/>
 <use href="#r68" x="642"/>
 <use href="#r61" x="1233"/>
@@ -807,7 +809,7 @@
 <use href="#r65" x="12210"/>
 <use href="#r73" x="12793"/>
 </g>
-<g transform="translate(64 387) scale(0.014)">
+<g transform="translate(64 378) scale(0.014)">
 <use href="#s65"/>
 <use href="#s6d" x="591"/>
 <use href="#s62" x="1492"/>
@@ -818,7 +820,7 @@
 <use href="#s72" x="4546"/>
 <use href="#s2f" x="4943"/>
 </g>
-<g fill="#9198a1" transform="translate(149.904 387) scale(0.012)">
+<g fill="#9198a1" transform="translate(149.904 378) scale(0.012)">
 <use href="#r54"/>
 <use href="#r69" x="646"/>
 <use href="#r74" x="888"/>
@@ -847,7 +849,7 @@
 <use href="#r67" x="14267"/>
 <use href="#r73" x="14880"/>
 </g>
-<g transform="translate(64 417) scale(0.014)">
+<g transform="translate(64 407) scale(0.014)">
 <use href="#s65"/>
 <use href="#s78" x="591"/>
 <use href="#s74" x="1160"/>
@@ -859,7 +861,7 @@
 <use href="#s72" x="4029"/>
 <use href="#s2f" x="4426"/>
 </g>
-<g fill="#9198a1" transform="translate(142.657 417) scale(0.012)">
+<g fill="#9198a1" transform="translate(142.657 407) scale(0.012)">
 <use href="#r46"/>
 <use href="#r69" x="590"/>
 <use href="#r6c" x="833"/>
@@ -891,13 +893,13 @@
 <use href="#r6f" x="14613"/>
 <use href="#r6e" x="15212"/>
 </g>
-<g transform="translate(64 447) scale(0.014)">
+<g transform="translate(64 436) scale(0.014)">
 <use href="#s6c"/>
 <use href="#s6c" x="262"/>
 <use href="#s6d" x="523"/>
 <use href="#s2f" x="1424"/>
 </g>
-<g fill="#9198a1" transform="translate(100.295 447) scale(0.012)">
+<g fill="#9198a1" transform="translate(100.295 436) scale(0.012)">
 <use href="#r41"/>
 <use href="#r6e" x="690"/>
 <use href="#r73" x="1281"/>
@@ -923,7 +925,7 @@
 <use href="#r73" x="12978"/>
 <use href="#r65" x="13506"/>
 </g>
-<g transform="translate(64 477) scale(0.014)">
+<g transform="translate(64 465) scale(0.014)">
 <use href="#s6c"/>
 <use href="#s6f" x="262"/>
 <use href="#s67" x="871"/>
@@ -932,7 +934,7 @@
 <use href="#s78" x="2432"/>
 <use href="#s2f" x="3000"/>
 </g>
-<g fill="#9198a1" transform="translate(122.368 477) scale(0.012)">
+<g fill="#9198a1" transform="translate(122.368 465) scale(0.012)">
 <use href="#r52"/>
 <use href="#r65" x="644"/>
 <use href="#r71" x="1227"/>
@@ -954,7 +956,7 @@
 <use href="#r65" x="9251"/>
 <use href="#r73" x="9834"/>
 </g>
-<g transform="translate(64 507) scale(0.014)">
+<g transform="translate(64 494) scale(0.014)">
 <use href="#s6d"/>
 <use href="#s65" x="900"/>
 <use href="#s74" x="1492"/>
@@ -964,7 +966,7 @@
 <use href="#s73" x="3086"/>
 <use href="#s2f" x="3635"/>
 </g>
-<g fill="#9198a1" transform="translate(131.255 507) scale(0.012)">
+<g fill="#9198a1" transform="translate(131.255 494) scale(0.012)">
 <use href="#r50"/>
 <use href="#r72" x="639"/>
 <use href="#r6f" x="1015"/>
@@ -987,7 +989,43 @@
 <use href="#r63" x="10445"/>
 <use href="#r73" x="11016"/>
 </g>
-<g transform="translate(64 537) scale(0.014)">
+<g transform="translate(64 523) scale(0.014)">
+<use href="#s6f"/>
+<use href="#s63" x="609"/>
+<use href="#s72" x="1191"/>
+<use href="#s2f" x="1588"/>
+</g>
+<g fill="#9198a1" transform="translate(102.934 523) scale(0.012)">
+<use href="#r41"/>
+<use href="#r73" x="690"/>
+<use href="#r79" x="1218"/>
+<use href="#r6e" x="1780"/>
+<use href="#r63" x="2371"/>
+<use href="#r68" x="2942"/>
+<use href="#r72" x="3533"/>
+<use href="#r6f" x="3910"/>
+<use href="#r6e" x="4509"/>
+<use href="#r6f" x="5100"/>
+<use href="#r75" x="5700"/>
+<use href="#r73" x="6291"/>
+<use href="#r50" x="7100"/>
+<use href="#r44" x="7739"/>
+<use href="#r46" x="8460"/>
+<use href="#r74" x="9332"/>
+<use href="#r65" x="9659"/>
+<use href="#r78" x="10242"/>
+<use href="#r74" x="10788"/>
+<use href="#r64" x="11397"/>
+<use href="#r65" x="12009"/>
+<use href="#r74" x="12592"/>
+<use href="#r65" x="12919"/>
+<use href="#r63" x="13502"/>
+<use href="#r74" x="14073"/>
+<use href="#r69" x="14401"/>
+<use href="#r6f" x="14643"/>
+<use href="#r6e" x="15242"/>
+</g>
+<g transform="translate(64 552) scale(0.014)">
 <use href="#s70"/>
 <use href="#s69" x="624"/>
 <use href="#s70" x="886"/>
@@ -998,7 +1036,7 @@
 <use href="#s65" x="3236"/>
 <use href="#s2f" x="3828"/>
 </g>
-<g fill="#9198a1" transform="translate(133.948 537) scale(0.012)">
+<g fill="#9198a1" transform="translate(133.948 552) scale(0.012)">
 <use href="#r49"/>
 <use href="#r6e" x="269"/>
 <use href="#r67" x="859"/>
@@ -1023,7 +1061,7 @@
 <use href="#r65" x="11707"/>
 <use href="#r73" x="12290"/>
 </g>
-<g transform="translate(64 567) scale(0.014)">
+<g transform="translate(64 581) scale(0.014)">
 <use href="#s72"/>
 <use href="#s65" x="397"/>
 <use href="#s74" x="988"/>
@@ -1035,7 +1073,7 @@
 <use href="#s72" x="3770"/>
 <use href="#s2f" x="4167"/>
 </g>
-<g fill="#9198a1" transform="translate(138.692 567) scale(0.012)">
+<g fill="#9198a1" transform="translate(138.692 581) scale(0.012)">
 <use href="#r4c"/>
 <use href="#r4f" x="565"/>
 <use href="#r43" x="1330"/>
@@ -1060,7 +1098,7 @@
 <use href="#r61" x="12961"/>
 <use href="#r6c" x="13522"/>
 </g>
-<g transform="translate(64 597) scale(0.014)">
+<g transform="translate(64 610) scale(0.014)">
 <use href="#s73"/>
 <use href="#s74" x="549"/>
 <use href="#s6f" x="902"/>
@@ -1068,7 +1106,7 @@
 <use href="#s65" x="1908"/>
 <use href="#s2f" x="2500"/>
 </g>
-<g fill="#9198a1" transform="translate(115.696 597) scale(0.012)">
+<g fill="#9198a1" transform="translate(115.696 610) scale(0.012)">
 <use href="#r53"/>
 <use href="#r74" x="642"/>
 <use href="#r6f" x="969"/>
@@ -1085,7 +1123,7 @@
 <use href="#r72" x="7242"/>
 <use href="#r73" x="7618"/>
 </g>
-<g transform="translate(88 627) scale(0.014)">
+<g transform="translate(88 639) scale(0.014)">
 <use href="#s6d"/>
 <use href="#s65" x="900"/>
 <use href="#s6d" x="1492"/>
@@ -1094,7 +1132,7 @@
 <use href="#s79" x="3398"/>
 <use href="#s2f" x="3986"/>
 </g>
-<g fill="#9198a1" transform="translate(160.17 627) scale(0.012)">
+<g fill="#9198a1" transform="translate(160.17 639) scale(0.012)">
 <use href="#r4f"/>
 <use href="#r66" x="765"/>
 <use href="#r66" x="1135"/>
@@ -1114,7 +1152,7 @@
 <use href="#r65" x="8191"/>
 <use href="#r78" x="8774"/>
 </g>
-<g transform="translate(88 657) scale(0.014)">
+<g transform="translate(88 668) scale(0.014)">
 <use href="#s70"/>
 <use href="#s69" x="624"/>
 <use href="#s6e" x="886"/>
@@ -1125,7 +1163,7 @@
 <use href="#s65" x="3892"/>
 <use href="#s2f" x="4483"/>
 </g>
-<g fill="#9198a1" transform="translate(167.129 657) scale(0.012)">
+<g fill="#9198a1" transform="translate(167.129 668) scale(0.012)">
 <use href="#r48"/>
 <use href="#r6f" x="743"/>
 <use href="#r73" x="1343"/>
@@ -1144,7 +1182,7 @@
 <use href="#r65" x="8420"/>
 <use href="#r78" x="9004"/>
 </g>
-<g transform="translate(88 687) scale(0.014)">
+<g transform="translate(88 697) scale(0.014)">
 <use href="#s70"/>
 <use href="#s6f" x="624"/>
 <use href="#s73" x="1233"/>
@@ -1155,7 +1193,7 @@
 <use href="#s73" x="3749"/>
 <use href="#s2f" x="4298"/>
 </g>
-<g fill="#9198a1" transform="translate(164.538 687) scale(0.012)">
+<g fill="#9198a1" transform="translate(164.538 697) scale(0.012)">
 <use href="#r44"/>
 <use href="#r6f" x="722"/>
 <use href="#r63" x="1321"/>
@@ -1187,12 +1225,12 @@
 <use href="#r62" x="16409"/>
 <use href="#r73" x="17021"/>
 </g>
-<g transform="translate(88 717) scale(0.014)">
+<g transform="translate(88 726) scale(0.014)">
 <use href="#s73"/>
 <use href="#s33" x="549"/>
 <use href="#s2f" x="1186"/>
 </g>
-<g fill="#9198a1" transform="translate(121.301 717) scale(0.012)">
+<g fill="#9198a1" transform="translate(121.301 726) scale(0.012)">
 <use href="#r4f"/>
 <use href="#r72" x="765"/>
 <use href="#r69" x="1141"/>
@@ -1225,7 +1263,7 @@
 <use href="#r64" x="15682"/>
 <use href="#r73" x="16295"/>
 </g>
-<g transform="translate(64 747) scale(0.014)">
+<g transform="translate(64 755) scale(0.014)">
 <use href="#s74"/>
 <use href="#s65" x="353"/>
 <use href="#s73" x="944"/>
@@ -1236,7 +1274,7 @@
 <use href="#s6c" x="3074"/>
 <use href="#s2f" x="3335"/>
 </g>
-<g fill="#9198a1" transform="translate(127.865 747) scale(0.012)">
+<g fill="#9198a1" transform="translate(127.865 755) scale(0.012)">
 <use href="#r54"/>
 <use href="#r65" x="646"/>
 <use href="#r73" x="1229"/>
@@ -1249,7 +1287,7 @@
 <use href="#r72" x="5308"/>
 <use href="#r74" x="5685"/>
 </g>
-<g transform="translate(88 777) scale(0.014)">
+<g transform="translate(88 784) scale(0.014)">
 <use href="#s70"/>
 <use href="#s67" x="624"/>
 <use href="#s74" x="1250"/>
@@ -1258,7 +1296,7 @@
 <use href="#s74" x="2743"/>
 <use href="#s2f" x="3096"/>
 </g>
-<g fill="#9198a1" transform="translate(147.708 777) scale(0.012)">
+<g fill="#9198a1" transform="translate(147.708 784) scale(0.012)">
 <use href="#r44"/>
 <use href="#r69" x="722"/>
 <use href="#r73" x="964"/>
@@ -1288,7 +1326,7 @@
 <use href="#r72" x="14207"/>
 <use href="#r73" x="14583"/>
 </g>
-<g transform="translate(64 807) scale(0.014)">
+<g transform="translate(64 813) scale(0.014)">
 <use href="#s74"/>
 <use href="#s65" x="353"/>
 <use href="#s78" x="944"/>
@@ -1299,7 +1337,7 @@
 <use href="#s6c" x="3093"/>
 <use href="#s2f" x="3355"/>
 </g>
-<g fill="#9198a1" transform="translate(128.138 807) scale(0.012)">
+<g fill="#9198a1" transform="translate(128.138 813) scale(0.012)">
 <use href="#r55"/>
 <use href="#r6e" x="744"/>
 <use href="#r69" x="1335"/>
@@ -1321,7 +1359,7 @@
 <use href="#r6f" x="9397"/>
 <use href="#r6e" x="9996"/>
 </g>
-<g transform="translate(64 837) scale(0.014)">
+<g transform="translate(64 842) scale(0.014)">
 <use href="#s74"/>
 <use href="#s72" x="353"/>
 <use href="#s61" x="750"/>
@@ -1331,7 +1369,7 @@
 <use href="#s67" x="2780"/>
 <use href="#s2f" x="3406"/>
 </g>
-<g fill="#9198a1" transform="translate(128.848 837) scale(0.012)">
+<g fill="#9198a1" transform="translate(128.848 842) scale(0.012)">
 <use href="#r4f"/>
 <use href="#r70" x="765"/>
 <use href="#r65" x="1377"/>
@@ -1366,7 +1404,7 @@
 <use href="#r72" x="18168"/>
 <use href="#r73" x="18544"/>
 </g>
-<g transform="translate(64 867) scale(0.014)">
+<g transform="translate(64 871) scale(0.014)">
 <use href="#s77"/>
 <use href="#s6f" x="839"/>
 <use href="#s72" x="1448"/>
@@ -1375,7 +1413,7 @@
 <use href="#s72" x="3006"/>
 <use href="#s2f" x="3403"/>
 </g>
-<g fill="#9198a1" transform="translate(128.644 867) scale(0.012)">
+<g fill="#9198a1" transform="translate(128.644 871) scale(0.012)">
 <use href="#r4c"/>
 <use href="#r65" x="565"/>
 <use href="#r61" x="1148"/>
@@ -1892,7 +1930,7 @@
 </g>
 </g>
 <g class="ink" opacity="0" fill="#e6edf3" style="animation:n8 8s cubic-bezier(0.4,0,0.2,1) infinite">
-<g transform="translate(101.225 147) scale(0.012)">
+<g transform="translate(101.225 146) scale(0.012)">
 <use href="#r48"/>
 <use href="#r54" x="743"/>
 <use href="#r54" x="1389"/>
@@ -1906,7 +1944,7 @@
 </g>
 </g>
 <g class="ink" opacity="0" fill="#e6edf3" style="animation:n18 8s cubic-bezier(0.4,0,0.2,1) infinite">
-<g transform="translate(100.295 447) scale(0.012)">
+<g transform="translate(100.295 436) scale(0.012)">
 <use href="#r41"/>
 <use href="#r6e" x="690"/>
 <use href="#r73" x="1281"/>
@@ -1933,8 +1971,8 @@
 <use href="#r65" x="13506"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#e6edf3" style="animation:n21 8s cubic-bezier(0.4,0,0.2,1) infinite">
-<g transform="translate(133.948 537) scale(0.012)">
+<g class="ink" opacity="0" fill="#e6edf3" style="animation:n22 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g transform="translate(133.948 552) scale(0.012)">
 <use href="#r49"/>
 <use href="#r6e" x="269"/>
 <use href="#r67" x="859"/>
@@ -1960,8 +1998,8 @@
 <use href="#r73" x="12290"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#e6edf3" style="animation:n22 8s cubic-bezier(0.4,0,0.2,1) infinite">
-<g transform="translate(138.692 567) scale(0.012)">
+<g class="ink" opacity="0" fill="#e6edf3" style="animation:n23 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g transform="translate(138.692 581) scale(0.012)">
 <use href="#r4c"/>
 <use href="#r4f" x="565"/>
 <use href="#r43" x="1330"/>
@@ -1987,8 +2025,8 @@
 <use href="#r6c" x="13522"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#e6edf3" style="animation:n23 8s cubic-bezier(0.4,0,0.2,1) infinite">
-<g transform="translate(115.696 597) scale(0.012)">
+<g class="ink" opacity="0" fill="#e6edf3" style="animation:n24 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g transform="translate(115.696 610) scale(0.012)">
 <use href="#r53"/>
 <use href="#r74" x="642"/>
 <use href="#r6f" x="969"/>

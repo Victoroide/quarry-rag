@@ -28,6 +28,7 @@ var directoryDescriptions = map[string]string{
 	"internal": "Private service packages", "internal/api": "HTTP router", "internal/api/handler": "Request handlers", "internal/api/middleware": "Authentication, logs and metrics",
 	"internal/awsconf": "AWS credentials and retry policy", "internal/chunker": "Text windows and fingerprints", "internal/cleanup": "Document deletion across stores", "internal/config": "Configuration and validation",
 	"internal/domain": "Shared types and interfaces", "internal/embedder": "Titan V2 and offline embeddings", "internal/extractor": "File parsing and process isolation", "internal/llm": "Answer routing and Converse",
+	"internal/ocr":    "Asynchronous PDF text detection",
 	"internal/logctx": "Request log attributes", "internal/metrics": "Prometheus text metrics", "internal/pipeline": "Ingestion and query stages", "internal/retriever": "LOCAL and GLOBAL retrieval",
 	"internal/store": "Storage adapters", "internal/store/memory": "Offline vector index", "internal/store/pinecone": "Hosted vector index", "internal/store/postgres": "Documents, chunks and durable jobs", "internal/store/s3": "Original files and signed downloads",
 	"internal/testutil": "Test support", "internal/testutil/pgtest": "Disposable database containers", "internal/textutil": "Unicode normalization", "internal/worker": "Leased ingestion and retry handling",

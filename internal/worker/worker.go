@@ -12,6 +12,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
+	"github.com/Victoroide/quarry-rag/internal/ocr"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/aws/smithy-go"
@@ -28,6 +29,12 @@ type Options struct {
 	Lease, JobTimeout, PollInterval time.Duration
 	Owner                           string
 	Metrics                         *metrics.Service
+	OCR                             TextExtractor
+}
+
+// TextExtractor detects text in an original object stored in S3.
+type TextExtractor interface {
+	Extract(context.Context, string) (string, error)
 }
 
 var errLeaseLost = errors.New("ingestion lease lost")
@@ -229,7 +236,11 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		}
 		stateCtx, stateCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 		defer stateCancel()
-		failErr := w.store.FailJob(stateCtx, job, err.Error())
+		message := err.Error()
+		if errors.Is(err, ocr.ErrNoText) {
+			message = "no_text"
+		}
+		failErr := w.store.FailJob(stateCtx, job, message)
 		w.recordOutcome(parent, job, "failed", failErr)
 		if errors.Is(failErr, domain.ErrJobNotOwned) {
 			w.compensateDeleted(parent, job)
@@ -258,6 +269,11 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 			err = fmt.Errorf("ingestion panic: %v", recovered)
 		}
 	}()
+	if job.Document.TextSource == "ocr_pending" {
+		if extractErr := w.extractText(ctx, job, ic); extractErr != nil {
+			return extractErr
+		}
+	}
 	if w.vectors != nil {
 		if err = w.vectors.DeleteByDocID(ctx, string(job.Document.ID)); err != nil {
 			return fmt.Errorf("remove previous vectors: %w", err)
@@ -276,6 +292,30 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 		w.opts.Metrics.IngestJobs.WithLabelValues("completed").Inc()
 		trace.SpanFromContext(ctx).SetAttributes(attribute.String("quarry.job.result", "completed"))
 	}
+	return nil
+}
+
+func (w *Worker) extractText(ctx context.Context, job domain.Job, ic *pipeline.IngestContext) error {
+	if w.opts.OCR == nil {
+		return errors.New("ocr: text detection is unavailable")
+	}
+	if job.Document.S3Key == nil || *job.Document.S3Key == "" {
+		return domain.Permanent(errors.New("ocr: original document is missing"))
+	}
+	text, err := w.opts.OCR.Extract(ctx, *job.Document.S3Key)
+	if err != nil {
+		return err
+	}
+	store, ok := w.store.(interface {
+		StoreOCRText(context.Context, domain.Job, string) error
+	})
+	if !ok {
+		return errors.New("ocr: detected text storage is unavailable")
+	}
+	if err := store.StoreOCRText(ctx, job, text); err != nil {
+		return err
+	}
+	ic.RawText = text
 	return nil
 }
 func permanent(err error) bool {
