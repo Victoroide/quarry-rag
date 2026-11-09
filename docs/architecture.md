@@ -173,7 +173,7 @@ sequenceDiagram
 
     Handler->>Synthesis: Run(QueryContext)
     alt No authorized evidence
-        Synthesis-->>Handler: Fixed English no-information answer, zero synthesis tokens
+        Synthesis-->>Handler: No-information answer (see query API)
     else Evidence available
     Synthesis->>Synthesis: trimChunksForSynthesis (relative score floor 0.55, max count cap, rune cutoff)
     Synthesis->>Synthesis: Route model (Nova Micro vs Llama 4 based on SYNTHESIS_MODEL & multi-need)
@@ -211,7 +211,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
    - Retains the allowlist post-filter before synthesis as defense in depth. A nil allowlist allows all documents; an empty allowlist denies all documents.
    - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query; the top score is recomputed from visible chunks.
 4. **SynthesisStage**:
-   - When `MIN_RELEVANCE_SCORE` is positive, drops chunks below it before adaptive trimming; the default zero disables this floor. If no authorized evidence remains, returns `No relevant information was found to answer this question.` with no model call, zero synthesis token usage, `early_exit=true` and `finish_reason=no_evidence`.
+   - When `MIN_RELEVANCE_SCORE` is positive, drops chunks below it before adaptive trimming; the default zero disables this floor. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).
    - Applies adaptive chunk trimming: drops chunks scoring below 55% of the top chunk's score, bounds chunk counts (5 chunks for simple queries, 8 for multi-need queries), and truncates chunk bodies at sentence boundaries near 1200 runes.
    - Selects synthesis model according to `SYNTHESIS_MODEL` (`fallback` defaults to Llama 4 Maverick, `primary` routes to Nova Micro, and `hybrid` dynamically routes based on multi-need detection).
    - Places the question before the retrieved excerpts and wraps each excerpt in a numbered marker with a random per-request boundary. Removes invisible format and control characters from the question and stored chunks, preserves newlines and tabs, and escapes excerpt marker prefixes inside their text. Estimates tokens over the complete system and user prompts, including markers.

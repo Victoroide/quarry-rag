@@ -4,6 +4,10 @@ Notable changes are grouped by release.
 
 ## [Unreleased]
 
+### Changed
+
+- The no-evidence answer follows `Accept-Language` for English, Spanish, Portuguese, French, German and Italian and sets `Content-Language`.
+
 ## [0.1.0] - 2026-11-09
 
 ### Added
