@@ -13,14 +13,25 @@ import (
 
 const image = "postgres:16.13-alpine3.23"
 
+const vectorImage = "pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f"
+
 // Start runs a PostgreSQL container and returns its connection URL once the
 // server accepts connections. The container is removed when the test ends.
 func Start(t testing.TB) string {
+	return start(t, image)
+}
+
+// StartVector runs PostgreSQL with pgvector available for extension creation.
+func StartVector(t testing.TB) string {
+	return start(t, vectorImage)
+}
+
+func start(t testing.TB, containerImage string) string {
 	t.Helper()
 	ctx := context.Background()
 	// The image opens its port for a temporary server during initialization,
 	// so readiness also waits for the second startup log line.
-	container, err := postgres.Run(ctx, image,
+	container, err := postgres.Run(ctx, containerImage,
 		postgres.WithDatabase("rag"),
 		postgres.WithUsername("rag"),
 		postgres.WithPassword("rag"),

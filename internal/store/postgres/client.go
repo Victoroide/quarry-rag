@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -16,7 +17,8 @@ import (
 // Client manages the PostgreSQL connection pool and provides
 // chunk metadata and document fingerprint operations.
 type Client struct {
-	Pool *pgxpool.Pool
+	Pool             *pgxpool.Pool
+	vectorDimensions atomic.Int32
 }
 
 // Option customizes PostgreSQL pool construction.

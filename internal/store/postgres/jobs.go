@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
@@ -215,6 +216,25 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	}
 	if batchErr := tx.SendBatch(ctx, batch).Close(); batchErr != nil {
 		return false, batchErr
+	}
+	if dimensions := int(c.vectorDimensions.Load()); dimensions != 0 {
+		if _, err = tx.Exec(ctx, `DELETE FROM chunk_vectors WHERE document_id=$1`, string(j.Document.ID)); err != nil {
+			return false, err
+		}
+		vectors := make([]domain.Chunk, len(chunks))
+		for i, ch := range chunks {
+			ch.DocumentID = j.Document.ID
+			ch.Metadata = maps.Clone(ch.Metadata)
+			if ch.Metadata == nil {
+				ch.Metadata = make(map[string]any)
+			}
+			ch.Metadata["doc_type"] = j.DocType
+			ch.Metadata["collection"] = j.Collection
+			vectors[i] = ch
+		}
+		if err = insertVectors(ctx, tx, vectors, dimensions); err != nil {
+			return false, fmt.Errorf("postgres: complete vectors: %w", err)
+		}
 	}
 	fingerprint := j.Document.Fingerprint
 	if fingerprint == "" {

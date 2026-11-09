@@ -17,6 +17,11 @@ type VectorStore interface {
 	Ping(ctx context.Context) error
 }
 
+// TransactionalVectorStore marks vectors written atomically by job completion.
+type TransactionalVectorStore interface {
+	TransactionalVectors()
+}
+
 // VectorDeleter is the subset of vector-store delete operations the document
 // delete handler needs. Both the Pinecone driver and the in-memory fake store
 // satisfy it, so the handler does not depend on a concrete implementation.
