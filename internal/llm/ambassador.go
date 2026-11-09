@@ -18,7 +18,8 @@ type ConverseRoutedResult struct {
 
 // Ambassador executes synthesis calls with SDK-owned transport retries.
 type Ambassador struct {
-	client Converser
+	client    Converser
+	generator Generator
 }
 
 // NewAmbassador creates a synthesis caller.

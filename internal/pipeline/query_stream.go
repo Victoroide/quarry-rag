@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/Victoroide/quarry-rag/internal/llm"
-	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 )
 
 // QueryStream receives context once, followed by incremental answer text.
@@ -38,21 +37,22 @@ func streamNoEvidence(ctx context.Context, qc *QueryContext) error {
 	return qc.Stream.Delta(qc.FinalAnswer)
 }
 
-func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, model, system string, messages []brtypes.Message, temperature float32, maxTokens int) (*llm.ConverseRoutedResult, error) {
-	var result *llm.ConverseRoutedResult
+func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, model, system string, messages []llm.Message, temperature float32, maxTokens int) (*llm.Response, error) {
+	request := llm.Request{Model: model, System: system, Messages: messages, Temperature: temperature, MaxTokens: maxTokens}
+	var result *llm.Response
 	var err error
 	if qc.Stream == nil {
-		result, err = s.ambassador.ConverseRoutedPlain(ctx, model, system, messages, temperature, maxTokens)
+		result, err = s.ambassador.Generate(ctx, request)
 	} else {
 		if startErr := qc.Stream.start(ctx); startErr != nil {
 			return nil, startErr
 		}
-		result, err = s.ambassador.ConverseStreamRoutedPlain(ctx, model, system, messages, temperature, maxTokens, qc.Stream.Delta)
+		result, err = s.ambassador.Stream(ctx, request, qc.Stream.Delta)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if result == nil || result.Output == nil {
+	if result == nil {
 		return nil, ErrSynthesisEmpty
 	}
 	return result, nil
