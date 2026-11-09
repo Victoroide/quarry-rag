@@ -20,8 +20,9 @@ Document labels (`doc_type`, `filter_doc_type` and `collection`) must be valid
 UTF-8, are trimmed and normalized to Unicode NFC, limited to 128 UTF-8 bytes,
 and must contain no control or Unicode format characters, including NUL. An
 empty `doc_type` uses the default `document`; an empty query filter imposes no
-document type restriction. An omitted or empty `collection` selects the default
-collection (`""`).
+document type restriction. On ingestion, an omitted or empty `collection` selects
+the default collection (`""`); on queries and listings it imposes no collection
+restriction.
 
 Metadata is stored only in PostgreSQL. Its serialized JSON representation is
 limited to 65,536 bytes (64 KiB), including JSON escaping, with at most eight
@@ -281,6 +282,7 @@ Request fields:
 | `query` | string | yes | Natural-language query string (1 to 10,000 decoded bytes) |
 | `mode` | string | no | Retrieval mode: `"auto"` (default), `"local"`, or `"global"`. Case-insensitive. `local` answers mainly from the most relevant authorized document (named entity or best match), topped up from the authorized scope when that document has fewer than 3 matching chunks. With no visible candidate, `local` uses `global`. Explicit `global` skips the routing probe |
 | `filter_doc_type` | string | no | Restricts vector retrieval to chunks matching the given `doc_type`, using the label normalization and limits above |
+| `collection` | string | no | Exact collection label, using the label rules above; omitted or empty searches all collections. Applied inside vector retrieval and routing, then checked against completed PostgreSQL documents. Intersects the type filter and document allowlist; vectors written before collection filtering need the [collection metadata backfill](development.md#collection-metadata-backfill) |
 | `max_chunks` | int | no | Requested chunks to retrieve (0 to 100), capped by [`MAX_CHUNKS_PER_QUERY`](configuration.md#environment-variables). Omitted or zero uses that configured maximum |
 | `include_citations` | bool | no | Request numbered inline citations and lexical checks against the excerpts sent to synthesis; defaults to false |
 | `allowed_document_ids` | array of strings | no | Tenant/role allowlist of UUIDs, at most [`MAX_ALLOWED_DOCUMENT_IDS`](configuration.md#environment-variables) entries. IDs are canonicalized and deduplicated. Omitted or `null` means unrestricted unless `REQUIRE_DOCUMENT_ALLOWLIST=true`, which makes a non-null field mandatory. An empty list (`[]`) returns the no-information answer without embedding or search. The allowlist is applied inside vector search and routing |
@@ -346,7 +348,7 @@ Error Status Codes:
 
 | Status | Error Category | Condition |
 |---|---|---|
-| `400 Bad Request` | `validation` | Query missing, empty, or whitespace; query exceeding 10,000 decoded bytes; mode not auto, local, or global; max_chunks outside 0-100; invalid document type filter; malformed JSON, unknown fields, duplicate top-level keys or trailing data |
+| `400 Bad Request` | `validation` | Query missing, empty, or whitespace; query exceeding 10,000 decoded bytes; mode not auto, local, or global; max_chunks outside 0-100; invalid document type filter or collection; malformed JSON, unknown fields, duplicate top-level keys or trailing data |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `413 Payload Too Large` | `validation` | Request body exceeds the 1 MiB limit |
 | `415 Unsupported Media Type` | `validation` | Content-Type is not `application/json` |
@@ -387,6 +389,7 @@ Optional query parameters:
 |---|---|---|
 | `limit` | int | Page size from 1 to 1000 |
 | `after` | string | UUID cursor, exclusive; requires `limit` |
+| `collection` | string | Exact collection label, using the label rules above; omitted or empty lists all collections. Filters both streaming and paginated listings before ordering and limiting |
 
 Without pagination parameters, PostgreSQL streams the full listing without buffering every row. The response writes `documents` before `count`; an empty listing is `{"documents":[],"count":0}`. If a stream fails after it begins, its JSON is incomplete; discard the partial result and retry. Stores without summary support retain the reference listing and return an empty array when no documents exist.
 
@@ -398,7 +401,7 @@ Response fields (200 OK):
 | `count` | int | Number of documents returned in this response |
 | `next_after` | string or null | Present for paginated responses; last UUID when the page contains `limit` documents, otherwise null |
 
-Use `next_after` as the next request's `after` value and keep the same `limit`. A full final page may lead to one empty page before `next_after` becomes null. Each request reads the current inventory; concurrent ingestion and deletion can change later pages.
+Use `next_after` as the next request's `after` value and keep the same `limit` and `collection`. A full final page may lead to one empty page before `next_after` becomes null. Each request reads the current inventory; concurrent ingestion and deletion can change later pages.
 
 Document summary fields:
 
@@ -421,7 +424,7 @@ Error Status Codes:
 
 | Status | Error Category | Condition |
 |---|---|---|
-| `400 Bad Request` | `validation` | Invalid `limit`, invalid `after`, duplicate pagination parameters or `after` without `limit` |
+| `400 Bad Request` | `validation` | Invalid `limit`, `after` or `collection`; duplicate pagination or `collection` parameters; `after` without `limit`; or a malformed query string |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `500 Internal Server Error` | `internal` | Database query failure |
 

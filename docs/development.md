@@ -181,6 +181,34 @@ delete error stops further deletions and returns a nonzero exit status; earlier
 successful deletions remain applied. Rerun the dry run after the index has
 converged to verify the remaining selections.
 
+### Collection Metadata Backfill
+
+For documents ingested with a collection before collection filtering was available,
+label their existing default-namespace vectors once after upgrading. Until then,
+collection-filtered queries omit those documents without an error, while
+collection-filtered listings, which read PostgreSQL, already include them. Pause
+ingestion and other index writers, then inspect the selected documents:
+
+```sh
+make reconcile ARGS="-backfill-collections"
+make reconcile ARGS="-backfill-collections -apply"
+```
+
+This mode skips orphan cleanup. It selects documents with non-empty collections
+in ascending UUID order and prints their `document_id` and `collection` in a
+`documents` array, plus `updated_documents`. A dry run reads only PostgreSQL and
+makes no index calls. With `-apply`, each document updates vectors whose `doc_id`
+exactly matches its identifier, setting only the `collection` metadata key.
+The `-limit` flag bounds documents in this mode (100000 by default); `-page` has
+no effect. Each run stops after 30 minutes. To continue after `-limit`, an
+interruption or an error, pass `-after` with the last printed `document_id` or
+the value named in the error; without it, a run starts at the first identifier.
+Reapplying the same label is idempotent.
+
+An update error stops further updates and returns a nonzero exit status; earlier
+successful updates remain applied. Metadata updates are eventually consistent,
+so allow them to propagate before relying on collection-filtered queries.
+
 ### Language Evaluation (`scripts/langeval`)
 
 Measures whether generated answers match the language of the input question (e.g., English or Spanish) across a fixed evaluation query set, recording token usage and latency:
