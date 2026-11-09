@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 940" role="img" fill="#1f2328">
 <title>PostgreSQL data model</title>
-<desc>Data model. documents contains id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at, completed_at and collection. chunks contains id, document_id, chunk_index, text, token_count and created_at. document_fingerprints contains fingerprint, document_id and created_at. ingest_jobs contains document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at and updated_at. Each child references documents.id with cascading deletion. A document has zero or more chunks and fingerprints and at most one ingestion job. PK denotes primary key and FK denotes foreign key; SQL types appear beside every column. Fingerprints are scoped to the collection; document_fingerprints stores the scoped digest.</desc>
+<desc>Data model. documents contains id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at, completed_at, collection and text_source. chunks contains id, document_id, chunk_index, text, token_count and created_at. document_fingerprints contains fingerprint, document_id and created_at. ingest_jobs contains document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at and updated_at. Each child references documents.id with cascading deletion. A document has zero or more chunks and fingerprints and at most one ingestion job. PK denotes primary key and FK denotes foreign key; SQL types appear beside every column. Fingerprints are scoped to the collection; document_fingerprints stores the scoped digest.</desc>
 <style>@keyframes n0{0%{opacity:0}3.75%{opacity:0}6.25%{opacity:1}8.75%{opacity:0}18.75%{opacity:0}21.25%{opacity:1}23.75%{opacity:0}33.75%{opacity:0}36.25%{opacity:1}38.75%{opacity:0}100%{opacity:0}}@keyframes n1{0%{opacity:0}10%{opacity:0}12.5%{opacity:1}15%{opacity:0}100%{opacity:0}}@keyframes n2{0%{opacity:0}25.651%{opacity:0}28.151%{opacity:1}30.651%{opacity:0}100%{opacity:0}}@keyframes n3{0%{opacity:0}42.255%{opacity:0}44.755%{opacity:1}47.255%{opacity:0}100%{opacity:0}}@keyframes e0{0%{opacity:0;stroke-dashoffset:13.25}3.75%{opacity:0;stroke-dashoffset:13.25}3.762%{opacity:1;stroke-dashoffset:13.25}7.487%{opacity:1;stroke-dashoffset:-143.25}7.5%{opacity:0;stroke-dashoffset:-143.25}7.512%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e1{0%{opacity:0;stroke-dashoffset:13.25}18.75%{opacity:0;stroke-dashoffset:13.25}18.762%{opacity:1;stroke-dashoffset:13.25}23.139%{opacity:1;stroke-dashoffset:-409.25}23.151%{opacity:0;stroke-dashoffset:-409.25}23.164%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e2{0%{opacity:0;stroke-dashoffset:13.25}33.75%{opacity:0;stroke-dashoffset:13.25}33.763%{opacity:1;stroke-dashoffset:13.25}39.743%{opacity:1;stroke-dashoffset:-563.25}39.755%{opacity:0;stroke-dashoffset:-563.25}39.768%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
 <defs>
 <path id="r2192" d="M537 0L480 -57L584 -159Q616 -191 659 -227Q702 -263 738 -292Q710 -286 682 -282Q654 -278 626 -278L125 -278L125 -359L626 -359Q654 -359 682 -355Q710 -351 738 -345Q702 -374 659 -409Q616 -445 584 -478L480 -580L537 -637L855 -318L537 0"/>
@@ -114,10 +114,10 @@
 <path class="pulse" opacity="0" stroke-dasharray="12 1149" d="M368 186L398 186Q404 186 404 192L404 638Q404 644 410 644L472 644" style="animation:e2 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
 </g>
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
-<rect class="node" x="16" y="108" width="352" height="482" rx="10"/>
+<rect class="node" x="16" y="108" width="352" height="508" rx="10"/>
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="17" y="109" width="350" height="480" rx="9" opacity="0" style="animation:n0 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="17" y="109" width="350" height="506" rx="9" opacity="0" style="animation:n0 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
 </g>
 <g fill="none" stroke="#d0d7de" stroke-width="1.25">
 <path d="M16 150H368"/>
@@ -601,6 +601,25 @@
 <use href="#r6e" x="3979"/>
 </g>
 <g fill="#59636e" transform="translate(244 570) scale(0.012)">
+<use href="#r54"/>
+<use href="#r45" x="646"/>
+<use href="#r58" x="1247"/>
+<use href="#r54" x="1929"/>
+</g>
+<g transform="translate(80 596) scale(0.012)">
+<use href="#r74"/>
+<use href="#r65" x="327"/>
+<use href="#r78" x="910"/>
+<use href="#r74" x="1456"/>
+<use href="#r5f" x="1783"/>
+<use href="#r73" x="2239"/>
+<use href="#r6f" x="2767"/>
+<use href="#r75" x="3367"/>
+<use href="#r72" x="3958"/>
+<use href="#r63" x="4335"/>
+<use href="#r65" x="4906"/>
+</g>
+<g fill="#59636e" transform="translate(244 596) scale(0.012)">
 <use href="#r54"/>
 <use href="#r45" x="646"/>
 <use href="#r58" x="1247"/>
@@ -1179,6 +1198,12 @@
 <use href="#r5a" x="6583"/>
 </g>
 <g transform="translate(244 570) scale(0.012)">
+<use href="#r54"/>
+<use href="#r45" x="646"/>
+<use href="#r58" x="1247"/>
+<use href="#r54" x="1929"/>
+</g>
+<g transform="translate(244 596) scale(0.012)">
 <use href="#r54"/>
 <use href="#r45" x="646"/>
 <use href="#r58" x="1247"/>

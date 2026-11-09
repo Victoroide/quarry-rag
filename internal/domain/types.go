@@ -42,6 +42,7 @@ type Document struct {
 	FileName       *string        `json:"file_name,omitempty"`
 	FileType       *string        `json:"file_type,omitempty"`
 	S3Key          *string        `json:"s3_key,omitempty"`
+	TextSource     string         `json:"text_source,omitempty"`
 }
 
 // TokenUsage tracks token consumption from Bedrock calls.

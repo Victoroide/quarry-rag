@@ -115,6 +115,11 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 	if err != nil {
 		return result, err
 	}
+	if req.Document.TextSource == "ocr_pending" {
+		if _, err = tx.Exec(ctx, `UPDATE documents SET text_source='ocr_pending' WHERE id=$1`, string(req.Document.ID)); err != nil {
+			return result, err
+		}
+	}
 	query := `INSERT INTO document_fingerprints(fingerprint,document_id) VALUES($1,$2)`
 	if req.CallerSupplied {
 		query += ` ON CONFLICT(fingerprint) DO NOTHING`
@@ -160,6 +165,11 @@ func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration
 		}
 		if fingerprint != nil {
 			j.Document.Fingerprint = *fingerprint
+		}
+		if err = c.Pool.QueryRow(ctx, `SELECT text_source FROM documents WHERE id=$1`, id).Scan(&j.Document.TextSource); errors.Is(err, pgx.ErrNoRows) {
+			continue
+		} else if err != nil {
+			return nil, fmt.Errorf("postgres: load text source: %w", err)
 		}
 		if err = json.Unmarshal(metadata, &j.Document.Metadata); err != nil {
 			return nil, fmt.Errorf("postgres: decode job metadata: %w", err)
@@ -286,4 +296,34 @@ func (c *Client) DocumentExists(ctx context.Context, id domain.DocumentID) (bool
 	var exists bool
 	err := c.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM documents WHERE id=$1)`, string(id)).Scan(&exists)
 	return exists, err
+}
+
+// StoreOCRText saves detected content only while its ingestion lease is live.
+func (c *Client) StoreOCRText(ctx context.Context, j domain.Job, text string) error {
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var id string
+	err = tx.QueryRow(ctx, `SELECT d.id::text FROM documents d JOIN ingest_jobs j ON j.document_id=d.id WHERE d.id=$1 AND d.status='processing' AND j.lease_owner=$2 AND j.attempts=$3 AND j.state='running' AND j.lease_until>clock_timestamp() FOR UPDATE OF d,j`, string(j.Document.ID), j.LeaseOwner, j.Attempts).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrJobNotOwned
+	}
+	if err != nil {
+		return err
+	}
+	preview := []rune(text)
+	if len(preview) > 120 {
+		preview = preview[:120]
+	}
+	// Recheck the lease after any wait for the document and job row locks.
+	tag, err := tx.Exec(ctx, `UPDATE documents d SET content=$2,content_preview=$3,text_source='ocr',updated_at=NOW() WHERE d.id=$1 AND EXISTS(SELECT 1 FROM ingest_jobs j WHERE j.document_id=d.id AND j.lease_owner=$4 AND j.attempts=$5 AND j.state='running' AND j.lease_until>clock_timestamp())`, id, text, string(preview), j.LeaseOwner, j.Attempts)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ErrJobNotOwned
+	}
+	return tx.Commit(ctx)
 }
