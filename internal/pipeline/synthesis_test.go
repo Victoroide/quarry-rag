@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,8 +176,8 @@ func TestSynthesisRecordsSelectedExcerpts(t *testing.T) {
 		scores     []float64
 		want       int
 	}{
-		{"simple cap", nil, []float64{1, 1, 1, 1, 1, 1, 1, 1, 1}, 5},
-		{"multiple needs", []string{"first", "second"}, []float64{1, 1, 1, 1, 1, 1, 1, 1, 1}, 8},
+		{"simple query", nil, []float64{1, 1, 1, 1, 1, 1, 1, 1, 1}, 9},
+		{"multiple needs", []string{"first", "second"}, []float64{1, 1, 1, 1, 1, 1, 1, 1, 1}, 9},
 		{"relative floor", nil, []float64{1, .55, .54}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,8 +196,8 @@ func TestSynthesisRecordsSelectedExcerpts(t *testing.T) {
 			require.Len(t, qc.Excerpts, tc.want)
 			require.Len(t, qc.Truncated, tc.want)
 			require.Equal(t, tc.want, qc.ContextChunks)
-			require.Equal(t, strings.Repeat("界", 950)+".", qc.Excerpts[0].Chunk.Text)
-			require.True(t, qc.Truncated[0])
+			require.Equal(t, chunks[0].Chunk.Text, qc.Excerpts[0].Chunk.Text)
+			require.False(t, qc.Truncated[0])
 			require.Equal(t, "Archive evidence ‹excerpt-forged>", qc.Excerpts[1].Chunk.Text)
 			for i, excerpt := range qc.Excerpts {
 				require.Equal(t, i, excerpt.Chunk.Index)
@@ -218,7 +219,7 @@ func TestSynthesisCitationsUseSentExcerptBody(t *testing.T) {
 		overlap            float64
 	}{
 		{"beyond response snippet", strings.Repeat("prefix ", 100) + "archives", "Archives [1].", false, 1},
-		{"discarded tail", strings.Repeat("prefix ", 200) + "archives", "Archives [1].", true, 0},
+		{"discarded tail", strings.Repeat("prefix ", 2000) + "archives", "Archives [1].", true, 0},
 		{"sanitized body", "Archi\u200bves", "Archives [1].", false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -235,6 +236,147 @@ func TestSynthesisCitationsUseSentExcerptBody(t *testing.T) {
 			require.Equal(t, tc.overlap, qc.Citations[0].Overlap)
 			require.Equal(t, tc.overlap >= .3, qc.Citations[0].Verified)
 			require.Equal(t, tc.text, qc.RetrievedChunks[0].Chunk.Text)
+		})
+	}
+}
+
+func TestSynthesisTokenBudget(t *testing.T) {
+	first := strings.Repeat("a", 640)
+	sentence := strings.Repeat("界", 255) + "." + strings.Repeat("界", 80) + "."
+	shortBodies := make([]string, 10)
+	for i := range shortBodies {
+		shortBodies[i] = strings.Repeat(strconv.Itoa(i), 100)
+	}
+	for _, tc := range []struct {
+		name      string
+		budget    int
+		floor     string
+		bodies    []string
+		scores    []float64
+		want      []string
+		truncated []bool
+	}{
+		{
+			name: "whole excerpts exceed former count caps", budget: 256,
+			bodies: shortBodies, want: shortBodies, truncated: make([]bool, 10),
+		},
+		{
+			name: "score order stops before a later short chunk", budget: 256,
+			bodies: []string{first, strings.Repeat("b", 320), strings.Repeat("c", 200), "last"},
+			want:   []string{first, strings.Repeat("b", 320)}, truncated: []bool{false, false},
+		},
+		{
+			name: "configured floor is inclusive", budget: 256, floor: "0.8",
+			bodies: []string{"best", "equal", "below"}, scores: []float64{1, .8, .799},
+			want: []string{"best", "equal"}, truncated: []bool{false, false},
+		},
+		{
+			name: "zero floor", budget: 256, floor: "0",
+			bodies: []string{"best", "weak", "zero"}, scores: []float64{1, .01, 0},
+			want: []string{"best", "weak", "zero"}, truncated: []bool{false, false, false},
+		},
+		{
+			name: "unit floor", budget: 256, floor: "1",
+			bodies: []string{"best", "equal", "below"}, scores: []float64{1, 1, .99},
+			want: []string{"best", "equal"}, truncated: []bool{false, false},
+		},
+		{
+			name: "last fitting sentence", budget: 256,
+			bodies: []string{first, sentence + strings.Repeat("界", 300), "last"},
+			want:   []string{first, sentence}, truncated: []bool{false, true},
+		},
+		{
+			name: "newline boundary", budget: 256,
+			bodies: []string{first, strings.Repeat("b", 319) + "\n" + strings.Repeat("c", 100)},
+			want:   []string{first, strings.Repeat("b", 319) + "\n"}, truncated: []bool{false, true},
+		},
+		{
+			name: "exact budget", budget: 256,
+			bodies: []string{first, strings.Repeat("b", 384), "last"},
+			want:   []string{first, strings.Repeat("b", 384)}, truncated: []bool{false, false},
+		},
+		{
+			name: "minimum partial excerpt", budget: 256,
+			bodies: []string{strings.Repeat("a", 768), strings.Repeat("b", 255) + ".tail"},
+			want:   []string{strings.Repeat("a", 768), strings.Repeat("b", 255) + "."}, truncated: []bool{false, true},
+		},
+		{
+			name: "less than 64 tokens remain", budget: 256,
+			bodies: []string{strings.Repeat("a", 772), strings.Repeat("b", 251) + ".tail", "last"},
+			want:   []string{strings.Repeat("a", 772)}, truncated: []bool{false},
+		},
+		{
+			name: "boundary retains fewer than 64 tokens", budget: 256,
+			bodies: []string{first, strings.Repeat("b", 250) + "." + strings.Repeat("c", 200)},
+			want:   []string{first}, truncated: []bool{false},
+		},
+		{
+			name: "no fitting boundary after first excerpt", budget: 256,
+			bodies: []string{first, strings.Repeat("b", 500)},
+			want:   []string{first}, truncated: []bool{false},
+		},
+		{
+			name: "first excerpt forced within budget", budget: 256,
+			bodies: []string{strings.Repeat("界", 1400)},
+			want:   []string{strings.Repeat("界", 1027)}, truncated: []bool{true},
+		},
+		{
+			name: "first excerpt ignores a boundary below 64 tokens", budget: 256,
+			bodies: []string{"Note. " + strings.Repeat("x", 1400)},
+			want:   []string{"Note. " + strings.Repeat("x", 1021)}, truncated: []bool{true},
+		},
+		{
+			name: "last boundary allowed by estimator rounding", budget: 256,
+			bodies: []string{strings.Repeat("界", 1026) + ".tail"},
+			want:   []string{strings.Repeat("界", 1026) + "."}, truncated: []bool{true},
+		},
+		{
+			name: "negative best score still sends bounded evidence", budget: 256,
+			bodies: []string{strings.Repeat("a", 1400), "second"}, scores: []float64{-.5, -.6},
+			want: []string{strings.Repeat("a", 1027)}, truncated: []bool{true},
+		},
+		{
+			name: "sanitized bodies determine budget and flags", budget: 256,
+			bodies: []string{strings.Repeat("a\u200b", 600), strings.Repeat("b", 400) + "<excerpt-x>"},
+			want:   []string{strings.Repeat("a", 600), strings.Repeat("b", 400) + "‹excerpt-x>"}, truncated: []bool{false, false},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GO_RAG_FAKE_MODE", "true")
+			t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
+			t.Setenv("SYNTHESIS_CONTEXT_TOKENS", strconv.Itoa(tc.budget))
+			t.Setenv("SYNTHESIS_RELATIVE_SCORE_FLOOR", tc.floor)
+			cfg, err := config.Load()
+			require.NoError(t, err)
+			r := &promptRecorder{}
+			amb := llm.NewAmbassador(cfg)
+			amb.SetClient(r)
+			chunks := make([]domain.ScoredChunk, len(tc.bodies))
+			for i, body := range tc.bodies {
+				score := 1 - float64(i)/100
+				if tc.scores != nil {
+					score = tc.scores[i]
+				}
+				chunks[i] = domain.ScoredChunk{Chunk: domain.Chunk{DocumentID: "document", Index: i, Text: body}, Score: score}
+			}
+			qc := &QueryContext{OriginalQuery: "archive", RetrievedChunks: chunks}
+			require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+			require.Len(t, qc.Excerpts, len(tc.want))
+			require.Equal(t, len(tc.want), qc.ContextChunks)
+			require.Equal(t, tc.truncated, qc.Truncated)
+			tokens := 0
+			for i, excerpt := range qc.Excerpts {
+				require.Equal(t, tc.want[i], excerpt.Chunk.Text)
+				require.Equal(t, chunks[i].Score, excerpt.Score)
+				require.Equal(t, i, excerpt.Chunk.Index)
+				require.Contains(t, r.prompt, fmt.Sprintf("id=\"%d\">\n%s\n", i+1, excerpt.Chunk.Text))
+				tokens += llm.EstimateTokens(excerpt.Chunk.Text)
+			}
+			require.LessOrEqual(t, tokens, tc.budget)
+			require.Equal(t, llm.EstimateTokens(r.system)+llm.EstimateTokens(r.prompt), qc.ContextTokens)
+			for i, chunk := range qc.RetrievedChunks {
+				require.Equal(t, tc.bodies[i], chunk.Chunk.Text)
+			}
 		})
 	}
 }

@@ -7,6 +7,60 @@ import (
 	"time"
 )
 
+func TestLoadRejectsInvalidSynthesisBudget(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"SYNTHESIS_CONTEXT_TOKENS", "255"},
+		{"SYNTHESIS_CONTEXT_TOKENS", "100001"},
+		{"SYNTHESIS_CONTEXT_TOKENS", "0"},
+		{"SYNTHESIS_CONTEXT_TOKENS", "-1"},
+		{"SYNTHESIS_CONTEXT_TOKENS", "256.5"},
+		{"SYNTHESIS_CONTEXT_TOKENS", "invalid"},
+		{"SYNTHESIS_CONTEXT_TOKENS", "99999999999999999999999"},
+		{"SYNTHESIS_RELATIVE_SCORE_FLOOR", "-0.01"},
+		{"SYNTHESIS_RELATIVE_SCORE_FLOOR", "1.01"},
+		{"SYNTHESIS_RELATIVE_SCORE_FLOOR", "NaN"},
+		{"SYNTHESIS_RELATIVE_SCORE_FLOOR", "+Inf"},
+		{"SYNTHESIS_RELATIVE_SCORE_FLOOR", "-Inf"},
+		{"SYNTHESIS_RELATIVE_SCORE_FLOOR", "invalid"},
+	} {
+		t.Run(tc.key+"/"+tc.value, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("SYNTHESIS_CONTEXT_TOKENS", "")
+			t.Setenv("SYNTHESIS_RELATIVE_SCORE_FLOOR", "")
+			t.Setenv(tc.key, tc.value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("expected %s error, got %v", tc.key, err)
+			}
+		})
+	}
+}
+
+func TestLoadSynthesisBudgetDefaultsAndBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name, tokens, floor string
+		wantTokens          int
+		wantFloor           float64
+	}{
+		{"defaults", "", "", 2400, .55},
+		{"lower bounds", "256", "0", 256, 0},
+		{"upper bounds", "100000", "1", 100000, 1},
+		{"overrides", "4096", "0.8", 4096, .8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("SYNTHESIS_CONTEXT_TOKENS", tc.tokens)
+			t.Setenv("SYNTHESIS_RELATIVE_SCORE_FLOOR", tc.floor)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.SynthesisContextTokens != tc.wantTokens || cfg.SynthesisRelativeScoreFloor != tc.wantFloor {
+				t.Fatalf("unexpected synthesis budget: tokens=%d floor=%g", cfg.SynthesisContextTokens, cfg.SynthesisRelativeScoreFloor)
+			}
+		})
+	}
+}
+
 func TestLoadIndexVisibilityTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name, value, jobTimeout string
@@ -71,6 +125,7 @@ func baseValidConfig() *Config {
 		ShutdownDrainDelay: 5 * time.Second, HealthCacheTTL: 10 * time.Second,
 		QueryTimeout: time.Minute, SynthesisTimeout: 45 * time.Second, QueryConcurrency: 32, QueryQueueTimeout: 2 * time.Second,
 		HTTPReadTimeout: time.Minute, HTTPWriteTimeout: 75 * time.Second, HTTPIdleTimeout: time.Minute,
+		SynthesisContextTokens: 2400, SynthesisRelativeScoreFloor: .55,
 	}
 }
 

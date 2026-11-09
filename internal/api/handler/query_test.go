@@ -101,6 +101,7 @@ func TestQueryReportsSynthesisContextAndOptionalCitations(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{MaxChunksPerQuery: 10, BedrockFallbackModel: "fallback", QueryTimeout: 5 * time.Second, SynthesisTimeout: 4 * time.Second}
+			cfg.SynthesisContextTokens, cfg.SynthesisRelativeScoreFloor = 256, .55
 			var chunks []domain.ScoredChunk
 			if tc.evidence {
 				for i := range 7 {
@@ -142,7 +143,7 @@ func TestQueryReportsSynthesisContextAndOptionalCitations(t *testing.T) {
 			require.NoError(t, json.Unmarshal(got["scored_chunks"], &scored))
 			require.Len(t, scored, 7)
 			for i, chunk := range scored {
-				if i < 5 {
+				if i == 0 {
 					require.Equal(t, fmt.Sprint(i+1), string(chunk["excerpt"]))
 				} else {
 					require.NotContains(t, chunk, "excerpt")
