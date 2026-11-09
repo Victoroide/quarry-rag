@@ -70,6 +70,8 @@ type QueryContext struct {
 	MaxChunks     int
 	RequestedMode string
 	FilterDocType string
+	// IncludeCitations asks synthesis for inline citation markers and verifies them.
+	IncludeCitations bool
 	// AllowedDocumentIDs, when non-nil, restricts retrieved chunks to this
 	// allowlist BEFORE synthesis (tenant/role scoping). Nil = no restriction;
 	// non-nil empty = matches nothing.
@@ -94,6 +96,9 @@ type QueryContext struct {
 	RetrievedChunks []domain.ScoredChunk
 
 	// Populated by synthesis stage.
+	Excerpts      []domain.ScoredChunk
+	Truncated     []bool
+	Citations     []Citation
 	FinishReason  string
 	FinalAnswer   string
 	TokenUsage    domain.TokenUsage
