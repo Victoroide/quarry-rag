@@ -106,7 +106,7 @@ sequenceDiagram
 2. **EmbedStage**: Embeds chunks concurrently up to [`EMBED_CONCURRENCY`](configuration.md#environment-variables); the provider also enforces its shared request limit [per replica](deployment.md#concurrency-limits).
 3. **PersistStage**:
    - Assigns the caller's `doc_type` or falls back to the default `"document"`.
-   - Injects `doc_type` into individual chunk metadata; document labels are stored at acceptance.
+   - Injects `doc_type`, and `collection` when non-empty, into individual chunk metadata; document labels are stored at acceptance.
    - Upserts vectors into Pinecone only under the default namespace (`""`), with `doc_id` metadata identifying each document.
    - Splits each vector upsert into batches of at most [`PINECONE_UPSERT_BATCH_SIZE`](configuration.md#environment-variables) records and 1.5 MiB of estimated encoded data. Metadata above 40,960 serialized JSON bytes per record is rejected before writing.
    - Retries transient vector index failures with a per-attempt `PINECONE_TIMEOUT` and full-jitter exponential backoff from 200 ms, capped at 5 seconds. Writes and deletions use up to `PINECONE_MAX_ATTEMPTS` attempts; queries use at most three. Parent cancellation stops retries.
@@ -154,7 +154,7 @@ sequenceDiagram
     alt Explicit GLOBAL
         Routing->>Routing: Select GLOBAL without a probe
     else Automatic or explicit LOCAL
-        Routing->>Pinecone: Probe top 5 with doc_type and allowlist filters
+        Routing->>Pinecone: Probe top 5 with doc_type, collection and allowlist filters
         Pinecone-->>Routing: Scoped candidates
         Routing->>Metadata: Check candidate visibility and load candidate previews
         Metadata-->>Routing: Visible candidates and their previews
@@ -165,7 +165,7 @@ sequenceDiagram
     end
 
     Handler->>Retrieval: Run(QueryContext)
-    Retrieval->>Pinecone: Query default namespace with doc_type and allowlist filters
+    Retrieval->>Pinecone: Query default namespace with doc_type, collection and allowlist filters
     Note over Retrieval: LOCAL searches the selected document; fewer than 3 chunks triggers one scope-wide top-up
     Pinecone-->>Retrieval: Scored chunks
     Retrieval->>Retrieval: filterChunksByAllowedDocIDs (tenant allowlist enforcement)
@@ -207,9 +207,9 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
    - `LOCAL` targets the matched entity's document, or the highest-scoring visible candidate's document when no entity matches.
 3. **RetrievalStage**:
    - Queries Pinecone using the embedding produced during routing.
-   - Both modes query the default namespace with `filter_doc_type` and `allowed_document_ids` applied before top-K selection. `LOCAL` narrows the document filter to the routed document. If that query returns fewer than three chunks, it makes one additional query using the original authorized scope and document-type filter; results merge by chunk ID using the highest score, then sort and trim to top-K. `GLOBAL` queries the authorized scope once without a sparse-result fallback. Allowlists above 10000 IDs require one sequential query per group.
+   - Both modes query the default namespace with `filter_doc_type`, `collection` and `allowed_document_ids` applied before top-K selection. `LOCAL` narrows the document filter to the routed document. If that query returns fewer than three chunks, it makes one additional query using the original authorized scope and document-type filter; results merge by chunk ID using the highest score, then sort and trim to top-K. `GLOBAL` queries the authorized scope once without a sparse-result fallback. Allowlists above 10000 IDs require one sequential query per group.
    - Retains the allowlist post-filter before synthesis as defense in depth. A nil allowlist allows all documents; an empty allowlist denies all documents.
-   - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query; the top score is recomputed from visible chunks.
+   - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents, in the requested collection when one is set, contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query; the top score is recomputed from visible chunks.
 4. **SynthesisStage**:
    - When [`MIN_RELEVANCE_SCORE`](configuration.md#environment-variables) is positive, drops chunks below it before adaptive trimming. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).
    - Applies adaptive chunk trimming: drops chunks scoring below 55% of the top chunk's score, bounds chunk counts (5 chunks for simple queries, 8 for multi-need queries), and truncates chunk bodies at sentence boundaries near 1200 runes.

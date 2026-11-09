@@ -41,8 +41,8 @@ Add the entry to the client's map of stdio servers. Omit `QUARRY_SERVICE_TOKEN` 
 
 | Tool | Input | Output |
 |---|---|---|
-| `quarry_query` | Question, mode, document type, chunk limit, optional citation request and optional document ID allowlist | Answer, finish reason, mode, chunk counts, token usage, scored evidence in `chunks` with excerpt numbers, and requested citations |
-| `quarry_list_documents` | Optional page limit and continuation cursor | Document summaries including collection, and `next_after` |
+| `quarry_query` | Question, mode, document type, collection, chunk limit, optional citation request and optional document ID allowlist | Answer, finish reason, mode, chunk counts, token usage, scored evidence in `chunks` with excerpt numbers, and requested citations |
+| `quarry_list_documents` | Optional collection, page limit and continuation cursor | Document summaries including collection, and `next_after` |
 | `quarry_get_document` | Document ID | Document summary including collection and ingestion status |
 | `quarry_ingest_text` | Content, optional collection, document type, ID and metadata | Document ID and acceptance status |
 | `quarry_ingest_file` | Local path, optional collection, document type, ID and metadata | Document ID and acceptance status |
@@ -63,7 +63,7 @@ For collection-scoped ingestion, pass a `collection` argument to either ingestio
 
 The service token grants full service access. Share it only with trusted clients. Read-only mode limits the available tools; it does not reduce the credential's permissions at the HTTP service. For restricted queries, pass the caller's authorized document IDs as `allowed_document_ids`; the [HTTP API reference](api.md) defines omitted and empty lists.
 
-Collections scope ingestion deduplication; they do not restrict query access. Continue to pass the authorized document IDs when querying documents from a collection.
+Collections scope ingestion deduplication. A `collection` argument restricts queries and listings to one collection and intersects `allowed_document_ids`; like the allowlist, it is chosen by the caller and does not limit what the service token can access.
 
 Choose file roots narrowly. The confinement rules are listed under [`QUARRY_MCP_FILE_ROOTS`](configuration.md#mcp-server-environment). The service enforces upload size and content validation. Files are streamed without buffering their contents in the local command.
 
@@ -77,7 +77,7 @@ Pass `client.WithAcceptLanguage` to `Query` to choose the language of the [no-ev
 
 Inspect `*client.APIError` for status, service error code, extraction code, request ID and retry guidance. The package does not log or retry requests. A `FileUpload` streams its reader, which remains owned by the caller; close a blocking source when canceling an upload.
 
-Set `IngestRequest.Collection` for JSON ingestion or `FileUpload.Collection` for multipart uploads. Both `ListDocuments` and `GetDocument` return the stored label in `DocumentSummary.Collection`. This helper accepts text and returns its initial ingestion summary:
+Set `IngestRequest.Collection` for JSON ingestion or `FileUpload.Collection` for multipart uploads. Both `ListDocuments` and `GetDocument` return the stored label in `DocumentSummary.Collection`. Set `QueryRequest.Collection` or `ListOptions.Collection` to restrict a query or listing to one collection. This helper accepts text and returns its initial ingestion summary:
 
 ```go
 func ingestInCollection(ctx context.Context, c *client.Client, content string) (*client.DocumentSummary, error) {

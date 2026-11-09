@@ -242,6 +242,10 @@ without vector listing support reconcile legacy namespaces only and report that
 limitation on stderr. See the operational scripts documentation for page sizes,
 output fields and partial deletion failures.
 
+If documents already have collection labels, complete the
+[collection metadata backfill](development.md#collection-metadata-backfill) once
+after upgrading to enable collection-filtered retrieval of their existing vectors.
+
 ## Health Probes and Readiness
 
 The service exposes three unauthenticated probe endpoints:

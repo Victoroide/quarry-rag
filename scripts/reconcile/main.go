@@ -24,20 +24,32 @@ type options struct {
 	Apply bool
 	Limit int
 	Page  int
+
+	BackfillCollections bool
+	After               string
 }
 
 func parseOptions(args []string, output io.Writer) (options, error) {
 	var opts options
 	flags := flag.NewFlagSet("reconcile", flag.ContinueOnError)
 	flags.SetOutput(output)
-	flags.BoolVar(&opts.Apply, "apply", false, "delete the selected orphaned vectors and namespaces")
-	flags.IntVar(&opts.Limit, "limit", 100000, "maximum vector count selected across vectors and whole namespaces")
+	flags.BoolVar(&opts.Apply, "apply", false, "apply the selected deletions or collection updates")
+	flags.BoolVar(&opts.BackfillCollections, "backfill-collections", false, "label existing vectors with their document collection instead of deleting orphans")
+	flags.IntVar(&opts.Limit, "limit", 100000, "maximum vectors and namespace vectors selected, or documents for collection backfill")
 	flags.IntVar(&opts.Page, "page", 100, "vector listing page size (1-1000)")
+	flags.StringVar(&opts.After, "after", "", "continue a collection backfill after this document UUID")
 	if err := flags.Parse(args); err != nil {
 		return opts, err
 	}
 	if flags.NArg() != 0 || opts.Limit < 1 || opts.Page < 1 || opts.Page > 1000 {
 		return opts, errors.New("provide -limit greater than zero and -page between 1 and 1000, with no positional arguments")
+	}
+	if opts.After != "" {
+		id, err := uuid.Parse(opts.After)
+		if err != nil || !opts.BackfillCollections {
+			return opts, errors.New("-after requires -backfill-collections and a document UUID")
+		}
+		opts.After = id.String()
 	}
 	return opts, nil
 }
@@ -61,7 +73,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if cfg.FakeMode || cfg.PineconeAPIKey == "" || cfg.PineconeIndexName == "" {
+	if (!opts.BackfillCollections || opts.Apply) && (cfg.FakeMode || cfg.PineconeAPIKey == "" || cfg.PineconeIndexName == "") {
 		return errors.New("reconciliation requires a configured hosted vector index")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -77,6 +89,20 @@ func run() error {
 			slog.Error("close document store", "error", closeErr)
 		}
 	}()
+	var collectionDocuments []collectionDocument
+	if opts.BackfillCollections {
+		collectionDocuments, err = listCollectionDocuments(ctx, pg, opts.After, opts.Limit)
+		if err != nil {
+			return err
+		}
+		if !opts.Apply {
+			result, backfillErr := backfillCollections(ctx, nil, collectionDocuments, opts)
+			if backfillErr != nil {
+				return backfillErr
+			}
+			return json.NewEncoder(os.Stdout).Encode(result)
+		}
+	}
 	pc, err := pinecone.NewClient(pinecone.NewClientParams{ApiKey: cfg.PineconeAPIKey})
 	if err != nil {
 		return fmt.Errorf("create index client: %w", err)
@@ -96,6 +122,13 @@ func run() error {
 			slog.Error("close index connection", "error", closeErr)
 		}
 	}()
+	if opts.BackfillCollections {
+		result, backfillErr := backfillCollections(ctx, conn, collectionDocuments, opts)
+		if backfillErr != nil {
+			return backfillErr
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
 	lookup := func(lookupCtx context.Context, ids []string) (map[string]documentState, error) {
 		return lookupDocuments(lookupCtx, pg, ids)
 	}

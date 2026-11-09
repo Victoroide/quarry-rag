@@ -159,7 +159,7 @@ The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing
 - **Content deduplication can reveal that identical content exists within a collection.** A request without `document_id` can return any document in its `collection` with identical content, including one created with an explicit `document_id`. Give each tenant or user its own collection when content must stay private between them.
 - **Concurrency limits apply per replica.** Query admission, embedding and extraction limits are process-local; calculate per-replica caps as described in [Deployment](docs/deployment.md#concurrency-limits).
 - **The no-evidence answer covers six languages.** Empty results skip synthesis and return a fixed message in English, Spanish, Portuguese, French, German or Italian, chosen from `Accept-Language`; other languages receive English unless closely related to a supported language. See the [query API](docs/api.md#post-query).
-- **Document allowlists have size limits.** [`MAX_ALLOWED_DOCUMENT_IDS`](docs/configuration.md#environment-variables) and the 1 MiB query-body cap limit request size and the number of vector queries needed for large scopes.
+- **Document allowlists have size limits.** [`MAX_ALLOWED_DOCUMENT_IDS`](docs/configuration.md#environment-variables) and the 1 MiB query-body cap limit request size and the number of vector queries needed for large scopes. Use `collection` to scope large document sets with a single filter.
 - **Offline mode does not measure hosted behavior.** Its vector writes are immediately consistent and its answer generator echoes prompt context. It exercises contracts and storage limits, while answer quality and hosted-index latency require external-service testing.
 
 ## Documentation
