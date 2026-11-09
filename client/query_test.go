@@ -42,3 +42,49 @@ func TestQueryPreservesEmptyAllowlist(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
+
+func TestQueryAcceptLanguage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		opts   []client.RequestOption
+		header string
+	}{
+		{"default", nil, ""},
+		{"regional", []client.RequestOption{client.WithAcceptLanguage("es-MX")}, "es-MX"},
+		{"weighted", []client.RequestOption{client.WithAcceptLanguage("en;q=0.2, fr-CA;q=0.9")}, "en;q=0.2, fr-CA;q=0.9"},
+		{"last option", []client.RequestOption{client.WithAcceptLanguage("es"), client.WithAcceptLanguage("pt-BR")}, "pt-BR"},
+		{"empty", []client.RequestOption{client.WithAcceptLanguage("")}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, tc.header, r.Header.Get("Accept-Language"))
+				assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+				writeJSON(t, w, client.QueryResponse{})
+			})
+			_, err := c.Query(t.Context(), client.QueryRequest{Query: "synthetic question"}, tc.opts...)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestQueryAcceptLanguageIsPerRequest(t *testing.T) {
+	wantHeader := "es"
+	c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, wantHeader, r.Header.Get("Accept-Language"))
+		writeJSON(t, w, client.QueryResponse{})
+	})
+	_, err := c.Query(t.Context(), client.QueryRequest{Query: "synthetic question"}, client.WithAcceptLanguage("es"))
+	require.NoError(t, err)
+	wantHeader = ""
+	_, err = c.Query(t.Context(), client.QueryRequest{Query: "synthetic question"})
+	require.NoError(t, err)
+}
+
+func TestQueryRejectsNilRequestOption(t *testing.T) {
+	c := newClient(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("invalid request option reached the server")
+	})
+	got, err := c.Query(t.Context(), client.QueryRequest{Query: "synthetic question"}, nil)
+	require.EqualError(t, err, "request option is required")
+	require.Nil(t, got)
+}

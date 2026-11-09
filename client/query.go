@@ -61,10 +61,20 @@ type QueryResponse struct {
 	ScoredChunks  []ScoredChunkResponse `json:"scored_chunks"`
 }
 
+// RequestOption configures an individual HTTP request.
+type RequestOption func(*http.Request)
+
+// WithAcceptLanguage sets the language preferences for a no-evidence answer.
+func WithAcceptLanguage(tag string) RequestOption {
+	return func(req *http.Request) {
+		req.Header.Set("Accept-Language", tag)
+	}
+}
+
 // Query answers a question using indexed evidence in the requested scope.
-func (c *Client) Query(ctx context.Context, req QueryRequest) (*QueryResponse, error) {
+func (c *Client) Query(ctx context.Context, req QueryRequest, opts ...RequestOption) (*QueryResponse, error) {
 	var response QueryResponse
-	if err := c.jsonRequest(ctx, http.MethodPost, "/query", req, &response); err != nil {
+	if err := c.jsonRequest(ctx, http.MethodPost, "/query", req, &response, opts...); err != nil {
 		return nil, err
 	}
 	return &response, nil

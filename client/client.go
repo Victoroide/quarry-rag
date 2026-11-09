@@ -81,7 +81,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 	return &Client{baseURL: strings.TrimRight(u.String(), "/"), token: o.token, httpClient: &hc}, nil
 }
 
-func (c *Client) jsonRequest(ctx context.Context, method, path string, body, output any) error {
+func (c *Client) jsonRequest(ctx context.Context, method, path string, body, output any, opts ...RequestOption) error {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -94,10 +94,10 @@ func (c *Client) jsonRequest(ctx context.Context, method, path string, body, out
 	if body != nil {
 		contentType = "application/json"
 	}
-	return c.request(ctx, method, path, reader, contentType, output)
+	return c.request(ctx, method, path, reader, contentType, output, opts...)
 }
 
-func (c *Client) request(ctx context.Context, method, path string, body io.Reader, contentType string, output any) error {
+func (c *Client) request(ctx context.Context, method, path string, body io.Reader, contentType string, output any, opts ...RequestOption) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
@@ -108,6 +108,12 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 	}
 	if c.token != "" {
 		req.Header.Set("X-Service-Token", c.token)
+	}
+	for _, opt := range opts {
+		if opt == nil {
+			return errors.New("request option is required")
+		}
+		opt(req)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
