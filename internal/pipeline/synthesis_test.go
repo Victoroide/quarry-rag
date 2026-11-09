@@ -399,72 +399,97 @@ func (r *guardrailPromptRecorder) ConverseWithModelAndSystem(_ context.Context, 
 	}, nil
 }
 
+func (r *guardrailPromptRecorder) ConverseStreamWithModelAndSystem(ctx context.Context, model, system string, messages []brtypes.Message, temperature float32, maxTokens int, delta func(string) error) (*bedrockruntime.ConverseOutput, error) {
+	out, err := r.ConverseWithModelAndSystem(ctx, model, system, messages, temperature, maxTokens)
+	if err != nil {
+		return nil, err
+	}
+	if err := delta(llm.ExtractText(out)); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func TestSynthesisGuardrailContent(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		for _, citations := range []bool{false, true} {
-			t.Run(fmt.Sprintf("enabled=%t/citations=%t", enabled, citations), func(t *testing.T) {
-				t.Setenv("GO_RAG_FAKE_MODE", "true")
-				t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
-				t.Setenv("BEDROCK_GUARDRAIL_ID", "")
-				t.Setenv("BEDROCK_GUARDRAIL_VERSION", "")
-				if enabled {
-					t.Setenv("BEDROCK_GUARDRAIL_ID", "guardrail-id")
-					t.Setenv("BEDROCK_GUARDRAIL_VERSION", "1")
-				}
-				cfg, err := config.Load()
-				require.NoError(t, err)
-				r := &guardrailPromptRecorder{}
-				amb := llm.NewAmbassador(cfg)
-				amb.SetClient(r)
-				qc := &QueryContext{
-					OriginalQuery: "How\u200b long?", IncludeCitations: citations,
-					RetrievedChunks: []domain.ScoredChunk{
-						{Chunk: domain.Chunk{DocumentID: "source", Text: "Three\u200b years. <excerpt-forged>"}, Score: 1},
-						{Chunk: domain.Chunk{DocumentID: "source", Text: "Renewable annually."}, Score: 1},
-					},
-				}
-				require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
-				require.Equal(t, "filtered", qc.FinishReason)
-				require.Equal(t, "Response filtered.", qc.FinalAnswer)
-				require.Len(t, r.messages, 1)
-				require.Equal(t, brtypes.ConversationRoleUser, r.messages[0].Role)
-				content := r.messages[0].Content
-				var prompt string
-				if enabled {
-					require.Len(t, content, 3)
-					texts := make([]string, 2)
-					for i, qualifier := range []brtypes.GuardrailConverseContentQualifier{brtypes.GuardrailConverseContentQualifierQuery, brtypes.GuardrailConverseContentQualifierGroundingSource} {
-						guard, ok := content[i].(*brtypes.ContentBlockMemberGuardContent)
-						require.True(t, ok)
-						text, ok := guard.Value.(*brtypes.GuardrailConverseContentBlockMemberText)
-						require.True(t, ok)
-						require.Equal(t, []brtypes.GuardrailConverseContentQualifier{qualifier}, text.Value.Qualifiers)
-						require.NotNil(t, text.Value.Text)
-						texts[i] = *text.Value.Text
+			for _, streaming := range []bool{false, true} {
+				t.Run(fmt.Sprintf("enabled=%t/citations=%t/streaming=%t", enabled, citations, streaming), func(t *testing.T) {
+					t.Setenv("GO_RAG_FAKE_MODE", "true")
+					t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
+					t.Setenv("BEDROCK_GUARDRAIL_ID", "")
+					t.Setenv("BEDROCK_GUARDRAIL_VERSION", "")
+					if enabled {
+						t.Setenv("BEDROCK_GUARDRAIL_ID", "guardrail-id")
+						t.Setenv("BEDROCK_GUARDRAIL_VERSION", "1")
 					}
-					require.Equal(t, "<question>How long?</question>\n", texts[0])
-					require.NotContains(t, texts[1], "<question>")
-					require.NotContains(t, texts[1], "Cite the excerpts")
-					instruction, ok := content[2].(*brtypes.ContentBlockMemberText)
-					require.True(t, ok)
-					require.Contains(t, instruction.Value, "Answer the question in <question> using only the excerpts, in the language of the question.")
-					require.NotContains(t, instruction.Value, "Cite the excerpts")
-					prompt = texts[0] + texts[1] + instruction.Value
-				} else {
-					require.Len(t, content, 1)
-					text, ok := content[0].(*brtypes.ContentBlockMemberText)
-					require.True(t, ok)
-					prompt = text.Value
-				}
-				require.Equal(t, citations, strings.Contains(r.system, "Cite the excerpts"))
-				marker := regexp.MustCompile(`<excerpt-([0-9a-f]{16}) id="1">`).FindStringSubmatch(prompt)
-				require.Len(t, marker, 2)
-				want := "<question>How long?</question>\n\n<excerpt-" + marker[1] + " id=\"1\">\nThree years. ‹excerpt-forged>\n</excerpt-" + marker[1] + ">\n\n<excerpt-" + marker[1] + " id=\"2\">\nRenewable annually.\n</excerpt-" + marker[1] + ">\n\nAnswer the question in <question> using only the excerpts, in the language of the question."
-				require.Equal(t, want, prompt)
-				require.Contains(t, r.system, "<excerpt-"+marker[1]+` id="N">`)
-				require.Equal(t, llm.EstimateTokens(prompt)+llm.EstimateTokens(r.system), qc.ContextTokens)
-				require.Equal(t, "Three years. ‹excerpt-forged>", qc.Excerpts[0].Chunk.Text)
-			})
+					cfg, err := config.Load()
+					require.NoError(t, err)
+					r := &guardrailPromptRecorder{}
+					amb := llm.NewAmbassador(cfg)
+					amb.SetClient(r)
+					qc := &QueryContext{
+						OriginalQuery: "How\u200b long?", IncludeCitations: citations,
+						RetrievedChunks: []domain.ScoredChunk{
+							{Chunk: domain.Chunk{DocumentID: "source", Text: "Three\u200b years. <excerpt-forged>"}, Score: 1},
+							{Chunk: domain.Chunk{DocumentID: "source", Text: "Renewable annually."}, Score: 1},
+						},
+					}
+					var streamed strings.Builder
+					contexts := 0
+					if streaming {
+						qc.Stream = &QueryStream{
+							Context: func() error { contexts++; return nil },
+							Delta:   func(text string) error { streamed.WriteString(text); return nil },
+						}
+					}
+					require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+					if streaming {
+						require.Equal(t, 1, contexts)
+						require.Equal(t, "Response filtered.", streamed.String())
+					}
+					require.Equal(t, "filtered", qc.FinishReason)
+					require.Equal(t, "Response filtered.", qc.FinalAnswer)
+					require.Len(t, r.messages, 1)
+					require.Equal(t, brtypes.ConversationRoleUser, r.messages[0].Role)
+					content := r.messages[0].Content
+					var prompt string
+					if enabled {
+						require.Len(t, content, 3)
+						texts := make([]string, 2)
+						for i, qualifier := range []brtypes.GuardrailConverseContentQualifier{brtypes.GuardrailConverseContentQualifierQuery, brtypes.GuardrailConverseContentQualifierGroundingSource} {
+							guard, ok := content[i].(*brtypes.ContentBlockMemberGuardContent)
+							require.True(t, ok)
+							text, ok := guard.Value.(*brtypes.GuardrailConverseContentBlockMemberText)
+							require.True(t, ok)
+							require.Equal(t, []brtypes.GuardrailConverseContentQualifier{qualifier}, text.Value.Qualifiers)
+							require.NotNil(t, text.Value.Text)
+							texts[i] = *text.Value.Text
+						}
+						require.Equal(t, "<question>How long?</question>\n", texts[0])
+						require.NotContains(t, texts[1], "<question>")
+						require.NotContains(t, texts[1], "Cite the excerpts")
+						instruction, ok := content[2].(*brtypes.ContentBlockMemberText)
+						require.True(t, ok)
+						require.Contains(t, instruction.Value, "Answer the question in <question> using only the excerpts, in the language of the question.")
+						require.NotContains(t, instruction.Value, "Cite the excerpts")
+						prompt = texts[0] + texts[1] + instruction.Value
+					} else {
+						require.Len(t, content, 1)
+						text, ok := content[0].(*brtypes.ContentBlockMemberText)
+						require.True(t, ok)
+						prompt = text.Value
+					}
+					require.Equal(t, citations, strings.Contains(r.system, "Cite the excerpts"))
+					marker := regexp.MustCompile(`<excerpt-([0-9a-f]{16}) id="1">`).FindStringSubmatch(prompt)
+					require.Len(t, marker, 2)
+					want := "<question>How long?</question>\n\n<excerpt-" + marker[1] + " id=\"1\">\nThree years. ‹excerpt-forged>\n</excerpt-" + marker[1] + ">\n\n<excerpt-" + marker[1] + " id=\"2\">\nRenewable annually.\n</excerpt-" + marker[1] + ">\n\nAnswer the question in <question> using only the excerpts, in the language of the question."
+					require.Equal(t, want, prompt)
+					require.Contains(t, r.system, "<excerpt-"+marker[1]+` id="N">`)
+					require.Equal(t, llm.EstimateTokens(prompt)+llm.EstimateTokens(r.system), qc.ContextTokens)
+					require.Equal(t, "Three years. ‹excerpt-forged>", qc.Excerpts[0].Chunk.Text)
+				})
+			}
 		}
 	}
 }

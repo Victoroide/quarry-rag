@@ -26,6 +26,15 @@ type Citation struct {
 // VerifyCitations cleans excerpt markers and checks their lexical overlap.
 func VerifyCitations(answer string, excerpts []domain.ScoredChunk) (string, []Citation) {
 	cleaned := cleanCitationMarkers(answer, len(excerpts))
+	return cleaned, verifyCitationMarkers(cleaned, excerpts)
+}
+
+// VerifyStreamCitations checks valid references without rewriting streamed text.
+func VerifyStreamCitations(answer string, excerpts []domain.ScoredChunk) []Citation {
+	return verifyCitationMarkers(answer, excerpts)
+}
+
+func verifyCitationMarkers(cleaned string, excerpts []domain.ScoredChunk) []Citation {
 	citations := make([]Citation, 0)
 	excerptTokens := make(map[int]map[string]struct{})
 	var sentence strings.Builder
@@ -41,7 +50,11 @@ func VerifyCitations(answer string, excerpts []domain.ScoredChunk) (string, []Ci
 		tokens := citationTokens(sentence.String())
 		runeOffset += utf8.RuneCountInString(cleaned[byteOffset:match[0]])
 		byteOffset = match[0]
-		for _, number := range citationNumbers(cleaned[match[0]:match[1]]) {
+		numbers := citationNumbers(cleaned[match[0]:match[1]])
+		for i, number := range numbers {
+			if number < 1 || number > len(excerpts) || slices.Contains(numbers[:i], number) {
+				continue
+			}
 			if _, ok := excerptTokens[number]; !ok {
 				excerptTokens[number] = citationTokens(excerpts[number-1].Chunk.Text)
 			}
@@ -60,7 +73,7 @@ func VerifyCitations(answer string, excerpts []domain.ScoredChunk) (string, []Ci
 		}
 		previous = match[1]
 	}
-	return cleaned, citations
+	return citations
 }
 
 var citationMarker = regexp.MustCompile(`\[\d{1,3}(?:\s*,\s*\d{1,3})*\]`)
