@@ -42,6 +42,21 @@ func TestReadConverseStream(t *testing.T) {
 	require.EqualValues(t, 14, *out.Usage.TotalTokens)
 }
 
+func TestReadConverseStreamErrorAfterMetadata(t *testing.T) {
+	failed := errors.New("stream failed after metadata")
+	s := &streamReader{events: make(chan brtypes.ConverseStreamOutput, 3), err: failed}
+	s.events <- textDelta("Archive evidence")
+	s.events <- &brtypes.ConverseStreamOutputMemberMessageStop{Value: brtypes.MessageStopEvent{StopReason: brtypes.StopReasonEndTurn}}
+	s.events <- &brtypes.ConverseStreamOutputMemberMetadata{Value: brtypes.ConverseStreamMetadataEvent{Usage: &brtypes.TokenUsage{TotalTokens: aws.Int32(14)}}}
+	close(s.events)
+	var text strings.Builder
+	out, err := readConverseStream(t.Context(), s, func(delta string) error { text.WriteString(delta); return nil })
+	require.Equal(t, "Archive evidence", text.String())
+	require.ErrorIs(t, err, failed)
+	require.Nil(t, out)
+	require.True(t, s.closed)
+}
+
 func TestReadConverseStreamFailuresCloseReader(t *testing.T) {
 	failed := errors.New("stream failed")
 	for _, name := range []string{"upstream", "callback", "canceled", "incomplete"} {
