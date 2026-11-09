@@ -34,15 +34,16 @@ func (q QueryRequest) MarshalJSON() ([]byte, error) {
 
 // ScoredChunkResponse contains retrieved evidence and its similarity score.
 type ScoredChunkResponse struct {
-	DocID      string  `json:"doc_id"`
-	DocType    string  `json:"doc_type"`
-	ChunkIndex int     `json:"chunk_index"`
-	Score      float64 `json:"score"`
-	Text       string  `json:"text"`
-	Kind       string  `json:"kind,omitempty"`
-	Quality    string  `json:"quality,omitempty"`
-	Excerpt    int     `json:"excerpt,omitempty"`
-	Truncated  bool    `json:"truncated,omitempty"`
+	DocID       string   `json:"doc_id"`
+	DocType     string   `json:"doc_type"`
+	ChunkIndex  int      `json:"chunk_index"`
+	Score       float64  `json:"score"`
+	Text        string   `json:"text"`
+	Kind        string   `json:"kind,omitempty"`
+	Quality     string   `json:"quality,omitempty"`
+	Excerpt     int      `json:"excerpt,omitempty"`
+	Truncated   bool     `json:"truncated,omitempty"`
+	RerankScore *float64 `json:"rerank_score,omitempty"`
 }
 
 // CitationResponse links an answer marker to an excerpt and its lexical check.
