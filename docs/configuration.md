@@ -21,7 +21,7 @@ The table below lists the environment variables recognized by the service:
 | `CHUNK_OVERLAP` | integer | `64` | 0 to `CHUNK_TOKEN_SIZE/2` (integer division) | Maximum estimated tokens retained from the previous chunk. Each chunk starts at least halfway through the previous one, in estimated tokens and bytes, so total chunk text is at most twice the normalized input. |
 | `CHUNK_TOKEN_SIZE` | integer | `512` | 2 to 8192 | Maximum estimated tokens per text chunk. Dense scripts count one token per character; chunks never exceed 30,000 bytes. |
 | `DATABASE_URL` | string | `""` | Valid PostgreSQL connection string | PostgreSQL connection string for document metadata and chunk storage. Always required in all modes. Defaults to 16 pooled connections and a 30-second statement timeout; override with `pool_max_conns` and `statement_timeout`. |
-| `EMBEDDING_DIMENSIONS` | integer | `1024` | 256, 512, or 1024 | Output vector dimensions requested from Bedrock Titan Embed V2. Responses with a different length or non-finite values are rejected. |
+| `EMBEDDING_DIMENSIONS` | integer | `1024` | 256, 512, or 1024 | Output vector dimensions requested from Bedrock Titan Embed V2. Responses with a different length or non-finite values are rejected. Must match the existing PostgreSQL vector column dimension when that backend is selected. |
 | `EMBED_CONCURRENCY` | integer | `10` | 1 to 50 | Maximum number of concurrent embedding requests dispatched to AWS Bedrock. |
 | `EMBED_TIMEOUT` | duration | `15s` | 1s to 2m | Deadline for each embedding call, including waiting for a concurrency slot and all retries. An earlier caller deadline takes precedence. |
 | `EXTRACT_CONCURRENCY` | integer | `2` | 1 to 64 | Maximum concurrent multipart handlers, including upload reads and extraction. |
@@ -34,7 +34,7 @@ The table below lists the environment variables recognized by the service:
 | `HTTP_IDLE_TIMEOUT` | duration | `60s` | Positive | Idle keep-alive connection timeout. |
 | `HTTP_READ_TIMEOUT` | duration | `60s` | 5s to 30m | Maximum time to read a complete HTTP request, including the body. |
 | `HTTP_WRITE_TIMEOUT` | duration | `QUERY_TIMEOUT + 15s` | Greater than `QUERY_TIMEOUT` | Response write deadline; defaults to 75s with the default query budget. |
-| `INDEX_VISIBILITY_TIMEOUT` | duration | `30s` | 0s to 5m; less than `INGEST_JOB_TIMEOUT` | Maximum wait after vector writes for search to return the document's last embedded chunk; zero disables waiting. Timeout logs a warning and allows completion. |
+| `INDEX_VISIBILITY_TIMEOUT` | duration | `30s` | 0s to 5m; less than `INGEST_JOB_TIMEOUT` | Pinecone only: maximum wait after vector writes for search to return the document's last embedded chunk; zero disables waiting. Timeout logs a warning and allows completion. |
 | `INGEST_JOB_TIMEOUT` | duration | `15m` | 1m to 2h; greater than lease | Maximum processing time per attempt. |
 | `INGEST_LEASE` | duration | `2m` | 30s to 30m | Lease duration, renewed every third of this interval. |
 | `INGEST_MAX_ATTEMPTS` | integer | `5` | 1 to 20 | Maximum processing attempts before recording terminal failure. |
@@ -49,9 +49,9 @@ The table below lists the environment variables recognized by the service:
 | `MIN_RELEVANCE_SCORE` | float64 | `0` | 0 to 1, finite | Absolute evidence score floor applied before adaptive synthesis trimming; zero disables this floor. |
 | `OCR_PROVIDER` | string | `none` | `none` or `textract`; `textract` requires `S3_BUCKET` | Enables [image-only PDF OCR](api.md#image-only-pdf-ocr) after the parser finds no text. Offline fake mode never calls Textract and keeps the parser-only behavior. |
 | `OCR_TIMEOUT` | duration | `10m` | Positive; below `INGEST_JOB_TIMEOUT` when OCR is enabled | Total Textract start, polling and result pagination budget per ingestion attempt. Earlier job cancellation takes precedence. |
-| `PINECONE_API_KEY` | string | `""` | Non-empty string | API key for authenticating with Pinecone vector indices. Required when `GO_RAG_FAKE_MODE=false`. |
+| `PINECONE_API_KEY` | string | `""` | Non-empty string | API key for authenticating with Pinecone vector indices. Required when `GO_RAG_FAKE_MODE=false` and `VECTOR_STORE=pinecone`. |
 | `PINECONE_ENVIRONMENT` | string | `""` | Ignored | Has no effect and is not stored in configuration. A non-empty value adds the startup warning `PINECONE_ENVIRONMENT is ignored`. Remove it from deployment configuration. |
-| `PINECONE_INDEX_NAME` | string | `""` | Required when `GO_RAG_FAKE_MODE=false` | Target Pinecone index, for example `quarry-rag`. There is no implicit default; missing values prevent startup with external services. Optional in offline mode. |
+| `PINECONE_INDEX_NAME` | string | `""` | Required when `GO_RAG_FAKE_MODE=false` and `VECTOR_STORE=pinecone` | Target Pinecone index, for example `quarry-rag`. There is no implicit default. Optional with PostgreSQL vectors or offline mode. |
 | `PINECONE_MAX_ATTEMPTS` | integer | `5` | 1 to 10 | Maximum vector write and deletion attempts, including the first attempt; queries use at most three attempts. |
 | `PINECONE_TIMEOUT` | duration | `10s` | 1s to 2m | Timeout for each vector index request attempt. |
 | `PINECONE_UPSERT_BATCH_SIZE` | integer | `100` | 1 to 1000 | Maximum records per vector upsert; each batch also has a 1.5 MiB estimated size limit. |
@@ -71,6 +71,7 @@ The table below lists the environment variables recognized by the service:
 | `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
 | `SYNTHESIS_RELATIVE_SCORE_FLOOR` | float64 | `0.55` | 0 to 1, finite | Minimum candidate score relative to the best retrieved score. |
 | `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries. |
+| `VECTOR_STORE` | string | `"pinecone"` | `pinecone` or `postgres` | Persistent vector backend; offline fake mode always uses memory. PostgreSQL vectors require the [deployment prerequisites](deployment.md#postgresql-vectors). |
 | `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including running jobs. |
 
 ---
@@ -139,6 +140,8 @@ Application connections default to `pool_max_conns=16` and `statement_timeout=30
 | `006_ingest_jobs.sql` | Adds durable ingestion jobs, lease and failure tracking, completion timestamps and document fingerprints. Normalizes previously persisted processing rows with fingerprints to completed and requeues other processing rows. |
 | `007_document_collections.sql` | Adds collection labels to documents and an index on `(collection, id)`; existing rows belong to the default collection. |
 | `008_document_text_source.sql` | Adds `text_source` to documents with the default `parser`, including existing rows; see [image-only PDF OCR](api.md#image-only-pdf-ocr). |
+
+The optional vector schema is initialized separately after base migrations, under the same advisory lock; see the [vector data model](architecture.md#postgresql-vector-schema).
 
 ## Metrics
 
