@@ -289,7 +289,7 @@ Response fields (200 OK):
 | Field | Type | Description |
 |---|---|---|
 | `finish_reason` | string | Completion reason when available: `stop`, `max_tokens`, `filtered`, `context_exceeded`, or `no_evidence` |
-| `answer` | string | Grounded answer in the question's language when evidence exists; fixed English no-information answer otherwise |
+| `answer` | string | Grounded answer in the question's language when evidence exists; localized fixed no-information answer otherwise, as described below |
 | `mode` | string | Retrieval mode executed: `"LOCAL"` or `"GLOBAL"`; automatic routing reflects only authorized, visible candidate documents |
 | `chunks_used` | int | Count of chunks from completed documents remaining after visibility, allowlist and minimum relevance filtering |
 | `context_chunks` | int | Count of chunks retained after score thresholding and passed into the LLM context (optional) |
@@ -301,7 +301,9 @@ Response fields (200 OK):
 
 Malformed allowlist entries return 400 `allowed_document_ids must contain UUIDs`; a missing or null required allowlist returns 400 `allowed_document_ids is required`. Lists above `MAX_ALLOWED_DOCUMENT_IDS` return 400 before deduplication.
 
-If retrieval, the document allowlist, or `MIN_RELEVANCE_SCORE` leaves no evidence, the answer is `No relevant information was found to answer this question.` No synthesis model is called, `token_usage` fields are zero, `early_exit` is true and `finish_reason` is `no_evidence`. A transient similarity-probe failure selects GLOBAL retrieval in automatic mode instead of failing the query; embedding or subsequent retrieval failures use the error mapping below.
+If retrieval, the document allowlist, or `MIN_RELEVANCE_SCORE` leaves no evidence, the answer is a fixed message selected from the optional `Accept-Language` request header. Supported language tags are `en`, `es`, `pt`, `fr`, `de` and `it`; regional tags such as `es-MX`, `pt-BR` and `fr-CA` match their base language, and quality weights determine preference. When the header lists no supported language, closely related languages such as Galician (`gl`) or Luxembourgish (`lb`) receive the related supported language. Missing, empty, malformed or unmatched headers, and headers longer than 1,024 bytes, use English: `No relevant information was found to answer this question.` The response sets `Content-Language` to the selected base tag. No synthesis model is called, `token_usage` fields are zero, `early_exit` is true and `finish_reason` is `no_evidence`. Evidence-backed synthesis follows the question's language and does not set `Content-Language`.
+
+A transient similarity-probe failure selects GLOBAL retrieval in automatic mode instead of failing the query; embedding or subsequent retrieval failures use the error mapping below.
 
 Document visibility is checked against PostgreSQL before answer generation. Older processing rows with a stored fingerprint are treated as completed for compatibility. Failed, unfinished and missing documents contribute no chunks; a visibility lookup failure uses the error mapping below. The same empty-evidence response applies when visibility filtering removes all chunks.
 

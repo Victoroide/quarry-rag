@@ -13,7 +13,7 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 - **Durable document ingestion**: Accepts text or PDF, DOCX, DOC and UTF-8 or UTF-16 plain text uploads into PostgreSQL before responding, with content verification, atomic deduplication, parallel processing, leased retries and restart recovery.
 - **Adaptive retrieval**: Evaluates query complexity and similarity signals to route between LOCAL and GLOBAL vector search in Pinecone.
 - **Tenant and document filtering**: Supports metadata filtering by document type and query-time document ID allowlists enforced before synthesis.
-- **Grounded synthesis**: Generates answers in the language of the incoming question using AWS Bedrock models when evidence is available; empty results return a fixed English no-information answer without synthesis.
+- **Grounded synthesis**: Generates answers in the language of the incoming question using AWS Bedrock models when evidence is available; see the [query API](docs/api.md#post-query) for empty results.
 - **Offline development mode**: Runs fully offline with deterministic in-memory vector storage and mock model providers via `GO_RAG_FAKE_MODE`.
 - **Service authentication**: Restricts operational and query routes with constant-time `X-Service-Token` verification.
 - **Tracing**: optional OpenTelemetry export over OTLP/HTTP, including LangSmith, for requests, pipeline stages, model calls and storage operations.
@@ -133,7 +133,7 @@ The service reads configuration only from environment variables. [Configuration]
 
 JSON ingestion accepts at most 1,000,000 bytes of decoded content. Its request-body cap is 8,097,152 bytes, allowing sixfold JSON escaping plus metadata overhead; queries accept a 1 MiB body. Every upload format enforces the same decoded-text limit. PDF extraction also enforces an 8 MiB decoded-stream budget. Oversized bodies return 413; extraction-limit failures return 422.
 
-The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing probe falls back to GLOBAL retrieval. If no authorized evidence remains, queries return `No relevant information was found to answer this question.` with zero synthesis token usage and no model call.
+The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing probe falls back to GLOBAL retrieval.
 
 ## Limitations
 
@@ -147,7 +147,7 @@ The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing
 - **Individual-user authorization belongs to the caller.** Service credentials authenticate trusted applications. Those applications must supply each user's `allowed_document_ids`; `REQUIRE_DOCUMENT_ALLOWLIST` can require that field, but the service does not determine which documents a user may read.
 - **Content deduplication can reveal that identical content exists within a collection.** A request without `document_id` can return any document in its `collection` with identical content, including one created with an explicit `document_id`. Give each tenant or user its own collection when content must stay private between them.
 - **Concurrency limits apply per replica.** Query admission, embedding and extraction limits are process-local, so total concurrency grows with the replica count. Configure replica counts, retries and per-process limits to fit upstream quotas.
-- **The no-evidence answer is fixed English.** Empty authorized results skip synthesis and return `No relevant information was found to answer this question.` Evidence-backed synthesis is instructed to follow the question's language.
+- **The no-evidence answer covers six languages.** Empty results skip synthesis and return a fixed message in English, Spanish, Portuguese, French, German or Italian, chosen from `Accept-Language`; other languages receive English unless closely related to a supported language. See the [query API](docs/api.md#post-query).
 - **Document allowlists have size limits.** `MAX_ALLOWED_DOCUMENT_IDS` defaults to 25,000 entries before deduplication, and the 1 MiB query-body cap also applies. These bounds limit request size and the number of vector queries needed for large scopes.
 - **Offline mode does not measure hosted behavior.** Its vector writes are immediately consistent and its answer generator echoes prompt context. It exercises contracts and storage limits, while answer quality and hosted-index latency require external-service testing.
 

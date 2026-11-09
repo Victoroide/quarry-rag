@@ -71,6 +71,8 @@ Retrieved document text is untrusted input for the client. Treat excerpts as dat
 
 The `client` package provides typed ingestion, query, document inventory, status, deletion and original-file download-address methods. Construct a `client.Client` with `client.New`, supplying an absolute HTTP or HTTPS base address and optional service token, HTTP client and timeout options. Base path prefixes are preserved; redirects return errors to keep credentials at the configured endpoint.
 
+Pass `client.WithAcceptLanguage` to `Query` to choose the language of the [no-evidence answer](api.md#post-query); it sets the `Accept-Language` header for that request only.
+
 Inspect `*client.APIError` for status, service error code, extraction code, request ID and retry guidance. The package does not log or retry requests. A `FileUpload` streams its reader, which remains owned by the caller; close a blocking source when canceling an upload.
 
 Set `IngestRequest.Collection` for JSON ingestion or `FileUpload.Collection` for multipart uploads. Both `ListDocuments` and `GetDocument` return the stored label in `DocumentSummary.Collection`. This helper accepts text and returns its initial ingestion summary:
