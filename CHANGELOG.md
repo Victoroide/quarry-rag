@@ -12,6 +12,10 @@ Notable changes are grouped by release.
 
 - The no-evidence answer follows `Accept-Language` for English, Spanish, Portuguese, French, German and Italian and sets `Content-Language`.
 
+### Fixed
+
+- **Breaking:** Startup rejects `CHUNK_OVERLAP` above `CHUNK_TOKEN_SIZE/2`, which was previously accepted, and chunk output now grows linearly with document size. Chunks keep the source spacing between sentences instead of adding a space after full-width terminators such as `。`.
+
 ## [0.1.0] - 2026-11-09
 
 ### Added

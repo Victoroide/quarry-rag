@@ -16,7 +16,7 @@ The table below lists the environment variables recognized by the service:
 | `BEDROCK_EMBED_MODEL` | string | `"amazon.titan-embed-text-v2:0"` | Non-empty string | Bedrock model identifier used for generating text embeddings. |
 | `BEDROCK_FALLBACK_MODEL` | string | `"us.meta.llama4-maverick-17b-instruct-v1:0"` | Non-empty string | Bedrock model identifier for answer synthesis and fallback routing. |
 | `BEDROCK_PRIMARY_MODEL` | string | `"amazon.nova-micro-v1:0"` | Non-empty string | Bedrock model identifier for low-latency reasoning and fast answer synthesis. |
-| `CHUNK_OVERLAP` | integer | `64` | >= 0 and < `CHUNK_TOKEN_SIZE` | Maximum estimated tokens retained from the previous chunk; overlap is reduced when needed to include new text within both limits. |
+| `CHUNK_OVERLAP` | integer | `64` | 0 to `CHUNK_TOKEN_SIZE/2` (integer division) | Maximum estimated tokens retained from the previous chunk. Each chunk starts at least halfway through the previous one, in estimated tokens and bytes, so total chunk text is at most twice the normalized input. |
 | `CHUNK_TOKEN_SIZE` | integer | `512` | 2 to 8192 | Maximum estimated tokens per text chunk. Dense scripts count one token per character; chunks never exceed 30,000 bytes. |
 | `DATABASE_URL` | string | `""` | Valid PostgreSQL connection string | PostgreSQL connection string for document metadata and chunk storage. Always required in all modes. Defaults to 16 pooled connections and a 30-second statement timeout; override with `pool_max_conns` and `statement_timeout`. |
 | `EMBEDDING_DIMENSIONS` | integer | `1024` | 256, 512, or 1024 | Output vector dimensions requested from Bedrock Titan Embed V2. Responses with a different length or non-finite values are rejected. |
