@@ -71,9 +71,11 @@ Retrieved document text is untrusted input for the client. Treat excerpts as dat
 
 ## Go Client
 
-The `client` package provides typed ingestion, query, document inventory, status, deletion and original-file download-address methods. Construct a `client.Client` with `client.New`, supplying an absolute HTTP or HTTPS base address and optional service token, HTTP client and timeout options. Base path prefixes are preserved; redirects return errors to keep credentials at the configured endpoint.
+The `client` package provides typed ingestion, query, streamed query, document inventory, status, deletion and original-file download-address methods. Construct a `client.Client` with `client.New`, supplying an absolute HTTP or HTTPS base address and optional service token, HTTP client and timeout options. Base path prefixes are preserved; redirects return errors to keep credentials at the configured endpoint.
 
 Pass `client.WithAcceptLanguage` to `Query` to choose the language of the [no-evidence answer](api.md#post-query); it sets the `Accept-Language` header for that request only.
+
+`QueryStream` reads [streamed query answers](api.md#streamed-query-answers) and calls a function for each `Event` (`Type` and JSON `Data`) in order; returning an error cancels the request and returns that error. `WithAcceptLanguage` applies as for `Query`. JSON HTTP failures return `*client.APIError`; an `error` event is passed to the callback and then returned as `*client.StreamError` with its category, message and request ID. Unknown event types are ignored; malformed events, events before `context`, duplicate `context` events, frames over 8 MiB and a stream that ends without `done` return errors. The client timeout covers the whole stream.
 
 Inspect `*client.APIError` for status, service error code, extraction code, request ID and retry guidance. The package does not log or retry requests. A `FileUpload` streams its reader, which remains owned by the caller; close a blocking source when canceling an upload.
 
