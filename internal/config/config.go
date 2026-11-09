@@ -45,6 +45,11 @@ type Config struct {
 	// SynthesisModel selects primary, fallback or hybrid answer routing.
 	SynthesisModel string
 
+	// SynthesisContextTokens bounds the estimated tokens in excerpt bodies.
+	SynthesisContextTokens int
+	// SynthesisRelativeScoreFloor sets the minimum score relative to the best match.
+	SynthesisRelativeScoreFloor float64
+
 	// FakeMode (GO_RAG_FAKE_MODE) runs the service fully offline: deterministic
 	// in-memory vector store, embedder, and LLM. No AWS/Pinecone credentials
 	// required. DATABASE_URL is still used for metadata (local Postgres in QA).
@@ -146,6 +151,13 @@ func Load() (*Config, error) {
 		*setting.dst = value
 	}
 	var err error
+	if cfg.SynthesisContextTokens, err = envIntOrDefault("SYNTHESIS_CONTEXT_TOKENS", 2400); err != nil {
+		return nil, err
+	}
+	if cfg.SynthesisRelativeScoreFloor, err = envFloat64OrDefault("SYNTHESIS_RELATIVE_SCORE_FLOOR", 0.55); err != nil {
+		return nil, err
+	}
+
 	if cfg.Tracing, err = loadTracing(); err != nil {
 		return nil, err
 	}
@@ -289,6 +301,13 @@ func (c *Config) validate() error {
 	case "primary", "fallback", "hybrid":
 	default:
 		return fmt.Errorf("config: SYNTHESIS_MODEL must be primary, fallback or hybrid")
+	}
+
+	if c.SynthesisContextTokens < 256 || c.SynthesisContextTokens > 100000 {
+		return fmt.Errorf("config: SYNTHESIS_CONTEXT_TOKENS must be between 256 and 100000")
+	}
+	if math.IsNaN(c.SynthesisRelativeScoreFloor) || math.IsInf(c.SynthesisRelativeScoreFloor, 0) || c.SynthesisRelativeScoreFloor < 0 || c.SynthesisRelativeScoreFloor > 1 {
+		return fmt.Errorf("config: SYNTHESIS_RELATIVE_SCORE_FLOOR must be between 0 and 1 and finite")
 	}
 
 	if err := c.validateServiceTokens(); err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,27 +18,7 @@ import (
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 )
 
-// Synthesis budgets bound context size and answer length.
-const (
-	answerSynthesisMaxOutput = 1024
-
-	// Chunk count caps. Simple lookups can answer from 5 chunks; multi-
-	// need aggregation/compare queries need a wider view, otherwise the
-	// model refuses because no single chunk has the full picture.
-	synthesisMaxChunksSimple    = 5
-	synthesisMaxChunksMultiNeed = 8
-
-	// synthesisRelScoreFloor prunes chunks whose score is less than this
-	// fraction of the top chunk's score. Keeps strong matches even when
-	// fewer than the cap survive; drops near-noise chunks.
-	synthesisRelScoreFloor = 0.55
-
-	// chunkBodyMaxRunes truncates over-long chunk text. The chunker
-	// produces ~512-token windows (≈2000 runes); we keep enough room for
-	// the salient facts at the start without padding the prompt with
-	// trailing boilerplate.
-	chunkBodyMaxRunes = 1200
-)
+const answerSynthesisMaxOutput = 1024
 
 // DecomposeStage identifies multiple information needs without database access.
 type DecomposeStage struct{}
@@ -269,52 +250,46 @@ func NewSynthesisStage(amb *llm.Ambassador, cfg *config.Config) *SynthesisStage 
 // ID returns the stage identifier.
 func (s *SynthesisStage) ID() StageID { return StageSynthesis }
 
-// trimChunksForSynthesis applies adaptive chunk selection to the
-// retrieval result: relative-score pruning, top-N cap, and per-chunk
-// text truncation. maxChunks lets the caller pick a tighter cap for
-// simple lookups and a wider cap for multi-need / aggregation queries
-// where the model needs to see more of the corpus to answer.
-func trimChunksForSynthesis(in []domain.ScoredChunk, maxChunks int) []domain.ScoredChunk {
+// trimChunksForSynthesis budgets sanitized excerpts in retrieval score order.
+// A partial final excerpt needs a sentence boundary and at least 64 tokens;
+// the first excerpt is always retained, with a hard cut if necessary.
+func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor float64) []domain.ScoredChunk {
 	if len(in) == 0 {
 		return in
 	}
-	if maxChunks <= 0 {
-		maxChunks = synthesisMaxChunksSimple
+	if budget <= 0 {
+		budget, relativeFloor = 2400, 0.55
 	}
 	// in is already sorted by score desc from Retriever.Retrieve.
-	top := in[0].Score
-	floor := top * synthesisRelScoreFloor
-	out := make([]domain.ScoredChunk, 0, maxChunks)
+	floor := in[0].Score * relativeFloor
+	out := make([]domain.ScoredChunk, 0, len(in))
+	remaining := budget
 	for _, sc := range in {
-		if len(out) >= maxChunks {
+		if sc.Score < floor && len(out) > 0 {
 			break
 		}
-		if sc.Score < floor {
-			break
-		}
-		// Truncate over-long chunk text at a sentence boundary if one
-		// exists in the trailing 1/4 of the kept slice, otherwise hard
-		// cut at the rune limit.
-		txt := sc.Chunk.Text
-		if r := []rune(txt); len(r) > chunkBodyMaxRunes {
-			cut := chunkBodyMaxRunes
-			// Look for a clean break in the last 25% of the window.
-			window := r[chunkBodyMaxRunes*3/4 : chunkBodyMaxRunes]
-			for i := len(window) - 1; i >= 0; i-- {
-				if window[i] == '.' || window[i] == '\n' {
-					cut = chunkBodyMaxRunes*3/4 + i + 1
-					break
-				}
+		sc.Chunk.Text = sanitizeExcerpt(sc.Chunk.Text)
+		tokens := llm.EstimateTokens(sc.Chunk.Text)
+		if tokens > remaining {
+			if remaining < 64 && len(out) > 0 {
+				break
 			}
-			sc.Chunk.Text = string(r[:cut])
-		} else {
-			sc.Chunk.Text = txt
+			runes := []rune(sc.Chunk.Text)
+			cut := sort.Search(len(runes)+1, func(n int) bool {
+				return llm.EstimateTokens(string(runes[:n])) > remaining
+			}) - 1
+			body := string(runes[:cut])
+			if end := strings.LastIndexAny(body, ".\n"); end >= 0 && llm.EstimateTokens(body[:end+1]) >= 64 {
+				body = body[:end+1]
+			} else if len(out) > 0 {
+				break
+			}
+			sc.Chunk.Text = body
+			out = append(out, sc)
+			break
 		}
 		out = append(out, sc)
-	}
-	// Always keep at least one chunk if any were retrieved.
-	if len(out) == 0 && len(in) > 0 {
-		out = append(out, in[0])
+		remaining -= tokens
 	}
 	return out
 }
@@ -352,20 +327,11 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		return nil
 	}
 
-	// Multi-need queries get a wider context window — listing/comparing
-	// across the corpus needs to see more chunks than a single-entity
-	// lookup. The signal is the same one the router uses to pick the
-	// stronger synthesis model, so prompt and model scale together.
-	maxChunks := synthesisMaxChunksSimple
-	if len(qc.SubQueries) > 1 {
-		maxChunks = synthesisMaxChunksMultiNeed
-	}
-	chunks := trimChunksForSynthesis(qc.RetrievedChunks, maxChunks)
+	chunks := trimChunksForSynthesis(qc.RetrievedChunks, s.cfg.SynthesisContextTokens, s.cfg.SynthesisRelativeScoreFloor)
 	qc.ContextChunks = len(chunks)
 	qc.Truncated = make([]bool, len(chunks))
 	for i := range chunks {
-		qc.Truncated[i] = len([]rune(chunks[i].Chunk.Text)) < len([]rune(qc.RetrievedChunks[i].Chunk.Text))
-		chunks[i].Chunk.Text = sanitizeExcerpt(chunks[i].Chunk.Text)
+		qc.Truncated[i] = chunks[i].Chunk.Text != sanitizeExcerpt(qc.RetrievedChunks[i].Chunk.Text)
 	}
 	qc.Excerpts = chunks
 
