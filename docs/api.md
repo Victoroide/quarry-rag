@@ -313,11 +313,11 @@ Each `citations` entry contains:
 | `excerpt` | int | One-based index of the excerpt sent to synthesis |
 | `doc_id` | string | Source document identifier |
 | `chunk_index` | int | Source chunk index |
-| `offset` | int | Zero-based Unicode code point index of the marker's `[` in the cleaned answer; references in one list marker share the offset |
+| `offset` | int | Zero-based Unicode code point index of the marker's `[` in the cleaned JSON answer or unchanged streamed answer; references in one list marker share the offset |
 | `verified` | bool | Whether the rounded lexical overlap is at least 0.30; this is not an entailment check |
 | `overlap` | number | Fraction of distinct sentence tokens also found in the excerpt, rounded to two decimal places; zero for a sentence without tokens |
 
-With `include_citations`, markers match `[n]` or comma-separated lists of one-to-three-digit numbers, such as `[1, 2]`; adjacent markers are allowed. Numbers outside the excerpt range are removed. A marker with no valid numbers is removed with one preceding space. Retained markers list each valid number once, as comma-separated decimal numbers. Other bracketed text is unchanged. Without this option the answer is unchanged.
+For JSON responses with `include_citations`, markers match `[n]` or comma-separated lists of one-to-three-digit numbers, such as `[1, 2]`; adjacent markers are allowed. Numbers outside the excerpt range are removed. A marker with no valid numbers is removed with one preceding space. Retained markers list each valid number once, as comma-separated decimal numbers. Other bracketed text is unchanged. Without this option the answer is unchanged.
 
 The referencing sentence begins after the previous `.`, `!`, `?`, `。`, `！`, `？` or newline before the marker and excludes other citation markers. Tokens are maximal runs of letters, combining marks and digits after NFC normalization and lowercasing, ignoring invisible format characters; runs of at least three code points or containing a digit are kept. Dense-script runs (Han, Hiragana, Katakana, Hangul, Thai, Lao, Khmer, Myanmar and Tibetan) use character bigrams, and script-neutral letters such as `ー` stay in the run they follow. Lexical checks use the actual sanitized, possibly truncated excerpt body rather than the response snippet.
 
@@ -331,7 +331,7 @@ Document visibility is checked against PostgreSQL before answer generation. Olde
 
 `MIN_RELEVANCE_SCORE=0` disables the absolute relevance floor; positive values remove lower-scoring chunks before synthesis trimming.
 
-Each admitted query runs under `QUERY_TIMEOUT`; synthesis has the shorter `SYNTHESIS_TIMEOUT` budget. Earlier client deadlines take precedence. A canceled request produces no response body. Nonempty truncated or filtered answers retain their completion reason; empty synthesis text returns 502.
+Each admitted query runs under `QUERY_TIMEOUT`; synthesis has the shorter `SYNTHESIS_TIMEOUT` budget. Earlier client deadlines take precedence. A canceled request produces no further response bytes. Nonempty truncated or filtered answers retain their completion reason; empty synthesis text uses the `synthesis` error category below.
 
 Scored chunk fields:
 
@@ -346,6 +346,39 @@ Scored chunk fields:
 | `quality` | string | Quality rating if populated during ingestion (optional) |
 | `excerpt` | int | One-based prompt excerpt number; omitted when this chunk did not reach synthesis |
 | `truncated` | bool | True when the excerpt body was cut before synthesis; omitted otherwise. This describes synthesis truncation, independently of the response snippet limit |
+
+#### Streamed query answers
+
+Send `Accept: text/event-stream` to receive server-sent events; JSON remains the default. `text/event-stream` with any positive `q` value selects streaming, regardless of other listed types; wildcards such as `*/*` keep JSON. Each event is framed as `event: <name>`, a `data: <JSON>` line, and a blank line. Text, including newlines, is escaped inside JSON. Each frame is flushed, and the response sets `Content-Type: text/event-stream`, `Cache-Control: no-cache` and `X-Accel-Buffering: no`. Bedrock generation uses ConverseStream; offline generation emits words incrementally.
+
+| Event | Payload | When |
+|---|---|---|
+| `context` | `mode`, `chunks_used`, `context_chunks`, `scored_chunks` | Once, after evidence filtering and synthesis excerpt selection, before generation |
+| `delta` | `{"text":"..."}` | Incremental answer text; concatenate `text` values in order |
+| `done` | `finish_reason`, `token_usage`, `context_tokens`, `stage_timings_ms`, optional `early_exit`, and `citations` when requested | Successful completion; timings include synthesis |
+| `error` | `{"error":"...","message":"..."}` | A failure after the first frame; error categories and messages follow the table below |
+
+The context event uses the scored chunk fields above, including `excerpt` and `truncated`, so it identifies which retrieved chunks reached synthesis. Zero context counts are included. With `include_citations`, the final event always contains a citation array, including `[]` when no valid references remain. Citation checks run on the complete generated answer. Streaming preserves all text and markers as generated; checks omit out-of-range excerpt numbers and report each valid number in a marker once. The lexical check and offset definition above apply.
+
+A no-evidence response sends `context`, one localized `delta`, and `done`, with zero token usage and context counts, `early_exit: true`, and `finish_reason: "no_evidence"`. Its `Content-Language` header follows the language selection described above.
+
+Authentication, JSON validation, body and authorization limits, admission, deadlines, metrics and tracing apply to both formats. Errors before the first frame retain the JSON status codes below. After the stream starts, HTTP status remains 200 and a failure ends with `error` instead of `done`. A disconnected client cancels generation and closes the upstream stream. A stream that closes without `done` is incomplete; discard it or retry the query as a new request.
+
+For example, add `-N -H "Accept: text/event-stream"` to the query command to display frames as they arrive:
+
+```text
+event: context
+data: {"mode":"GLOBAL","chunks_used":1,"context_chunks":1,"scored_chunks":[{"doc_id":"example-document","doc_type":"guide","chunk_index":0,"score":0.9,"text":"Archive evidence","excerpt":1}]}
+
+event: delta
+data: {"text":"Archive evidence [1]."}
+
+event: done
+data: {"finish_reason":"stop","token_usage":{"input_tokens":100,"output_tokens":6,"total_tokens":106},"context_tokens":100,"stage_timings_ms":{"query_decomposition":0,"retrieval_routing":1,"retrieval":2,"synthesis":5},"citations":[{"excerpt":1,"doc_id":"example-document","chunk_index":0,"offset":17,"verified":true,"overlap":1}]}
+
+```
+
+The [Go client](mcp.md#go-client) reads this stream with `QueryStream`.
 
 Error Status Codes:
 

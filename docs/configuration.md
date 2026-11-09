@@ -15,7 +15,7 @@ The table below lists the environment variables recognized by the service:
 | `AWS_SESSION_TOKEN` | string | `""` | Optional string | Session token for temporary static AWS credentials. |
 | `BEDROCK_EMBED_MODEL` | string | `"amazon.titan-embed-text-v2:0"` | Non-empty string | Bedrock model identifier used for generating text embeddings. |
 | `BEDROCK_FALLBACK_MODEL` | string | `"us.meta.llama4-maverick-17b-instruct-v1:0"` | Non-empty string | Bedrock model identifier for answer synthesis and fallback routing. |
-| `BEDROCK_GUARDRAIL_ID` | string | `""` (disabled) | Set together with `BEDROCK_GUARDRAIL_VERSION`; no whitespace or control characters | Optional Bedrock guardrail identifier attached to Converse requests. See [synthesis behavior](architecture.md#query-stages) and [required permissions](deployment.md#3-aws-bedrock-embedding-and-llm-models). |
+| `BEDROCK_GUARDRAIL_ID` | string | `""` (disabled) | Set together with `BEDROCK_GUARDRAIL_VERSION`; no whitespace or control characters | Optional Bedrock guardrail identifier attached to Converse and ConverseStream requests. See [synthesis behavior](architecture.md#query-stages) and [required permissions](deployment.md#3-aws-bedrock-embedding-and-llm-models). |
 | `BEDROCK_GUARDRAIL_VERSION` | string | `""` (disabled) | Set together with `BEDROCK_GUARDRAIL_ID`; `DRAFT` or a positive decimal integer without leading zeros | Guardrail version to apply. |
 | `BEDROCK_PRIMARY_MODEL` | string | `"amazon.nova-micro-v1:0"` | Non-empty string | Bedrock model identifier for low-latency reasoning and fast answer synthesis. |
 | `CHUNK_OVERLAP` | integer | `64` | 0 to `CHUNK_TOKEN_SIZE/2` (integer division) | Maximum estimated tokens retained from the previous chunk. Each chunk starts at least halfway through the previous one, in estimated tokens and bytes, so total chunk text is at most twice the normalized input. |
@@ -143,7 +143,7 @@ and restrict access to the monitoring system; it has no service-token check.
 
 Metrics use Prometheus text format:
 
-- `quarry_http_requests_total{route,code}` counts HTTP responses.
+- `quarry_http_requests_total{route,code}` counts HTTP responses. A [streamed query answer](api.md#streamed-query-answers) that fails after its first event keeps code `200`; the failure is logged as `query processing failed`.
 - `quarry_http_request_duration_seconds{route}` observes request duration.
 - `quarry_pipeline_stage_duration_seconds{stage}` observes executed ingestion and
   retrieval stages, including stages that return an error.

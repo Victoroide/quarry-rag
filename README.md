@@ -130,6 +130,8 @@ curl -X POST localhost:8081/query \
   }'
 ```
 
+For incremental answers, see [streamed query answers](docs/api.md#streamed-query-answers).
+
 ## Configuration
 
 The service reads configuration only from environment variables. [Configuration](docs/configuration.md) lists every variable with its default and bounds, and [.env.example](.env.example) is a starting point for Docker Compose.
@@ -154,7 +156,7 @@ The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing
 - **Retrieved text can still steer answers.** Excerpt markers, sanitization and synthesis instructions reduce prompt injection, and optional Bedrock Guardrails ([`BEDROCK_GUARDRAIL_ID`](docs/configuration.md#environment-variables)) add prompt-attack and grounding checks. Hostile text in authorized documents can still influence an answer.
 - **Token counts are estimates.** The service uses text heuristics instead of a provider tokenizer. Chunk token estimates and the 30,000-byte chunk cap bound input size, but do not guarantee exact token counts or acceptance by every configured provider.
 - **Synthesis uses a bounded part of the evidence.** Excerpts are added in score order while they fit `SYNTHESIS_CONTEXT_TOKENS` estimated tokens, after chunks below `SYNTHESIS_RELATIVE_SCORE_FLOOR` of the best score are dropped. Chunks left out are returned without an `excerpt` number, and a cut excerpt is marked `truncated`.
-- **Citation checks are lexical.** With `include_citations`, markers must refer to excerpts sent to the model, and each citation reports its word overlap with that excerpt. Overlap does not prove that the excerpt supports the sentence, and answers written in a different language than their excerpts score low.
+- **Citation checks are lexical.** With `include_citations`, reported citations refer to excerpts sent to the model and include their word overlap with that excerpt. Overlap does not prove that the excerpt supports the sentence, and answers written in a different language than their excerpts score low.
 - **Individual-user authorization belongs to the caller.** Service credentials authenticate trusted applications. Those applications must supply each user's `allowed_document_ids`; `REQUIRE_DOCUMENT_ALLOWLIST` can require that field, but the service does not determine which documents a user may read.
 - **Content deduplication can reveal that identical content exists within a collection.** A request without `document_id` can return any document in its `collection` with identical content, including one created with an explicit `document_id`. Give each tenant or user its own collection when content must stay private between them.
 - **Concurrency limits apply per replica.** Query admission, embedding and extraction limits are process-local; calculate per-replica caps as described in [Deployment](docs/deployment.md#concurrency-limits).
