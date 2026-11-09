@@ -1,0 +1,1 @@
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS text_source TEXT NOT NULL DEFAULT 'parser';
