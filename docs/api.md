@@ -359,7 +359,7 @@ Document visibility is checked against PostgreSQL before answer generation. Olde
 
 Optional [Bedrock reranking](configuration.md#environment-variables) submits the original question and up to 100 authorized, visible candidate texts after retrieval and before synthesis context selection. Candidates are sorted by descending relevance; ties retain vector order. Reranking changes only the order: `MIN_RELEVANCE_SCORE` and `SYNTHESIS_RELATIVE_SCORE_FLOOR` still compare vector similarity, and candidates below the relative floor are skipped rather than ending selection. A failed, timed-out or invalid reranking response preserves vector order and omits reranking scores; a warning and [outcome counter](configuration.md#metrics) record the fallback. The `rerank` entry in `stage_timings_ms` measures this step.
 
-Each admitted query runs under `QUERY_TIMEOUT`; synthesis has the shorter `SYNTHESIS_TIMEOUT` budget. Earlier client deadlines take precedence. A canceled request produces no further response bytes. Nonempty truncated or filtered answers retain their completion reason; empty synthesis text uses the `synthesis` error category below.
+Admitted queries run under the [query time budget](architecture.md#query-time-budget). A canceled request produces no further response bytes. Nonempty truncated or filtered answers retain their completion reason; empty synthesis text uses the `synthesis` error category below.
 
 Scored chunk fields:
 
