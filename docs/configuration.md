@@ -61,7 +61,9 @@ The table below lists the environment variables recognized by the service:
 | `SERVICE_TOKEN` | string | `""` | No whitespace or control characters after trimming | Shared secret merged with `SERVICE_TOKENS`; see [Service Token Rotation](deployment.md#service-token-rotation). At least one token is required when `GO_RAG_FAKE_MODE=false`. |
 | `SERVICE_TOKENS` | comma-separated strings | `""` | No whitespace or control characters within a token after trimming | Additional secrets accepted in `X-Service-Token` for rotation; see [Service Token Rotation](deployment.md#service-token-rotation). Tokens are trimmed, empty entries are dropped and duplicates are removed across both variables. Startup warns with only the count of tokens shorter than 32 bytes; use secrets of at least 32 bytes. An empty combined list leaves routes open only in offline mode. |
 | `SHUTDOWN_DRAIN_DELAY` | duration | `5s` | 0s to 60s | Delay after readiness starts returning draining, before HTTP shutdown. A second termination signal skips the remaining delay. |
+| `SYNTHESIS_CONTEXT_TOKENS` | integer | `2400` | 256 to 100000 | Maximum sum of estimated tokens in sanitized synthesis excerpt bodies; excludes prompt instructions, the question and markers. |
 | `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
+| `SYNTHESIS_RELATIVE_SCORE_FLOOR` | float64 | `0.55` | 0 to 1, finite | Minimum candidate score relative to the best retrieved score. |
 | `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries. |
 | `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including running jobs. |
 
