@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"strings"
 	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // StreamConverser emits synthesis text incrementally and returns final usage.
@@ -69,7 +72,16 @@ func (c *Client) ConverseStreamWithModelAndSystem(ctx context.Context, modelID, 
 			StreamProcessingMode: brtypes.GuardrailStreamProcessingModeSync,
 		}
 	}
-	out, err := c.rt.ConverseStream(ctx, input)
+	out, err := c.rt.ConverseStream(ctx, input, func(o *bedrockruntime.Options) {
+		client := o.HTTPClient
+		o.HTTPClient = smithyhttp.ClientDoFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Body != nil {
+				// Use Read: the SDK's closed request-body WriterTo returns EOF as a write error.
+				r.Body = struct{ io.ReadCloser }{r.Body}
+			}
+			return client.Do(r)
+		})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("llm: converse stream (model=%s): %w", modelID, err)
 	}

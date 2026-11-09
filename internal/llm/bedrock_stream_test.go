@@ -1,12 +1,16 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,9 +18,80 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBedrockConverseStreamReadsThroughRequestBodyClose(t *testing.T) {
+	var response bytes.Buffer
+	encoder := eventstream.NewEncoder()
+	for _, event := range []struct{ name, payload string }{
+		{"messageStart", `{"role":"assistant"}`},
+		{"contentBlockDelta", `{"contentBlockIndex":0,"delta":{"text":"Archive "}}`},
+		{"contentBlockDelta", `{"contentBlockIndex":0,"delta":{"text":"evidence"}}`},
+		{"messageStop", `{"stopReason":"end_turn"}`},
+		{"metadata", `{"usage":{"inputTokens":11,"outputTokens":3,"totalTokens":14},"metrics":{"latencyMs":1}}`},
+	} {
+		message := eventstream.Message{Payload: []byte(event.payload)}
+		message.Headers.Set(":message-type", eventstream.StringValue("event"))
+		message.Headers.Set(":event-type", eventstream.StringValue(event.name))
+		message.Headers.Set(":content-type", eventstream.StringValue("application/json"))
+		require.NoError(t, encoder.Encode(&response, message))
+	}
+	transport := smithyhttp.ClientDoFunc(func(r *http.Request) (*http.Response, error) {
+		body := r.Body
+		if _, err := io.CopyN(io.Discard, body, r.ContentLength); err != nil {
+			return nil, err
+		}
+		requestBody := &notifyingRequestBody{ReadCloser: body, closed: make(chan struct{})}
+		r.Body = requestBody
+		reader, writer := io.Pipe()
+		done := make(chan struct{})
+		t.Cleanup(func() {
+			_ = reader.Close()
+			_ = requestBody.Close()
+			<-done
+		})
+		go func() {
+			defer close(done)
+			_, err := writer.Write(response.Bytes())
+			if err == nil {
+				<-requestBody.closed
+				// HTTP checks for excess request bytes after sending Content-Length.
+				// A write error closes the connection, including the response body.
+				if _, err = io.Copy(io.Discard, body); err != nil {
+					err = fmt.Errorf("write request body: %w", err)
+				}
+			}
+			_ = writer.CloseWithError(err)
+		}()
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/vnd.amazon.eventstream"}}, Body: reader}, nil
+	})
+	rt := bedrockruntime.NewFromConfig(aws.Config{Region: "us-east-1", Credentials: credentials.NewStaticCredentialsProvider("synthetic-key", "synthetic-secret", ""), HTTPClient: transport})
+	c := &Client{rt: rt, maxToks: DefaultMaxTokens}
+	var text strings.Builder
+	out, err := c.ConverseStreamWithModelAndSystem(t.Context(), "selected", "", nil, .2, 0, func(delta string) error { text.WriteString(delta); return nil })
+	require.Equal(t, "Archive evidence", text.String())
+	require.NoError(t, err)
+	require.Equal(t, "Archive evidence", ExtractText(out))
+	require.Equal(t, brtypes.StopReasonEndTurn, out.StopReason)
+	require.EqualValues(t, 11, *out.Usage.InputTokens)
+	require.EqualValues(t, 3, *out.Usage.OutputTokens)
+	require.EqualValues(t, 14, *out.Usage.TotalTokens)
+}
+
+type notifyingRequestBody struct {
+	io.ReadCloser
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (b *notifyingRequestBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() { close(b.closed) })
+	return err
+}
 
 func TestBedrockConverseStreamProtocol(t *testing.T) {
 	for _, limit := range []int{0, 80} {
