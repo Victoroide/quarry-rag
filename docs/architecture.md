@@ -24,7 +24,7 @@ Quarry organizes core functionality into distinct packages under `internal/`, wi
 - **`internal/worker`**: Claims persisted ingestion jobs with renewable leases, executes documents in parallel, and records retries or terminal status in PostgreSQL.
 - **`internal/pipeline`**: Encapsulates sequential multi-stage pipelines:
   - **Ingestion Pipeline**: Executes `ChunkStage`, `EmbedStage`, and `PersistStage`.
-  - **Query Pipeline**: Executes `DecomposeStage`, `RoutingStage`, `RetrievalStage`, and `SynthesisStage`.
+  - **Query Pipeline**: Executes `DecomposeStage`, `RoutingStage`, `RetrievalStage`, `RerankStage` (when reranking is enabled), and `SynthesisStage`.
 - **`internal/store/postgres`**: Manages PostgreSQL connection pooling via `pgxpool`, applies embedded SQL migrations, and performs transactional CRUD queries on documents, chunks, and fingerprints.
 - **`internal/store/pinecone`**: Implements vector storage drivers for Pinecone, sharing one connection across all namespaces (legacy document namespaces use handles derived from it, which are never closed individually; the connection closes when the client shuts down), with batched writes, retries, and metadata filtering.
 - **`internal/store/s3`**: Uploads source binaries, deletes stored objects, and generates presigned GET download URLs.
@@ -39,7 +39,7 @@ The `internal/tracing` package configures export and decorates provider and
 storage interfaces. Request middleware continues W3C trace context and baggage,
 then names server spans with the matched method and route. Query stages are
 sibling spans under that server span: `query.decompose`, `query.routing`,
-`query.retrieval` and `query.synthesis`. Embedding, vector search and model calls
+`query.retrieval`, `query.rerank` when reranking is enabled, and `query.synthesis`. Embedding, vector search and model calls
 are client spans under the stage that invokes them. PostgreSQL query spans
 record parameterized statements without arguments, only within an existing span.
 Upload requests also contain extraction and optional object-upload spans;
@@ -124,7 +124,7 @@ Token estimates count each Han, Hiragana, Katakana, Hangul, Thai, Lao, Khmer, My
 
 ## Query Pipeline
 
-The query pipeline executes semantic search and grounded answer generation through four distinct stages: decomposition, routing, retrieval, and synthesis.
+The query pipeline executes semantic search and grounded answer generation through decomposition, routing, retrieval, optional reranking, and synthesis.
 
 ```mermaid
 sequenceDiagram
@@ -137,6 +137,7 @@ sequenceDiagram
     participant Embedder as AWS Bedrock (Embedder)
     participant Retrieval as RetrievalStage
     participant Pinecone as Pinecone
+    participant Rerank as RerankStage
     participant Synthesis as SynthesisStage
     participant LLM as AWS Bedrock (LLM)
 
@@ -171,6 +172,11 @@ sequenceDiagram
     Retrieval->>Retrieval: filterChunksByAllowedDocIDs (tenant allowlist enforcement)
     Retrieval->>Retrieval: Remove chunks of unavailable documents using PostgreSQL
 
+    opt Reranking enabled
+        Handler->>Rerank: Run(QueryContext)
+        Rerank->>Rerank: Apply Bedrock reranking (see query API)
+    end
+
     Handler->>Synthesis: Run(QueryContext)
     alt No authorized evidence
         Synthesis-->>Handler: No-information answer (see query API)
@@ -186,7 +192,7 @@ sequenceDiagram
 
 ### Query Time Budget
 
-Each handler admits up to [`QUERY_CONCURRENCY`](configuration.md#environment-variables) queries [per replica](deployment.md#concurrency-limits), waiting at most `QUERY_QUEUE_TIMEOUT` before returning 503 with `Retry-After: 1`. Admission precedes all pipeline work. Each admitted query gets `QUERY_TIMEOUT` across decomposition, routing, embedding, retrieval and synthesis, with a nested `SYNTHESIS_TIMEOUT` for the synthesis call; an earlier parent deadline always wins. Cancellation propagates to upstream calls and waiting queries.
+Each handler admits up to [`QUERY_CONCURRENCY`](configuration.md#environment-variables) queries [per replica](deployment.md#concurrency-limits), waiting at most `QUERY_QUEUE_TIMEOUT` before returning 503 with `Retry-After: 1`. Admission precedes all pipeline work. Each admitted query gets `QUERY_TIMEOUT` across decomposition, routing, embedding, retrieval, reranking and synthesis, with a nested `SYNTHESIS_TIMEOUT` for the synthesis call; an earlier parent deadline always wins. Cancellation propagates to upstream calls and waiting queries.
 
 The AWS SDK retryer is the single transport retry layer for Bedrock, configured with `AWS_MAX_ATTEMPTS`. The ambassador makes one client call per operation and does not add backoff or retry throttled requests. Structured-output correction remains separate; answer synthesis uses the plain-text path without correction calls. SDK retries and their backoff share the synthesis or embedding deadline. Timeout errors return 504, upstream throttling returns 503 with `Retry-After: 2`, empty synthesis returns 502, and other failures return a generic 500. Full errors are logged at error level.
 
@@ -210,9 +216,10 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
    - Both modes query the default namespace with `filter_doc_type`, `collection` and `allowed_document_ids` applied before top-K selection. `LOCAL` narrows the document filter to the routed document. If that query returns fewer than three chunks, it makes one additional query using the original authorized scope and document-type filter; results merge by chunk ID using the highest score, then sort and trim to top-K. `GLOBAL` queries the authorized scope once without a sparse-result fallback. Allowlists above 10000 IDs require one sequential query per group.
    - Retains the allowlist post-filter before synthesis as defense in depth. A nil allowlist allows all documents; an empty allowlist denies all documents.
    - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents, in the requested collection when one is set, contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query; the top score is recomputed from visible chunks.
-4. **SynthesisStage**:
+4. **RerankStage**: Applies optional [reranking](api.md#post-query) before context selection.
+5. **SynthesisStage**:
    - When [`MIN_RELEVANCE_SCORE`](configuration.md#environment-variables) is positive, drops chunks below it before adaptive trimming. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).
-   - Selects sanitized excerpt bodies in score order using the [configured token budget and relative score floor](configuration.md#environment-variables). The first body that does not fit is cut at the last period or newline within the remaining budget if at least 64 estimated tokens can be retained; selection then stops. The best-scoring excerpt is always retained; without such a boundary it is cut at the budget.
+   - Selects sanitized excerpt bodies in candidate order using the [configured token budget and relative score floor](configuration.md#environment-variables), skipping candidates below the floor. The first body that does not fit is cut at the last period or newline within the remaining budget if at least 64 estimated tokens can be retained; selection then stops. The first candidate is always retained; without such a boundary it is cut at the budget.
    - Records the exact sanitized excerpts sent to synthesis and whether each body was cut. Retrieved chunks report their matching excerpt number and truncation flag through the [query response](api.md#post-query).
    - Selects synthesis model according to `SYNTHESIS_MODEL` (`fallback` defaults to Llama 4 Maverick, `primary` routes to Nova Micro, and `hybrid` dynamically routes based on multi-need detection).
    - Places the question before the retrieved excerpts and wraps each excerpt in a numbered marker with a random per-request boundary. Removes invisible format and control characters from the question and stored chunks, preserves newlines and tabs, and escapes excerpt marker prefixes inside their text. Estimates tokens over the complete system and user prompts, including markers.

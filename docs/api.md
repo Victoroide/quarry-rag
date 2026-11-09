@@ -303,7 +303,7 @@ Response fields (200 OK):
 | `early_exit` | bool | Indicates whether query execution completed early (optional) |
 | `stage_timings_ms` | map[string]int64 | Execution timings for pipeline stages in milliseconds (optional) |
 | `token_usage` | object | LLM token usage metrics (`input_tokens`, `output_tokens`, `total_tokens`) |
-| `scored_chunks` | array | Retrieved chunks ordered by similarity score |
+| `scored_chunks` | array | Retrieved chunks ordered by reranking relevance when available, otherwise vector similarity |
 | `citations` | array | Citation checks; present whenever `include_citations` is true, including an empty array when no markers or evidence remain; otherwise omitted |
 
 Each `citations` entry contains:
@@ -331,6 +331,8 @@ Document visibility is checked against PostgreSQL before answer generation. Olde
 
 `MIN_RELEVANCE_SCORE=0` disables the absolute relevance floor; positive values remove lower-scoring chunks before synthesis trimming.
 
+Optional [Bedrock reranking](configuration.md#environment-variables) submits the original question and up to 100 authorized, visible candidate texts after retrieval and before synthesis context selection. Candidates are sorted by descending relevance; ties retain vector order. Reranking changes only the order: `MIN_RELEVANCE_SCORE` and `SYNTHESIS_RELATIVE_SCORE_FLOOR` still compare vector similarity, and candidates below the relative floor are skipped rather than ending selection. A failed, timed-out or invalid reranking response preserves vector order and omits reranking scores; a warning and [outcome counter](configuration.md#metrics) record the fallback. The `rerank` entry in `stage_timings_ms` measures this step.
+
 Each admitted query runs under `QUERY_TIMEOUT`; synthesis has the shorter `SYNTHESIS_TIMEOUT` budget. Earlier client deadlines take precedence. A canceled request produces no further response bytes. Nonempty truncated or filtered answers retain their completion reason; empty synthesis text uses the `synthesis` error category below.
 
 Scored chunk fields:
@@ -341,6 +343,7 @@ Scored chunk fields:
 | `doc_type` | string | Document category label |
 | `chunk_index` | int | Position index of the chunk within the source document |
 | `score` | float64 | Cosine similarity score |
+| `rerank_score` | float64 | Bedrock relevance score, including zero; omitted when reranking is disabled or fails. Does not replace `score` |
 | `text` | string | Chunk text excerpt, truncated safely to a maximum of 600 runes without splitting UTF-8 characters |
 | `kind` | string | Classification category if populated during ingestion (optional) |
 | `quality` | string | Quality rating if populated during ingestion (optional) |

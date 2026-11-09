@@ -12,6 +12,7 @@ Notable changes are grouped by release.
 - `docs/openapi.yaml` describes the HTTP API in OpenAPI 3.1, and a test keeps it in sync with the router and handler types.
 - Optional Bedrock Guardrails for answer synthesis (`BEDROCK_GUARDRAIL_ID`, `BEDROCK_GUARDRAIL_VERSION`), with the question and excerpts marked for prompt-attack and grounding checks.
 - `POST /query` streams answers as server-sent events when the request accepts `text/event-stream`.
+- Optional Bedrock reranking of retrieved chunks before synthesis (`RERANK_MODEL_ARN`).
 
 ### Changed
 

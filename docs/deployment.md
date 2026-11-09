@@ -202,6 +202,7 @@ Confirm that `TestSmoke_PreexistingDocumentRemainsRetrievable` passes without sk
   - Titan Embed Text V2 (`amazon.titan-embed-text-v2:0`): generates 1024-dimensional normalized text embeddings.
   - Nova Micro (`amazon.nova-micro-v1:0`): fast, low-latency reasoning and synthesis.
   - Llama 4 Maverick (`us.meta.llama4-maverick-17b-instruct-v1:0`): synthesis and comparison across multiple retrieved chunks.
+- **Reranking permissions**: Optional [reranking](api.md#post-query) requires `bedrock:Rerank` with `Resource: "*"` and `bedrock:InvokeModel` scoped to the configured reranking model ARN. Enable access to that model in the configured AWS region before querying.
 
 ### 4. AWS S3 (Raw Object Storage)
 
