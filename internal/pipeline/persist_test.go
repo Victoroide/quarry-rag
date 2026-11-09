@@ -317,3 +317,23 @@ func TestPersistCollectionMetadata(t *testing.T) {
 		})
 	}
 }
+
+type transactionalPersistStore struct{ persistFilteredStore }
+
+func (*transactionalPersistStore) TransactionalVectors() {}
+
+func TestPersistDefersTransactionalVectors(t *testing.T) {
+	s := &transactionalPersistStore{persistFilteredStore{persistVectorRecorder: persistVectorRecorder{err: errors.New("standalone writes forbidden")}, query: func(context.Context, []float32, int, domain.VectorFilter) ([]domain.ScoredChunk, error) {
+		t.Fatal("unexpected visibility wait")
+		return nil, nil
+	}}}
+	ic := visibilityIngest()
+	ic.DocType = "reference"
+	ic.Collection = "archive"
+	require.NoError(t, NewPersistStage(s, WithVisibilityWait(time.Second)).Run(t.Context(), ic))
+	require.Empty(t, s.writes)
+	for _, ch := range ic.Chunks {
+		require.Equal(t, "reference", ch.Metadata["doc_type"])
+		require.Equal(t, "archive", ch.Metadata["collection"])
+	}
+}

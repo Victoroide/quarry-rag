@@ -33,6 +33,8 @@ type Config struct {
 
 	DatabaseURL string
 
+	VectorStore string
+
 	WorkerQueueSize         int
 	EmbedConcurrency        int
 	LocalRetrievalThreshold float64
@@ -128,6 +130,7 @@ func Load() (*Config, error) {
 		PineconeAPIKey:        os.Getenv("PINECONE_API_KEY"),
 		PineconeIndexName:     os.Getenv("PINECONE_INDEX_NAME"),
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
+		VectorStore:           envOrDefault("VECTOR_STORE", "pinecone"),
 		S3Bucket:              os.Getenv("S3_BUCKET"),
 		SynthesisModel:        envOrDefault("SYNTHESIS_MODEL", "fallback"),
 		ServiceToken:          os.Getenv("SERVICE_TOKEN"),
@@ -275,6 +278,9 @@ func (c *Config) validate() error {
 	if c.OCRProvider == "textract" && strings.TrimSpace(c.S3Bucket) == "" {
 		return fmt.Errorf("config: OCR_PROVIDER=textract requires S3_BUCKET")
 	}
+	if c.VectorStore != "" && c.VectorStore != "pinecone" && c.VectorStore != "postgres" {
+		return fmt.Errorf("config: VECTOR_STORE must be pinecone or postgres")
+	}
 	type requirement struct {
 		name  string
 		value string
@@ -284,8 +290,10 @@ func (c *Config) validate() error {
 		{"DATABASE_URL", c.DatabaseURL},
 	}
 	if !c.FakeMode {
+		required = append(required, requirement{"AWS_REGION", c.AWSRegion})
+	}
+	if !c.FakeMode && c.VectorStore != "postgres" {
 		required = append(required,
-			requirement{"AWS_REGION", c.AWSRegion},
 			requirement{"PINECONE_API_KEY", c.PineconeAPIKey},
 			requirement{"PINECONE_INDEX_NAME", c.PineconeIndexName},
 		)
