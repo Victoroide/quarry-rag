@@ -56,7 +56,7 @@ paths:
     post:
       operationId: ingestDocument
       summary: Accept a document
-      description: 'See [POST /ingest](api.md#post-ingest).'
+      description: 'See [POST /ingest](api.md#post-ingest), including [optional image-only PDF OCR](api.md#image-only-pdf-ocr).'
       security:
         - ServiceToken: []
       requestBody:

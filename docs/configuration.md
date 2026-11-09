@@ -47,6 +47,8 @@ The table below lists the environment variables recognized by the service:
 | `MAX_UPLOAD_BYTES` | int64 | `20971520` (20 MiB) | 1 to 104857600 (100 MiB) | Maximum accepted request payload size for multipart file uploads in bytes. |
 | `METRICS_ADDR` | string | `""` (disabled) | Optional TCP listen address | Separate metrics listener; bind to a private interface and never expose publicly. |
 | `MIN_RELEVANCE_SCORE` | float64 | `0` | 0 to 1, finite | Absolute evidence score floor applied before adaptive synthesis trimming; zero disables this floor. |
+| `OCR_PROVIDER` | string | `none` | `none` or `textract`; `textract` requires `S3_BUCKET` | Enables [image-only PDF OCR](api.md#image-only-pdf-ocr) after the parser finds no text. Offline fake mode never calls Textract and keeps the parser-only behavior. |
+| `OCR_TIMEOUT` | duration | `10m` | Positive; below `INGEST_JOB_TIMEOUT` when OCR is enabled | Total Textract start, polling and result pagination budget per ingestion attempt. Earlier job cancellation takes precedence. |
 | `PINECONE_API_KEY` | string | `""` | Non-empty string | API key for authenticating with Pinecone vector indices. Required when `GO_RAG_FAKE_MODE=false`. |
 | `PINECONE_ENVIRONMENT` | string | `""` | Ignored | Has no effect and is not stored in configuration. A non-empty value adds the startup warning `PINECONE_ENVIRONMENT is ignored`. Remove it from deployment configuration. |
 | `PINECONE_INDEX_NAME` | string | `""` | Required when `GO_RAG_FAKE_MODE=false` | Target Pinecone index, for example `quarry-rag`. There is no implicit default; missing values prevent startup with external services. Optional in offline mode. |
@@ -136,6 +138,7 @@ Application connections default to `pool_max_conns=16` and `statement_timeout=30
 | `005_document_default.sql` | Sets the default column value for `doc_type` in `documents` to `'document'`. |
 | `006_ingest_jobs.sql` | Adds durable ingestion jobs, lease and failure tracking, completion timestamps and document fingerprints. Normalizes previously persisted processing rows with fingerprints to completed and requeues other processing rows. |
 | `007_document_collections.sql` | Adds collection labels to documents and an index on `(collection, id)`; existing rows belong to the default collection. |
+| `008_document_text_source.sql` | Adds `text_source` to documents with the default `parser`, including existing rows; see [image-only PDF OCR](api.md#image-only-pdf-ocr). |
 
 ## Metrics
 
