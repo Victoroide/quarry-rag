@@ -496,3 +496,48 @@ func TestAPIFailureIsToolError(t *testing.T) {
 	assert.NotContains(t, text, "synthetic-token")
 	assert.Nil(t, result.StructuredContent)
 }
+
+func TestCollectionTools(t *testing.T) {
+	var queries, lists atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/query":
+			queries.Add(1)
+			var body map[string]any
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			assert.Equal(t, "archive", body["collection"])
+			_, _ = io.WriteString(w, `{"answer":"synthetic","scored_chunks":[]}`)
+		case "/documents":
+			lists.Add(1)
+			assert.Equal(t, "archive", r.URL.Query().Get("collection"))
+			_, _ = io.WriteString(w, `{"documents":[],"next_after":null}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer s.Close()
+	cs := connectServer(t, config{baseURL: s.URL, timeout: time.Second})
+	tools, err := cs.ListTools(t.Context(), nil)
+	require.NoError(t, err)
+	for _, tool := range tools.Tools {
+		if tool.Name != "quarry_query" && tool.Name != "quarry_list_documents" {
+			continue
+		}
+		data, err := json.Marshal(tool.InputSchema)
+		require.NoError(t, err)
+		var schema struct{ Properties map[string]any }
+		require.NoError(t, json.Unmarshal(data, &schema))
+		require.Contains(t, schema.Properties, "collection")
+	}
+	for _, name := range []string{"quarry_query", "quarry_list_documents"} {
+		args := map[string]any{"collection": "archive"}
+		if name == "quarry_query" {
+			args["query"] = "archive"
+		}
+		result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args})
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+	}
+	require.Equal(t, int32(1), queries.Load())
+	require.Equal(t, int32(1), lists.Load())
+}
