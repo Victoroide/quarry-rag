@@ -316,7 +316,8 @@ Failure-status updates use a separate five-second context after task cancellatio
 
 ### Metrics Collection
 
-The middleware order is `RequestID(Metrics(Logging(Recovery(mux))))`. Metrics read
+The middleware order is `RequestID(Metrics(Tracing(Logging(Recovery(mux)))))`, so
+each request span covers logging and panic recovery. Metrics read
 the matched route pattern after dispatch, so document identifiers and unmatched
 raw paths never become labels. Recovered failures retain their final HTTP status.
 The separate metrics listener serves Prometheus text without an additional module.
