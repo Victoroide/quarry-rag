@@ -41,7 +41,7 @@ Add the entry to the client's map of stdio servers. Omit `QUARRY_SERVICE_TOKEN` 
 
 | Tool | Input | Output |
 |---|---|---|
-| `quarry_query` | Question, mode, document type, chunk limit and optional document ID allowlist | Answer, finish reason, mode, chunk counts, token usage and scored evidence in `chunks` |
+| `quarry_query` | Question, mode, document type, chunk limit, optional citation request and optional document ID allowlist | Answer, finish reason, mode, chunk counts, token usage, scored evidence in `chunks` with excerpt numbers, and requested citations |
 | `quarry_list_documents` | Optional page limit and continuation cursor | Document summaries including collection, and `next_after` |
 | `quarry_get_document` | Document ID | Document summary including collection and ingestion status |
 | `quarry_ingest_text` | Content, optional collection, document type, ID and metadata | Document ID and acceptance status |

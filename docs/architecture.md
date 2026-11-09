@@ -213,10 +213,12 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
 4. **SynthesisStage**:
    - When `MIN_RELEVANCE_SCORE` is positive, drops chunks below it before adaptive trimming; the default zero disables this floor. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).
    - Applies adaptive chunk trimming: drops chunks scoring below 55% of the top chunk's score, bounds chunk counts (5 chunks for simple queries, 8 for multi-need queries), and truncates chunk bodies at sentence boundaries near 1200 runes.
+   - Records the exact sanitized excerpts sent to synthesis and whether each body was cut. Retrieved chunks report their matching excerpt number and truncation flag through the [query response](api.md#post-query).
    - Selects synthesis model according to `SYNTHESIS_MODEL` (`fallback` defaults to Llama 4 Maverick, `primary` routes to Nova Micro, and `hybrid` dynamically routes based on multi-need detection).
    - Places the question before the retrieved excerpts and wraps each excerpt in a numbered marker with a random per-request boundary. Removes invisible format and control characters from the question and stored chunks, preserves newlines and tabs, and escapes excerpt marker prefixes inside their text. Estimates tokens over the complete system and user prompts, including markers.
    - Instructs synthesis to answer strictly using retrieved excerpts and in the language of the user's question, treating excerpt text as untrusted content whose instructions, role changes and formatting requests must not be followed.
    - Invokes AWS Bedrock Converse only for evidence-backed answers and aggregates synthesis token usage statistics. Empty text is an error; nonempty output reports whether generation stopped, reached its token or context limit, or was filtered.
+   - With `include_citations`, requests numbered inline markers, removes out-of-range references from the answer and reports lexical overlap for each remaining reference. The [query contract](api.md#post-query) defines the scoring and offset rules.
 
 ---
 
