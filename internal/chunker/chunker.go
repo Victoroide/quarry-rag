@@ -25,11 +25,12 @@ type Chunker struct {
 
 // NewChunker creates a Chunker with estimated token budgets. Sizes below two
 // are treated as two, the minimum estimate for a non-dense character.
+// Overlap is clamped between zero and half the effective size, rounded down.
 func NewChunker(chunkSize, overlap int) *Chunker {
 	chunkSize = max(2, chunkSize)
 	return &Chunker{
 		chunkSize: chunkSize,
-		overlap:   min(max(0, overlap), chunkSize-1),
+		overlap:   min(max(0, overlap), chunkSize/2),
 	}
 }
 
@@ -46,12 +47,15 @@ func (c *Chunker) Chunk(docID domain.DocumentID, text string) []domain.Chunk {
 	cleaned := textutil.NormalizeForIngest(stripHTML(text))
 	var units []textUnit
 	for i, paragraph := range textutil.SplitParagraphs(cleaned) {
+		offset := 0
 		for j, sentence := range textutil.SplitSentences(paragraph) {
-			separator := " "
+			sentenceStart := offset + strings.Index(paragraph[offset:], sentence)
+			separator := paragraph[offset:sentenceStart]
 			if i > 0 && j == 0 {
 				separator = "\n\n"
 			}
 			units = c.appendSentence(units, sentence, separator)
+			offset = sentenceStart + len(sentence)
 		}
 	}
 
@@ -98,9 +102,11 @@ func (c *Chunker) Chunk(docID domain.DocumentID, text string) []domain.Chunk {
 				nextSuffix = nextSuffix.append(suffix, units[i+1].separator != "")
 				nextSize += len(units[i+1].separator) + suffixSize
 			}
-			// Retain only a suffix that leaves room for the first new unit.
+			// Discard at least half of this window in tokens and bytes,
+			// while leaving room for the first new unit.
 			withNew := nextSuffix.append(units[nextNew].estimate, units[nextNew].separator != "")
-			if nextSuffix.count() > c.overlap || withNew.count() > c.chunkSize ||
+			if nextSuffix.count() > min(c.overlap, estimate.count()/2) || nextSize > size/2 ||
+				withNew.count() > c.chunkSize ||
 				nextSize+len(units[nextNew].separator)+len(units[nextNew].text) > MaxChunkBytes {
 				break
 			}
@@ -136,7 +142,7 @@ func (c *Chunker) appendWord(units []textUnit, word, separator string) []textUni
 	// Smaller fragments let successive windows share part of a long word.
 	fragmentSize := c.chunkSize
 	if c.overlap > 0 {
-		fragmentSize = min(c.overlap, c.chunkSize-c.overlap)
+		fragmentSize = c.overlap
 	}
 	start := 0
 	var estimate tokenEstimate

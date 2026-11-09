@@ -261,8 +261,8 @@ func (c *Config) validate() error {
 	if c.ChunkTokenSize < 2 || c.ChunkTokenSize > 8192 {
 		return fmt.Errorf("config: CHUNK_TOKEN_SIZE must be between 2 and 8192")
 	}
-	if c.ChunkOverlap < 0 || c.ChunkOverlap >= c.ChunkTokenSize {
-		return fmt.Errorf("config: CHUNK_OVERLAP must be nonnegative and smaller than CHUNK_TOKEN_SIZE")
+	if c.ChunkOverlap < 0 || c.ChunkOverlap > c.ChunkTokenSize/2 {
+		return fmt.Errorf("config: CHUNK_OVERLAP must be between 0 and CHUNK_TOKEN_SIZE/2 (%d)", c.ChunkTokenSize/2)
 	}
 	if math.IsNaN(c.LocalRetrievalThreshold) || math.IsInf(c.LocalRetrievalThreshold, 0) || c.LocalRetrievalThreshold < 0 || c.LocalRetrievalThreshold > 1 {
 		return fmt.Errorf("config: LOCAL_RETRIEVAL_THRESHOLD must be between 0 and 1")
