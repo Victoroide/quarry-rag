@@ -157,6 +157,11 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			Collection:         req.Collection,
 		}
 
+		var stream *queryStream
+		if acceptsQueryStream(r) {
+			stream = newQueryStream(w, r, qc)
+		}
+
 		retrieval := pipeline.NewRetrievalStage(ret)
 		routing := pipeline.NewRoutingStage(ret)
 		if pool != nil {
@@ -174,51 +179,19 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		if err == nil {
 			err = ctx.Err()
 		}
+		if err == nil {
+			slog.DebugContext(r.Context(), "query completed", "mode", qc.RetrievalMode, "chunks", len(qc.RetrievedChunks), "duration", time.Since(start))
+		}
+		if stream != nil {
+			stream.finish(ctx, err)
+			return
+		}
 		if err != nil {
 			writeQueryError(w, r, err)
 			return
 		}
 
-		scoredChunks := make([]ScoredChunkResponse, 0, len(qc.RetrievedChunks))
-		for _, sc := range qc.RetrievedChunks {
-			docType, kind, quality := "", "", ""
-			if sc.Chunk.Metadata != nil {
-				if dt, ok := sc.Chunk.Metadata["doc_type"]; ok {
-					docType, _ = dt.(string)
-				}
-				if k, ok := sc.Chunk.Metadata["kind"]; ok {
-					kind, _ = k.(string)
-				}
-				if q, ok := sc.Chunk.Metadata["quality"]; ok {
-					quality, _ = q.(string)
-				}
-			}
-			// Bound response snippets without splitting UTF-8 sequences.
-			text := sc.Chunk.Text
-			if runes := []rune(text); len(runes) > 600 {
-				text = string(runes[:600])
-			}
-
-			excerpt, truncated := 0, false
-			for i, sent := range qc.Excerpts {
-				if sent.Chunk.DocumentID == sc.Chunk.DocumentID && sent.Chunk.Index == sc.Chunk.Index && sent.Chunk.ID == sc.Chunk.ID {
-					excerpt, truncated = i+1, qc.Truncated[i]
-					break
-				}
-			}
-			scoredChunks = append(scoredChunks, ScoredChunkResponse{
-				DocID:      string(sc.Chunk.DocumentID),
-				DocType:    docType,
-				ChunkIndex: sc.Chunk.Index,
-				Score:      sc.Score,
-				Text:       text,
-				Kind:       kind,
-				Quality:    quality,
-				Excerpt:    excerpt,
-				Truncated:  truncated,
-			})
-		}
-
+		scoredChunks := queryScoredChunks(qc)
 		resp := QueryResponse{
 			Answer:        qc.FinalAnswer,
 			FinishReason:  qc.FinishReason,
@@ -237,8 +210,6 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 				resp.Citations = append(resp.Citations, CitationResponse{Excerpt: citation.Excerpt, DocID: string(citation.DocumentID), ChunkIndex: citation.ChunkIndex, Offset: citation.Offset, Verified: citation.Verified, Overlap: citation.Overlap})
 			}
 		}
-
-		slog.DebugContext(r.Context(), "query completed", "mode", qc.RetrievalMode, "chunks", len(qc.RetrievedChunks), "duration", time.Since(start))
 
 		w.Header().Set("Content-Type", "application/json")
 		if qc.EarlyExit && qc.ContentLanguage != "" {

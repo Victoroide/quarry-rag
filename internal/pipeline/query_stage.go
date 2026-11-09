@@ -324,7 +324,7 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		qc.ContextTokens, qc.ContextChunks = 0, 0
 		qc.TokenUsage = domain.TokenUsage{}
 		qc.EarlyExit = true
-		return nil
+		return streamNoEvidence(ctx, qc)
 	}
 
 	chunks := trimChunksForSynthesis(qc.RetrievedChunks, s.cfg.SynthesisContextTokens, s.cfg.SynthesisRelativeScoreFloor)
@@ -374,8 +374,8 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	}
 	synthesisCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	result, err := s.ambassador.ConverseRoutedPlain(
-		synthesisCtx, modelID, system, messages, 0.2, answerSynthesisMaxOutput,
+	result, err := s.converse(
+		synthesisCtx, qc, modelID, system, messages, 0.2, answerSynthesisMaxOutput,
 	)
 	if err != nil {
 		return fmt.Errorf("synthesis_stage: %w", err)
@@ -389,7 +389,11 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		return ErrSynthesisEmpty
 	}
 	if qc.IncludeCitations {
-		qc.FinalAnswer, qc.Citations = VerifyCitations(qc.FinalAnswer, qc.Excerpts)
+		if qc.Stream == nil {
+			qc.FinalAnswer, qc.Citations = VerifyCitations(qc.FinalAnswer, qc.Excerpts)
+		} else {
+			qc.Citations = VerifyStreamCitations(qc.FinalAnswer, qc.Excerpts)
+		}
 	}
 	switch result.Output.StopReason {
 	case "end_turn", "stop_sequence":

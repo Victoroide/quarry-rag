@@ -41,21 +41,30 @@ func acquireQuerySlot(ctx context.Context, slots chan struct{}, timeout time.Dur
 
 func writeQueryError(w http.ResponseWriter, r *http.Request, err error) {
 	slog.ErrorContext(r.Context(), "query processing failed", "error", err)
+	code, retry, body := queryErrorResponse(err)
+	if code == 0 {
+		return
+	}
+	if retry != "" {
+		w.Header().Set("Retry-After", retry)
+	}
+	writeJSONError(w, code, body.Error, body.Message)
+}
+
+func queryErrorResponse(err error) (code int, retry string, body APIError) {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		writeJSONError(w, http.StatusGatewayTimeout, "timeout", "query processing timed out")
+		return http.StatusGatewayTimeout, "", APIError{Error: "timeout", Message: "query processing timed out"}
 	case errors.Is(err, context.Canceled):
-		return
+		return 0, "", APIError{}
 	case errors.Is(err, errQueryOverloaded):
-		w.Header().Set("Retry-After", "1")
-		writeJSONError(w, http.StatusServiceUnavailable, "overloaded", "too many concurrent queries")
+		return http.StatusServiceUnavailable, "1", APIError{Error: "overloaded", Message: "too many concurrent queries"}
 	case isUpstreamThrottled(err):
-		w.Header().Set("Retry-After", "2")
-		writeJSONError(w, http.StatusServiceUnavailable, "upstream_throttled", "upstream service is busy")
+		return http.StatusServiceUnavailable, "2", APIError{Error: "upstream_throttled", Message: "upstream service is busy"}
 	case errors.Is(err, pipeline.ErrSynthesisEmpty):
-		writeJSONError(w, http.StatusBadGateway, "synthesis", "answer synthesis returned no text")
+		return http.StatusBadGateway, "", APIError{Error: "synthesis", Message: "answer synthesis returned no text"}
 	default:
-		writeJSONError(w, http.StatusInternalServerError, "pipeline", "query processing failed")
+		return http.StatusInternalServerError, "", APIError{Error: "pipeline", Message: "query processing failed"}
 	}
 }
 

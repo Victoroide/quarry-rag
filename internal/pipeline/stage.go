@@ -112,6 +112,9 @@ type QueryContext struct {
 	// ContentLanguage identifies the language of the fixed no-evidence answer.
 	ContentLanguage string
 
+	// Stream receives prepared context and synthesis deltas when requested.
+	Stream *QueryStream
+
 	// Per-stage timing in milliseconds — observability for tail-latency
 	// analysis. Filled by each stage and surfaced in the query response.
 	StageTimingsMS map[string]int64

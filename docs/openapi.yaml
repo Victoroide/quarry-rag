@@ -112,7 +112,7 @@ paths:
               $ref: '#/components/schemas/QueryRequest'
       responses:
         '200':
-          description: Query result
+          description: Query result, or server-sent events when the request accepts `text/event-stream`
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -120,10 +120,22 @@ paths:
               description: 'Language of the no-evidence answer; see [POST /query](api.md#post-query).'
               schema:
                 type: string
+            Cache-Control:
+              description: '`no-cache` on streamed answers; see [streamed query answers](api.md#streamed-query-answers).'
+              schema:
+                type: string
+            X-Accel-Buffering:
+              description: '`no` on streamed answers; see [streamed query answers](api.md#streamed-query-answers).'
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueryResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: 'Events `context` (QueryStreamContext), `delta` (QueryStreamDelta), `done` (QueryStreamDone) and `error` (APIError); see [streamed query answers](api.md#streamed-query-answers).'
         '400':
           $ref: '#/components/responses/Error'
         '401':
@@ -540,6 +552,53 @@ components:
         overlap:
           type: number
           format: double
+    QueryStreamContext:
+      type: object
+      description: 'See [streamed query answers](api.md#streamed-query-answers).'
+      additionalProperties: false
+      required: [mode, chunks_used, context_chunks, scored_chunks]
+      properties:
+        mode:
+          type: string
+        chunks_used:
+          type: integer
+        context_chunks:
+          type: integer
+        scored_chunks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScoredChunkResponse'
+    QueryStreamDelta:
+      type: object
+      description: 'See [streamed query answers](api.md#streamed-query-answers).'
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+    QueryStreamDone:
+      type: object
+      description: 'See [streamed query answers](api.md#streamed-query-answers).'
+      additionalProperties: false
+      required: [finish_reason, token_usage, context_tokens, stage_timings_ms]
+      properties:
+        finish_reason:
+          type: string
+        token_usage:
+          $ref: '#/components/schemas/TokenUsage'
+        context_tokens:
+          type: integer
+        stage_timings_ms:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        early_exit:
+          type: boolean
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/CitationResponse'
     TokenUsage:
       type: object
       description: 'See [POST /query](api.md#post-query).'
