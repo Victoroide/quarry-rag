@@ -17,12 +17,164 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/llm"
+	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/require"
 )
+
+type rerankerFunc func(context.Context, string, []domain.ScoredChunk) ([]domain.ScoredChunk, error)
+
+func (f rerankerFunc) Rerank(ctx context.Context, question string, chunks []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+	return f(ctx, question, chunks)
+}
+
+func TestRerankingPrecedesSynthesisSelection(t *testing.T) {
+	chunks := make([]domain.ScoredChunk, 6)
+	for i, score := range []float64{.99, .95, .9, .85, .5, .3} {
+		chunks[i] = domain.ScoredChunk{Chunk: domain.Chunk{ID: domain.ChunkID(fmt.Sprint(i)), DocumentID: "archive", Index: i, Text: fmt.Sprintf("Archive passage %d", i)}, Score: score}
+	}
+	r := rerankerFunc(func(_ context.Context, question string, in []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+		require.Equal(t, "archive hours", question)
+		require.Len(t, in, 6)
+		out := []domain.ScoredChunk{in[5], in[0], in[4], in[1], in[2], in[3]}
+		for i, score := range []float64{1, .7, .6, .55, .4, .3} {
+			out[i].RerankScore = &score
+		}
+		return out, nil
+	})
+	cfg := &config.Config{BedrockFallbackModel: "fallback", MinRelevanceScore: 0}
+	amb := llm.NewAmbassador(cfg)
+	pr := &promptRecorder{}
+	amb.SetClient(pr)
+	qc := &QueryContext{OriginalQuery: "archive hours", RetrievedChunks: chunks, TopScore: .99}
+	m := metrics.NewService(nil)
+	_, err := RunRetrievalPipeline(metrics.WithService(t.Context(), m), qc, []QueryStage{NewRerankStage(r, time.Second), NewSynthesisStage(amb, cfg)})
+	require.NoError(t, err)
+	got := make([]int, 0, len(qc.Excerpts))
+	for _, excerpt := range qc.Excerpts {
+		got = append(got, excerpt.Chunk.Index)
+	}
+	require.Equal(t, []int{5, 0, 1, 2, 3}, got)
+	require.Equal(t, []bool{false, false, false, false, false}, qc.Truncated)
+	require.Equal(t, .3, qc.RetrievedChunks[0].Score)
+	require.Equal(t, .99, qc.TopScore)
+	require.Contains(t, pr.prompt, "id=\"1\">\nArchive passage 5\n")
+	require.Contains(t, qc.StageTimingsMS, "rerank")
+	var output strings.Builder
+	require.NoError(t, m.Registry.WriteText(&output))
+	require.Contains(t, output.String(), "quarry_rerank_total{result=\"reranked\"} 1\n")
+}
+
+func TestSynthesisKeepsVectorThresholdAfterReranking(t *testing.T) {
+	cfg := &config.Config{BedrockFallbackModel: "fallback", MinRelevanceScore: .75}
+	amb := llm.NewAmbassador(cfg)
+	amb.SetClient(&promptRecorder{})
+	chunks := []domain.ScoredChunk{sc("weak", .3), sc("relevant", .8), sc("similar", .99)}
+	for i, score := range []float64{1, .9, .8} {
+		chunks[i].RerankScore = &score
+	}
+	qc := &QueryContext{OriginalQuery: "archive", RetrievedChunks: chunks, TopScore: .99}
+	require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+	require.Equal(t, []string{"relevant", "similar"}, docIDs(qc.RetrievedChunks))
+	require.Equal(t, .99, qc.TopScore)
+	require.Equal(t, "relevant", string(qc.Excerpts[0].Chunk.DocumentID))
+}
+
+func TestRerankFallbackPreservesEvidenceAndOmitsScores(t *testing.T) {
+	for _, mode := range []string{"error", "api error", "mutated input", "timeout", "late success"} {
+		t.Run(mode, func(t *testing.T) {
+			m := metrics.NewService(nil)
+			in := []domain.ScoredChunk{sc("a", .9), sc("b", .8)}
+			qc := &QueryContext{OriginalQuery: "private question", RetrievedChunks: in, TopScore: .9}
+			var logs bytes.Buffer
+			old, flags := slog.Default(), log.Flags()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			defer func() { slog.SetDefault(old); log.SetFlags(flags) }()
+			r := rerankerFunc(func(ctx context.Context, _ string, chunks []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+				if mode == "api error" {
+					return nil, &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "private question"}
+				}
+				if mode == "mutated input" {
+					score := .5
+					chunks[0].RerankScore = &score
+					return nil, errors.New("private question and private document")
+				}
+				if mode == "error" {
+					return nil, errors.New("private question and private document")
+				}
+				<-ctx.Done()
+				if mode == "late success" {
+					return []domain.ScoredChunk{in[1], in[0]}, nil
+				}
+				return nil, ctx.Err()
+			})
+			require.NoError(t, NewRerankStage(r, 5*time.Millisecond).Run(metrics.WithService(t.Context(), m), qc))
+			require.Equal(t, in, qc.RetrievedChunks)
+			require.Nil(t, qc.RetrievedChunks[0].RerankScore)
+			require.Equal(t, .9, qc.TopScore)
+			require.Contains(t, logs.String(), "WARN")
+			require.NotContains(t, logs.String(), "private")
+			if mode == "api error" {
+				require.Contains(t, logs.String(), "error_code=AccessDeniedException")
+			}
+			if mode == "timeout" || mode == "late success" {
+				require.Contains(t, logs.String(), "reason=timeout")
+			}
+			var output strings.Builder
+			require.NoError(t, m.Registry.WriteText(&output))
+			require.Contains(t, output.String(), "quarry_rerank_total{result=\"fallback\"} 1\n")
+		})
+	}
+}
+
+func TestRerankDisabledAndEmptySkipCalls(t *testing.T) {
+	m := metrics.NewService(nil)
+	ctx := metrics.WithService(t.Context(), m)
+	qc := &QueryContext{RetrievedChunks: []domain.ScoredChunk{sc("a", .9)}}
+	require.NoError(t, NewRerankStage(nil, time.Second).Run(ctx, qc))
+	require.Len(t, qc.RetrievedChunks, 1)
+	r := rerankerFunc(func(context.Context, string, []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+		t.Fatal("empty evidence must skip reranking")
+		return nil, nil
+	})
+	require.NoError(t, NewRerankStage(r, time.Second).Run(ctx, &QueryContext{}))
+	var output strings.Builder
+	require.NoError(t, m.Registry.WriteText(&output))
+	require.NotContains(t, output.String(), "quarry_rerank_total{result=")
+}
+
+func TestRerankHonorsEarlierQueryDeadline(t *testing.T) {
+	for _, mode := range []string{"canceled", "deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			m := metrics.NewService(nil)
+			parent := metrics.WithService(t.Context(), m)
+			ctx, cancel := context.WithCancel(parent)
+			want := context.Canceled
+			if mode == "deadline" {
+				cancel()
+				ctx, cancel = context.WithTimeout(parent, 5*time.Millisecond)
+				want = context.DeadlineExceeded
+			} else {
+				cancel()
+			}
+			defer cancel()
+			r := rerankerFunc(func(ctx context.Context, _ string, _ []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			})
+			qc := &QueryContext{RetrievedChunks: []domain.ScoredChunk{sc("a", .9)}}
+			require.ErrorIs(t, NewRerankStage(r, time.Second).Run(ctx, qc), want)
+			require.Equal(t, "a", string(qc.RetrievedChunks[0].Chunk.DocumentID))
+			var output strings.Builder
+			require.NoError(t, m.Registry.WriteText(&output))
+			require.NotContains(t, output.String(), "quarry_rerank_total{result=")
+		})
+	}
+}
 
 type synthesisDeadlineClient struct {
 	llm.FakeConverser

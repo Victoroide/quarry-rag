@@ -98,6 +98,64 @@ func TestLoadBedrockGuardrails(t *testing.T) {
 	}
 }
 
+func TestLoadReranking(t *testing.T) {
+	for _, tc := range []struct {
+		name, timeout string
+		want          time.Duration
+		invalid       bool
+	}{
+		{"default", "", 5 * time.Second, false},
+		{"lower bound", "1s", time.Second, false},
+		{"upper bound", "60s", time.Minute, false},
+		{"fractional", "1.5s", 1500 * time.Millisecond, false},
+		{"zero", "0s", 0, true},
+		{"negative", "-1s", 0, true},
+		{"too short", "999ms", 0, true},
+		{"too long", "60.001s", 0, true},
+		{"malformed", "five", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("RERANK_MODEL_ARN", "arn:aws:bedrock:us-east-1::foundation-model/test")
+			t.Setenv("RERANK_TIMEOUT", tc.timeout)
+			cfg, err := Load()
+			if tc.invalid {
+				if err == nil || !strings.Contains(err.Error(), "RERANK_TIMEOUT") {
+					t.Fatalf("expected timeout error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.RerankTimeout != tc.want || cfg.RerankModelARN != "arn:aws:bedrock:us-east-1::foundation-model/test" {
+				t.Fatalf("unexpected reranking configuration: %v", cfg.RerankTimeout)
+			}
+		})
+	}
+	for _, arn := range []string{" arn:aws:bedrock:us-east-1::foundation-model/test", "cohere.rerank-v3-5:0", "arn:aws:bedrock:us-east-1::foundation-model/test\u007f", "arn:aws:bedrock:us-east-1::foundation-model/test\u00a0"} {
+		t.Run(arn, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("RERANK_MODEL_ARN", arn)
+			t.Setenv("RERANK_TIMEOUT", "5s")
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RERANK_MODEL_ARN") {
+				t.Fatalf("expected ARN validation error, got %v", err)
+			}
+		})
+	}
+
+	awsConfigEnvironment(t)
+	t.Setenv("RERANK_MODEL_ARN", "")
+	t.Setenv("RERANK_TIMEOUT", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RerankModelARN != "" {
+		t.Fatal("reranking enabled by default")
+	}
+}
+
 func TestLoadIndexVisibilityTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name, value, jobTimeout string
@@ -163,6 +221,7 @@ func baseValidConfig() *Config {
 		QueryTimeout: time.Minute, SynthesisTimeout: 45 * time.Second, QueryConcurrency: 32, QueryQueueTimeout: 2 * time.Second,
 		HTTPReadTimeout: time.Minute, HTTPWriteTimeout: 75 * time.Second, HTTPIdleTimeout: time.Minute,
 		SynthesisContextTokens: 2400, SynthesisRelativeScoreFloor: .55,
+		RerankTimeout: 5 * time.Second,
 	}
 }
 

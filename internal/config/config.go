@@ -105,6 +105,9 @@ type Config struct {
 	MetricsAddr       string
 	Warnings          []string
 	Tracing           TracingConfig
+
+	RerankModelARN string
+	RerankTimeout  time.Duration
 }
 
 // Load reads configuration from environment variables, applies defaults,
@@ -128,6 +131,7 @@ func Load() (*Config, error) {
 		ServiceTokens:         strings.Split(os.Getenv("SERVICE_TOKENS"), ","),
 		S3ExpectedBucketOwner: os.Getenv("S3_EXPECTED_BUCKET_OWNER"),
 		AWSSessionToken:       os.Getenv("AWS_SESSION_TOKEN"),
+		RerankModelARN:        os.Getenv("RERANK_MODEL_ARN"),
 	}
 	cfg.BedrockGuardrailID = os.Getenv("BEDROCK_GUARDRAIL_ID")
 	cfg.BedrockGuardrailVersion = os.Getenv("BEDROCK_GUARDRAIL_VERSION")
@@ -216,6 +220,7 @@ func Load() (*Config, error) {
 		{"QUERY_QUEUE_TIMEOUT", &cfg.QueryQueueTimeout, 2 * time.Second},
 		{"HTTP_READ_TIMEOUT", &cfg.HTTPReadTimeout, time.Minute},
 		{"HTTP_IDLE_TIMEOUT", &cfg.HTTPIdleTimeout, time.Minute},
+		{"RERANK_TIMEOUT", &cfg.RerankTimeout, 5 * time.Second},
 	} {
 		value, parseErr := envDurationOrDefault(setting.key, setting.fallback)
 		if parseErr != nil {
@@ -248,6 +253,12 @@ func (c *Config) validate() error {
 		}
 	}
 
+	if c.RerankModelARN != "" && (!strings.HasPrefix(c.RerankModelARN, "arn:") || strings.ContainsFunc(c.RerankModelARN, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })) {
+		return fmt.Errorf("config: RERANK_MODEL_ARN must be an ARN without whitespace or control characters")
+	}
+	if c.RerankTimeout < time.Second || c.RerankTimeout > time.Minute {
+		return fmt.Errorf("config: RERANK_TIMEOUT must be between 1s and 60s")
+	}
 	type requirement struct {
 		name  string
 		value string

@@ -53,7 +53,8 @@ type TokenUsage struct {
 
 // ScoredChunk pairs a chunk with its similarity score from vector search.
 type ScoredChunk struct {
-	Chunk     Chunk   `json:"chunk"`
-	Score     float64 `json:"score"`
-	Namespace string  `json:"namespace,omitempty"`
+	Chunk       Chunk    `json:"chunk"`
+	Score       float64  `json:"score"`
+	Namespace   string   `json:"namespace,omitempty"`
+	RerankScore *float64 `json:"rerank_score,omitempty"`
 }

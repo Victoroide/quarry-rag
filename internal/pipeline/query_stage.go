@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -14,8 +16,10 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/llm"
+	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	"github.com/aws/smithy-go"
 )
 
 const answerSynthesisMaxOutput = 1024
@@ -235,6 +239,55 @@ func filterChunksByAllowedDocIDs(chunks []domain.ScoredChunk, allowed []string) 
 	return out
 }
 
+// RerankStage optionally reorders retrieved evidence before context selection.
+type RerankStage struct {
+	reranker retriever.Reranker
+	timeout  time.Duration
+}
+
+// NewRerankStage creates a stage with a separate budget for optional reranking.
+func NewRerankStage(r retriever.Reranker, timeout time.Duration) *RerankStage {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	return &RerankStage{reranker: r, timeout: timeout}
+}
+
+// ID returns the stage identifier.
+func (s *RerankStage) ID() StageID { return StageRerank }
+
+// Run preserves vector order when reranking fails or its deadline expires.
+func (s *RerankStage) Run(ctx context.Context, qc *QueryContext) error {
+	if s.reranker == nil || len(qc.RetrievedChunks) == 0 {
+		return nil
+	}
+	rerankCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	chunks, err := s.reranker.Rerank(rerankCtx, qc.OriginalQuery, slices.Clone(qc.RetrievedChunks))
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("rerank_stage: %w", ctxErr)
+	}
+	if err == nil {
+		err = rerankCtx.Err()
+	}
+	if err != nil {
+		attrs := []any{"reason", "upstream"}
+		if rerankCtx.Err() != nil {
+			attrs[1] = "timeout"
+		}
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			attrs = append(attrs, "error_code", apiErr.ErrorCode())
+		}
+		slog.WarnContext(ctx, "reranking failed; retaining vector order", attrs...)
+		metrics.FromContext(ctx).Rerank.WithLabelValues("fallback").Inc()
+		return nil
+	}
+	qc.RetrievedChunks = chunks
+	metrics.FromContext(ctx).Rerank.WithLabelValues("reranked").Inc()
+	return nil
+}
+
 // SynthesisStage synthesizes a final answer from retrieved chunks.
 // Model selection follows the configured synthesis routing policy.
 type SynthesisStage struct {
@@ -250,23 +303,29 @@ func NewSynthesisStage(amb *llm.Ambassador, cfg *config.Config) *SynthesisStage 
 // ID returns the stage identifier.
 func (s *SynthesisStage) ID() StageID { return StageSynthesis }
 
-// trimChunksForSynthesis budgets sanitized excerpts in retrieval score order.
+// trimChunksForSynthesis budgets sanitized excerpts in candidate order.
 // A partial final excerpt needs a sentence boundary and at least 64 tokens;
 // the first excerpt is always retained, with a hard cut if necessary.
-func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor float64) []domain.ScoredChunk {
+func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor float64) (out []domain.ScoredChunk, truncated []bool) {
 	if len(in) == 0 {
-		return in
+		return in, nil
 	}
 	if budget <= 0 {
 		budget, relativeFloor = 2400, 0.55
 	}
-	// in is already sorted by score desc from Retriever.Retrieve.
-	floor := in[0].Score * relativeFloor
-	out := make([]domain.ScoredChunk, 0, len(in))
+	// Reranking may reorder candidates: the floor follows the best vector score
+	// and skips weaker candidates instead of ending selection.
+	top := in[0].Score
+	for _, sc := range in[1:] {
+		top = max(top, sc.Score)
+	}
+	floor := top * relativeFloor
+	out = make([]domain.ScoredChunk, 0, len(in))
+	truncated = make([]bool, 0, len(in))
 	remaining := budget
 	for _, sc := range in {
 		if sc.Score < floor && len(out) > 0 {
-			break
+			continue
 		}
 		sc.Chunk.Text = sanitizeExcerpt(sc.Chunk.Text)
 		tokens := llm.EstimateTokens(sc.Chunk.Text)
@@ -285,13 +344,13 @@ func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor f
 				break
 			}
 			sc.Chunk.Text = body
-			out = append(out, sc)
+			out, truncated = append(out, sc), append(truncated, true)
 			break
 		}
-		out = append(out, sc)
+		out, truncated = append(out, sc), append(truncated, false)
 		remaining -= tokens
 	}
-	return out
+	return out, truncated
 }
 
 // Run synthesizes a grounded answer in the language of the question.
@@ -316,6 +375,9 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		qc.TopScore = 0
 		if len(filtered) > 0 {
 			qc.TopScore = filtered[0].Score
+			for _, sc := range filtered[1:] {
+				qc.TopScore = max(qc.TopScore, sc.Score)
+			}
 		}
 	}
 	if len(qc.RetrievedChunks) == 0 {
@@ -327,12 +389,9 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		return streamNoEvidence(ctx, qc)
 	}
 
-	chunks := trimChunksForSynthesis(qc.RetrievedChunks, s.cfg.SynthesisContextTokens, s.cfg.SynthesisRelativeScoreFloor)
+	chunks, truncated := trimChunksForSynthesis(qc.RetrievedChunks, s.cfg.SynthesisContextTokens, s.cfg.SynthesisRelativeScoreFloor)
 	qc.ContextChunks = len(chunks)
-	qc.Truncated = make([]bool, len(chunks))
-	for i := range chunks {
-		qc.Truncated[i] = chunks[i].Chunk.Text != sanitizeExcerpt(qc.RetrievedChunks[i].Chunk.Text)
-	}
+	qc.Truncated = truncated
 	qc.Excerpts = chunks
 
 	system, parts := buildSynthesisPrompt(qc.OriginalQuery, chunks, newBoundary())

@@ -27,6 +27,7 @@ const (
 	StageQueryDecomposition StageID = "query_decomposition"
 	StageRetrievalRouting   StageID = "retrieval_routing"
 	StageRetrieval          StageID = "retrieval"
+	StageRerank             StageID = "rerank"
 	StageSynthesis          StageID = "synthesis"
 )
 
