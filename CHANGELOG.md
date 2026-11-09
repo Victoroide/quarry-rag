@@ -4,6 +4,8 @@ Notable changes are grouped by release.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-09
+
 ### Added
 
 - OpenSSF Scorecard analysis publishes results for `main`, and the README shows CI, CodeQL, Scorecard, Go version and license badges with requirements, usage, configuration, operations, contributing and security sections.
