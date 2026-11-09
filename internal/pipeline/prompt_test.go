@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -8,6 +10,9 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/llm"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	"github.com/stretchr/testify/require"
 )
 
 func captureSynthesisPrompt(t *testing.T, question string, texts ...string) (system, user string) {
@@ -107,4 +112,38 @@ func TestQuestionPrecedesExcerpts(t *testing.T) {
 	if !strings.HasSuffix(user, "Answer the question in <question> using only the excerpts, in the language of the question.") {
 		t.Fatalf("missing final answer instruction: %q", user)
 	}
+}
+
+func TestSynthesisCitationsAreOptIn(t *testing.T) {
+	for _, include := range []bool{false, true} {
+		t.Run(fmt.Sprint(include), func(t *testing.T) {
+			cfg := &config.Config{BedrockFallbackModel: "fallback"}
+			r := &citationPromptRecorder{answer: "Archive evidence [9] [1]."}
+			amb := llm.NewAmbassador(cfg)
+			amb.SetClient(r)
+			qc := &QueryContext{OriginalQuery: "archive", IncludeCitations: include, RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{DocumentID: "source", Index: 2, Text: "Archive evidence"}, Score: .9}}}
+			require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+			require.Equal(t, include, strings.Contains(r.system, "Cite the excerpts"))
+			if include {
+				require.Equal(t, "Archive evidence [1].", qc.FinalAnswer)
+				require.Len(t, qc.Citations, 1)
+				require.True(t, qc.Citations[0].Verified)
+			} else {
+				require.Equal(t, r.answer, qc.FinalAnswer)
+				require.Nil(t, qc.Citations)
+			}
+			require.Equal(t, len([]rune(r.system))/4+len([]rune(r.prompt))/4, qc.ContextTokens)
+		})
+	}
+}
+
+type citationPromptRecorder struct {
+	llm.FakeConverser
+	system, prompt, answer string
+}
+
+func (r *citationPromptRecorder) ConverseWithModelAndSystem(_ context.Context, _, system string, messages []brtypes.Message, _ float32, _ int) (*bedrockruntime.ConverseOutput, error) {
+	r.system = system
+	r.prompt = messages[0].Content[0].(*brtypes.ContentBlockMemberText).Value
+	return &bedrockruntime.ConverseOutput{StopReason: brtypes.StopReasonEndTurn, Output: &brtypes.ConverseOutputMemberMessage{Value: brtypes.Message{Role: brtypes.ConversationRoleAssistant, Content: []brtypes.ContentBlock{&brtypes.ContentBlockMemberText{Value: r.answer}}}}}, nil
 }

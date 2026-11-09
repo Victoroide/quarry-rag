@@ -321,6 +321,11 @@ func trimChunksForSynthesis(in []domain.ScoredChunk, maxChunks int) []domain.Sco
 
 // Run synthesizes a grounded answer in the language of the question.
 func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
+	qc.Excerpts, qc.Truncated = nil, nil
+	qc.Citations = nil
+	if qc.IncludeCitations {
+		qc.Citations = make([]Citation, 0)
+	}
 	minScore := 0.0
 	if s.cfg != nil {
 		minScore = s.cfg.MinRelevanceScore
@@ -357,8 +362,17 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	}
 	chunks := trimChunksForSynthesis(qc.RetrievedChunks, maxChunks)
 	qc.ContextChunks = len(chunks)
+	qc.Truncated = make([]bool, len(chunks))
+	for i := range chunks {
+		qc.Truncated[i] = len([]rune(chunks[i].Chunk.Text)) < len([]rune(qc.RetrievedChunks[i].Chunk.Text))
+		chunks[i].Chunk.Text = sanitizeExcerpt(chunks[i].Chunk.Text)
+	}
+	qc.Excerpts = chunks
 
 	system, prompt := buildSynthesisPrompt(qc.OriginalQuery, chunks, newBoundary())
+	if qc.IncludeCitations {
+		system += "\n" + synthesisCitationInstruction
+	}
 
 	tokenEst := llm.EstimateTokens(prompt) + llm.EstimateTokens(system)
 	qc.ContextTokens = tokenEst
@@ -404,6 +418,9 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	qc.FinalAnswer = llm.ExtractText(result.Output)
 	if strings.TrimSpace(qc.FinalAnswer) == "" {
 		return ErrSynthesisEmpty
+	}
+	if qc.IncludeCitations {
+		qc.FinalAnswer, qc.Citations = VerifyCitations(qc.FinalAnswer, qc.Excerpts)
 	}
 	switch result.Output.StopReason {
 	case "end_turn", "stop_sequence":

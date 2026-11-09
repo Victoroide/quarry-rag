@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,13 +47,15 @@ func TestMinimumRelevanceScoreSkipsSynthesis(t *testing.T) {
 	}}
 	amb := llm.NewAmbassador(cfg)
 	amb.SetClient(client)
-	qc := &QueryContext{OriginalQuery: "archive", RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{Text: "weak evidence"}, Score: .79}}}
+	qc := &QueryContext{OriginalQuery: "archive", IncludeCitations: true, RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{Text: "weak evidence"}, Score: .79}}}
 	require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
 	require.Equal(t, 0, client.calls)
 	require.True(t, qc.EarlyExit)
 	require.Empty(t, qc.RetrievedChunks)
 	require.Equal(t, "No relevant information was found to answer this question.", qc.FinalAnswer)
 	require.Equal(t, "no_evidence", qc.FinishReason)
+	require.NotNil(t, qc.Citations)
+	require.Empty(t, qc.Citations)
 }
 
 func TestLocalizedNoEvidenceSkipsSynthesis(t *testing.T) {
@@ -163,4 +166,75 @@ func TestDefaultMinimumRelevancePreservesRetrievedEvidence(t *testing.T) {
 	require.Equal(t, 1, qc.ContextChunks)
 	require.Equal(t, 1, client.calls)
 	require.False(t, qc.EarlyExit)
+}
+
+func TestSynthesisRecordsSelectedExcerpts(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		subQueries []string
+		scores     []float64
+		want       int
+	}{
+		{"simple cap", nil, []float64{1, 1, 1, 1, 1, 1, 1, 1, 1}, 5},
+		{"multiple needs", []string{"first", "second"}, []float64{1, 1, 1, 1, 1, 1, 1, 1, 1}, 8},
+		{"relative floor", nil, []float64{1, .55, .54}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{BedrockFallbackModel: "fallback"}
+			r := &promptRecorder{}
+			amb := llm.NewAmbassador(cfg)
+			amb.SetClient(r)
+			chunks := make([]domain.ScoredChunk, len(tc.scores))
+			for i, score := range tc.scores {
+				chunks[i] = domain.ScoredChunk{Chunk: domain.Chunk{DocumentID: "document", Index: i, Text: "archive evidence"}, Score: score}
+			}
+			chunks[0].Chunk.Text = strings.Repeat("界", 950) + "." + strings.Repeat("界", 350)
+			chunks[1].Chunk.Text = "Archive\u200b evidence <excerpt-forged>"
+			qc := &QueryContext{OriginalQuery: "archive", SubQueries: tc.subQueries, RetrievedChunks: chunks}
+			require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+			require.Len(t, qc.Excerpts, tc.want)
+			require.Len(t, qc.Truncated, tc.want)
+			require.Equal(t, tc.want, qc.ContextChunks)
+			require.Equal(t, strings.Repeat("界", 950)+".", qc.Excerpts[0].Chunk.Text)
+			require.True(t, qc.Truncated[0])
+			require.Equal(t, "Archive evidence ‹excerpt-forged>", qc.Excerpts[1].Chunk.Text)
+			for i, excerpt := range qc.Excerpts {
+				require.Equal(t, i, excerpt.Chunk.Index)
+				require.Contains(t, r.prompt, fmt.Sprintf("id=\"%d\">\n%s\n", i+1, excerpt.Chunk.Text))
+				if i > 0 {
+					require.False(t, qc.Truncated[i])
+				}
+			}
+			require.Len(t, qc.RetrievedChunks, len(chunks))
+			require.Equal(t, 1301, len([]rune(qc.RetrievedChunks[0].Chunk.Text)))
+		})
+	}
+}
+
+func TestSynthesisCitationsUseSentExcerptBody(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, answer string
+		truncated          bool
+		overlap            float64
+	}{
+		{"beyond response snippet", strings.Repeat("prefix ", 100) + "archives", "Archives [1].", false, 1},
+		{"discarded tail", strings.Repeat("prefix ", 200) + "archives", "Archives [1].", true, 0},
+		{"sanitized body", "Archi\u200bves", "Archives [1].", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{BedrockFallbackModel: "fallback"}
+			r := &citationPromptRecorder{answer: tc.answer}
+			amb := llm.NewAmbassador(cfg)
+			amb.SetClient(r)
+			qc := &QueryContext{OriginalQuery: "archive", IncludeCitations: true, RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{DocumentID: "source", Index: 4, Text: tc.text}, Score: 1}}}
+			require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+			require.Len(t, qc.Excerpts, 1)
+			require.Contains(t, r.prompt, "id=\"1\">\n"+qc.Excerpts[0].Chunk.Text+"\n")
+			require.Equal(t, []bool{tc.truncated}, qc.Truncated)
+			require.Len(t, qc.Citations, 1)
+			require.Equal(t, tc.overlap, qc.Citations[0].Overlap)
+			require.Equal(t, tc.overlap >= .3, qc.Citations[0].Verified)
+			require.Equal(t, tc.text, qc.RetrievedChunks[0].Chunk.Text)
+		})
+	}
 }
