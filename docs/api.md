@@ -1,5 +1,8 @@
 # API Reference
 
+The [OpenAPI 3.1 description](openapi.yaml) provides machine-readable routes and
+payload schemas. This reference owns endpoint behavior and limits.
+
 All API responses use `Content-Type: application/json`. Error responses follow a uniform structured JSON format:
 
 ```json

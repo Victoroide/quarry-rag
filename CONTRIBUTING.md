@@ -79,6 +79,10 @@ with existing documents.
 
 ## Documentation
 
+Update [docs/openapi.yaml](docs/openapi.yaml) together with route, method or
+payload changes; `internal/api/openapi_test.go` fails while the description and
+the code differ.
+
 Document environment variables only in docs/configuration.md, in alphabetical
 order. Add one CHANGELOG.md bullet under Unreleased for each caller-visible
 change. Use relative links; the only URLs allowed are the README badge lines

@@ -168,6 +168,7 @@ The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing
 |---|---|
 | [Architecture](docs/architecture.md) | Package organization, sequence diagrams, database entity-relationship model, and runtime lifecycles |
 | [API Reference](docs/api.md) | Route definitions, authentication headers, request and response structures, and HTTP status codes |
+| [OpenAPI Description](docs/openapi.yaml) | Machine-readable HTTP API contract |
 | [MCP Server](docs/mcp.md) | Local stdio command, client setup, tools and Go client package |
 | [Configuration](docs/configuration.md) | Environment variables, validation constraints, default parameters, and database schema migrations |
 | [Deployment](docs/deployment.md) | Container image build, non-root user execution, external service requirements, and token rotation |
