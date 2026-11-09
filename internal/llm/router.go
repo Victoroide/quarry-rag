@@ -1,4 +1,4 @@
-// Package llm provides synthesis routing and Bedrock Converse calls.
+// Package llm provides synthesis routing, Bedrock Converse calls and an OpenAI-compatible chat client.
 package llm
 
 import (
@@ -35,6 +35,9 @@ func Route(cfg *config.Config, req RoutingRequest) (modelID, reason string) {
 	defer func() {
 		slog.Debug("synthesis route selected", "model_id", modelID, "reason", reason)
 	}()
+	if cfg.LLMProvider == "openai" && !cfg.FakeMode {
+		return cfg.OpenAIChatModel, "openai"
+	}
 	if req.ContextTokens >= NovaMicroSafeContextLimit {
 		return cfg.BedrockFallbackModel, "context_limit"
 	}
