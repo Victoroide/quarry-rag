@@ -157,7 +157,7 @@ Apply this formula to `QUERY_CONCURRENCY` and `EMBED_CONCURRENCY` with the quota
 
 ## Required External Services
 
-In production deployments (`GO_RAG_FAKE_MODE=false`), the microservice connects to four external cloud services, configured via environment variables.
+In production deployments (`GO_RAG_FAKE_MODE=false`), the microservice uses the following backing services. [PDF OCR](#optional-pdf-ocr) adds optional text detection.
 
 ### 1. PostgreSQL (Metadata and Chunk Store)
 
@@ -216,6 +216,25 @@ Confirm that `TestSmoke_PreexistingDocumentRemainsRetrievable` passes without sk
   - `s3:ListBucket` on `arn:aws:s3:::{bucket}`, required by the startup and health `HeadBucket` checks.
 
 ---
+
+## Optional PDF OCR
+
+Enable the [OCR configuration](configuration.md#environment-variables) to accept
+[image-only PDFs](api.md#image-only-pdf-ocr). The S3 bucket and Textract endpoint
+must be in the same AWS Region. The service uses its shared AWS credential chain
+and retry policy. Grant `textract:StartDocumentTextDetection` and
+`textract:GetDocumentTextDetection` on `*`; Textract reads the original with the
+caller's existing `s3:GetObject` permission. SSE-KMS objects also need
+`kms:Decrypt` on the object's key. Polling requires no SNS topic or notification role. Enable OCR only after every replica runs a release with OCR support, and let pending OCR documents finish before rolling back; replicas without it fail those documents with `no chunks produced`.
+
+Textract asynchronous PDF detection supports at most 3,000 pages and 500 MB per
+document. The service's [upload and decoded-text limits](api.md#post-ingest)
+still apply and can be lower. Detection adds latency and is billed per page;
+Amazon's US West (Oregon) example charges $0.0015 per page for the first million
+pages in a month. Rates vary by region and volume; check current Amazon Textract
+pricing before enabling it. S3 and other ingestion charges also apply. Detection
+can continue in AWS after a local timeout or deletion, and incurred charges are
+not canceled by stopping ingestion.
 
 ## Vector Index Maintenance
 

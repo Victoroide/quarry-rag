@@ -101,7 +101,7 @@ curl localhost:8081/health
 
 ### POST /ingest
 
-Ingests textual content or document files for chunking, embedding, vector indexing, and relational storage. HTTP 202 means the document content and pending ingestion job have committed to PostgreSQL and survive restarts. Processing completes asynchronously. Content NUL characters are removed before validation and fingerprinting; metadata keys or values containing NUL return 400 `metadata must not contain NUL characters`.
+Ingests textual content or document files for chunking, embedding, vector indexing, and relational storage. HTTP 202 means the parsed content or [pending OCR input](#image-only-pdf-ocr) and ingestion job have committed to PostgreSQL and survive restarts. Processing completes asynchronously. Content NUL characters are removed before validation and fingerprinting; metadata keys or values containing NUL return 400 `metadata must not contain NUL characters`.
 
 A document's `status` becomes `completed` after its vectors and chunks are stored and search returns its last vector. When the [visibility wait](architecture.md#ingestion-stages) is disabled or ends first, the document completes anyway and can take a moment to become searchable.
 
@@ -196,7 +196,7 @@ Form fields:
 | `file` | file binary | yes | File to extract and ingest. Accepted formats: PDF, DOCX, DOC and UTF-8 or BOM-marked UTF-16 plain text (`.txt`, `.md`, `.markdown`) |
 | `collection` | string | no | Collection label with the same scope, default and validation rules as JSON ingestion; repeated fields return 400 |
 | `doc_type` | string | no | Document category label. Defaults to `"document"` if omitted |
-| `document_id` | string | no | Optional document UUID with the same identity and conflict rules as JSON requests, applied to extracted text |
+| `document_id` | string | no | Optional document UUID with the same identity and conflict rules as JSON requests, applied to extracted text or [OCR input](#image-only-pdf-ocr) |
 | `metadata` | JSON object string | no | Optional metadata with the same limits as JSON ingestion; duplicate top-level keys, trailing data and repeated metadata fields return 400. The stored object includes `source_file` set to the uploaded filename, overriding a caller value, and must still fit the size limit |
 
 Uploads are identified by content. PDF headers must appear within the first
@@ -220,7 +220,7 @@ DOC extraction supports the main document text in Word 97–2003 binary document
 headers, footers, footnotes and comments are not extracted. Word 6/95 documents
 and encrypted files return 422.
 
-New uploads return 202 after durable acceptance with the retained or generated identifier. Completed duplicates return 200 `already_ingested`; in-flight duplicates return 202 with the same identifier; failed duplicates return 202 and are requeued. Identity and deduplication follow the JSON ingestion rules above. A configured source store must accept the original upload before document acceptance. New source objects are removed when acceptance does not retain them.
+New uploads return 202 after durable acceptance with the retained or generated identifier. Completed duplicates return 200 `already_ingested`; in-flight duplicates return 202 with the same identifier; failed duplicates return 202 and are requeued. Identity and deduplication follow the JSON ingestion rules above, with the [OCR input exception](#image-only-pdf-ocr). A configured source store must accept the original upload before document acceptance. New source objects are removed when acceptance does not retain them.
 
 Error Status Codes:
 
@@ -228,7 +228,7 @@ Error Status Codes:
 |---|---|---|
 | `400 Bad Request` | `validation` | Form `file` part missing or read error; invalid label or metadata; non-empty `document_id` is not a UUID |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
-| `409 Conflict` | `conflict` | Supplied `document_id` already exists with different extracted text |
+| `409 Conflict` | `conflict` | Supplied `document_id` already exists with different extracted text or OCR input |
 | `413 Payload Too Large` | `validation` | Upload exceeds `MAX_UPLOAD_BYTES` |
 | `415 Unsupported Media Type` | `extraction` | Extension and content disagree, or content has no supported type |
 | `422 Unprocessable Entity` | `extraction` | Document text extraction failed (e.g., malformed binary structure, extracted PDF, DOCX, DOC or text exceeding 1,000,000 bytes, expanded DOCX XML exceeding 16 MiB, a DOC stream declaring a size larger than the file, or PDF extraction work exceeding its limits) |
@@ -253,7 +253,7 @@ Content verification and extraction error codes:
 | `unsupported_version` | 422 | `document version is not supported` |
 | `unavailable` | 503 | `document extraction is unavailable` |
 
-For example, a PDF without a readable text layer returns 422 with
+With OCR disabled, a PDF without a readable text layer returns 422 with
 `{"error":"extraction","message":"document contains no readable text","code":"no_text"}`.
 
 Example:
@@ -265,6 +265,32 @@ curl -X POST localhost:8081/ingest \
   -F "doc_type=research" \
   -F 'metadata={"author":"research-team"}'
 ```
+
+#### Image-only PDF OCR
+
+With [OCR enabled](configuration.md#environment-variables), a PDF whose parser
+returns `no_text` (fewer than 10 bytes of embedded text after trimming
+whitespace) is uploaded to S3 and accepted with HTTP 202 `processing`. PDFs with
+more embedded text, including partly scanned documents, are ingested from that
+text without OCR.
+PostgreSQL initially stores empty content and `text_source = 'ocr_pending'`.
+Deduplication and caller-supplied identifier conflicts use the collection-scoped
+SHA-256 of the original PDF bytes, preserving that identity after text detection.
+Other formats and extraction errors keep their existing behavior. If the
+original cannot be stored, acceptance returns 503 `storage`.
+
+During ingestion, Textract text detection runs against that original while the
+job lease is renewed. All result pages are read; detected lines are ordered by
+page, then top and left position, and joined with newlines. The detected content
+and preview are saved with `text_source = 'ocr'` before chunking, embedding and
+indexing. A retry uses saved text when available, and retries before persistence
+reuse the detection request for that S3 object. A requeued failed document
+reuses the same original and request, so a failed detection can return the same
+result; delete the document and upload it again to request a new detection. Empty results fail ingestion with
+`last_error = 'no_text'`; partial or failed detection and document or decoded-text
+limit errors also fail ingestion. Poll [document status](#get-documentsdoc_id)
+for the outcome. The decoded-text limit above still applies; provider limits,
+permissions and billing are described in [deployment](deployment.md#optional-pdf-ocr).
 
 ---
 
