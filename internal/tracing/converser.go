@@ -26,6 +26,9 @@ type modelConverser struct {
 func WrapConverser(inner llm.Converser, provider, model string) llm.Converser {
 	c := &converser{inner, provider, model}
 	if mc, ok := inner.(llm.ModelConverser); ok {
+		if stream, ok := inner.(llm.StreamConverser); ok {
+			return &streamModelConverser{&modelConverser{c, mc}, stream}
+		}
 		return &modelConverser{c, mc}
 	}
 	return c
