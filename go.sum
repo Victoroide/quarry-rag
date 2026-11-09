@@ -47,6 +47,8 @@ github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.1 h1:w8yui2ZqdHmGwVBDGvazoIvK
 github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.1/go.mod h1:gJSdIY6YUzDvqQLcMtPVZgBRHrFwzHryvpE8Igzbxps=
 github.com/aws/aws-sdk-go-v2/service/sts v1.51.6 h1:BVjKrtRUtSYKztBCCfE1oAB+d3ViKcW2cKZfserOqMQ=
 github.com/aws/aws-sdk-go-v2/service/sts v1.51.6/go.mod h1:eSukFLeLkPMm+1OxDR+F0joauZdyBkF47Ow7MqjZiJw=
+github.com/aws/aws-sdk-go-v2/service/textract v1.49.12 h1:AxiMT5GweXnlF6QD/h+8z/FdjsiMhpFe23v0h6oTp70=
+github.com/aws/aws-sdk-go-v2/service/textract v1.49.12/go.mod h1:jyOwvsWvImImTCgwUMmvuGnCCM5zxI6eMiH56oIK8tQ=
 github.com/aws/smithy-go v1.28.8 h1:aEmdAq7gVCoGCnvf1NnELlu3I6D/nhqrC321FyFiQkQ=
 github.com/aws/smithy-go v1.28.8/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
 github.com/bmatcuk/doublestar v1.1.1/go.mod h1:UD6OnuiIn0yFxxA2le/rnRU1G4RaI4UvFv1sNto9p6w=

@@ -46,6 +46,9 @@ type Config struct {
 	S3Bucket       string
 	MaxUploadBytes int64
 
+	OCRProvider string
+	OCRTimeout  time.Duration
+
 	// SynthesisModel selects primary, fallback or hybrid answer routing.
 	SynthesisModel string
 
@@ -132,6 +135,7 @@ func Load() (*Config, error) {
 		S3ExpectedBucketOwner: os.Getenv("S3_EXPECTED_BUCKET_OWNER"),
 		AWSSessionToken:       os.Getenv("AWS_SESSION_TOKEN"),
 		RerankModelARN:        os.Getenv("RERANK_MODEL_ARN"),
+		OCRProvider:           envOrDefault("OCR_PROVIDER", "none"),
 	}
 	cfg.BedrockGuardrailID = os.Getenv("BEDROCK_GUARDRAIL_ID")
 	cfg.BedrockGuardrailVersion = os.Getenv("BEDROCK_GUARDRAIL_VERSION")
@@ -168,6 +172,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	if cfg.OCRTimeout, err = envDurationOrDefault("OCR_TIMEOUT", 10*time.Minute); err != nil {
+		return nil, err
+	}
 	if cfg.Tracing, err = loadTracing(); err != nil {
 		return nil, err
 	}
@@ -258,6 +265,15 @@ func (c *Config) validate() error {
 	}
 	if c.RerankTimeout < time.Second || c.RerankTimeout > time.Minute {
 		return fmt.Errorf("config: RERANK_TIMEOUT must be between 1s and 60s")
+	}
+	if c.OCRProvider != "none" && c.OCRProvider != "textract" {
+		return fmt.Errorf("config: OCR_PROVIDER must be none or textract")
+	}
+	if c.OCRTimeout <= 0 || (c.OCRProvider == "textract" && c.OCRTimeout >= c.IngestJobTimeout) {
+		return fmt.Errorf("config: OCR_TIMEOUT must be positive and below INGEST_JOB_TIMEOUT when OCR is enabled")
+	}
+	if c.OCRProvider == "textract" && strings.TrimSpace(c.S3Bucket) == "" {
+		return fmt.Errorf("config: OCR_PROVIDER=textract requires S3_BUCKET")
 	}
 	type requirement struct {
 		name  string

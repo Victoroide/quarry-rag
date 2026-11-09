@@ -53,6 +53,10 @@ func validateIngestRequest(req *IngestRequest) *APIError {
 	if len(req.Content) > domain.MaxContentBytes {
 		return &APIError{Error: "validation", Message: "content exceeds maximum length of 1000000 bytes"}
 	}
+	return validateIngestFields(req)
+}
+
+func validateIngestFields(req *IngestRequest) *APIError {
 	var apiErr *APIError
 	req.DocType, apiErr = validateDocType(req.DocType)
 	if apiErr != nil {
@@ -172,7 +176,8 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	} else {
 		text, extractErr = opts.extract(r.Context(), ft, fileData)
 	}
-	if extractErr != nil {
+	ocrPending := extractErr != nil && opts.ocr && ft == extractor.FileTypePDF && extractionErrorIs(extractErr, extractor.ErrNoText)
+	if extractErr != nil && !ocrPending {
 		writeExtractionError(rw, r, extractErr)
 		return
 	}
@@ -206,19 +211,36 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		collection = values[0]
 	}
 	req := IngestRequest{Content: text, DocType: formDocType, Collection: collection, Metadata: metadata}
-	if apiErr := validateIngestRequest(&req); apiErr != nil {
+	var apiErr *APIError
+	if ocrPending {
+		text, req.Content = "", ""
+		apiErr = validateIngestFields(&req)
+	} else {
+		apiErr = validateIngestRequest(&req)
+	}
+	if apiErr != nil {
 		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
 	}
 	formDocType = req.DocType
+	if ocrPending && s3Client == nil {
+		rw.Header().Set("Retry-After", "30")
+		writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
+		return
+	}
+	fingerprint, textSource := chunker.ScopedFingerprint(req.Collection, text), "parser"
+	if ocrPending {
+		fingerprint = chunker.ScopedFingerprint(req.Collection, string(fileData))
+		textSource = "ocr_pending"
+	}
 	var s3Key *string
 	if s3Client != nil {
-		existingID, exists, lookupErr := cs.CheckFingerprint(r.Context(), chunker.ScopedFingerprint(req.Collection, text))
+		existingID, exists, lookupErr := cs.CheckFingerprint(r.Context(), fingerprint)
 		if lookupErr != nil {
 			writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 			return
 		}
-		if !exists || (suppliedID != "" && string(existingID) != docID) {
+		if ocrPending || !exists || (suppliedID != "" && string(existingID) != docID) {
 			docType := formDocType
 			if docType == "" {
 				docType = domain.DefaultDocType
@@ -234,7 +256,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 			s3Key = &key
 		}
 	}
-	outcome, acceptErr := acceptIngest(rw, r, wk, cs, domain.AcceptRequest{Document: domain.Document{ID: domain.DocumentID(docID), Content: text, Metadata: metadata, FileName: &fileName, FileType: &ftStr, S3Key: s3Key}, CallerSupplied: suppliedID != "", DocType: formDocType, Collection: req.Collection, MaxPending: opts.maxPending})
+	outcome, acceptErr := acceptIngest(rw, r, wk, cs, domain.AcceptRequest{Document: domain.Document{ID: domain.DocumentID(docID), Content: text, Metadata: metadata, FileName: &fileName, FileType: &ftStr, S3Key: s3Key, TextSource: textSource}, Fingerprint: fingerprint, CallerSupplied: suppliedID != "", DocType: formDocType, Collection: req.Collection, MaxPending: opts.maxPending})
 	if s3Key != nil && outcome != domain.AcceptAccepted {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 		defer cancel()

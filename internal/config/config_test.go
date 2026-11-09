@@ -200,6 +200,7 @@ func TestLoadIndexVisibilityTimeout(t *testing.T) {
 func baseValidConfig() *Config {
 	return &Config{
 		ServerPort: "8081", ChunkTokenSize: 512, ChunkOverlap: 64, LocalRetrievalThreshold: 0.7, MaxChunksPerQuery: 10, MaxUploadBytes: 20 << 20, EmbeddingDimensions: 1024, SynthesisModel: "fallback",
+		OCRProvider: "none", OCRTimeout: 10 * time.Minute,
 		DatabaseURL:       "postgres://localhost:5432/db?sslmode=disable",
 		AWSRegion:         "us-east-1",
 		AWSAccessKeyID:    "AKIA_TEST",
