@@ -25,6 +25,7 @@ Notable changes are grouped by release.
 
 ### Fixed
 
+- The architecture documentation lists the tracing middleware in the request middleware order.
 - **Breaking:** Startup rejects `CHUNK_OVERLAP` above `CHUNK_TOKEN_SIZE/2`, which was previously accepted, and chunk output now grows linearly with document size. Chunks keep the source spacing between sentences instead of adding a space after full-width terminators such as `。`.
 
 ## [0.1.0] - 2026-11-09
