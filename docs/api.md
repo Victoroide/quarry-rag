@@ -49,7 +49,7 @@ When `SERVICE_TOKEN` or `SERVICE_TOKENS` is configured, all mutating and sensiti
 - `GET /documents/{doc_id}/file`
 - `DELETE /documents/{doc_id}`
 
-Requests missing or presenting an empty or incorrect token receive `401 Unauthorized`. Configuration trims tokens, drops empty entries and deduplicates both variables. Each request hashes the header with SHA-256 and compares it against every configured digest in constant time, without stopping at a match. An empty combined token list is allowed only in offline mode and leaves service routes open. The `GET /livez`, `GET /readyz` and `GET /health` endpoints are public and do not require authentication.
+Requests missing or presenting an empty or incorrect token receive `401 Unauthorized`. Each request hashes the header with SHA-256 and compares it against every configured digest in constant time, without stopping at a match. An empty combined token list is allowed only in offline mode and leaves service routes open. The `GET /livez`, `GET /readyz` and `GET /health` endpoints are public and do not require authentication. To change tokens without downtime, follow [Service Token Rotation](deployment.md#service-token-rotation).
 
 ---
 
@@ -65,7 +65,7 @@ Returns HTTP 200 with `{"status":"ready"}` when the cached PostgreSQL check succ
 
 ### GET /health
 
-Returns cached diagnostic status for backing data stores. Results are shared with readiness and may be up to `HEALTH_CACHE_TTL` old (default 10 seconds). On expiry, concurrent callers share one refresh, with checks running concurrently under separate 5-second timeouts. Use this endpoint for diagnostics.
+Returns cached diagnostic status for backing data stores. Results are shared with readiness and may be up to [`HEALTH_CACHE_TTL`](configuration.md#environment-variables) old. On expiry, concurrent callers share one refresh, with checks running concurrently under separate 5-second timeouts. Use this endpoint for diagnostics.
 
 - **Method**: `GET`
 - **Path**: `/health`
@@ -183,7 +183,7 @@ curl -X POST localhost:8081/ingest \
 #### Variant B: Multipart Form Upload
 
 - **Content-Type**: `multipart/form-data`
-- **Body Limit**: Bounded by `MAX_UPLOAD_BYTES` (default 20,971,520 bytes = 20 MiB)
+- **Body Limit**: Bounded by [`MAX_UPLOAD_BYTES`](configuration.md#environment-variables)
 
 Form fields:
 
@@ -281,9 +281,9 @@ Request fields:
 | `query` | string | yes | Natural-language query string (1 to 10,000 decoded bytes) |
 | `mode` | string | no | Retrieval mode: `"auto"` (default), `"local"`, or `"global"`. Case-insensitive. `local` answers mainly from the most relevant authorized document (named entity or best match), topped up from the authorized scope when that document has fewer than 3 matching chunks. With no visible candidate, `local` uses `global`. Explicit `global` skips the routing probe |
 | `filter_doc_type` | string | no | Restricts vector retrieval to chunks matching the given `doc_type`, using the label normalization and limits above |
-| `max_chunks` | int | no | Requested chunks to retrieve (0 to 100), capped by `MAX_CHUNKS_PER_QUERY`. Omitted or zero uses that configured maximum (default 10) |
+| `max_chunks` | int | no | Requested chunks to retrieve (0 to 100), capped by [`MAX_CHUNKS_PER_QUERY`](configuration.md#environment-variables). Omitted or zero uses that configured maximum |
 | `include_citations` | bool | no | Request numbered inline citations and lexical checks against the excerpts sent to synthesis; defaults to false |
-| `allowed_document_ids` | array of strings | no | Tenant/role allowlist of UUIDs, at most `MAX_ALLOWED_DOCUMENT_IDS` entries (default 25000). IDs are canonicalized and deduplicated. Omitted or `null` means unrestricted unless `REQUIRE_DOCUMENT_ALLOWLIST=true`, which makes a non-null field mandatory. An empty list (`[]`) returns the no-information answer without embedding or search. The allowlist is applied inside vector search and routing |
+| `allowed_document_ids` | array of strings | no | Tenant/role allowlist of UUIDs, at most [`MAX_ALLOWED_DOCUMENT_IDS`](configuration.md#environment-variables) entries. IDs are canonicalized and deduplicated. Omitted or `null` means unrestricted unless `REQUIRE_DOCUMENT_ALLOWLIST=true`, which makes a non-null field mandatory. An empty list (`[]`) returns the no-information answer without embedding or search. The allowlist is applied inside vector search and routing |
 
 Response fields (200 OK):
 
