@@ -307,7 +307,7 @@ func (c *Config) validate() error {
 		{"DATABASE_URL", c.DatabaseURL},
 	}
 	if !c.FakeMode {
-		if c.LLMProvider == "bedrock" || c.EmbeddingProvider == "bedrock" || c.S3Bucket != "" {
+		if c.LLMProvider == "bedrock" || c.EmbeddingProvider == "bedrock" || c.S3Bucket != "" || c.RerankModelARN != "" {
 			required = append(required, requirement{"AWS_REGION", c.AWSRegion})
 		}
 	}

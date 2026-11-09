@@ -63,6 +63,7 @@ func TestProviderValidation(t *testing.T) {
 		{"LLM_PROVIDER", "bedrock", "AWS_REGION"},
 		{"EMBEDDING_PROVIDER", "bedrock", "AWS_REGION"},
 		{"S3_BUCKET", "bucket", "AWS_REGION"},
+		{"RERANK_MODEL_ARN", "arn:aws:bedrock:us-east-1::foundation-model/amazon.rerank-v1:0", "AWS_REGION"},
 	} {
 		t.Run(tc.key+tc.value, func(t *testing.T) {
 			providerEnvironment(t)

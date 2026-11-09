@@ -212,7 +212,7 @@ Changing backends does not copy existing embeddings. Re-ingest documents with ne
 
 ### OpenAI-compatible providers
 
-Select chat and embedding backends independently using the [provider configuration](configuration.md#environment-variables). Supply an explicit base address including the API version prefix required by your server, and model names supported by that server. Configure secrets through your deployment's secret store. Pinecone and PostgreSQL remain required in external-service mode. When both backends use compatible endpoints and original-file storage is disabled, startup does not initialize AWS clients.
+Select chat and embedding backends independently using the [provider configuration](configuration.md#environment-variables). Supply an explicit base address including the API version prefix required by your server, and model names supported by that server. Configure secrets through your deployment's secret store. Pinecone and PostgreSQL remain required in external-service mode. When both backends use compatible endpoints and reranking and original-file storage are disabled, startup does not initialize AWS clients.
 
 Chat sends JSON to `/chat/completions`; embeddings send JSON to `/embeddings` beneath the configured base address. Chat requests send `max_tokens` and `temperature`; use a chat model that accepts both. Embedding requests ask for float encoding and do not request a dimension count; set `EMBEDDING_DIMENSIONS` to the model's output size. An existing index must use the same embedding model and vector size; changing the embedding model requires re-embedding the corpus into a matching index.
 

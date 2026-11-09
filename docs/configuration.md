@@ -10,7 +10,7 @@ The table below lists the environment variables recognized by the service:
 |---|---|---|---|---|
 | `AWS_ACCESS_KEY_ID` | string | `""` | Set together with `AWS_SECRET_ACCESS_KEY`, or leave both empty | Optional static AWS access key ID. When both keys are empty, AWS clients use the default credential chain. |
 | `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. Standard retries have a 10-second maximum backoff, no client-side retry quota, and include `ModelTimeoutException` and `ModelNotReadyException`. |
-| `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls and S3 object storage. Required outside offline mode when either provider uses Bedrock or original-file storage is enabled. |
+| `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls, Bedrock reranking and S3 object storage. Required outside offline mode when either provider uses Bedrock, reranking is enabled, or original-file storage is enabled. |
 | `AWS_SECRET_ACCESS_KEY` | string | `""` | Set together with `AWS_ACCESS_KEY_ID`, or leave both empty | Optional static AWS secret access key. |
 | `AWS_SESSION_TOKEN` | string | `""` | Optional string | Session token for temporary static AWS credentials. |
 | `BEDROCK_EMBED_MODEL` | string | `"amazon.titan-embed-text-v2:0"` | Non-empty string | Bedrock model identifier used for generating text embeddings. |
