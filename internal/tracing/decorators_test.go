@@ -253,3 +253,15 @@ func TestModelDecoratorCapturesGuardedText(t *testing.T) {
 	require.Len(t, spans, 1)
 	require.Equal(t, "guarded-question closing", spanAttrs(spans[0])["gen_ai.prompt.1.content"].AsString())
 }
+
+type transactionalTestStore struct{ *memory.FakeVectorStore }
+
+func (*transactionalTestStore) TransactionalVectors() {}
+
+func TestVectorDecoratorPreservesTransactionalWrites(t *testing.T) {
+	store := WrapVectorStore(&transactionalTestStore{memory.NewFakeVectorStore()}, "postgresql")
+	_, ok := store.(interface{ TransactionalVectors() })
+	require.True(t, ok, "transactional persistence must survive tracing")
+	_, ok = WrapVectorStore(memory.NewFakeVectorStore(), "memory").(interface{ TransactionalVectors() })
+	require.False(t, ok, "memory writes must still use the persist stage")
+}

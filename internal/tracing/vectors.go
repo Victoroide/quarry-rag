@@ -22,8 +22,16 @@ func WrapVectorStore(inner domain.VectorStore, system string) domain.VectorStore
 	if !canDelete || !canFilter {
 		return inner
 	}
-	return &vectorStore{inner, deleter, filtered, system}
+	wrapped := &vectorStore{inner, deleter, filtered, system}
+	if _, transactional := inner.(domain.TransactionalVectorStore); transactional {
+		return &transactionalVectorStore{wrapped}
+	}
+	return wrapped
 }
+
+type transactionalVectorStore struct{ *vectorStore }
+
+func (*transactionalVectorStore) TransactionalVectors() {}
 
 func (s *vectorStore) begin(ctx context.Context, operation, kind string) (context.Context, trace.Span) {
 	return start(ctx, "vector."+operation, kind, trace.SpanKindClient, attribute.String("db.system.name", s.system), attribute.String("db.operation.name", operation))
