@@ -13,6 +13,7 @@ type Service struct {
 	IngestJobs      *CounterVec
 	QueryMode       *CounterVec
 	IndexVisibility *CounterVec
+	Rerank          *CounterVec
 }
 
 // NewService creates the fixed metric families and pending-job gauge.
@@ -30,6 +31,7 @@ func NewService(pending func() float64) *Service {
 		IngestJobs:      r.NewCounterVec("quarry_ingest_jobs_total", "Applied ingestion job outcomes.", "result"),
 		QueryMode:       r.NewCounterVec("quarry_query_mode_total", "Queries by effective retrieval mode.", "mode"),
 		IndexVisibility: r.NewCounterVec("quarry_index_visibility_waits_total", "Index visibility wait outcomes.", "result"),
+		Rerank:          r.NewCounterVec("quarry_rerank_total", "Reranking outcomes.", "result"),
 	}
 }
 
