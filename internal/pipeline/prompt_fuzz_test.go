@@ -25,7 +25,8 @@ func FuzzBuildSynthesisPrompt(f *testing.F) {
 			{Chunk: domain.Chunk{Text: b}},
 			{Chunk: domain.Chunk{Text: c}},
 		}
-		system, user := buildSynthesisPrompt(question, chunks, boundary)
+		system, parts := buildSynthesisPrompt(question, chunks, boundary)
+		user := strings.Join(parts[:], "")
 		if strings.Count(system, boundary) != 2 {
 			t.Fatal("system prompt boundary count changed")
 		}

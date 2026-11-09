@@ -35,8 +35,8 @@ func (f *FakeConverser) synthesize(messages []brtypes.Message) *bedrockruntime.C
 	var user strings.Builder
 	for _, m := range messages {
 		for _, b := range m.Content {
-			if t, ok := b.(*brtypes.ContentBlockMemberText); ok {
-				user.WriteString(t.Value)
+			if text, ok := BlockText(b); ok {
+				user.WriteString(text)
 				user.WriteString("\n")
 			}
 		}

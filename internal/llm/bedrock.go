@@ -36,6 +36,8 @@ type Client struct {
 	rt      *bedrockruntime.Client
 	modelID string
 	maxToks int32
+
+	guardrailConfig *brtypes.GuardrailConfiguration
 }
 
 // NewClient creates a Bedrock client from the service configuration.
@@ -45,10 +47,18 @@ func NewClient(ctx context.Context, cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("llm: load aws config: %w", err)
 	}
 	rt := bedrockruntime.NewFromConfig(awsCfg)
+	var guardrailConfig *brtypes.GuardrailConfiguration
+	if cfg.BedrockGuardrailID != "" {
+		guardrailConfig = &brtypes.GuardrailConfiguration{
+			GuardrailIdentifier: aws.String(cfg.BedrockGuardrailID),
+			GuardrailVersion:    aws.String(cfg.BedrockGuardrailVersion),
+		}
+	}
 	return &Client{
-		rt:      rt,
-		modelID: cfg.BedrockFallbackModel,
-		maxToks: DefaultMaxTokens,
+		rt:              rt,
+		modelID:         cfg.BedrockFallbackModel,
+		maxToks:         DefaultMaxTokens,
+		guardrailConfig: guardrailConfig,
 	}, nil
 }
 
@@ -58,8 +68,9 @@ func (c *Client) Converse(ctx context.Context, messages []brtypes.Message) (*bed
 	topP := extractionTopP
 	maxToks := c.maxToks
 	input := &bedrockruntime.ConverseInput{
-		ModelId:  aws.String(c.modelID),
-		Messages: messages,
+		GuardrailConfig: c.guardrailConfig,
+		ModelId:         aws.String(c.modelID),
+		Messages:        messages,
 		InferenceConfig: &brtypes.InferenceConfiguration{
 			Temperature: &temp,
 			TopP:        &topP,
@@ -87,8 +98,9 @@ func (c *Client) ConverseWithModelAndSystem(ctx context.Context, modelID, system
 	}
 
 	input := &bedrockruntime.ConverseInput{
-		ModelId:  aws.String(modelID),
-		Messages: messages,
+		GuardrailConfig: c.guardrailConfig,
+		ModelId:         aws.String(modelID),
+		Messages:        messages,
 		InferenceConfig: &brtypes.InferenceConfiguration{
 			Temperature: &temperature,
 			TopP:        &topP,
@@ -105,6 +117,19 @@ func (c *Client) ConverseWithModelAndSystem(ctx context.Context, modelID, system
 		return nil, fmt.Errorf("llm: converse (model=%s): %w", modelID, err)
 	}
 	return output, nil
+}
+
+// BlockText returns the text carried by a text block or a guarded text block.
+func BlockText(block brtypes.ContentBlock) (string, bool) {
+	switch b := block.(type) {
+	case *brtypes.ContentBlockMemberText:
+		return b.Value, true
+	case *brtypes.ContentBlockMemberGuardContent:
+		if guarded, ok := b.Value.(*brtypes.GuardrailConverseContentBlockMemberText); ok {
+			return aws.ToString(guarded.Value.Text), true
+		}
+	}
+	return "", false
 }
 
 // ExtractText pulls text from a ConverseOutput.

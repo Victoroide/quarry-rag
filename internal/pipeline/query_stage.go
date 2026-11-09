@@ -335,9 +335,14 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	}
 	qc.Excerpts = chunks
 
-	system, prompt := buildSynthesisPrompt(qc.OriginalQuery, chunks, newBoundary())
+	system, parts := buildSynthesisPrompt(qc.OriginalQuery, chunks, newBoundary())
 	if qc.IncludeCitations {
 		system += "\n" + synthesisCitationInstruction
+	}
+	prompt := strings.Join(parts[:], "")
+	content := []brtypes.ContentBlock{&brtypes.ContentBlockMemberText{Value: prompt}}
+	if s.cfg.BedrockGuardrailID != "" {
+		content = guardedSynthesisContent(parts)
 	}
 
 	tokenEst := llm.EstimateTokens(prompt) + llm.EstimateTokens(system)
@@ -355,10 +360,8 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 
 	messages := []brtypes.Message{
 		{
-			Role: brtypes.ConversationRoleUser,
-			Content: []brtypes.ContentBlock{
-				&brtypes.ContentBlockMemberText{Value: prompt},
-			},
+			Role:    brtypes.ConversationRoleUser,
+			Content: content,
 		},
 	}
 
