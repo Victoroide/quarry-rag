@@ -203,12 +203,22 @@ Changing backends does not copy existing embeddings. Re-ingest documents with ne
 - **Configuration**: `AWS_REGION` and model identifiers (`BEDROCK_EMBED_MODEL`, `BEDROCK_PRIMARY_MODEL`, `BEDROCK_FALLBACK_MODEL`). Static `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are optional and must be configured together; temporary static credentials also accept `AWS_SESSION_TOKEN`.
 - **Credentials**: IAM roles are supported. Without static keys, AWS clients use the default credential chain, including environment credentials, shared configuration files, web identity, container roles and instance roles.
 - **Query and proxy timeouts**: `QUERY_CONCURRENCY` bounds admitted queries [per replica](#concurrency-limits), and `QUERY_QUEUE_TIMEOUT` limits admission waits. Each admitted query has a [`QUERY_TIMEOUT`](configuration.md#environment-variables) budget, with a nested `SYNTHESIS_TIMEOUT`. Set proxy and load balancer response timeouts to at least `HTTP_WRITE_TIMEOUT`. Keep adequate margin for reading request bodies and waiting for admission when configuring write timeouts.
-- **Retries and Deadlines**: Bedrock and S3 use the same retry policy, with [`AWS_MAX_ATTEMPTS`](configuration.md#environment-variables) attempts, up to 10 seconds of backoff, no client-side retry quota and retries for `ModelTimeoutException` and `ModelNotReadyException`. The SDK is the only transport retry layer; the ambassador makes one client call per operation. Each embedding call has an `EMBED_TIMEOUT` deadline, including waiting for a concurrency slot and retries.
+- **Retries and Deadlines**: Bedrock and S3 use the same retry policy, with [`AWS_MAX_ATTEMPTS`](configuration.md#environment-variables) attempts, up to 10 seconds of backoff, no client-side retry quota and retries for `ModelTimeoutException` and `ModelNotReadyException`. The SDK is the only transport retry layer; the ambassador makes one client call per operation. Each embedding call has an [`EMBED_TIMEOUT`](configuration.md#environment-variables) deadline.
 - **Required Model Access**:
   - Titan Embed Text V2 (`amazon.titan-embed-text-v2:0`): generates 1024-dimensional normalized text embeddings.
   - Nova Micro (`amazon.nova-micro-v1:0`): fast, low-latency reasoning and synthesis.
   - Llama 4 Maverick (`us.meta.llama4-maverick-17b-instruct-v1:0`): synthesis and comparison across multiple retrieved chunks.
 - **Reranking permissions**: Optional [reranking](api.md#post-query) requires `bedrock:Rerank` with `Resource: "*"` and `bedrock:InvokeModel` scoped to the configured reranking model ARN. Enable access to that model in the configured AWS region before querying.
+
+### OpenAI-compatible providers
+
+Select chat and embedding backends independently using the [provider configuration](configuration.md#environment-variables). Supply an explicit base address including the API version prefix required by your server, and model names supported by that server. Configure secrets through your deployment's secret store. Pinecone and PostgreSQL remain required in external-service mode. When both backends use compatible endpoints and original-file storage is disabled, startup does not initialize AWS clients.
+
+Chat sends JSON to `/chat/completions`; embeddings send JSON to `/embeddings` beneath the configured base address. Chat requests send `max_tokens` and `temperature`; use a chat model that accepts both. Embedding requests ask for float encoding and do not request a dimension count; set `EMBEDDING_DIMENSIONS` to the model's output size. An existing index must use the same embedding model and vector size; changing the embedding model requires re-embedding the corpus into a matching index.
+
+Synchronous queries use one chat completion request. Streamed queries use the streaming chat API with usage requested, deliver text deltas as they arrive, and require a finish reason followed by the `[DONE]` marker. Usage omitted by a compatible server remains unavailable and query token counts stay zero. Malformed events, premature EOF, upstream error events and callback failures stop the stream without a successful final response; a caller cancellation closes the upstream body. HTTP 429 and 503 map to the existing `upstream_throttled` response. The HTTP clients do not retry or follow redirects, and discard upstream error bodies. Caller deadlines bound requests; embedding concurrency and call deadlines use the same limits as Bedrock.
+
+OpenAI-compatible tracing sets `gen_ai.system` and `gen_ai.provider.name` to `openai` and records model, finish reason and reported token counts.
 
 ### 4. AWS S3 (Raw Object Storage)
 

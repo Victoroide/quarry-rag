@@ -378,7 +378,7 @@ Scored chunk fields:
 
 #### Streamed query answers
 
-Send `Accept: text/event-stream` to receive server-sent events; JSON remains the default. `text/event-stream` with any positive `q` value selects streaming, regardless of other listed types; wildcards such as `*/*` keep JSON. Each event is framed as `event: <name>`, a `data: <JSON>` line, and a blank line. Text, including newlines, is escaped inside JSON. Each frame is flushed, and the response sets `Content-Type: text/event-stream`, `Cache-Control: no-cache` and `X-Accel-Buffering: no`. Bedrock generation uses ConverseStream; offline generation emits words incrementally.
+Send `Accept: text/event-stream` to receive server-sent events; JSON remains the default. `text/event-stream` with any positive `q` value selects streaming, regardless of other listed types; wildcards such as `*/*` keep JSON. Each event is framed as `event: <name>`, a `data: <JSON>` line, and a blank line. Text, including newlines, is escaped inside JSON. Each frame is flushed, and the response sets `Content-Type: text/event-stream`, `Cache-Control: no-cache` and `X-Accel-Buffering: no`. Bedrock generation uses ConverseStream, OpenAI-compatible generation uses the [streaming chat API](deployment.md#openai-compatible-providers), and offline generation emits words incrementally.
 
 | Event | Payload | When |
 |---|---|---|

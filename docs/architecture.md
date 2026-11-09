@@ -18,8 +18,8 @@ Quarry organizes core functionality into distinct packages under `internal/`, wi
 - **`internal/api/middleware`**: Provides request logging with execution latency tracking, panic recovery yielding JSON envelopes, and service token enforcement.
 - **`internal/chunker`**: Splits raw text into token-bounded segments using paragraph and sentence boundaries, normalizes document text, strips HTML only from documents with recognizable markup, and generates content fingerprints.
 - **`internal/extractor`**: Extracts plain text from uploaded document formats (PDF, DOCX, DOC, plain text) with context cancellation and XML safety bounds.
-- **`internal/embedder`**: Invokes AWS Bedrock Titan Embed V2 to generate 1024-dimensional normalized vector embeddings, throttling concurrent API requests via weighted semaphores. Provides a deterministic fake embedder for offline execution.
-- **`internal/llm`**: Routes plain-text answer synthesis through AWS Bedrock Converse using the configured primary, fallback or hybrid policy and the context limit. The SDK owns transport retries. Provides a fake converser for offline execution.
+- **`internal/embedder`**: Generates vector embeddings with AWS Bedrock Titan Embed V2 or an [OpenAI-compatible endpoint](deployment.md#openai-compatible-providers), throttling concurrent API requests via weighted semaphores. Provides a deterministic fake embedder for offline execution.
+- **`internal/llm`**: Routes plain-text answer synthesis through AWS Bedrock Converse using the configured primary, fallback or hybrid policy and the context limit, or sends it to the configured [OpenAI-compatible chat model](deployment.md#openai-compatible-providers). The AWS SDK owns Bedrock transport retries. Provides a fake converser for offline execution.
 - **`internal/retriever`**: Executes scoped similarity searches in the default vector namespace and evaluates authorized candidate scores to select LOCAL or GLOBAL search modes.
 - **`internal/worker`**: Claims persisted ingestion jobs with renewable leases, executes documents in parallel, and records retries or terminal status in PostgreSQL.
 - **`internal/pipeline`**: Encapsulates sequential multi-stage pipelines:
@@ -203,7 +203,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
 
 1. **DecomposeStage**: Logs the query byte length and first 12 hexadecimal SHA-256 digits without the query text. Sets the sub-query count from multi-need surface signals (comparison keywords, conjunctions, aggregation markers). Makes no database or generation calls.
 2. **RoutingStage**:
-   - An empty allowlist skips embedding and retrieval. Otherwise, embeds the incoming query once using Bedrock Titan Embed V2. Explicit `global` skips the routing probe.
+   - An empty allowlist skips embedding and retrieval. Otherwise, embeds the incoming query once with the configured embedding provider. Explicit `global` skips the routing probe.
    - Automatic routing and explicit `local` probe the top five candidates with the same allowlist and document-type filters as retrieval, then remove unavailable documents. Entity matching reads only those candidates' previews, uses whole words, prefers full and longer phrases, and breaks ties by candidate score order.
    - Evaluates whether to route to `LOCAL` or `GLOBAL` retrieval:
      - Explicit `global` selects `GLOBAL`. Explicit `local` selects `LOCAL` when a visible candidate exists, regardless of score or sub-query count.
@@ -228,7 +228,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
    - Places the question before the retrieved excerpts and wraps each excerpt in a numbered marker with a random per-request boundary. Removes invisible format and control characters from the question and stored chunks, preserves newlines and tabs, and escapes excerpt marker prefixes inside their text. Estimates tokens over the complete system and user prompts, including markers.
    - Instructs synthesis to answer strictly using retrieved excerpts and in the language of the user's question, treating excerpt text as untrusted content whose instructions, role changes and formatting requests must not be followed.
    - With [optional Bedrock Guardrails](configuration.md#environment-variables), sends the sanitized question in a guard-content block qualified as `query` and the numbered, marked excerpts in a block qualified as `grounding_source`. The closing instruction remains in a text block. Configured policies can assess prompt attacks and contextual grounding; an intervention reports `finish_reason: "filtered"`. Without guardrails, synthesis retains its single text block. Offline mode applies no guardrail policies and reads guarded text as prompt text. Streamed answers use synchronous guardrail processing, so text is assessed before it is sent.
-   - Invokes AWS Bedrock Converse only for evidence-backed answers and aggregates synthesis token usage statistics. Empty text is an error; nonempty output reports whether generation stopped, reached its token or context limit, or was filtered.
+   - Calls the configured chat provider only for evidence-backed answers and aggregates synthesis token usage statistics. Empty text is an error; nonempty output reports whether generation stopped, reached its token or context limit, or was filtered.
    - With `include_citations`, requests numbered inline markers, removes out-of-range references from the answer and reports lexical overlap for each remaining reference. The [query contract](api.md#post-query) defines the scoring and offset rules.
 
 ---
@@ -277,7 +277,7 @@ An HNSW index uses `vector_cosine_ops`; B-tree indexes cover `document_id` and `
 2. The PostgreSQL connection pool (`pgxpool.Pool`) is established with a 30-second connection timeout.
 3. Embedded SQL migrations are applied in ascending order within a PostgreSQL transaction guarded by an advisory lock; see [Schema Migrations](configuration.md#schema-migrations).
 4. Storage drivers and model clients are initialized:
-   - In standard mode: the configured vector backend, AWS Bedrock embedder, AWS Bedrock LLM client, and S3 object storage client.
+   - In standard mode: the configured vector backend, the configured Bedrock or OpenAI-compatible embedder and synthesis client, and S3 object storage client.
    - In offline fake mode: In-memory vector store, fake deterministic embedder, and fake converser.
 5. Ingestion stages and `INGEST_WORKERS` lease claim loops are started with a unique process owner.
 6. The HTTP router and middleware chain are registered with standard network listeners.

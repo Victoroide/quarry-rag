@@ -15,6 +15,7 @@ Notable changes are grouped by release.
 - Optional Bedrock Guardrails for answer synthesis (`BEDROCK_GUARDRAIL_ID`, `BEDROCK_GUARDRAIL_VERSION`), with the question and excerpts marked for prompt-attack and grounding checks.
 - `POST /query` streams answers as server-sent events when the request accepts `text/event-stream`.
 - Optional Bedrock reranking of retrieved chunks before synthesis (`RERANK_MODEL_ARN`).
+- OpenAI-compatible chat and embedding providers (`LLM_PROVIDER`, `EMBEDDING_PROVIDER`, `OPENAI_BASE_URL`) for local or self-hosted models.
 
 ### Changed
 
