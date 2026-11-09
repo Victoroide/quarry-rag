@@ -91,7 +91,7 @@ func (s *RoutingStage) ID() StageID { return StageRetrievalRouting }
 
 // Run evaluates query signals and sets RetrievalMode on the QueryContext.
 func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
-	filter := domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs}
+	filter := domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs, Collection: qc.Collection}
 	qc.NamedEntity, qc.EntityDocumentID = "", ""
 	qc.LocalDocumentID = ""
 	qc.Candidates, qc.QueryEmbedding = nil, nil
@@ -203,7 +203,7 @@ func (s *RetrievalStage) Run(ctx context.Context, qc *QueryContext) error {
 		qc.TopScore = 0
 		return nil
 	}
-	filter := domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs}
+	filter := domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs, Collection: qc.Collection}
 	mode := retriever.RetrievalMode(qc.RetrievalMode)
 	if len(qc.QueryEmbedding) == 0 {
 		embedding, _, _, err := s.ret.EmbedQuery(ctx, qc.OriginalQuery, filter, 0)

@@ -128,3 +128,39 @@ func TestDocumentSummariesIncludeCollections(t *testing.T) {
 		check(*summary)
 	}
 }
+
+func TestCollectionListingAndVisibility(t *testing.T) {
+	c, _ := listingDatabase(t)
+	_, err := c.Pool.Exec(t.Context(), `UPDATE documents SET collection=CASE WHEN id=$1 THEN 'other' ELSE 'archive' END,status='completed'`, listingSecondID)
+	require.NoError(t, err)
+	var ids []string
+	require.NoError(t, c.StreamDocumentsInCollection(t.Context(), "archive", func(doc domain.DocumentSummary) error { ids = append(ids, doc.ID); return nil }))
+	require.Equal(t, []string{listingFirstID, listingThirdID}, ids)
+	page, err := c.ListDocumentsPageInCollection(t.Context(), listingFirstID, 1, "archive")
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	require.Equal(t, listingThirdID, page[0].ID)
+	empty, err := c.ListDocumentsPageInCollection(t.Context(), "", 10, "missing")
+	require.NoError(t, err)
+	require.Empty(t, empty)
+	visible, err := (Visibility{Pool: c.Pool, Collection: "archive"}).VisibleDocumentIDs(t.Context(), []string{listingFirstID, listingSecondID, listingThirdID})
+	require.NoError(t, err)
+	require.Equal(t, map[string]struct{}{listingFirstID: {}, listingThirdID: {}}, visible)
+	_, err = c.Pool.Exec(t.Context(), `UPDATE documents SET status='processing' WHERE id=$1`, listingThirdID)
+	require.NoError(t, err)
+	visible, err = (Visibility{Pool: c.Pool, Collection: "archive"}).VisibleDocumentIDs(t.Context(), []string{listingFirstID, listingThirdID})
+	require.NoError(t, err)
+	require.Equal(t, map[string]struct{}{listingFirstID: {}}, visible)
+}
+
+func TestClaimIncludesCollection(t *testing.T) {
+	c, _ := listingDatabase(t)
+	_, err := c.Pool.Exec(t.Context(), `UPDATE documents SET collection='archive' WHERE id=$1`, listingFirstID)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(t.Context(), `INSERT INTO ingest_jobs(document_id) VALUES($1)`, listingFirstID)
+	require.NoError(t, err)
+	job, err := c.ClaimJob(t.Context(), "collection-test", time.Minute, 3)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, "archive", job.Collection)
+}

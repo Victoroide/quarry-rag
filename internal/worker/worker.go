@@ -193,6 +193,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 	ic.FileType = job.Document.FileType
 	ic.S3Key = job.Document.S3Key
 	ic.DocType = job.DocType
+	ic.Collection = job.Collection
 	ic.Stopping = w.stop
 	err := w.run(ctx, job, ic)
 	tracing.RecordError(span, err)

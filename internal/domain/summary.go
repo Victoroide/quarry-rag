@@ -37,3 +37,9 @@ type DocumentLister interface {
 	ListDocumentsPage(ctx context.Context, after string, limit int) ([]DocumentSummary, error)
 	GetDocumentSummary(ctx context.Context, id DocumentID) (*DocumentSummary, error)
 }
+
+// CollectionDocumentLister applies a collection predicate before ordering and pagination.
+type CollectionDocumentLister interface {
+	StreamDocumentsInCollection(ctx context.Context, collection string, visit func(DocumentSummary) error) error
+	ListDocumentsPageInCollection(ctx context.Context, after string, limit int, collection string) ([]DocumentSummary, error)
+}

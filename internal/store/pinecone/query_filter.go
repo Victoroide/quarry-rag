@@ -13,8 +13,11 @@ import (
 
 const maxInValues = 10000
 
-func buildFilter(docType string, ids []string) *structpb.Struct {
+func buildFilter(docType string, ids []string, collection string) *structpb.Struct {
 	fields := make(map[string]*structpb.Value)
+	if collection != "" {
+		fields["collection"] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$eq": structpb.NewStringValue(collection)}})
+	}
 	if docType != "" {
 		fields["doc_type"] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$eq": structpb.NewStringValue(docType)}})
 	}
@@ -42,7 +45,7 @@ func (p *Client) QueryFiltered(ctx context.Context, embedding []float32, topK in
 	merged := make(map[domain.ChunkID]domain.ScoredChunk)
 	for start := 0; start == 0 || start < len(filter.DocumentIDs); start += maxInValues {
 		ids := filter.DocumentIDs[start:min(start+maxInValues, len(filter.DocumentIDs))]
-		req := &pinecone.QueryByVectorValuesRequest{Vector: embedding, TopK: uint32(topK), IncludeMetadata: true, MetadataFilter: buildFilter(filter.DocType, ids)}
+		req := &pinecone.QueryByVectorValuesRequest{Vector: embedding, TopK: uint32(topK), IncludeMetadata: true, MetadataFilter: buildFilter(filter.DocType, ids, filter.Collection)}
 		chunks, err := p.queryNamespace(ctx, "", req)
 		if err != nil {
 			return nil, err

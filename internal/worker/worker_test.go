@@ -318,3 +318,21 @@ func TestShutdownCompletesJobWaitingForVisibility(t *testing.T) {
 		require.Equal(t, "completed", <-s.events)
 	})
 }
+
+type collectionStage struct{ got chan string }
+
+func (collectionStage) ID() pipeline.StageID { return pipeline.StageChunk }
+func (s collectionStage) Run(_ context.Context, ic *pipeline.IngestContext) error {
+	s.got <- ic.Collection
+	return nil
+}
+func TestProcessorPassesCollection(t *testing.T) {
+	s := leaseStore(1)
+	s.jobs[0].Collection = "archive"
+	got := make(chan string, 1)
+	w := leaseWorker(s, collectionStage{got: got}, 1)
+	w.Start(t.Context())
+	defer w.Shutdown()
+	leaseEvent(t, s, "completed")
+	require.Equal(t, "archive", <-got)
+}

@@ -103,3 +103,13 @@ func TestLocalWithoutTargetQueriesScopeOnce(t *testing.T) {
 	require.Equal(t, RetrievalModeGlobal, result.Mode)
 	require.Len(t, store.filters, 1)
 }
+
+type legacyVectorStore struct{ domain.VectorStore }
+
+func (legacyVectorStore) QueryAllNamespaces(context.Context, []float32, int, string) ([]domain.ScoredChunk, error) {
+	return []domain.ScoredChunk{{Chunk: domain.Chunk{ID: "private", Metadata: map[string]any{"collection": "private"}}}}, nil
+}
+func TestCollectionRequiresFilteringStore(t *testing.T) {
+	_, err := NewRetriever(legacyVectorStore{}, nil, .7, 10).RetrieveWithEmbedding(t.Context(), []float32{1, 0}, RetrievalModeGlobal, "", 10, domain.VectorFilter{Collection: "archive"})
+	require.ErrorContains(t, err, "collection filtering")
+}

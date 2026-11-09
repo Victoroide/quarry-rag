@@ -23,7 +23,18 @@ func scanDocumentSummary(row pgx.Row) (*domain.DocumentSummary, error) {
 
 // StreamDocuments visits document summaries in ascending identifier order.
 func (c *Client) StreamDocuments(ctx context.Context, visit func(domain.DocumentSummary) error) error {
-	rows, err := c.Pool.Query(ctx, `SELECT `+summaryColumns+` FROM documents ORDER BY id`)
+	return c.StreamDocumentsInCollection(ctx, "", visit)
+}
+
+// StreamDocumentsInCollection visits summaries in one collection, or all collections when empty.
+func (c *Client) StreamDocumentsInCollection(ctx context.Context, collection string, visit func(domain.DocumentSummary) error) error {
+	query := `SELECT ` + summaryColumns + ` FROM documents`
+	args := []any{}
+	if collection != "" {
+		query += ` WHERE collection = $1`
+		args = append(args, collection)
+	}
+	rows, err := c.Pool.Query(ctx, query+` ORDER BY documents.id`, args...)
 	if err != nil {
 		return fmt.Errorf("postgres: stream documents: %w", err)
 	}
@@ -45,8 +56,18 @@ func (c *Client) StreamDocuments(ctx context.Context, visit func(domain.Document
 
 // ListDocumentsPage returns summaries strictly after the supplied identifier.
 func (c *Client) ListDocumentsPage(ctx context.Context, after string, limit int) ([]domain.DocumentSummary, error) {
-	rows, err := c.Pool.Query(ctx, `SELECT `+summaryColumns+` FROM documents
-		WHERE ($1::text = '' OR id > NULLIF($1::text, '')::uuid) ORDER BY id LIMIT $2`, after, limit)
+	return c.ListDocumentsPageInCollection(ctx, after, limit, "")
+}
+
+// ListDocumentsPageInCollection returns a page within a collection, or all collections when empty.
+func (c *Client) ListDocumentsPageInCollection(ctx context.Context, after string, limit int, collection string) ([]domain.DocumentSummary, error) {
+	query := `SELECT ` + summaryColumns + ` FROM documents WHERE ($1::text = '' OR id > NULLIF($1::text, '')::uuid)`
+	args := []any{after, limit}
+	if collection != "" {
+		query += ` AND collection = $3`
+		args = append(args, collection)
+	}
+	rows, err := c.Pool.Query(ctx, query+` ORDER BY documents.id LIMIT $2`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list documents page: %w", err)
 	}

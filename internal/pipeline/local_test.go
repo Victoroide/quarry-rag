@@ -123,3 +123,22 @@ func TestLocalWithoutCandidateUsesGlobal(t *testing.T) {
 		}
 	}
 }
+
+func TestCollectionScopesRoutingAndLocalRetrieval(t *testing.T) {
+	store := &localRecordingStore{FakeVectorStore: memory.NewFakeVectorStore()}
+	require.NoError(t, store.Upsert(t.Context(), "", []domain.Chunk{
+		{ID: "a1", DocumentID: "a", Embedding: []float32{.8, .6}, Metadata: map[string]any{"collection": "archive"}},
+		{ID: "b1", DocumentID: "b", Embedding: []float32{1, 0}, Metadata: map[string]any{"collection": "private"}},
+	}))
+	ret := retriever.NewRetriever(store, &scopeCountingEmbedder{}, .7, 10)
+	qc := &QueryContext{OriginalQuery: "opening hours", SubQueries: []string{"opening hours"}, Collection: "archive", RequestedMode: "local", MaxChunks: 3}
+	require.NoError(t, NewRoutingStage(ret).Run(t.Context(), qc))
+	require.Equal(t, "a", qc.LocalDocumentID)
+	require.NoError(t, NewRetrievalStage(ret).Run(t.Context(), qc))
+	require.Len(t, qc.RetrievedChunks, 1)
+	require.Equal(t, domain.DocumentID("a"), qc.RetrievedChunks[0].Chunk.DocumentID)
+	require.GreaterOrEqual(t, len(store.filters), 2)
+	for _, filter := range store.filters {
+		require.Equal(t, "archive", filter.Collection)
+	}
+}

@@ -47,6 +47,8 @@ type Job struct {
 	DocType    string
 	Attempts   int
 	LeaseOwner string
+
+	Collection string
 }
 
 // JobStore coordinates durable ingestion through owned leases.

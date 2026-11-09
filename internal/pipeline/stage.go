@@ -51,6 +51,9 @@ type IngestContext struct {
 	// Stopping is closed when the worker stops claiming jobs; optional waits
 	// end early so the attempt can still complete.
 	Stopping <-chan struct{}
+
+	// Collection is written to chunk metadata when non-empty.
+	Collection string
 }
 
 // NewIngestContext creates an initialized IngestContext.
@@ -112,6 +115,9 @@ type QueryContext struct {
 	// Per-stage timing in milliseconds — observability for tail-latency
 	// analysis. Filled by each stage and surfaced in the query response.
 	StageTimingsMS map[string]int64
+
+	// Collection restricts routing, retrieval and visibility to one label; empty is unrestricted.
+	Collection string
 }
 
 // Stage is the interface for a single ingestion pipeline stage.

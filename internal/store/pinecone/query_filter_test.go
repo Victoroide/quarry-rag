@@ -24,7 +24,7 @@ func TestBuildFilterShapes(t *testing.T) {
 		{name: "both", docType: "report", ids: []string{"one"}, want: map[string]any{"doc_type": map[string]any{"$eq": "report"}, "doc_id": map[string]any{"$in": []any{"one"}}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildFilter(tt.docType, tt.ids)
+			got := buildFilter(tt.docType, tt.ids, "")
 			if tt.want == nil {
 				require.Nil(t, got)
 			} else {
@@ -83,5 +83,37 @@ func TestFilteredQueryEmptyAndErrors(t *testing.T) {
 	require.Zero(t, calls)
 	_, err = client.QueryFiltered(t.Context(), []float32{1}, 10, domain.VectorFilter{})
 	require.ErrorContains(t, err, "unavailable")
+	require.Equal(t, 1, calls)
+}
+
+func TestCollectionFilterInEveryPartition(t *testing.T) {
+	ids := make([]string, 10001)
+	for i := range ids {
+		ids[i] = fmt.Sprint(i)
+	}
+	calls := 0
+	conn := &fakeIndexConn{query: func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+		fields := req.MetadataFilter.AsMap()
+		require.Equal(t, map[string]any{"$eq": "archive"}, fields["collection"])
+		require.Equal(t, map[string]any{"$eq": "report"}, fields["doc_type"])
+		calls++
+		return &pinecone.QueryVectorsResponse{}, nil
+	}}
+	_, err := testClient(conn).QueryFiltered(t.Context(), []float32{1}, 2, domain.VectorFilter{Collection: "archive", DocType: "report", DocumentIDs: ids})
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
+	_, err = testClient(conn).QueryFiltered(t.Context(), []float32{1}, 2, domain.VectorFilter{Collection: "archive", DocType: "report"})
+	require.NoError(t, err)
+	require.Equal(t, 3, calls)
+}
+
+func TestUpsertPreservesCollection(t *testing.T) {
+	calls := 0
+	conn := &fakeIndexConn{upsert: func(_ context.Context, vectors []*pinecone.Vector) (uint32, error) {
+		calls++
+		require.Equal(t, "archive", vectors[0].Metadata.AsMap()["collection"])
+		return 1, nil
+	}}
+	require.NoError(t, testClient(conn).Upsert(t.Context(), "", []domain.Chunk{{ID: "chunk", DocumentID: "doc", Embedding: []float32{1}, Metadata: map[string]any{"collection": "archive"}}}))
 	require.Equal(t, 1, calls)
 }

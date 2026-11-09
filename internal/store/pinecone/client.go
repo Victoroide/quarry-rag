@@ -95,7 +95,7 @@ func (p *Client) Upsert(ctx context.Context, namespace string, chunks []domain.C
 			"doc_id": string(c.DocumentID), "chunk_index": float64(c.Index),
 			"text": c.Text, "token_count": float64(c.TokenCount),
 		}
-		for _, key := range []string{"doc_type", "kind", "quality"} {
+		for _, key := range []string{"doc_type", "kind", "quality", "collection"} {
 			if value, ok := c.Metadata[key]; ok {
 				mdMap[key] = value
 			}
@@ -307,7 +307,7 @@ func matchesToScoredChunks(matches []*pinecone.ScoredVector, namespace string) [
 				chunk.TokenCount = int(v.GetNumberValue())
 			}
 			chunk.Metadata = make(map[string]any)
-			for _, key := range []string{"doc_type", "kind", "quality"} {
+			for _, key := range []string{"doc_type", "kind", "quality", "collection"} {
 				if v, ok := fields[key]; ok {
 					chunk.Metadata[key] = v.GetStringValue()
 				}

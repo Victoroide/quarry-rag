@@ -299,3 +299,21 @@ func TestPersistWritesOnlyDefaultNamespace(t *testing.T) {
 	}
 	require.Equal(t, want, vs.writes[0].chunks)
 }
+
+func TestPersistCollectionMetadata(t *testing.T) {
+	for _, collection := range []string{"archive", ""} {
+		t.Run(collection, func(t *testing.T) {
+			ic := visibilityIngest()
+			ic.Collection = collection
+			vs := &persistVectorRecorder{}
+			require.NoError(t, NewPersistStage(vs).Run(t.Context(), ic))
+			for _, chunk := range vs.writes[0].chunks {
+				if collection == "" {
+					require.NotContains(t, chunk.Metadata, "collection")
+				} else {
+					require.Equal(t, collection, chunk.Metadata["collection"])
+				}
+			}
+		})
+	}
+}
