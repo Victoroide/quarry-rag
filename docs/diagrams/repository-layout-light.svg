@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 920" role="img" fill="#1f2328">
 <title>Repository layout</title>
 <desc>Repository layout, from the directory listing to depth three. client/ Go client for the HTTP API. cmd/ Executable entry points. cmd/quarry-mcp/ Local MCP server over stdio. cmd/server/ Wiring and graceful shutdown. docs/ Service documentation. docs/diagrams/ Architecture, schema and layout. docs/diagrams/src/ Diagram placement sources. internal/ Private service packages. internal/api/ HTTP router. internal/api/handler/ Request handlers. internal/api/middleware/ Authentication, logs and metrics. internal/awsconf/ AWS credentials and retry policy. internal/chunker/ Text windows and fingerprints. internal/cleanup/ Document deletion across stores. internal/config/ Configuration and validation. internal/domain/ Shared types and interfaces. internal/embedder/ Titan V2 and offline embeddings. internal/extractor/ File parsing and process isolation. internal/llm/ Answer routing and Converse. internal/logctx/ Request log attributes. internal/metrics/ Prometheus text metrics. internal/ocr/ Asynchronous PDF text detection. internal/pipeline/ Ingestion and query stages. internal/retriever/ LOCAL and GLOBAL retrieval. internal/store/ Storage adapters. internal/store/memory/ Offline vector index. internal/store/pinecone/ Hosted vector index. internal/store/postgres/ Documents, chunks and durable jobs. internal/store/s3/ Original files and signed downloads. internal/testutil/ Test support. internal/testutil/pgtest/ Disposable database containers. internal/textutil/ Unicode normalization. internal/tracing/ OpenTelemetry export and span helpers. internal/worker/ Leased ingestion and retry handling. scripts/ Operational commands. scripts/cleanup/ Delete selected documents. scripts/langeval/ Answer language and latency checks. scripts/reconcile/ Find and remove orphan vectors. scripts/simulate/ Exercise the service API. scripts/validate/ Check retrieval behavior. test/ Service test suites. test/integration/ Database and API integration. test/smoke/ Opt-in live service checks. test/unit/ Package behavior checks. tools/ Documentation support. tools/diagrams/ Vector image sources and checks. tools/diagrams/fonts/ Bundled typefaces and license. The highlight follows cmd/server, internal/api, internal/pipeline, internal/retriever, internal/llm and internal/store.</desc>
-<style>@keyframes n3{0%{opacity:0}2.5%{opacity:0}5%{opacity:1}7.5%{opacity:0}100%{opacity:0}}@keyframes n8{0%{opacity:0}10%{opacity:0}12.5%{opacity:1}15%{opacity:0}100%{opacity:0}}@keyframes n18{0%{opacity:0}32.5%{opacity:0}35%{opacity:1}37.5%{opacity:0}100%{opacity:0}}@keyframes n22{0%{opacity:0}17.5%{opacity:0}20%{opacity:1}22.5%{opacity:0}100%{opacity:0}}@keyframes n23{0%{opacity:0}25%{opacity:0}27.5%{opacity:1}30%{opacity:0}100%{opacity:0}}@keyframes n24{0%{opacity:0}40%{opacity:0}42.5%{opacity:1}45%{opacity:0}100%{opacity:0}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
+<style>@keyframes n3{0%{opacity:0}1.818%{opacity:0}5.455%{opacity:1}12.727%{opacity:1}16.364%{opacity:0}100%{opacity:0}}@keyframes n8{0%{opacity:0}12.727%{opacity:0}16.364%{opacity:1}23.636%{opacity:1}27.273%{opacity:0}100%{opacity:0}}@keyframes n18{0%{opacity:0}45.455%{opacity:0}49.091%{opacity:1}56.364%{opacity:1}60%{opacity:0}100%{opacity:0}}@keyframes n22{0%{opacity:0}23.636%{opacity:0}27.273%{opacity:1}34.545%{opacity:1}38.182%{opacity:0}100%{opacity:0}}@keyframes n23{0%{opacity:0}34.545%{opacity:0}38.182%{opacity:1}45.455%{opacity:1}49.091%{opacity:0}100%{opacity:0}}@keyframes n24{0%{opacity:0}56.364%{opacity:0}60%{opacity:1}67.273%{opacity:1}70.909%{opacity:0}100%{opacity:0}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
 <defs>
 <path id="r2c" d="M63 175L105 -102L206 -102L130 175L63 175"/>
 <path id="r2d" d="M390 -351L390 -270L70 -270L70 -351L390 -351"/>
@@ -116,7 +116,7 @@
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="469" y="225" width="342" height="30" rx="9" opacity="0" style="animation:n3 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="469" y="225" width="342" height="30" rx="9" opacity="0" style="animation:n3 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
@@ -129,7 +129,7 @@
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="53" y="126" width="342" height="27" rx="9" opacity="0" style="animation:n8 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="53" y="126" width="342" height="27" rx="9" opacity="0" style="animation:n8 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
@@ -152,7 +152,7 @@
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="53" y="416" width="342" height="27" rx="9" opacity="0" style="animation:n18 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="53" y="416" width="342" height="27" rx="9" opacity="0" style="animation:n18 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
@@ -163,17 +163,17 @@
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="53" y="532" width="342" height="27" rx="9" opacity="0" style="animation:n22 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="53" y="532" width="342" height="27" rx="9" opacity="0" style="animation:n22 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="53" y="561" width="342" height="27" rx="9" opacity="0" style="animation:n23 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="53" y="561" width="342" height="27" rx="9" opacity="0" style="animation:n23 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="53" y="590" width="342" height="27" rx="9" opacity="0" style="animation:n24 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="53" y="590" width="342" height="27" rx="9" opacity="0" style="animation:n24 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 </g>
@@ -1900,7 +1900,7 @@
 <use href="#r73" x="13423"/>
 <use href="#r65" x="13950"/>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n3 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n3 11s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(540.282 245) scale(0.012)">
 <use href="#r57"/>
 <use href="#r69" x="985"/>
@@ -1929,7 +1929,7 @@
 <use href="#r6e" x="13636"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n8 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n8 11s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(101.225 146) scale(0.012)">
 <use href="#r48"/>
 <use href="#r54" x="743"/>
@@ -1943,7 +1943,7 @@
 <use href="#r72" x="5432"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n18 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n18 11s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(100.295 436) scale(0.012)">
 <use href="#r41"/>
 <use href="#r6e" x="690"/>
@@ -1971,7 +1971,7 @@
 <use href="#r65" x="13506"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n22 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n22 11s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(133.948 552) scale(0.012)">
 <use href="#r49"/>
 <use href="#r6e" x="269"/>
@@ -1998,7 +1998,7 @@
 <use href="#r73" x="12290"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n23 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n23 11s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(138.692 581) scale(0.012)">
 <use href="#r4c"/>
 <use href="#r4f" x="565"/>
@@ -2025,7 +2025,7 @@
 <use href="#r6c" x="13522"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n24 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n24 11s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(115.696 610) scale(0.012)">
 <use href="#r53"/>
 <use href="#r74" x="642"/>
