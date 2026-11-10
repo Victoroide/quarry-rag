@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 940" role="img" fill="#1f2328">
 <title>PostgreSQL data model</title>
 <desc>Data model. documents contains id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at, completed_at, collection and text_source. chunks contains id, document_id, chunk_index, text, token_count and created_at. document_fingerprints contains fingerprint, document_id and created_at. ingest_jobs contains document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at and updated_at. Each child references documents.id with cascading deletion. A document has zero or more chunks and fingerprints and at most one ingestion job. PK denotes primary key and FK denotes foreign key; SQL types appear beside every column. Fingerprints are scoped to the collection; document_fingerprints stores the scoped digest.</desc>
-<style>@keyframes n0{0%{opacity:0}3.75%{opacity:0}6.25%{opacity:1}8.75%{opacity:0}18.75%{opacity:0}21.25%{opacity:1}23.75%{opacity:0}33.75%{opacity:0}36.25%{opacity:1}38.75%{opacity:0}100%{opacity:0}}@keyframes n1{0%{opacity:0}10%{opacity:0}12.5%{opacity:1}15%{opacity:0}100%{opacity:0}}@keyframes n2{0%{opacity:0}25.651%{opacity:0}28.151%{opacity:1}30.651%{opacity:0}100%{opacity:0}}@keyframes n3{0%{opacity:0}42.255%{opacity:0}44.755%{opacity:1}47.255%{opacity:0}100%{opacity:0}}@keyframes e0{0%{opacity:0;stroke-dashoffset:13.25}3.75%{opacity:0;stroke-dashoffset:13.25}3.762%{opacity:1;stroke-dashoffset:13.25}7.487%{opacity:1;stroke-dashoffset:-143.25}7.5%{opacity:0;stroke-dashoffset:-143.25}7.512%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e1{0%{opacity:0;stroke-dashoffset:13.25}18.75%{opacity:0;stroke-dashoffset:13.25}18.762%{opacity:1;stroke-dashoffset:13.25}23.139%{opacity:1;stroke-dashoffset:-409.25}23.151%{opacity:0;stroke-dashoffset:-409.25}23.164%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e2{0%{opacity:0;stroke-dashoffset:13.25}33.75%{opacity:0;stroke-dashoffset:13.25}33.763%{opacity:1;stroke-dashoffset:13.25}39.743%{opacity:1;stroke-dashoffset:-563.25}39.755%{opacity:0;stroke-dashoffset:-563.25}39.768%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
+<style>@keyframes n0{0%{opacity:0}1%{opacity:0}5%{opacity:1}26%{opacity:1}30%{opacity:0}34.089%{opacity:0}38.089%{opacity:1}46.089%{opacity:1}50.089%{opacity:0}100%{opacity:0}}@keyframes n1{0%{opacity:0}10%{opacity:0}14%{opacity:1}22%{opacity:1}26%{opacity:0}100%{opacity:0}}@keyframes n2{0%{opacity:0}30.089%{opacity:0}34.089%{opacity:1}42.089%{opacity:1}46.089%{opacity:0}100%{opacity:0}}@keyframes n3{0%{opacity:0}55.679%{opacity:0}59.679%{opacity:1}67.679%{opacity:1}71.679%{opacity:0}100%{opacity:0}}@keyframes e0{0%{opacity:0;stroke-dashoffset:13.25}1%{opacity:0;stroke-dashoffset:13.25}1.01%{opacity:1;stroke-dashoffset:13.25}8.99%{opacity:1;stroke-dashoffset:-143.25}9%{opacity:0;stroke-dashoffset:-143.25}9.01%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e1{0%{opacity:0;stroke-dashoffset:13.25}14%{opacity:0;stroke-dashoffset:13.25}14.01%{opacity:1;stroke-dashoffset:13.25}29.079%{opacity:1;stroke-dashoffset:-409.25}29.089%{opacity:0;stroke-dashoffset:-409.25}29.099%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e2{0%{opacity:0;stroke-dashoffset:13.25}34.089%{opacity:0;stroke-dashoffset:13.25}34.099%{opacity:1;stroke-dashoffset:13.25}54.669%{opacity:1;stroke-dashoffset:-563.25}54.679%{opacity:0;stroke-dashoffset:-563.25}54.689%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
 <defs>
 <path id="r2192" d="M537 0L480 -57L584 -159Q616 -191 659 -227Q702 -263 738 -292Q710 -286 682 -282Q654 -278 626 -278L125 -278L125 -359L626 -359Q654 -359 682 -355Q710 -351 738 -345Q702 -374 659 -409Q616 -445 584 -478L480 -580L537 -637L855 -318L537 0"/>
 <path id="r2e" d="M144 6Q117 6 97 -13Q78 -32 78 -60Q78 -87 97 -106Q117 -125 144 -125Q171 -125 190 -106Q210 -87 210 -60Q210 -32 190 -13Q171 6 144 6"/>
@@ -109,15 +109,15 @@
 <path class="edge" d="M368 186L398 186Q404 186 404 192L404 638Q404 644 410 644L472 644"/>
 </g>
 <g fill="none" stroke="#0969da" stroke-width="2.5" stroke-linecap="round">
-<path class="pulse" opacity="0" stroke-dasharray="12 309" d="M368 162L422 162Q428 162 428 168L428 194Q428 200 434 200L472 200" style="animation:e0 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
-<path class="pulse" opacity="0" stroke-dasharray="12 841" d="M368 174L410 174Q416 174 416 180L416 472Q416 478 422 478L472 478" style="animation:e1 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
-<path class="pulse" opacity="0" stroke-dasharray="12 1149" d="M368 186L398 186Q404 186 404 192L404 638Q404 644 410 644L472 644" style="animation:e2 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<path class="pulse" opacity="0" stroke-dasharray="12 309" d="M368 162L422 162Q428 162 428 168L428 194Q428 200 434 200L472 200" style="animation:e0 10s cubic-bezier(0.45,0,0.55,1) infinite"/>
+<path class="pulse" opacity="0" stroke-dasharray="12 841" d="M368 174L410 174Q416 174 416 180L416 472Q416 478 422 478L472 478" style="animation:e1 10s cubic-bezier(0.45,0,0.55,1) infinite"/>
+<path class="pulse" opacity="0" stroke-dasharray="12 1149" d="M368 186L398 186Q404 186 404 192L404 638Q404 644 410 644L472 644" style="animation:e2 10s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.25">
 <rect class="node" x="16" y="108" width="352" height="508" rx="10"/>
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="17" y="109" width="350" height="506" rx="9" opacity="0" style="animation:n0 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="17" y="109" width="350" height="506" rx="9" opacity="0" style="animation:n0 10s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="none" stroke="#d0d7de" stroke-width="1.25">
 <path d="M16 150H368"/>
@@ -126,7 +126,7 @@
 <rect class="node" x="472" y="108" width="352" height="222" rx="10"/>
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="473" y="109" width="350" height="220" rx="9" opacity="0" style="animation:n1 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="473" y="109" width="350" height="220" rx="9" opacity="0" style="animation:n1 10s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="none" stroke="#d0d7de" stroke-width="1.25">
 <path d="M472 150H824"/>
@@ -135,7 +135,7 @@
 <rect class="node" x="472" y="386" width="352" height="144" rx="10"/>
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="473" y="387" width="350" height="142" rx="9" opacity="0" style="animation:n2 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="473" y="387" width="350" height="142" rx="9" opacity="0" style="animation:n2 10s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="none" stroke="#d0d7de" stroke-width="1.25">
 <path d="M472 428H824"/>
@@ -144,7 +144,7 @@
 <rect class="node" x="472" y="578" width="352" height="300" rx="10"/>
 </g>
 <g fill="#d4e8ff">
-<rect class="hit" x="473" y="579" width="350" height="298" rx="9" opacity="0" style="animation:n3 8s cubic-bezier(0.4,0,0.2,1) infinite"/>
+<rect class="hit" x="473" y="579" width="350" height="298" rx="9" opacity="0" style="animation:n3 10s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="none" stroke="#d0d7de" stroke-width="1.25">
 <path d="M472 620H824"/>
@@ -1077,7 +1077,7 @@
 <use href="#r2e" x="919"/>
 <use href="#r31" x="1207"/>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n0 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n0 10s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(28 180) scale(0.0115)">
 <use href="#r50"/>
 <use href="#r4b" x="639"/>
@@ -1210,7 +1210,7 @@
 <use href="#r54" x="1929"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n1 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n1 10s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(484 180) scale(0.0115)">
 <use href="#r50"/>
 <use href="#r4b" x="639"/>
@@ -1269,7 +1269,7 @@
 <use href="#r5a" x="6583"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n2 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n2 10s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(484 458) scale(0.0115)">
 <use href="#r50"/>
 <use href="#r4b" x="639"/>
@@ -1304,7 +1304,7 @@
 <use href="#r5a" x="6583"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#1f2328" style="animation:n3 8s cubic-bezier(0.4,0,0.2,1) infinite">
+<g class="ink" opacity="0" fill="#1f2328" style="animation:n3 10s cubic-bezier(0.45,0,0.55,1) infinite">
 <g transform="translate(484 650) scale(0.0115)">
 <use href="#r50"/>
 <use href="#r4b" x="639"/>
