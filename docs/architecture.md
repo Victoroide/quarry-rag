@@ -92,14 +92,14 @@ sequenceDiagram
         Worker->>Pinecone: Query the last vector until it is returned (bounded)
     end
     Worker->>Postgres: CompleteJob transaction
-    Note over Postgres: Require processing status and owned lease; insert chunks and optional vectors, then remove job
+    Note over Postgres: Require processing status and owned lease, insert chunks and optional vectors, then remove job
     alt Retryable failure
         Worker->>Postgres: Reschedule with backoff and last_error
     else Permanent or exhausted failure
-        Worker->>Postgres: Record failed and last_error; remove job
+        Worker->>Postgres: Record failed and last_error, then remove job
         Worker->>Pinecone: Remove partial vectors
     end
-    Note over Worker,Pinecone: Deletion clears vectors again after removing the row; late writes compensate on failed completion
+    Note over Worker,Pinecone: Deletion clears vectors again after removing the row, and late writes compensate on failed completion
 ```
 
 ### Ingestion Stages
@@ -164,13 +164,13 @@ sequenceDiagram
         Metadata-->>Routing: Visible candidates and their previews
         Routing->>Routing: Match entity phrases using whole words and candidate order
         Routing->>Routing: Determine mode (sub-queries > 1 -> GLOBAL, entity -> LOCAL, score >= threshold -> LOCAL, else GLOBAL)
-        Note over Routing: Explicit LOCAL overrides score and sub-query count; no visible candidate selects GLOBAL
+        Note over Routing: Explicit LOCAL overrides score and sub-query count, and no visible candidate selects GLOBAL
         Routing->>Routing: For LOCAL, select entity document or best visible candidate
     end
 
     Handler->>Retrieval: Run(QueryContext)
     Retrieval->>Pinecone: Query default namespace with doc_type, collection and allowlist filters
-    Note over Retrieval: LOCAL searches the selected document; fewer than 3 chunks triggers one scope-wide top-up
+    Note over Retrieval: LOCAL searches the selected document, and fewer than 3 chunks triggers one scope-wide top-up
     Pinecone-->>Retrieval: Scored chunks
     Retrieval->>Retrieval: filterChunksByAllowedDocIDs (tenant allowlist enforcement)
     Retrieval->>Retrieval: Remove chunks of unavailable documents using PostgreSQL
