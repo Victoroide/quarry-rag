@@ -61,7 +61,7 @@ func buildDiagrams(root string) (result []diagram, err error) {
 }
 
 func architecture() diagram {
-	d := diagram{Name: "system-architecture", Title: "Quarry service architecture", Duration: 16, MaxW: 840, MaxH: 760,
+	d := diagram{Name: "system-architecture", Title: "Quarry service architecture", MaxW: 840, MaxH: 760,
 		Description: "Quarry service architecture. The Go client and local stdio MCP server call the HTTP API. Public probes serve GET /health, GET /livez and GET /readyz. Token-protected routes serve ingestion, queries and document operations. Ingestion normally extracts binary uploads in a sandbox, decodes text uploads in process, optionally saves originals in S3, and accepts documents and durable jobs in PostgreSQL. The ingestion processor claims a job, chunks text, embeds with Bedrock Titan V2, persists vectors in Pinecone, then completes the job and saves chunks in PostgreSQL. Queries decompose, route LOCAL or GLOBAL with Bedrock embeddings, retrieve scoped visible evidence from Pinecone, and synthesize with Bedrock Converse. A representative ingestion span flows through OpenTelemetry to optional OTLP and LangSmith exporters. Document handlers serve GET /documents, GET /documents/{doc_id}, GET /documents/{doc_id}/file and DELETE /documents/{doc_id}."}
 	add := func(id, title string, lines ...string) {
 		d.Nodes = append(d.Nodes, node{ID: id, Title: title, Lines: lines})
@@ -117,78 +117,47 @@ func architecture() diagram {
 	e("retrieve-synth", "retrieve", "synth", point{732, 452}, point{732, 412})
 	e("synth-converse", "synth", "converse", point{640, 384}, point{616, 384})
 	e("worker-tracing", "worker", "tracing", point{280, 604}, point{280, 624}, point{108, 624}, point{108, 634})
-	order := []string{"client-router", "router-ingest", "ingest-sandbox", "ingest-s3", "ingest-postgres", "postgres-job", "job-worker", "worker-chunk", "chunk-embed", "embed-bedrock", "embed-persist", "persist-pinecone", "worker-postgres", "client-router", "router-query", "query-decompose", "decompose-route", "route-bedrock", "route-retrieve", "retrieve-pinecone", "retrieve-synth", "synth-converse"}
-	at := 0.1
-	for _, id := range order {
-		for j := range d.Edges {
-			e := &d.Edges[j]
-			if e.ID != id {
-				continue
-			}
-			e.Times = append(e.Times, at)
-			arrival := at + pulseDuration(edgeLength(*e))
-			for k := range d.Nodes {
-				n := &d.Nodes[k]
-				if n.ID == e.From {
-					n.Times = append(n.Times, at)
-				}
-				if n.ID == e.To {
-					n.Times = append(n.Times, arrival+targetHighlightDelay)
-				}
-			}
-			at = arrival + .015
-		}
-	}
-
+	schedule(&d,
+		[]string{"client-router", "router-ingest", "ingest-sandbox", "ingest-s3", "ingest-postgres", "postgres-job", "job-worker", "worker-chunk", "chunk-embed", "embed-bedrock", "embed-persist", "persist-pinecone", "worker-postgres"},
+		[]string{"client-router", "router-query", "query-decompose", "decompose-route", "route-bedrock", "route-retrieve", "retrieve-pinecone", "retrieve-synth", "synth-converse"},
+	)
 	return d
 }
 
 func dataModel() diagram {
-	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", Duration: 8, MaxW: 840, MaxH: 1000,
+	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", MaxW: 840, MaxH: 1000,
 		Description: "Data model. documents contains id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at, completed_at, collection and text_source. chunks contains id, document_id, chunk_index, text, token_count and created_at. document_fingerprints contains fingerprint, document_id and created_at. ingest_jobs contains document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at and updated_at. Each child references documents.id with cascading deletion. A document has zero or more chunks and fingerprints and at most one ingestion job. PK denotes primary key and FK denotes foreign key; SQL types appear beside every column. Fingerprints are scoped to the collection; document_fingerprints stores the scoped digest."}
 	d.Nodes = []node{
-		{ID: "documents", Title: "documents", Times: []float64{0.3, 1.5, 2.7}, Columns: []column{
+		{ID: "documents", Title: "documents", Columns: []column{
 			{"id", "UUID", "PK", ""}, {"content", "TEXT", "", ""}, {"metadata", "JSONB", "", ""}, {"status", "TEXT", "", ""}, {"chunk_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"file_name", "TEXT", "", ""}, {"file_type", "TEXT", "", ""}, {"s3_key", "TEXT", "", ""}, {"content_preview", "TEXT", "", ""}, {"doc_type", "TEXT", "", ""}, {"fingerprint", "TEXT", "", ""}, {"last_error", "TEXT", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"completed_at", "TIMESTAMPTZ", "", ""}, {"collection", "TEXT", "", ""}, {"text_source", "TEXT", "", ""}}},
-		{ID: "chunks", Title: "chunks", Times: []float64{0.6}, Columns: []column{{"id", "UUID", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"chunk_index", "INTEGER", "", ""}, {"text", "TEXT", "", ""}, {"token_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}}},
-		{ID: "document_fingerprints", Title: "document_fingerprints", Times: []float64{1.8}, Columns: []column{{"fingerprint", "TEXT", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"created_at", "TIMESTAMPTZ", "", ""}}},
-		{ID: "ingest_jobs", Title: "ingest_jobs", Times: []float64{3.0}, Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "chunks", Title: "chunks", Columns: []column{{"id", "UUID", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"chunk_index", "INTEGER", "", ""}, {"text", "TEXT", "", ""}, {"token_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "document_fingerprints", Title: "document_fingerprints", Columns: []column{{"fingerprint", "TEXT", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"created_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
 	}
 	for _, v := range []struct {
-		id, to, card     string
-		x, sourceY, y, t float64
+		id, to, card  string
+		x, sourceY, y float64
 	}{
-		{"documents-chunks", "chunks", "0..n", 428, 162, 200, 0.3},
-		{"documents-fingerprints", "document_fingerprints", "0..n", 416, 174, 478, 1.5},
-		{"documents-jobs", "ingest_jobs", "0..1", 404, 186, 644, 2.7},
+		{"documents-chunks", "chunks", "0..n", 428, 162, 200},
+		{"documents-fingerprints", "document_fingerprints", "0..n", 416, 174, 478},
+		{"documents-jobs", "ingest_jobs", "0..1", 404, 186, 644},
 	} {
 		l := &label{Text: v.card, X: 464, Y: v.y - 14, Size: edgeLabelSize, Kind: "muted", Owner: v.id}
-		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Times: []float64{v.t}, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {472, v.y}}})
+		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {472, v.y}}})
 	}
-
-	for i := range d.Nodes {
-		d.Nodes[i].Times = nil
-	}
-	for _, e := range d.Edges {
-		for i := range d.Nodes {
-			if d.Nodes[i].ID == e.From {
-				d.Nodes[i].Times = append(d.Nodes[i].Times, e.Times...)
-			}
-			if d.Nodes[i].ID == e.To {
-				d.Nodes[i].Times = []float64{e.Times[0] + pulseDuration(edgeLength(e)) + targetHighlightDelay}
-			}
-		}
-	}
+	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs"})
 	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one · Parent → child; cascading delete.", X: 16, Y: 918, Size: sublabelSize, Kind: "muted"}}
 	return d
 }
 
 func repositoryTree(dirs []string) diagram {
-	d := diagram{Name: "repository-layout", Title: "Repository layout", Duration: 8, MaxW: 840, MaxH: 1000}
+	d := diagram{Name: "repository-layout", Title: "Repository layout", MaxW: 840, MaxH: 1000}
 	for _, path := range dirs {
 		n := node{ID: path, Title: filepath.Base(path) + "/", Lines: []string{directoryDescriptions[path]}, Borderless: true}
 		flow := []string{"cmd/server", "internal/api", "internal/pipeline", "internal/retriever", "internal/llm", "internal/store"}
 		if i := slices.Index(flow, path); i >= 0 {
-			n.Times = []float64{0.2 + float64(i)*0.6}
+			// Each directory starts lighting as the previous one starts to fade.
+			n.Times = []float64{0.2 + float64(i)*(highlightFade+highlightHold)}
 		}
 		d.Nodes = append(d.Nodes, n)
 	}
@@ -196,8 +165,41 @@ func repositoryTree(dirs []string) diagram {
 	for _, n := range d.Nodes {
 		content = append(content, n.ID+"/ "+n.Lines[0])
 	}
+	d.Duration = loopDuration(d)
 	d.Description = "Repository layout, from the directory listing to depth three. " + strings.Join(content, ". ") + ". The highlight follows cmd/server, internal/api, internal/pipeline, internal/retriever, internal/llm and internal/store."
 	return d
+}
+
+// schedule plays the flows one after another, one pulse at a time. A pulse
+// lights its source as it leaves and its target as it arrives, and the next
+// pulse waits until that target is fully lit.
+func schedule(d *diagram, flows ...[]string) {
+	at := 0.1
+	for i, flow := range flows {
+		if i > 0 {
+			at += flowPause
+		}
+		for _, id := range flow {
+			k := slices.IndexFunc(d.Edges, func(e edge) bool { return e.ID == id })
+			if k < 0 {
+				panic(d.Name + " has no edge " + id)
+			}
+			e := &d.Edges[k]
+			e.Times = append(e.Times, at)
+			arrival := at + pulseDuration(edgeLength(*e))
+			for j := range d.Nodes {
+				n := &d.Nodes[j]
+				if n.ID == e.From {
+					n.Times = append(n.Times, at)
+				}
+				if n.ID == e.To {
+					n.Times = append(n.Times, arrival+targetHighlightDelay)
+				}
+			}
+			at = arrival + stepPause
+		}
+	}
+	d.Duration = loopDuration(*d)
 }
 
 func sceneLabels(d diagram) []label {

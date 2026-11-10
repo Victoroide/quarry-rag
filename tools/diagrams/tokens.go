@@ -23,10 +23,16 @@ const (
 	groupRadius          = 14.0
 	edgeClearance        = 8.0
 	parallelClearance    = 12.0
-	pulseSeconds         = 0.3
+	pulseSeconds         = 0.8
 	pulseDash            = 12.0
-	pulseSpeed           = 1200.0
-	targetHighlightDelay = 0.2
-	highlightFade        = 0.2
-	easing               = "cubic-bezier(0.4,0,0.2,1)"
+	pulseSpeed           = 280.0
+	targetHighlightDelay = 0.1
+	highlightFade        = 0.4
+	highlightHold        = 0.8
+	flowPause            = 1.0
+	restSeconds          = 2.5
+	easing               = "cubic-bezier(0.45,0,0.55,1)"
 )
+
+// The next pulse leaves once the node it starts from is fully lit.
+const stepPause = targetHighlightDelay + highlightFade

@@ -143,7 +143,7 @@ func TestHighlightWindowsAreOrderedAndContinuous(t *testing.T) {
 			t.Errorf("offset %g follows %g", at, previous)
 		}
 		previous = at
-		if m[2] == "0" && at > 100*.3/16 && at < 100*.98/16 {
+		if m[2] == "0" && at > 100*.5/16 && at < 100*1.18/16 {
 			t.Error("overlapping visits blink")
 		}
 	}
@@ -157,7 +157,7 @@ func TestHighlightWindowsAreOrderedAndContinuous(t *testing.T) {
 			slices.Sort(times)
 			css := animation(fmt.Sprintf("n%d", i), times, d.Duration, false, 1)
 			for j := 1; j < len(times); j++ {
-				if times[j]-times[j-1] >= 2*highlightFade {
+				if times[j]-times[j-1] > highlightSpan {
 					continue
 				}
 				for _, frame := range regexp.MustCompile(`([0-9.]+)%\{opacity:0`).FindAllStringSubmatch(css, -1) {
@@ -186,6 +186,21 @@ func TestHighlightWindowsAreOrderedAndContinuous(t *testing.T) {
 	}
 }
 
+func TestHighlightHoldsBeforeFading(t *testing.T) {
+	css := animation("visit", []float64{.1}, 16, false, 1)
+	frames := regexp.MustCompile(`([0-9.]+)%\{opacity:([01])\}`).FindAllStringSubmatch(css, -1)
+	var got []string
+	for _, m := range frames {
+		at, _ := strconv.ParseFloat(m[1], 64)
+		got = append(got, fmt.Sprintf("%s@%.2f", m[2], at*16/100))
+	}
+	// Fade in over .4 s, stay lit for .8 s, then fade out over .4 s.
+	want := []string{"0@0.00", "0@0.10", "1@0.50", "1@1.30", "0@1.70", "0@16.00"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("visit frames %v, want %v", got, want)
+	}
+}
+
 func TestVariantHasOpaqueRoundedBackground(t *testing.T) {
 	f, err := loadFonts()
 	if err != nil {
@@ -210,7 +225,7 @@ func TestPulseDurationAndTargetHighlightOffset(t *testing.T) {
 			t.Fatalf("unexpected travel frames %s", css)
 		}
 		end, _ := strconv.ParseFloat(frames[1][1], 64)
-		want := math.Max(.3, (length+14.5)/1200)
+		want := math.Max(.8, (length+14.5)/280)
 		if math.Abs(end*16/100+.001-.1-want) > .0001 {
 			t.Errorf("length %g duration is not distance/speed with minimum", length)
 		}
@@ -222,7 +237,7 @@ func TestPulseDurationAndTargetHighlightOffset(t *testing.T) {
 	for _, d := range ds {
 		for _, e := range d.Edges {
 			for _, at := range e.Times {
-				want := at + math.Max(.3, (edgeLength(e)+14.5)/1200) + .2
+				want := at + math.Max(.8, (edgeLength(e)+14.5)/280) + .1
 				found := false
 				for _, n := range d.Nodes {
 					if n.ID == e.To {
@@ -234,7 +249,7 @@ func TestPulseDurationAndTargetHighlightOffset(t *testing.T) {
 					}
 				}
 				if !found {
-					t.Errorf("%s target highlight must start .2 s after arrival", e.ID)
+					t.Errorf("%s target highlight must start .1 s after arrival", e.ID)
 				}
 			}
 		}

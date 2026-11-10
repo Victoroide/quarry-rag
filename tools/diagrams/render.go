@@ -32,6 +32,26 @@ func pulseDuration(length float64) float64 {
 	return math.Max(pulseSeconds, (length+pulseDash+pulseStroke)/pulseSpeed)
 }
 
+// highlightSpan is how long one visit keeps a node lit, fades included.
+const highlightSpan = 2*highlightFade + highlightHold
+
+// loopDuration rounds the end of the last pulse or highlight, plus a rest, up
+// to whole seconds.
+func loopDuration(d diagram) float64 {
+	end := 0.0
+	for _, e := range d.Edges {
+		for _, at := range e.Times {
+			end = math.Max(end, at+pulseDuration(edgeLength(e)))
+		}
+	}
+	for _, n := range d.Nodes {
+		for _, at := range n.Times {
+			end = math.Max(end, at+highlightSpan)
+		}
+	}
+	return math.Ceil(end + restSeconds)
+}
+
 func animation(name string, times []float64, duration float64, pulse bool, length float64) string {
 	var b strings.Builder
 	start := number(pulseDash + pulseStroke/2)
@@ -51,15 +71,11 @@ func animation(name string, times []float64, duration float64, pulse bool, lengt
 			fmt.Fprintf(&b, "%s{opacity:0;stroke-dashoffset:%s}%s{opacity:1;stroke-dashoffset:%s}%s{opacity:1;stroke-dashoffset:%s}%s{opacity:0;stroke-dashoffset:%s}%s{opacity:0;stroke-dashoffset:%s}", pct(t), start, pct(t+.001), start, pct(t+travel-.001), end, pct(t+travel), end, pct(t+travel+.001), start)
 		} else {
 			last := t
-			for i+1 < len(times) && times[i+1] < last+2*highlightFade {
+			for i+1 < len(times) && times[i+1] <= last+highlightSpan {
 				i++
 				last = times[i]
 			}
-			fmt.Fprintf(&b, "%s{opacity:0}%s{opacity:1}", pct(t), pct(t+highlightFade))
-			if last > t {
-				fmt.Fprintf(&b, "%s{opacity:1}", pct(last+highlightFade))
-			}
-			fmt.Fprintf(&b, "%s{opacity:0}", pct(last+2*highlightFade))
+			fmt.Fprintf(&b, "%s{opacity:0}%s{opacity:1}%s{opacity:1}%s{opacity:0}", pct(t), pct(t+highlightFade), pct(last+highlightFade+highlightHold), pct(last+highlightSpan))
 		}
 	}
 	b.WriteString("100%{opacity:0")

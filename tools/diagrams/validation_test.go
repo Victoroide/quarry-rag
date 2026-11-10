@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"math"
 	"os"
@@ -274,19 +275,21 @@ func TestPulseSequenceIsSingularAndSeamless(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range ds {
-		var starts []float64
+		type trip struct{ start, arrival float64 }
+		var trips []trip
 		for _, e := range d.Edges {
 			for _, at := range e.Times {
 				if at <= 0 || at+pulseSeconds >= d.Duration {
 					t.Errorf("%s pulse crosses loop seam", e.ID)
 				}
-				starts = append(starts, at)
+				trips = append(trips, trip{at, at + pulseDuration(edgeLength(e))})
 			}
 		}
-		slices.Sort(starts)
-		for i := 1; i < len(starts); i++ {
-			if starts[i]-starts[i-1] < pulseSeconds-0.00001 {
-				t.Errorf("%s simultaneous pulses at %.2f and %.2f", d.Name, starts[i-1], starts[i])
+		slices.SortFunc(trips, func(a, b trip) int { return cmp.Compare(a.start, b.start) })
+		for i := 1; i < len(trips); i++ {
+			// The next pulse leaves once the previous target has faded in.
+			if trips[i].start-trips[i-1].arrival < .5-0.00001 {
+				t.Errorf("%s pulse at %.2f leaves before the one at %.2f lands and lights", d.Name, trips[i].start, trips[i-1].start)
 			}
 		}
 	}
@@ -607,7 +610,7 @@ func TestDataModelRowsAndPorts(t *testing.T) {
 	}
 }
 
-func TestMotionHoldsForHalfLoop(t *testing.T) {
+func TestMotionRestsBeforeLoopRepeats(t *testing.T) {
 	ds, err := buildDiagrams("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -615,15 +618,15 @@ func TestMotionHoldsForHalfLoop(t *testing.T) {
 	for _, d := range ds {
 		for _, e := range d.Edges {
 			for _, at := range e.Times {
-				if at+pulseDuration(edgeLength(e))+.001 > d.Duration/2 {
-					t.Errorf("%s pulse exceeds motion half", e.ID)
+				if at+pulseDuration(edgeLength(e))+.001 > d.Duration-2.5 {
+					t.Errorf("%s pulse runs into the rest before the loop repeats", e.ID)
 				}
 			}
 		}
 		for _, n := range d.Nodes {
 			for _, at := range n.Times {
-				if at+2*highlightFade > d.Duration/2 {
-					t.Errorf("%s highlight exceeds motion half", n.ID)
+				if at+2*highlightFade+highlightHold > d.Duration-2.5 {
+					t.Errorf("%s highlight runs into the rest before the loop repeats", n.ID)
 				}
 			}
 		}
