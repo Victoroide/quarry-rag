@@ -123,6 +123,10 @@ func TestOCRUploadValidatesBeforeStorageAndRollsBack(t *testing.T) {
 			require.Equal(t, tc.status, rw.Code, rw.Body.String())
 			require.Equal(t, tc.uploaded, len(objects.data) > 0)
 			require.Equal(t, tc.deleted, objects.deleted)
+			if tc.outcome == domain.AcceptQueueFull {
+				require.Equal(t, "30", rw.Header().Get("Retry-After"))
+				require.JSONEq(t, `{"error":"queue","message":"ingest queue is full"}`, rw.Body.String())
+			}
 		})
 	}
 }

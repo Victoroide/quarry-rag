@@ -109,6 +109,18 @@ A document's `status` becomes `completed` after its vectors and chunks are store
 - **Path**: `/ingest`
 - **Auth**: Required (`X-Service-Token`)
 
+#### Queue admission and retries
+
+New documents and retries of failed documents each require a slot in the
+[persisted ingestion queue](configuration.md#environment-variables). At or above
+the queue limit, either request returns 503 with error category
+`queue` and `Retry-After: 30`. A rejected retry leaves the failed document and
+its stored error intact. When a slot opens, a successful retry returns 202 and
+requeues the same document UUID.
+
+In-flight duplicates return 202 `processing` and completed duplicates return
+200 `already_ingested`, both with the existing UUID, even when the queue is full.
+
 #### Variant A: JSON Request
 
 - **Content-Type**: `application/json` (accepts standard parameters such as `charset=utf-8`)
@@ -137,9 +149,9 @@ Response (New Document):
 Response (Duplicate Document):
 - **Status**: `200 OK`
 
-When `document_id` is supplied, a completed document with the same content
-fingerprint returns `already_ingested` with that same identifier. In-flight duplicates return 202 `processing` with the same identifier. Failed duplicates return 202 and requeue that document. Different
-content or a different collection under an existing identifier returns 409 with
+When `document_id` is supplied, the same content fingerprint follows the queue
+admission and retry rules above. Different content or a different collection
+under an existing identifier returns 409 with
 `{"error":"conflict","message":"document_id already exists with different content"}`.
 Existing documents are never overwritten.
 
@@ -165,7 +177,7 @@ Error Status Codes:
 | `409 Conflict` | `conflict` | Supplied `document_id` already exists with different content |
 | `413 Payload Too Large` | `validation` | JSON request payload exceeds 8,097,152 bytes |
 | `415 Unsupported Media Type` | `validation` | Content-Type is not `application/json` or `multipart/form-data` |
-| `503 Service Unavailable` | `queue` | Persisted ingestion queue is full (`WORKER_QUEUE_SIZE` reached); `Retry-After: 30` |
+| `503 Service Unavailable` | `queue` | See [queue admission and retries](#queue-admission-and-retries) |
 | `503 Service Unavailable` | `unavailable` | Document lookup or atomic acceptance failed |
 
 Example:
@@ -220,7 +232,10 @@ DOC extraction supports the main document text in Word 97–2003 binary document
 headers, footers, footnotes and comments are not extracted. Word 6/95 documents
 and encrypted files return 422.
 
-New uploads return 202 after durable acceptance with the retained or generated identifier. Completed duplicates return 200 `already_ingested`; in-flight duplicates return 202 with the same identifier; failed duplicates return 202 and are requeued. Identity and deduplication follow the JSON ingestion rules above, with the [OCR input exception](#image-only-pdf-ocr). A configured source store must accept the original upload before document acceptance. New source objects are removed when acceptance does not retain them.
+Uploads follow the [queue admission and retry rules](#queue-admission-and-retries)
+and the JSON identity rules above, with the [OCR input exception](#image-only-pdf-ocr).
+A configured source store must accept the original upload before document
+acceptance. New source objects are removed when acceptance does not retain them.
 
 Error Status Codes:
 
@@ -236,7 +251,7 @@ Error Status Codes:
 | `503 Service Unavailable` | `busy` | All upload slots remain occupied beyond `EXTRACT_QUEUE_TIMEOUT`: `too many concurrent uploads`, with `Retry-After: 5` |
 | `503 Service Unavailable` | `extraction` | The extraction child cannot be started: `document extraction is unavailable` |
 | `503 Service Unavailable` | `storage` | Source upload failed: `source file storage is unavailable`; `Retry-After: 30` |
-| `503 Service Unavailable` | `queue` | Persisted ingestion queue is full; removes a newly uploaded source object; `Retry-After: 30` |
+| `503 Service Unavailable` | `queue` | See [queue admission and retries](#queue-admission-and-retries) |
 | `503 Service Unavailable` | `unavailable` | Document lookup or atomic acceptance failed |
 
 Content verification and extraction error codes:

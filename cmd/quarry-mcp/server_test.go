@@ -497,6 +497,30 @@ func TestAPIFailureIsToolError(t *testing.T) {
 	assert.Nil(t, result.StructuredContent)
 }
 
+func TestIngestQueueFullIsRetryableToolError(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/ingest", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":"queue","message":"ingest queue is full"}`)
+	}))
+	defer s.Close()
+	cs := connectServer(t, config{baseURL: s.URL, timeout: time.Second})
+	result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: "quarry_ingest_text",
+		Arguments: map[string]any{
+			"content":     "synthetic text",
+			"document_id": "00000000-0000-4000-8000-000000000001",
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Nil(t, result.StructuredContent)
+	require.Equal(t, "503 queue: ingest queue is full; retry after 30s", result.Content[0].(*mcp.TextContent).Text)
+}
+
 func TestCollectionTools(t *testing.T) {
 	var queries, lists atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
