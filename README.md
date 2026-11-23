@@ -32,9 +32,8 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 ## Requirements
 
 - Go at the version in [go.mod](go.mod) to build from source; the badge shows it, and [CONTRIBUTING.md](CONTRIBUTING.md) lists the tool versions.
-- PostgreSQL 14 or later in every mode.
 - Docker for the full test suite and image builds.
-- For external services, access to Bedrock or OpenAI-compatible chat and embedding providers, either a Pinecone index or the [PostgreSQL vector prerequisites](docs/deployment.md#postgresql-vectors), and an optional S3 bucket. [Deployment](docs/deployment.md) covers index settings, providers and permissions.
+- See the [deployment prerequisite matrix](docs/deployment.md#required-external-services) for database, vector store, provider and optional service requirements.
 
 ## Installation
 
@@ -47,7 +46,9 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 
 ### Offline Fake Mode
 
-Offline fake mode executes the service without cloud credentials by using an in-memory vector store, deterministic mock embeddings, and local model synthesis. A PostgreSQL database is still required for schema migrations and metadata storage.
+Follow the offline entry in the [deployment prerequisites](docs/deployment.md#required-external-services).
+See [offline mode internals](docs/development.md#offline-fake-mode-internals) for
+the local components.
 
 1. Start a local PostgreSQL instance:
 
@@ -87,7 +88,11 @@ To run the containerized application using Docker Compose:
 cp .env.example .env
 ```
 
-Select the vector backend and its credentials using [configuration](docs/configuration.md#environment-variables). Set `S3_BUCKET=your-owned-bucket` in `.env` for original file storage, and optionally set `S3_EXPECTED_BUCKET_OWNER` to the owner's 12-digit AWS account ID. Leaving `S3_BUCKET` empty disables original file storage.
+Use the [deployment prerequisite matrix](docs/deployment.md#required-external-services)
+to select and provision the vector store, model providers and optional features.
+Set the selected services' variables in `.env`. For non-fake deployments, also set
+at least one [service token](docs/configuration.md#environment-variables) using
+`SERVICE_TOKEN` or `SERVICE_TOKENS`. Compose starts the application container.
 
 2. Start the container in detached mode:
 

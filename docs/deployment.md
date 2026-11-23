@@ -159,21 +159,63 @@ PostgreSQL connections also add up across replicas. Each replica opens one pool 
 
 `replicas × pool_max_conns + maintenance connections ≤ max_connections − reserved slots`
 
+## Query and Proxy Timeouts
+
+Admitted queries follow the [query time budget](architecture.md#query-time-budget).
+Set proxy and load balancer response timeouts to at least `HTTP_WRITE_TIMEOUT`.
+Allow time to read request bodies and wait for admission when configuring the
+write timeout.
+
 ## Required External Services
 
-In production deployments (`GO_RAG_FAKE_MODE=false`), the microservice uses PostgreSQL and AWS Bedrock, with a selectable vector backend and optional S3 storage. See [configuration](configuration.md#environment-variables) for backend selection and credentials. [PDF OCR](#optional-pdf-ocr) adds optional text detection.
+Every deployment needs [PostgreSQL for metadata and chunks](#postgresql-metadata-and-chunk-store).
+Outside offline fake mode, select a vector store, an embedding provider and a
+chat provider independently. Use the matrix to provision dependencies, then set
+the [environment variables](configuration.md#environment-variables) for the
+selected services.
 
-### 1. PostgreSQL (Metadata and Chunk Store)
+| `VECTOR_STORE` | `EMBEDDING_PROVIDER` | `LLM_PROVIDER` | Additional prerequisites |
+|---|---|---|---|
+| `pinecone` | `bedrock` | `bedrock` | Pinecone index and key, AWS access for Bedrock embeddings and chat |
+| `pinecone` | `bedrock` | `openai` | Pinecone index and key, AWS access for Bedrock embeddings, compatible chat endpoint |
+| `pinecone` | `openai` | `bedrock` | Pinecone index and key, compatible embeddings endpoint, AWS access for Bedrock chat |
+| `pinecone` | `openai` | `openai` | Pinecone index and key, compatible embeddings and chat endpoint |
+| `postgres` | `bedrock` | `bedrock` | pgvector, AWS access for Bedrock embeddings and chat |
+| `postgres` | `bedrock` | `openai` | pgvector, AWS access for Bedrock embeddings, compatible chat endpoint |
+| `postgres` | `openai` | `bedrock` | pgvector, compatible embeddings endpoint, AWS access for Bedrock chat |
+| `postgres` | `openai` | `openai` | pgvector, compatible embeddings and chat endpoint |
 
-- **Version**: PostgreSQL 14 or later.
-- **Extensions**: `pgcrypto` (applied automatically by migration 001).
-- **Configuration**: Provided via `DATABASE_URL`.
-- **Purpose**: Stores document records, status indicators, chunk texts, token counts, and SHA-256 content fingerprints.
-- **Operations**: Versioned startup migrations, duplicate fingerprint lookups, chunk insertion transactions, document status tracking, and inventory listings. Replicas serialize migrations using an advisory lock; see [Schema Migrations](configuration.md#schema-migrations).
+With `VECTOR_STORE=postgres`, both providers set to `openai` and the options
+below disabled, leave the AWS region and credentials and the Pinecone index
+name and key unset. See the [compatible chat, streaming and embedding
+protocols](#openai-compatible-providers) for what the endpoint must support.
+For a Bedrock provider, configure [AWS credentials](#aws-credentials) and
+grant [access to the selected models](#aws-bedrock-models).
 
-### 2. Pinecone (Vector Index)
+Apply the following prerequisites for each optional feature you enable.
 
-- **Configuration**: `PINECONE_API_KEY` and an explicit `PINECONE_INDEX_NAME`, for example `quarry-rag`. Required settings depend on the selected backend; see [configuration](configuration.md#environment-variables). The index name has no default. `PINECONE_ENVIRONMENT` is ignored and logs a startup warning when non-empty; remove it from deployment configuration.
+- **Stored originals** require a private [S3 bucket](#aws-s3-original-file-storage)
+  and [AWS access](#aws-credentials).
+- **Image-only PDF OCR** requires [Textract](#optional-pdf-ocr) and the S3 source bucket.
+- **Reranking** requires [AWS access to the reranking model](#bedrock-reranking),
+  even when chat and embeddings both use compatible providers.
+- **Guardrails** require [Bedrock chat and guardrail permissions](#bedrock-guardrails).
+  Pairing a guardrail with `LLM_PROVIDER=openai` fails configuration validation,
+  even when embeddings use Bedrock.
+
+For `GO_RAG_FAKE_MODE=true`, provision only the metadata database. See the
+[offline setup](../README.md#offline-fake-mode).
+
+### PostgreSQL Metadata and Chunk Store
+
+Set `DATABASE_URL` to a PostgreSQL 14 or later database. It stores document
+records, ingestion status, chunk text and token counts, and SHA-256 content
+fingerprints. [Startup migrations](configuration.md#schema-migrations) create
+the schema and enable `pgcrypto`.
+
+### Pinecone Vector Index
+
+- Set `PINECONE_API_KEY` and `PINECONE_INDEX_NAME` for the hosted index.
 - **API Version**: The v5 Go SDK uses Pinecone API version `2025-10`.
 - **Startup Requirements**: The index dimension must equal [`EMBEDDING_DIMENSIONS`](configuration.md#environment-variables), the metric must be `cosine`, and the index must be ready. Startup fails if any requirement is unmet.
 - **Request Limits**: Upserts use at most [`PINECONE_UPSERT_BATCH_SIZE`](configuration.md#environment-variables) records and 1.5 MiB of estimated encoded data per batch. `PINECONE_TIMEOUT` bounds each attempt, and `PINECONE_MAX_ATTEMPTS` limits write and deletion attempts.
@@ -197,38 +239,98 @@ Confirm that `TestSmoke_PreexistingDocumentRemainsRetrievable` passes without sk
 
 ### PostgreSQL Vectors
 
-The PostgreSQL vector backend requires pgvector 0.8 or later installed on the database server and a database role allowed to create its tables and indexes. The role must also be allowed to create the `vector` extension unless an administrator creates it beforehand; an existing extension requires no extension-creation privilege. The standard PostgreSQL image in the offline example does not include this extension; use a PostgreSQL distribution with pgvector available. Base PostgreSQL requirements remain as described above. The [vector schema](architecture.md#postgresql-vector-schema) is initialized at startup.
+Install pgvector 0.8 or later on the PostgreSQL server, for example by using
+the `pgvector/pgvector:0.8.7-pg16` image or installing the pgvector package for
+your PostgreSQL major version. The stock PostgreSQL image in the offline quick
+start lacks pgvector. Give the database role permission to create the vector
+tables and indexes. An administrator can create the `vector` extension ahead of
+time, or grant the service role permission to create it during
+[vector schema initialization](architecture.md#postgresql-vector-schema).
 
-Changing backends does not copy existing embeddings. Re-ingest documents with new identities in the target backend, or migrate their vectors before switching query traffic. Existing completed documents are not automatically queued again. Use the same backend across replicas sharing an ingestion queue. Bedrock access is still required for embeddings and synthesis; the PostgreSQL backend removes the Pinecone dependency only. Hosted-index reconciliation applies to Pinecone deployments.
+### Changing Models or Vector Stores
 
-### 3. AWS Bedrock (Embedding and LLM Models)
+A chat model change can reuse the existing vectors when the embedding model and
+its output dimensions stay the same. When changing the embedding model,
+re-embed the corpus into a matching index before switching query traffic, even
+if the dimensions stay the same.
 
-- **Guardrail permission**: When [optional guardrails](configuration.md#environment-variables) are enabled, grant `bedrock:ApplyGuardrail` on the target guardrail ARN, `arn:aws:bedrock:{region}:{account-id}:guardrail/{guardrail-id}`, in addition to model invocation permissions. Create the guardrail and configure its prompt-attack and contextual grounding policies before enabling it in the service.
-- **Configuration**: `AWS_REGION` and model identifiers (`BEDROCK_EMBED_MODEL`, `BEDROCK_PRIMARY_MODEL`, `BEDROCK_FALLBACK_MODEL`). Static `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are optional and must be configured together; temporary static credentials also accept `AWS_SESSION_TOKEN`.
-- **Credentials**: IAM roles are supported. Without static keys, AWS clients use the default credential chain, including environment credentials, shared configuration files, web identity, container roles and instance roles.
-- **Query and proxy timeouts**: Admitted queries run under the [query time budget](architecture.md#query-time-budget). Set proxy and load balancer response timeouts to at least `HTTP_WRITE_TIMEOUT`. Keep adequate margin for reading request bodies and waiting for admission when configuring write timeouts.
-- **Retries and Deadlines**. Bedrock and S3 use the SDK's standard retries with [`AWS_MAX_ATTEMPTS`](configuration.md#environment-variables) attempts, a 10-second maximum calculated backoff, and no client-side retry quota. The service adds `ModelTimeoutException` and `ModelNotReadyException` to the retryable errors. A valid `x-amz-retry-after` header can extend the calculated backoff by up to 5 seconds, subject to the request deadline. Each embedding call has an [`EMBED_TIMEOUT`](configuration.md#environment-variables) deadline. See the [query time budget](architecture.md#query-time-budget) for the single transport retry layer.
-- **Required Model Access**:
-  - Titan Embed Text V2 (`amazon.titan-embed-text-v2:0`): generates 1024-dimensional normalized text embeddings.
-  - Nova Micro (`amazon.nova-micro-v1:0`): fast, low-latency reasoning and synthesis.
-  - Llama 4 Maverick (`us.meta.llama4-maverick-17b-instruct-v1:0`): synthesis and comparison across multiple retrieved chunks.
-- **Reranking permissions**: Optional [reranking](api.md#post-query) requires `bedrock:Rerank` with `Resource: "*"` and `bedrock:InvokeModel` scoped to the configured reranking model ARN. Enable access to that model in the configured AWS region before querying.
+When changing only the vector store, migrate the existing vectors or re-ingest
+documents with new identities in the target store before switching query
+traffic. A configuration change leaves completed documents in their current
+state. Use the same vector store and embedding model across replicas sharing an
+ingestion queue.
+
+### AWS Credentials
+
+For any selected AWS service, set `AWS_REGION` and give the service access to
+the corresponding resources. AWS clients use the default credential chain,
+including shared configuration, web identity and IAM roles. Supply
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` together when using static
+credentials. Include `AWS_SESSION_TOKEN` when those credentials are temporary.
+
+### AWS Retries and Deadlines
+
+Bedrock and S3 use the SDK's standard retries with
+[`AWS_MAX_ATTEMPTS`](configuration.md#environment-variables) attempts, a
+10-second maximum calculated backoff and no client-side retry quota. The service
+adds `ModelTimeoutException` and `ModelNotReadyException` to the retryable
+errors. A valid `x-amz-retry-after` header can extend the calculated backoff
+by up to five seconds, subject to the request deadline. Each embedding call
+has an [`EMBED_TIMEOUT`](configuration.md#environment-variables) deadline.
+See the [query time budget](architecture.md#query-time-budget) for the transport
+retry layer.
+
+### AWS Bedrock Models
+
+- For Bedrock embeddings, grant `bedrock:InvokeModel` for `BEDROCK_EMBED_MODEL`.
+- For Bedrock chat, grant `bedrock:InvokeModel` for the models selected by the
+  synthesis policy from `BEDROCK_PRIMARY_MODEL` and `BEDROCK_FALLBACK_MODEL`.
+  Streamed answers also require `bedrock:InvokeModelWithResponseStream` for those
+  models. For a geographic inference profile, including the default fallback,
+  grant the applicable invoke actions on the profile ARN in the source Region
+  and on the foundation model ARN in the source Region and every destination
+  Region for that source Region.
+
+#### Bedrock Guardrails
+
+Create the guardrail with its prompt-attack and contextual grounding policies
+before enabling it. Grant `bedrock:ApplyGuardrail` on its ARN
+(`arn:aws:bedrock:{region}:{account-id}:guardrail/{guardrail-id}`) in addition
+to the chat model's invocation permissions.
+
+#### Bedrock Reranking
+
+Optional [reranking](api.md#post-query) requires `bedrock:Rerank` with
+`Resource: "*"` and `bedrock:InvokeModel` scoped to the model specified by
+`RERANK_MODEL_ARN`. Enable access to that model in the configured AWS region.
 
 ### OpenAI-compatible providers
 
-Select chat and embedding backends independently using the [provider configuration](configuration.md#environment-variables). Supply an explicit base address including the API version prefix required by your server, and model names supported by that server. Configure secrets through your deployment's secret store. Pinecone and PostgreSQL remain required in external-service mode. When both backends use compatible endpoints and reranking and original-file storage are disabled, startup does not initialize AWS clients.
+Both compatible clients use the same `OPENAI_BASE_URL` and optional
+`OPENAI_API_KEY`. Include the API version prefix required by the endpoint and
+set the model name for each selected compatible provider.
 
-Chat sends JSON to `/chat/completions`; embeddings send JSON to `/embeddings` beneath the configured base address. Chat requests send `max_tokens` and `temperature`; use a chat model that accepts both. Embedding requests ask for float encoding and do not request a dimension count; set `EMBEDDING_DIMENSIONS` to the model's output size. An existing index must use the same embedding model and vector size; changing the embedding model requires re-embedding the corpus into a matching index.
+Chat sends JSON to `/chat/completions` with `max_tokens` and `temperature`.
+Embeddings send JSON to `/embeddings` and request float encoding. Both paths are
+relative to the configured API base. Set `EMBEDDING_DIMENSIONS` to the model's
+output size.
 
 Synchronous queries use one chat completion request. Streamed queries use the streaming chat API with usage requested, deliver text deltas as they arrive, and require a finish reason followed by the `[DONE]` marker. Usage omitted by a compatible server remains unavailable and query token counts stay zero. Malformed events, premature EOF, upstream error events and callback failures stop the stream without a successful final response; a caller cancellation closes the upstream body. HTTP 429 and 503 map to the existing `upstream_throttled` response. The HTTP clients do not retry or follow redirects, and discard upstream error bodies. Caller deadlines bound requests; embedding concurrency and call deadlines use the same limits as Bedrock.
 
 OpenAI-compatible tracing sets `gen_ai.system` and `gen_ai.provider.name` to `openai` and records model, finish reason and reported token counts.
 
-### 4. AWS S3 (Raw Object Storage)
+### AWS S3 Original File Storage
 
-- **Configuration**: Set `S3_BUCKET` explicitly to a bucket you control, using the same AWS credentials configured for Bedrock. Set optional `S3_EXPECTED_BUCKET_OWNER` to the owner's 12-digit AWS account ID. An empty bucket disables original file storage and logs a startup warning.
+- Set `S3_BUCKET` to a bucket you control. Use `S3_EXPECTED_BUCKET_OWNER` to
+  verify ownership when needed.
 - **Startup Verification**: Client initialization and `HeadBucket` share a 10-second deadline. Access denied (403), a missing bucket (404), or an expected-owner mismatch prevents startup. Transient errors log a warning and allow startup to continue; an initialized client remains available for later requests.
-- **Purpose**: Stores original binary uploads (PDF, DOCX, DOC) and generates presigned GET download links valid for up to 15 minutes. A download signed with temporary credentials stops working when those credentials expire, which can be before 15 minutes. Downloads use attachment disposition with the stored filename and an extension-derived content type. Downloaders need no expected-owner header.
+- S3 stores originals for [accepted multipart uploads](api.md#variant-b-multipart-form-upload),
+  including recognized plain-text files and binary documents. It generates
+  presigned GET download links valid for up to 15 minutes. A link signed with
+  temporary credentials expires when the credentials expire or when the link
+  reaches its own deadline, whichever comes first. Downloads use attachment
+  disposition with the stored filename and an extension-derived content type.
+  Downloaders need no expected-owner header.
 - **IAM Permissions Required**:
   - `s3:PutObject` on `arn:aws:s3:::{bucket}/documents/*`
   - `s3:GetObject` on `arn:aws:s3:::{bucket}/documents/*`
@@ -258,10 +360,11 @@ not canceled by stopping ingestion.
 
 ## Vector Index Maintenance
 
-Use `make reconcile` during a maintenance window to inspect orphaned vectors and
-legacy document namespaces. Configure the same PostgreSQL database and Pinecone
-index as the deployment, ensure the ingestion job migrations have been applied,
-and pause ingestion and other index writers until reconciliation finishes.
+For a Pinecone deployment, use `make reconcile` during a maintenance window to
+inspect orphaned vectors and legacy document namespaces. Configure the same
+PostgreSQL database and Pinecone index as the deployment. Apply the ingestion
+job migrations and pause ingestion and other index writers until reconciliation
+finishes.
 Always inspect a dry run before applying deletions:
 
 ```sh

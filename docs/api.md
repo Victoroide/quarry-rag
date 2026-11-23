@@ -513,7 +513,7 @@ Document summary fields:
 | `document_id` | string | Document UUID |
 | `collection` | string | Collection label, always present; `""` for the default collection |
 | `doc_type` | string | Document category label |
-| `s3_key` | string | S3 object key, or omitted if no binary file was stored |
+| `s3_key` | string | S3 object key for the original upload, omitted when no original was stored |
 | `status` | string | Ingestion state: `processing`, `completed` or `failed` |
 | `chunk_count` | int | Number of stored chunks |
 | `file_name` | string or null | Original uploaded filename |
@@ -564,7 +564,7 @@ Returns one document summary with the fields described above. Poll this endpoint
 
 ### GET /documents/{doc_id}/file
 
-Generates a presigned S3 URL for downloading the original binary file associated with an ingested document. Downloads are served as attachments using the stored filename and a content type derived from its extension.
+Generates a presigned S3 URL for downloading the original uploaded file. Downloads are served as attachments using the stored filename and a content type derived from its extension.
 
 - **Method**: `GET`
 - **Path**: `/documents/{doc_id}/file`
