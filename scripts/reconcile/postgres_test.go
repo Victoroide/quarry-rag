@@ -32,6 +32,9 @@ func TestDocumentLookupPreservesRetryJobs(t *testing.T) {
 }
 
 func TestCollectionBackfillSelectsLabeledDocuments(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(t.Context())) })
@@ -50,6 +53,9 @@ func TestCollectionBackfillSelectsLabeledDocuments(t *testing.T) {
 }
 
 func TestMakeCollectionBackfillDryRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(t.Context())) })

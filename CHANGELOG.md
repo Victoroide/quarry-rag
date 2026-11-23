@@ -27,6 +27,7 @@ Notable changes are grouped by release.
 - The runtime image uses Alpine 3.24.4.
 - AWS retries distinguish throttling from transient errors and honor service-provided retry delays.
 - Textract OCR uses Smithy RPC v2 CBOR by default.
+- PostgreSQL connections reload file-backed client certificates and keys on TLS certificate requests.
 
 ### Fixed
 
@@ -37,6 +38,7 @@ Notable changes are grouped by release.
 ### Security
 
 - Build Quarry with Go 1.27.4 to fix GO-2026-6859 in the HTTP server.
+- Update pgx to 5.13.0, which fixes GHSA-w9rp-vfrh-q8vv in row decoding.
 
 ## [0.1.0] - 2026-11-09
 

@@ -1,5 +1,6 @@
 scripts/
 docs/
+!docs/openapi.yaml
 .env
 .env.*
 *.exe
