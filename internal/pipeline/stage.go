@@ -74,6 +74,9 @@ type QueryContext struct {
 	MaxChunks     int
 	RequestedMode string
 	FilterDocType string
+	AnswerMode    domain.AnswerMode
+	// EvidenceVisibility checks vector candidates against current stored chunks.
+	EvidenceVisibility domain.EvidenceVisibility
 	// IncludeCitations asks synthesis for inline citation markers and verifies them.
 	IncludeCitations bool
 	// AllowedDocumentIDs, when non-nil, restricts retrieved chunks to this
@@ -90,6 +93,7 @@ type QueryContext struct {
 	LocalDocumentID  string
 	Candidates       []domain.ScoredChunk
 	SkipRetrieval    bool
+	previewRouting   *previewRouting
 
 	// Populated by routing stage.
 	RetrievalMode  string
@@ -106,9 +110,9 @@ type QueryContext struct {
 	FinishReason  string
 	FinalAnswer   string
 	TokenUsage    domain.TokenUsage
-	ContextTokens int  // estimated synthesis input tokens (after compression)
-	ContextChunks int  // chunks actually sent to the LLM (after adaptive trim)
-	EarlyExit     bool // true if synthesis skipped (cache hit / no chunks)
+	ContextTokens int  // estimated prompt or selected evidence tokens
+	ContextChunks int  // chunks retained after context selection
+	EarlyExit     bool // true when the pipeline exits early
 
 	// ContentLanguage identifies the language of the fixed no-evidence answer.
 	ContentLanguage string

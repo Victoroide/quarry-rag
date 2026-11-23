@@ -60,6 +60,19 @@ type RoutingStage struct {
 	previews   domain.DocumentPreviewer
 }
 
+type queryRoute struct {
+	mode             string
+	localDocumentID  string
+	namedEntity      string
+	entityDocumentID string
+}
+
+type previewRouting struct {
+	stage       *RoutingStage
+	documentIDs []string
+	original    queryRoute
+}
+
 // NewRoutingStage creates a RoutingStage.
 func NewRoutingStage(ret *retriever.Retriever) *RoutingStage {
 	return NewRoutingStageWithScope(ret, nil, nil)
@@ -80,7 +93,7 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 	qc.LocalDocumentID = ""
 	qc.Candidates, qc.QueryEmbedding = nil, nil
 	qc.TopScore, qc.SkipRetrieval = 0, false
-	explicit := qc.RequestedMode != "" && !strings.EqualFold(qc.RequestedMode, "auto")
+	qc.previewRouting = nil
 	qc.RetrievalMode = string(retriever.RetrievalModeGlobal)
 	if filter.MatchesNothing() {
 		qc.SkipRetrieval = true
@@ -98,8 +111,7 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 	if probeK == 0 || probeFailed {
 		return nil
 	}
-	candidates = filterChunksByAllowedDocIDs(candidates, qc.AllowedDocumentIDs)
-	candidates, err = visibleChunks(ctx, candidates, s.visibility)
+	candidates, err = scopedChunks(ctx, qc, candidates, s.visibility)
 	if err != nil {
 		return fmt.Errorf("routing_stage: visibility: %w", err)
 	}
@@ -108,25 +120,39 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 		return nil
 	}
 	qc.TopScore = candidates[0].Score
+	var ids []string
+	var previews map[string]string
 	if s.previews != nil {
-		ids := candidateDocumentIDs(candidates)
-		previews, err := s.previews.DocumentPreviews(ctx, ids)
+		ids = candidateDocumentIDs(candidates)
+		previews, err = s.previews.DocumentPreviews(ctx, ids)
 		if err != nil {
 			return fmt.Errorf("routing_stage: previews: %w", err)
 		}
-		qc.NamedEntity, qc.EntityDocumentID = MatchNamedEntity(qc.OriginalQuery, previews, ids)
 	}
-	qc.RetrievalMode = string(s.ret.DetermineModeWithQuery(len(qc.SubQueries), qc.TopScore, qc.NamedEntity))
-	if explicit {
-		qc.RetrievalMode = strings.ToUpper(qc.RequestedMode)
-	}
-	if qc.RetrievalMode == string(retriever.RetrievalModeLocal) {
-		qc.LocalDocumentID = qc.EntityDocumentID
-		if qc.LocalDocumentID == "" {
-			qc.LocalDocumentID = string(candidates[0].Chunk.DocumentID)
-		}
+	route := s.selectRoute(qc, previews, ids)
+	qc.RetrievalMode, qc.LocalDocumentID = route.mode, route.localDocumentID
+	qc.NamedEntity, qc.EntityDocumentID = route.namedEntity, route.entityDocumentID
+	if qc.AnswerMode == domain.AnswerModeEvidence && len(ids) != 0 {
+		qc.previewRouting = &previewRouting{stage: s, documentIDs: ids, original: route}
 	}
 	return nil
+}
+
+func (s *RoutingStage) selectRoute(qc *QueryContext, previews map[string]string, ids []string) queryRoute {
+	first := qc.Candidates[0]
+	var route queryRoute
+	route.namedEntity, route.entityDocumentID = MatchNamedEntity(qc.OriginalQuery, previews, ids)
+	route.mode = string(s.ret.DetermineModeWithQuery(len(qc.SubQueries), first.Score, route.namedEntity))
+	if qc.RequestedMode != "" && !strings.EqualFold(qc.RequestedMode, "auto") {
+		route.mode = strings.ToUpper(qc.RequestedMode)
+	}
+	if route.mode == string(retriever.RetrievalModeLocal) {
+		route.localDocumentID = route.entityDocumentID
+		if route.localDocumentID == "" {
+			route.localDocumentID = string(first.Chunk.DocumentID)
+		}
+	}
+	return route
 }
 
 func candidateDocumentIDs(chunks []domain.ScoredChunk) []string {
@@ -140,6 +166,87 @@ func candidateDocumentIDs(chunks []domain.ScoredChunk) []string {
 		}
 	}
 	return ids
+}
+
+func scopedChunks(ctx context.Context, qc *QueryContext, chunks []domain.ScoredChunk, visibility domain.DocumentVisibility) ([]domain.ScoredChunk, error) {
+	if qc.AnswerMode != domain.AnswerModeEvidence {
+		return visibleChunks(ctx, filterChunksByAllowedDocIDs(chunks, qc.AllowedDocumentIDs), visibility)
+	}
+	chunks = filterEvidenceScope(qc, chunks)
+	if qc.EvidenceVisibility != nil && len(chunks) != 0 {
+		return qc.EvidenceVisibility.VisibleEvidence(ctx, chunks)
+	}
+	return visibleChunks(ctx, chunks, visibility)
+}
+
+func filterEvidenceScope(qc *QueryContext, chunks []domain.ScoredChunk) []domain.ScoredChunk {
+	chunks = filterChunksByAllowedDocIDs(chunks, qc.AllowedDocumentIDs)
+	if qc.Collection != "" || qc.FilterDocType != "" {
+		filtered := make([]domain.ScoredChunk, 0, len(chunks))
+		for _, sc := range chunks {
+			collection, _ := sc.Chunk.Metadata["collection"].(string)
+			docType, _ := sc.Chunk.Metadata["doc_type"].(string)
+			if (qc.Collection == "" || collection == qc.Collection) && (qc.FilterDocType == "" || docType == qc.FilterDocType) {
+				filtered = append(filtered, sc)
+			}
+		}
+		chunks = filtered
+	}
+	return chunks
+}
+
+// CheckEvidenceScope verifies the original candidate bodies before a response
+// releases evidence or diagnostics derived from it.
+func (qc *QueryContext) CheckEvidenceScope(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if qc.AnswerMode != domain.AnswerModeEvidence {
+		return nil
+	}
+	// Probe candidates can influence the public retrieval mode even when
+	// retrieval returns no evidence.
+	candidates := slices.Concat(qc.Candidates, qc.RetrievedChunks)
+	if len(candidates) == 0 {
+		return nil
+	}
+	visible := filterEvidenceScope(qc, candidates)
+	var previews map[string]string
+	if qc.EvidenceVisibility != nil && len(visible) != 0 {
+		var probeIDs []string
+		if qc.previewRouting != nil {
+			probeIDs = qc.previewRouting.documentIDs
+		}
+		var err error
+		visible, previews, err = qc.EvidenceVisibility.VisibleEvidenceWithPreviews(ctx, visible, probeIDs)
+		if err != nil {
+			return fmt.Errorf("evidence response: %w", err)
+		}
+	}
+	if len(visible) != len(candidates) {
+		return ErrEvidenceScopeChanged
+	}
+	for i, candidate := range candidates {
+		docType, _ := candidate.Chunk.Metadata["doc_type"].(string)
+		currentDocType, _ := visible[i].Chunk.Metadata["doc_type"].(string)
+		if docType != currentDocType {
+			return ErrEvidenceScopeChanged
+		}
+	}
+	if routing := qc.previewRouting; routing != nil {
+		if previews == nil {
+			var err error
+			previews, err = routing.stage.previews.DocumentPreviews(ctx, routing.documentIDs)
+			if err != nil {
+				return fmt.Errorf("evidence response: previews: %w", err)
+			}
+		}
+		current := routing.stage.selectRoute(qc, previews, routing.documentIDs)
+		if current.mode != routing.original.mode || current.localDocumentID != routing.original.localDocumentID {
+			return ErrEvidenceScopeChanged
+		}
+	}
+	return ctx.Err()
 }
 
 func visibleChunks(ctx context.Context, chunks []domain.ScoredChunk, visibility domain.DocumentVisibility) ([]domain.ScoredChunk, error) {
@@ -203,10 +310,9 @@ func (s *RetrievalStage) Run(ctx context.Context, qc *QueryContext) error {
 	// Enforce the caller's tenant/role allowlist BEFORE the synthesis stage
 	// runs, so privileged content never reaches the LLM context (and so can
 	// never leak into the generated answer). A nil allowlist is a no-op.
-	chunks := filterChunksByAllowedDocIDs(result.Chunks, qc.AllowedDocumentIDs)
 	qc.RetrievedChunks = nil
 	qc.TopScore = 0
-	chunks, err = visibleChunks(ctx, chunks, s.visibility)
+	chunks, err := scopedChunks(ctx, qc, result.Chunks, s.visibility)
 	if err != nil {
 		return fmt.Errorf("retrieval_stage: visibility: %w", err)
 	}
@@ -257,7 +363,7 @@ func (s *RerankStage) ID() StageID { return StageRerank }
 
 // Run preserves vector order when reranking fails or its deadline expires.
 func (s *RerankStage) Run(ctx context.Context, qc *QueryContext) error {
-	if s.reranker == nil || len(qc.RetrievedChunks) == 0 {
+	if qc.AnswerMode == domain.AnswerModeEvidence || s.reranker == nil || len(qc.RetrievedChunks) == 0 {
 		return nil
 	}
 	rerankCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -392,6 +498,20 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	qc.ContextChunks = len(chunks)
 	qc.Truncated = truncated
 	qc.Excerpts = chunks
+	if qc.AnswerMode == domain.AnswerModeEvidence {
+		qc.FinishReason = domain.FinishReasonEvidenceOnly
+		qc.FinalAnswer = ""
+		qc.TokenUsage = domain.TokenUsage{}
+		qc.ContentLanguage = ""
+		qc.ContextTokens = 0
+		for _, sc := range chunks {
+			qc.ContextTokens += llm.EstimateTokens(sc.Chunk.Text)
+		}
+		if qc.Stream != nil {
+			return qc.Stream.start(ctx)
+		}
+		return ctx.Err()
+	}
 
 	system, parts := buildSynthesisPrompt(qc.OriginalQuery, chunks, newBoundary())
 	if qc.IncludeCitations {
