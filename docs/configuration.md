@@ -78,7 +78,7 @@ The table below lists the environment variables recognized by the service:
 | `SYNTHESIS_RELATIVE_SCORE_FLOOR` | float64 | `0.55` | 0 to 1, finite | Minimum candidate score relative to the best retrieved score. |
 | `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries with Bedrock. |
 | `VECTOR_STORE` | string | `"pinecone"` | `pinecone` or `postgres` | Persistent vector backend; offline fake mode always uses memory. PostgreSQL vectors require the [deployment prerequisites](deployment.md#postgresql-vectors). |
-| `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including running jobs. |
+| `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including pending, delayed and running jobs. |
 
 ---
 

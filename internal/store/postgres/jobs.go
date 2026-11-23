@@ -14,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+const ingestAdmissionLock = int64(0x7175617272790002)
+
 // AcceptDocument atomically reserves document identity and queues ingestion.
 func (c *Client) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
 	for attempt := 0; attempt < 2; attempt++ {
@@ -32,13 +34,14 @@ func (c *Client) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (
 
 func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
 	result := domain.AcceptResult{DocumentID: req.Document.ID}
-	tx, err := c.Pool.Begin(ctx)
+	// Reads after the advisory lock wait must see the previous holder's commit.
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return result, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	// Serialize admission so concurrent requests cannot overfill the durable queue.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(0x7175617272790002)); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 		return result, err
 	}
 	var id, state string
@@ -73,16 +76,7 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 			result.Outcome = domain.AcceptInProgress
 			return result, nil
 		case "failed":
-			_, err = tx.Exec(ctx, `UPDATE documents SET status='processing',last_error=NULL,updated_at=NOW() WHERE id=$1`, id)
-			if err != nil {
-				return result, err
-			}
-			_, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id) VALUES($1) ON CONFLICT DO NOTHING`, id)
-			if err != nil {
-				return result, err
-			}
-			result.Outcome = domain.AcceptRequeued
-			return result, tx.Commit(ctx)
+			// Terminal failure removed the job, so a retry needs queue capacity.
 		default:
 			return result, fmt.Errorf("unexpected document status %q", state)
 		}
@@ -95,6 +89,16 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 	if count >= req.MaxPending {
 		result.Outcome = domain.AcceptQueueFull
 		return result, nil
+	}
+	if id != "" {
+		if _, err = tx.Exec(ctx, `UPDATE documents SET status='processing',last_error=NULL,updated_at=NOW() WHERE id=$1`, id); err != nil {
+			return result, err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id) VALUES($1) ON CONFLICT DO NOTHING`, id); err != nil {
+			return result, err
+		}
+		result.Outcome = domain.AcceptRequeued
+		return result, tx.Commit(ctx)
 	}
 	metadata := req.Document.Metadata
 	if metadata == nil {

@@ -15,9 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func jobsDatabase(t *testing.T) *Client {
+func jobsDatabase(t *testing.T, opts ...Option) *Client {
 	t.Helper()
-	c, err := NewClient(t.Context(), startTestDatabase(t))
+	c, err := NewClient(t.Context(), startTestDatabase(t), opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
 	require.NoError(t, c.RunMigrations(t.Context()))
@@ -293,7 +293,7 @@ func TestConcurrentDuplicateAtQueueCapacity(t *testing.T) {
 	lock, err := c.Pool.Begin(t.Context())
 	require.NoError(t, err)
 	defer func() { _ = lock.Rollback(t.Context()) }()
-	_, err = lock.Exec(t.Context(), `SELECT pg_advisory_xact_lock($1)`, int64(0x7175617272790002))
+	_, err = lock.Exec(t.Context(), `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock)
 	require.NoError(t, err)
 	results := make(chan domain.AcceptResult, 2)
 	errs := make(chan error, 2)
