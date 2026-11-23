@@ -31,6 +31,10 @@ Notable changes are grouped by release.
 - The architecture documentation lists the tracing middleware in the request middleware order.
 - **Breaking:** Startup rejects `CHUNK_OVERLAP` above `CHUNK_TOKEN_SIZE/2`, which was previously accepted, and chunk output now grows linearly with document size. Chunks keep the source spacing between sentences instead of adding a space after full-width terminators such as `。`.
 
+### Security
+
+- Build Quarry with Go 1.27.4 to fix GO-2026-6859 in the HTTP server.
+
 ## [0.1.0] - 2026-11-09
 
 ### Added
