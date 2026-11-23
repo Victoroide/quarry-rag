@@ -18,6 +18,9 @@ const ingestAdmissionLock = int64(0x7175617272790002)
 
 // AcceptDocument atomically reserves document identity and queues ingestion.
 func (c *Client) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
+	if req.ContentDedup == "" {
+		req.ContentDedup = domain.ContentDedupCollection
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		result, err := c.acceptDocument(ctx, req)
 		var pgErr *pgconn.PgError
@@ -30,6 +33,13 @@ func (c *Client) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (
 		return result, nil
 	}
 	return domain.AcceptResult{}, errors.New("postgres: acceptance retry exhausted")
+}
+
+func identityFingerprint(policy domain.ContentDedup, id domain.DocumentID, fingerprint string) string {
+	if policy == domain.ContentDedupOff {
+		return chunker.Fingerprint("quarry.document.v1\x00" + string(id) + "\x00" + fingerprint)
+	}
+	return fingerprint
 }
 
 func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
@@ -47,20 +57,21 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 	var id, state string
 	if req.CallerSupplied {
 		var fingerprint *string
-		var content string
-		err = tx.QueryRow(ctx, `SELECT status,fingerprint,content FROM documents WHERE id=$1 FOR UPDATE`, string(req.Document.ID)).Scan(&state, &fingerprint, &content)
+		var content, collection string
+		var policy domain.ContentDedup
+		err = tx.QueryRow(ctx, `SELECT status,fingerprint,content,collection,content_dedup FROM documents WHERE id=$1 FOR UPDATE`, string(req.Document.ID)).Scan(&state, &fingerprint, &content, &collection, &policy)
 		if err == nil {
-			stored := chunker.Fingerprint(content)
-			if fingerprint != nil {
-				stored = *fingerprint
+			if fingerprint == nil {
+				legacy := chunker.ScopedFingerprint(collection, content)
+				fingerprint = &legacy
 			}
-			if stored != req.Fingerprint {
+			if collection != req.Collection || *fingerprint != identityFingerprint(policy, req.Document.ID, req.Fingerprint) {
 				result.Outcome = domain.AcceptConflict
 				return result, nil
 			}
 			id = string(req.Document.ID)
 		}
-	} else {
+	} else if req.ContentDedup == domain.ContentDedupCollection {
 		err = tx.QueryRow(ctx, `SELECT d.id::text,d.status FROM document_fingerprints f JOIN documents d ON d.id=f.document_id WHERE f.fingerprint=$1 FOR UPDATE OF d`, req.Fingerprint).Scan(&id, &state)
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -100,6 +111,10 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 		result.Outcome = domain.AcceptRequeued
 		return result, tx.Commit(ctx)
 	}
+	if req.RequireSource && req.Document.S3Key == nil {
+		result.Outcome = domain.AcceptNeedsSource
+		return result, nil
+	}
 	metadata := req.Document.Metadata
 	if metadata == nil {
 		metadata = map[string]any{}
@@ -116,7 +131,8 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 	if len(preview) > 120 {
 		preview = preview[:120]
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,file_name,file_type,s3_key,doc_type,status,fingerprint,collection) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9,$10)`, string(req.Document.ID), req.Document.Content, string(preview), encoded, req.Document.FileName, req.Document.FileType, req.Document.S3Key, metadata["doc_type"], req.Fingerprint, req.Collection)
+	fingerprint := identityFingerprint(req.ContentDedup, req.Document.ID, req.Fingerprint)
+	_, err = tx.Exec(ctx, `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,file_name,file_type,s3_key,doc_type,status,fingerprint,collection,content_dedup) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9,$10,$11)`, string(req.Document.ID), req.Document.Content, string(preview), encoded, req.Document.FileName, req.Document.FileType, req.Document.S3Key, metadata["doc_type"], fingerprint, req.Collection, req.ContentDedup)
 	if err != nil {
 		return result, err
 	}
@@ -125,12 +141,14 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 			return result, err
 		}
 	}
-	query := `INSERT INTO document_fingerprints(fingerprint,document_id) VALUES($1,$2)`
-	if req.CallerSupplied {
-		query += ` ON CONFLICT(fingerprint) DO NOTHING`
-	}
-	if _, err = tx.Exec(ctx, query, req.Fingerprint, string(req.Document.ID)); err != nil {
-		return result, err
+	if req.ContentDedup == domain.ContentDedupCollection {
+		query := `INSERT INTO document_fingerprints(fingerprint,document_id) VALUES($1,$2)`
+		if req.CallerSupplied {
+			query += ` ON CONFLICT(fingerprint) DO NOTHING`
+		}
+		if _, err = tx.Exec(ctx, query, fingerprint, string(req.Document.ID)); err != nil {
+			return result, err
+		}
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id) VALUES($1)`, string(req.Document.ID)); err != nil {
 		return result, err
@@ -197,14 +215,17 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	tag, err := tx.Exec(ctx, `UPDATE documents SET status='completed',chunk_count=$2,completed_at=NOW(),updated_at=NOW(),last_error=NULL WHERE id=$1 AND status='processing'`, string(j.Document.ID), len(chunks))
+	var policy domain.ContentDedup
+	var fingerprint *string
+	var collection string
+	err = tx.QueryRow(ctx, `UPDATE documents SET status='completed',chunk_count=$2,completed_at=NOW(),updated_at=NOW(),last_error=NULL WHERE id=$1 AND status='processing' RETURNING content_dedup,fingerprint,collection`, string(j.Document.ID), len(chunks)).Scan(&policy, &fingerprint, &collection)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	if tag.RowsAffected() != 1 {
-		return false, nil
-	}
-	tag, err = tx.Exec(ctx, `DELETE FROM ingest_jobs WHERE document_id=$1 AND lease_owner=$2 AND attempts=$3 AND state='running' AND lease_until>NOW()`, string(j.Document.ID), j.LeaseOwner, j.Attempts)
+	tag, err := tx.Exec(ctx, `DELETE FROM ingest_jobs WHERE document_id=$1 AND lease_owner=$2 AND attempts=$3 AND state='running' AND lease_until>NOW()`, string(j.Document.ID), j.LeaseOwner, j.Attempts)
 	if err != nil {
 		return false, err
 	}
@@ -240,15 +261,17 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 			return false, fmt.Errorf("postgres: complete vectors: %w", err)
 		}
 	}
-	fingerprint := j.Document.Fingerprint
-	if fingerprint == "" {
-		fingerprint = chunker.Fingerprint(j.Document.Content)
-	}
-	if _, err = tx.Exec(ctx, `UPDATE documents SET fingerprint=$2 WHERE id=$1 AND fingerprint IS NULL`, string(j.Document.ID), fingerprint); err != nil {
-		return false, err
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO document_fingerprints(fingerprint,document_id) VALUES($1,$2) ON CONFLICT(fingerprint) DO NOTHING`, fingerprint, string(j.Document.ID)); err != nil {
-		return false, err
+	if policy == domain.ContentDedupCollection {
+		if fingerprint == nil {
+			legacy := chunker.ScopedFingerprint(collection, j.Document.Content)
+			fingerprint = &legacy
+			if _, err = tx.Exec(ctx, `UPDATE documents SET fingerprint=$2 WHERE id=$1`, string(j.Document.ID), *fingerprint); err != nil {
+				return false, err
+			}
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO document_fingerprints(fingerprint,document_id) VALUES($1,$2) ON CONFLICT(fingerprint) DO NOTHING`, *fingerprint, string(j.Document.ID)); err != nil {
+			return false, err
+		}
 	}
 	if commitErr := tx.Commit(ctx); commitErr != nil {
 		return false, commitErr

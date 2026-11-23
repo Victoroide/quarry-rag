@@ -18,6 +18,16 @@ const (
 	AcceptRequeued
 	AcceptConflict
 	AcceptQueueFull
+	AcceptNeedsSource
+)
+
+// ContentDedup controls whether uploads participate in collection-wide content matching.
+type ContentDedup string
+
+// Content deduplication policies distinguish shared and document-bound identity.
+const (
+	ContentDedupCollection ContentDedup = "collection"
+	ContentDedupOff        ContentDedup = "off"
 )
 
 // AcceptRequest supplies document identity, content, and queue admission limits.
@@ -27,6 +37,8 @@ type AcceptRequest struct {
 	Fingerprint    string
 	DocType        string
 	Collection     string
+	ContentDedup   ContentDedup
+	RequireSource  bool
 	MaxPending     int
 }
 

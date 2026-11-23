@@ -68,7 +68,7 @@ sequenceDiagram
     participant Pinecone as Vector Store
     Caller->>Handler: POST /ingest
     Handler->>Handler: Extract, remove content NUL, validate
-    opt Source storage enabled and no duplicate for this identity
+    opt Source storage enabled and no shared match to reuse
         Handler->>S3: Upload original file
     end
     Handler->>Postgres: AcceptDocument transaction
@@ -239,15 +239,15 @@ The base relational schema is defined across embedded SQL migrations applied in 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.svg">
-  <img alt="Data model. documents contains id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at, completed_at, collection and text_source. chunks contains id, document_id, chunk_index, text, token_count and created_at. document_fingerprints contains fingerprint, document_id and created_at. ingest_jobs contains document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at and updated_at. Each child references documents.id with cascading deletion. A document has zero or more chunks and fingerprints and at most one ingestion job. PK denotes primary key and FK denotes foreign key; SQL types appear beside every column. Fingerprints are scoped to the collection; document_fingerprints stores the scoped digest." src="diagrams/database-schema-light.svg">
+  <img alt="Data model. documents contains id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at, completed_at, collection, text_source and content_dedup. chunks contains id, document_id, chunk_index, text, token_count and created_at. document_fingerprints contains fingerprint, document_id and created_at. ingest_jobs contains document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at and updated_at. Each child references documents.id with cascading deletion. A document has zero or more chunks and fingerprints and at most one ingestion job. PK denotes primary key and FK denotes foreign key; SQL types appear beside every column. Only documents with the collection policy appear in document_fingerprints." src="diagrams/database-schema-light.svg">
 </picture>
 
 ### Table Definitions
 
-- **`documents`**: Stores primary document records, full content, status lifecycle (`processing`, `completed`, `failed`), extracted prefix preview, file metadata, object storage references, document labels, and a non-null `collection TEXT` defaulting to `''` with an index on `(collection, id)`.
+- **`documents`**: Stores primary document records, full content, status lifecycle (`processing`, `completed`, `failed`), extracted prefix preview, file metadata, object storage references, document labels, and a non-null `collection TEXT` defaulting to `''` with an index on `(collection, id)`. For private uploads, `fingerprint` incorporates the document UUID so equal content has different digests across identities.
 - **`chunks`**: Stores segmented text blocks and approximate token counts linked to parent documents via cascading foreign keys.
 - **`ingest_jobs`**: Stores pending or running work, attempt counts, lease ownership and expiry, retry scheduling, and the latest error. Deleting a document cascades to its job.
-- **`document_fingerprints`**: Maps collection-scoped SHA-256 content fingerprints to document UUIDs, providing deduplication across ingest requests.
+- **`document_fingerprints`**: Maps collection-scoped SHA-256 content fingerprints to document UUIDs accepted under the `collection` policy.
 
 ---
 

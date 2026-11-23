@@ -123,6 +123,84 @@ func TestAcceptIsAtomicUnderConcurrency(t *testing.T) {
 	require.Equal(t, 1, docs)
 	require.Equal(t, 1, jobs)
 }
+
+func TestPrivateIdentitySurvivesPolicySwitchAndLeaseReclaim(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+	const content = "private report"
+	req := jobsRequest(content)
+	req.CallerSupplied = true
+	req.Collection = "archive"
+	req.Fingerprint = chunker.ScopedFingerprint(req.Collection, content)
+	req.ContentDedup = domain.ContentDedupOff
+	private, err := c.AcceptDocument(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, private.Outcome)
+
+	job, err := c.ClaimJob(ctx, "first", time.Minute, 5)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, private.DocumentID, job.Document.ID)
+	require.NotEqual(t, req.Fingerprint, job.Document.Fingerprint)
+
+	// Simulate switching policy before the first attempt expires.
+	req.ContentDedup = domain.ContentDedupCollection
+	inFlight, err := c.AcceptDocument(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptInProgress, inFlight.Outcome)
+	require.Equal(t, private.DocumentID, inFlight.DocumentID)
+	_, exists, err := c.CheckFingerprint(ctx, req.Fingerprint)
+	require.NoError(t, err)
+	require.False(t, exists)
+	require.Error(t, c.StoreFingerprint(ctx, req.Fingerprint, string(private.DocumentID)))
+
+	_, err = c.Pool.Exec(ctx, `UPDATE ingest_jobs SET lease_until=NOW()-interval '1 second' WHERE document_id=$1`, private.DocumentID)
+	require.NoError(t, err)
+	next, err := c.ClaimJob(ctx, "second", time.Minute, 5)
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	require.Equal(t, private.DocumentID, next.Document.ID)
+	require.Equal(t, 2, next.Attempts)
+	done, err := c.CompleteJob(ctx, *job, nil)
+	require.NoError(t, err)
+	require.False(t, done)
+	done, err = c.CompleteJob(ctx, *next, nil)
+	require.NoError(t, err)
+	require.True(t, done)
+	_, exists, err = c.CheckFingerprint(ctx, req.Fingerprint)
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	same, err := c.AcceptDocument(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptDuplicate, same.Outcome)
+	require.Equal(t, private.DocumentID, same.DocumentID)
+	req.CallerSupplied = false
+	req.Document.ID = domain.DocumentID(uuid.NewString())
+	public, err := c.AcceptDocument(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, public.Outcome)
+	require.NotEqual(t, private.DocumentID, public.DocumentID)
+	mapped, exists, err := c.CheckFingerprint(ctx, req.Fingerprint)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, public.DocumentID, mapped)
+
+	req.ContentDedup = domain.ContentDedupOff
+	req.Document.ID = domain.DocumentID(uuid.NewString())
+	another, err := c.AcceptDocument(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, another.Outcome)
+	require.NotEqual(t, public.DocumentID, another.DocumentID)
+	var policy, fingerprint string
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT content_dedup,fingerprint FROM documents WHERE id=$1`, another.DocumentID).Scan(&policy, &fingerprint))
+	require.Equal(t, string(domain.ContentDedupOff), policy)
+	require.NotEqual(t, job.Document.Fingerprint, fingerprint)
+	mapped, exists, err = c.CheckFingerprint(ctx, req.Fingerprint)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, public.DocumentID, mapped)
+}
 func TestAcceptCallerIDConflict(t *testing.T) {
 	c := jobsDatabase(t)
 	req := jobsRequest("original")
@@ -155,6 +233,30 @@ func TestAcceptRequeuesFailedDuplicate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, job)
 	require.Equal(t, 1, job.Attempts)
+}
+
+func TestFailedDuplicateRespectsQueueLimit(t *testing.T) {
+	c := jobsDatabase(t)
+	req := jobsRequest("failed at capacity")
+	req.CallerSupplied = true
+	req.MaxPending = 1
+	accepted, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, accepted.Outcome)
+	failed, err := c.ClaimJob(t.Context(), "first", time.Minute, 5)
+	require.NoError(t, err)
+	require.NotNil(t, failed)
+	require.NoError(t, c.FailJob(t.Context(), *failed, "terminal failure"))
+	jobsAccept(t, c, "occupies the queue")
+
+	denied, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptQueueFull, denied.Outcome)
+	var status string
+	var pending int
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT status,(SELECT count(*) FROM ingest_jobs) FROM documents WHERE id=$1`, req.Document.ID).Scan(&status, &pending))
+	require.Equal(t, "failed", status)
+	require.Equal(t, 1, pending)
 }
 func TestAcceptQueueFull(t *testing.T) {
 	c := jobsDatabase(t)
@@ -274,16 +376,21 @@ func TestLegacyProcessingRowsAreRequeued(t *testing.T) {
 	_, err = c.Pool.Exec(t.Context(), `INSERT INTO document_fingerprints(fingerprint,document_id) VALUES ('legacy',$1)`, ids[0])
 	require.NoError(t, err)
 	require.NoError(t, c.RunMigrations(t.Context()))
-	var state string
-	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT status FROM documents WHERE id=$1`, ids[0]).Scan(&state))
+	var state, policy string
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT status,content_dedup FROM documents WHERE id=$1`, ids[0]).Scan(&state, &policy))
 	require.Equal(t, "completed", state)
+	require.Equal(t, string(domain.ContentDedupCollection), policy)
+	mapped, exists, err := c.CheckFingerprint(t.Context(), "legacy")
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, domain.DocumentID(ids[0]), mapped)
 	job, err := c.ClaimJob(t.Context(), "owner", time.Minute, 5)
 	require.NoError(t, err)
 	require.Equal(t, domain.DocumentID(ids[1]), job.Document.ID)
 	ok, err := c.CompleteJob(t.Context(), *job, nil)
 	require.NoError(t, err)
 	require.True(t, ok)
-	_, exists, err := c.CheckFingerprint(t.Context(), chunker.Fingerprint("legacy 1"))
+	_, exists, err = c.CheckFingerprint(t.Context(), chunker.Fingerprint("legacy 1"))
 	require.NoError(t, err)
 	require.True(t, exists)
 }
