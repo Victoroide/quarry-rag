@@ -6,6 +6,7 @@ Notable changes are grouped by release.
 
 ### Added
 
+- `INGEST_CONTENT_DEDUP=off` lets deployments disable content matching across upload IDs and retain explicit UUID retries.
 - Optional OCR of image-only PDF uploads through Amazon Textract (`OCR_PROVIDER=textract`, requires `S3_BUCKET`; migration 008).
 - Optional PostgreSQL vector store (`VECTOR_STORE=postgres`, pgvector) that writes vectors in the completion transaction.
 - The README shows release and Go reference badges and describes installing released artifacts.

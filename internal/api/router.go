@@ -48,8 +48,12 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		tokens = []string{deps.Config.ServiceToken}
 	}
 	middleware.LogServiceAuthState(tokens)
-	ingestOpts := []handler.IngestOption{handler.WithMaxPending(deps.Config.WorkerQueueSize), handler.WithUploadLimiter(extractor.NewLimiter(deps.Config.ExtractConcurrency, deps.Config.ExtractQueueTimeout))}
-	ingestOpts = append(ingestOpts, handler.WithOCR(deps.Config.OCRProvider == "textract" && !deps.Config.FakeMode))
+	ingestOpts := []handler.IngestOption{
+		handler.WithMaxPending(deps.Config.WorkerQueueSize),
+		handler.WithUploadLimiter(extractor.NewLimiter(deps.Config.ExtractConcurrency, deps.Config.ExtractQueueTimeout)),
+		handler.WithContentDedup(deps.Config.IngestContentDedup),
+		handler.WithOCR(deps.Config.OCRProvider == "textract" && !deps.Config.FakeMode),
+	}
 	if deps.Config.ExtractIsolation {
 		sb, err := extractor.NewSandbox(extractor.SandboxConfig{Timeout: deps.Config.ExtractTimeout, MemoryLimitMB: deps.Config.ExtractMemoryLimitMB})
 		if err != nil {

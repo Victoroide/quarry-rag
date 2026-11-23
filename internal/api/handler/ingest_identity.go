@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
@@ -34,9 +33,6 @@ func acceptIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker, cs
 		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return domain.AcceptConflict, errors.New("durable acceptance is unavailable")
 	}
-	if req.Document.TextSource != "ocr_pending" {
-		req.Fingerprint = chunker.ScopedFingerprint(req.Collection, req.Document.Content)
-	}
 	acceptCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 	defer cancel()
 	result, err := acceptor.AcceptDocument(acceptCtx, req)
@@ -59,6 +55,8 @@ func acceptIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker, cs
 	case domain.AcceptQueueFull:
 		rw.Header().Set("Retry-After", "30")
 		writeJSONError(rw, http.StatusServiceUnavailable, "queue", "ingest queue is full")
+		return result.Outcome, nil
+	case domain.AcceptNeedsSource:
 		return result.Outcome, nil
 	default:
 		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")

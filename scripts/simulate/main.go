@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -162,7 +163,24 @@ func loadDatabaseURL() string {
 
 func isValidUUID(s string) bool { _, err := uuid.Parse(s); return err == nil }
 
+func expectedIngestPolicy(value string) (domain.ContentDedup, error) {
+	policy := domain.ContentDedup(value)
+	switch policy {
+	case "", domain.ContentDedupCollection:
+		return domain.ContentDedupCollection, nil
+	case domain.ContentDedupOff:
+		return policy, nil
+	default:
+		return "", fmt.Errorf("INGEST_CONTENT_DEDUP must be collection or off")
+	}
+}
+
 func main() {
+	policy, err := expectedIngestPolicy(os.Getenv("INGEST_CONTENT_DEDUP"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	fmt.Println("═══════════════════════════════════════════════")
 	fmt.Println("  Document Service Simulation")
 	fmt.Println("═══════════════════════════════════════════════")
@@ -176,7 +194,7 @@ func main() {
 	// Wait and verify in Postgres
 	verifyPostgres()
 	// ── SCENARIO 4 ──
-	scenario4()
+	scenario4(policy)
 	// ── SCENARIO 5 ──
 	scenario5()
 	// ── SCENARIO 6 ──
@@ -331,27 +349,59 @@ func verifyPostgres() {
 	fmt.Println("  Postgres verification: PASSED")
 }
 
-// ── SCENARIO 4: Deduplication check ──
-func scenario4() {
+// ── SCENARIO 4: Repeat upload identity ──
+func scenario4(policy domain.ContentDedup) {
 	reqBody := map[string]interface{}{
 		"content":  "Reference Guide: Cedar Archive. Covers Python, gRPC, PostgreSQL, Docker, AWS S3, Redis, REST APIs and JWT. Describes four years of archival system operation and document preservation.",
 		"doc_type": "reference",
 	}
 	resp, body, err := doRequest("POST", "/ingest", reqBody)
 	if err != nil {
-		printScenario(4, "Deduplication check", "POST", "/ingest", reqBody, 0, nil, false, fmt.Sprintf("request error: %v", err))
+		printScenario(4, "Repeat upload identity", "POST", "/ingest", reqBody, 0, nil, false, fmt.Sprintf("request error: %v", err))
 		return
 	}
 	var ir ingestResp
-	_ = json.Unmarshal(body, &ir)
-
-	ok := (resp.StatusCode == 200 || resp.StatusCode == 202) &&
-		(ir.Status == "already_ingested" || ir.DocumentID == guideID)
+	decodeErr := json.Unmarshal(body, &ir)
+	ok := decodeErr == nil && matchesRepeatIngest(policy, resp.StatusCode, ir, guideID)
 	reason := ""
 	if !ok {
-		reason = fmt.Sprintf("status=%d resp_status=%q doc_id=%q guide_id=%q", resp.StatusCode, ir.Status, ir.DocumentID, guideID)
+		reason = fmt.Sprintf("policy=%s status=%d resp_status=%q doc_id=%q guide_id=%q", policy, resp.StatusCode, ir.Status, ir.DocumentID, guideID)
+	} else if policy == domain.ContentDedupOff {
+		if err := deleteRepeatDocument(ir.DocumentID); err != nil {
+			ok = false
+			reason = err.Error()
+		}
 	}
-	printScenario(4, "Deduplication check", "POST", "/ingest", reqBody, resp.StatusCode, body, ok, reason)
+	printScenario(4, "Repeat upload identity", "POST", "/ingest", reqBody, resp.StatusCode, body, ok, reason)
+}
+
+func matchesRepeatIngest(policy domain.ContentDedup, status int, response ingestResp, previousID string) bool {
+	id, err := uuid.Parse(response.DocumentID)
+	if err != nil {
+		return false
+	}
+	previous, err := uuid.Parse(previousID)
+	if err != nil {
+		return false
+	}
+	if policy == domain.ContentDedupOff {
+		return id != previous && status == http.StatusAccepted && response.Status == "processing"
+	}
+	return id == previous && ((status == http.StatusOK && response.Status == "already_ingested") ||
+		(status == http.StatusAccepted && response.Status == "processing"))
+}
+
+func deleteRepeatDocument(id string) error {
+	resp, body, err := doRequest(http.MethodDelete, "/documents/"+id, nil)
+	if err != nil {
+		return fmt.Errorf("delete repeated upload %s: %w", id, err)
+	}
+	var deleted deleteResp
+	decodeErr := json.Unmarshal(body, &deleted)
+	if resp.StatusCode != http.StatusOK || decodeErr != nil || !deleted.Deleted || deleted.DocID != id {
+		return fmt.Errorf("delete repeated upload %s: status=%d deleted=%v", id, resp.StatusCode, deleted.Deleted)
+	}
+	return nil
 }
 
 // ── SCENARIO 5: Query with filter_doc_type=reference ──

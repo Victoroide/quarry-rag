@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/Victoroide/quarry-rag/internal/domain"
 )
 
 // Config holds all operational parameters for the service.
@@ -95,6 +97,7 @@ type Config struct {
 	IngestLease        time.Duration
 	IngestJobTimeout   time.Duration
 	IngestPollInterval time.Duration
+	IngestContentDedup domain.ContentDedup
 
 	IndexVisibilityTimeout time.Duration
 
@@ -147,6 +150,7 @@ func Load() (*Config, error) {
 		AWSSessionToken:       os.Getenv("AWS_SESSION_TOKEN"),
 		RerankModelARN:        os.Getenv("RERANK_MODEL_ARN"),
 		OCRProvider:           envOrDefault("OCR_PROVIDER", "none"),
+		IngestContentDedup:    domain.ContentDedup(envOrDefault("INGEST_CONTENT_DEDUP", string(domain.ContentDedupCollection))),
 	}
 	cfg.LLMProvider = envOrDefault("LLM_PROVIDER", "bedrock")
 	cfg.EmbeddingProvider = envOrDefault("EMBEDDING_PROVIDER", "bedrock")
@@ -426,6 +430,9 @@ func (c *Config) validate() error {
 	}
 	if c.IngestPollInterval < 100*time.Millisecond || c.IngestPollInterval > time.Minute {
 		return fmt.Errorf("config: INGEST_POLL_INTERVAL must be between 100ms and 1m")
+	}
+	if c.IngestContentDedup != "" && c.IngestContentDedup != domain.ContentDedupCollection && c.IngestContentDedup != domain.ContentDedupOff {
+		return fmt.Errorf("config: INGEST_CONTENT_DEDUP must be collection or off")
 	}
 	if c.IndexVisibilityTimeout < 0 || c.IndexVisibilityTimeout > 5*time.Minute || c.IndexVisibilityTimeout >= c.IngestJobTimeout {
 		return fmt.Errorf("config: INDEX_VISIBILITY_TIMEOUT must be between 0s and 5m and below INGEST_JOB_TIMEOUT")

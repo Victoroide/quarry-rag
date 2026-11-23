@@ -3,14 +3,16 @@ package handler
 import (
 	"context"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
 )
 
 type ingestOptions struct {
-	maxPending int
-	extract    func(context.Context, extractor.FileType, []byte) (string, error)
-	limiter    *extractor.Limiter
-	ocr        bool
+	maxPending   int
+	extract      func(context.Context, extractor.FileType, []byte) (string, error)
+	limiter      *extractor.Limiter
+	ocr          bool
+	contentDedup domain.ContentDedup
 }
 
 // WithOCR enables deferred text detection for image-only PDF uploads.
@@ -20,6 +22,15 @@ func WithOCR(enabled bool) IngestOption {
 
 // IngestOption configures file extraction and upload admission.
 type IngestOption func(*ingestOptions)
+
+// WithContentDedup selects how new uploads participate in collection-wide matching.
+func WithContentDedup(policy domain.ContentDedup) IngestOption {
+	return func(opts *ingestOptions) {
+		if policy != "" {
+			opts.contentDedup = policy
+		}
+	}
+}
 
 // WithExtractor selects the function used to extract uploaded document text.
 func WithExtractor(extract func(context.Context, extractor.FileType, []byte) (string, error)) IngestOption {

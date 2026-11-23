@@ -222,10 +222,17 @@ go run ./scripts/langeval -compare baseline,after
 
 ### End-to-End Simulation (`scripts/simulate`)
 
-Simulates a sequential series of client interactions against a running instance on port 8081, verifying health checks, JSON ingestion, duplicate detection, vector query modes, and document deletion:
+Simulates a sequential series of client interactions against a running instance on port 8081, verifying health checks, JSON ingestion, upload identity, vector query modes, and document deletion. The simulator expects the default `collection` policy.
 
 ```sh
 go run ./scripts/simulate/main.go
+```
+
+Set the expected policy when the service uses `off`. The simulation verifies
+the additional upload gets its own ID and deletes that document.
+
+```sh
+INGEST_CONTENT_DEDUP=off go run ./scripts/simulate/main.go
 ```
 
 ### Retrieval Validation (`scripts/validate`)

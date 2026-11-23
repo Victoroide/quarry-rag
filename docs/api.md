@@ -111,6 +111,21 @@ A document's `status` becomes `completed` after its vectors and chunks are store
 - **Path**: `/ingest`
 - **Auth**: Required (`X-Service-Token`)
 
+#### Document identity
+
+A supplied `document_id` is retained in canonical UUID form. Reusing it with
+the same content and collection follows the [retry rules](#queue-admission-and-retries).
+Reusing an ID with different content or collection returns 409 `conflict`
+with message `document_id already exists with different content`.
+Existing documents are never overwritten.
+
+When `document_id` is empty or omitted, a deployment using the default
+`collection` policy may return the ID of a document registered for shared
+matching with the same content and collection. With `off`, each accepted
+upload without an explicit ID receives a new UUID. Documents accepted with
+`off` remain excluded from content matching when the policy changes.
+Document lookup or acceptance failures return 503 `unavailable`.
+
 #### Queue admission and retries
 
 New documents and retries of failed documents each require a slot in the
@@ -133,9 +148,9 @@ Request fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `content` | string | yes | Document text content (maximum 1,000,000 bytes after JSON decoding) |
-| `collection` | string | no | Collection label that scopes content deduplication, using the label rules above |
+| `collection` | string | no | Collection label, using the label rules above |
 | `doc_type` | string | no | Document category label. Defaults to `"document"` if omitted |
-| `document_id` | string | no | Optional document UUID, retained in canonical form. Omitted or empty values generate a fresh UUID; malformed non-empty values return 400 |
+| `document_id` | string | no | Optional document UUID. Malformed non-empty values return 400. See [document identity](#document-identity) for omitted or empty values. |
 | `metadata` | object | no | Optional key-value metadata stored only in PostgreSQL, subject to the size, nesting and NUL limits above |
 
 Response (New Document):
@@ -151,18 +166,6 @@ Response (New Document):
 Response (Duplicate Document):
 - **Status**: `200 OK`
 
-When `document_id` is supplied, the same content fingerprint follows the queue
-admission and retry rules above. Different content or a different collection
-under an existing identifier returns 409 with
-`{"error":"conflict","message":"document_id already exists with different content"}`.
-Existing documents are never overwritten.
-
-Content deduplication across identifiers applies only when `document_id` is
-omitted or empty, and only within the request's collection. A new
-caller-supplied identifier is retained even if another document has identical
-content. Document or fingerprint lookup failures return 503 with
-`{"error":"unavailable","message":"document store unavailable"}`.
-
 ```json
 {
   "document_id": "8a3e792c-5df6-4b6e-a612-4f7db4959db2",
@@ -176,7 +179,7 @@ Error Status Codes:
 |---|---|---|
 | `400 Bad Request` | `validation` | Content field missing, empty, blank whitespace, or exceeding 1,000,000 decoded bytes; malformed JSON, unknown fields, duplicate top-level keys or trailing data; invalid label or metadata; non-empty `document_id` is not a UUID (`document_id must be a UUID`) |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
-| `409 Conflict` | `conflict` | Supplied `document_id` already exists with different content |
+| `409 Conflict` | `conflict` | Supplied `document_id` already exists with different content or collection |
 | `413 Payload Too Large` | `validation` | JSON request payload exceeds 8,097,152 bytes |
 | `415 Unsupported Media Type` | `validation` | Content-Type is not `application/json` or `multipart/form-data` |
 | `503 Service Unavailable` | `queue` | See [queue admission and retries](#queue-admission-and-retries) |
@@ -210,7 +213,7 @@ Form fields:
 | `file` | file binary | yes | File to extract and ingest. Accepted formats: PDF, DOCX, DOC and UTF-8 or BOM-marked UTF-16 plain text (`.txt`, `.md`, `.markdown`) |
 | `collection` | string | no | Collection label with the same scope, default and validation rules as JSON ingestion; repeated fields return 400 |
 | `doc_type` | string | no | Document category label. Defaults to `"document"` if omitted |
-| `document_id` | string | no | Optional document UUID with the same identity and conflict rules as JSON requests, applied to extracted text or [OCR input](#image-only-pdf-ocr) |
+| `document_id` | string | no | Optional document UUID. Malformed non-empty values return 400. See [document identity](#document-identity). |
 | `metadata` | JSON object string | no | Optional metadata with the same limits as JSON ingestion; duplicate top-level keys, trailing data and repeated metadata fields return 400. The stored object includes `source_file` set to the uploaded filename, overriding a caller value, and must still fit the size limit |
 
 Uploads are identified by content. PDF headers must appear within the first
@@ -234,10 +237,13 @@ DOC extraction supports the main document text in Word 97–2003 binary document
 headers, footers, footnotes and comments are not extracted. Word 6/95 documents
 and encrypted files return 422.
 
-Uploads follow the [queue admission and retry rules](#queue-admission-and-retries)
-and the JSON identity rules above, with the [OCR input exception](#image-only-pdf-ocr).
-A configured source store must accept the original upload before document
-acceptance. New source objects are removed when acceptance does not retain them.
+Multipart uploads follow the same [document identity rules](#document-identity),
+using extracted text or the [original PDF bytes for OCR](#image-only-pdf-ocr).
+A configured source store must accept the original file before a new document
+is accepted. In collection mode, the service can resolve an explicit UUID or a
+shared match before uploading a source. Each PUT uses a unique object key.
+Cleanup uses best-effort deletion for objects confirmed unused and retains
+objects when ownership is uncertain.
 
 Error Status Codes:
 
@@ -245,7 +251,7 @@ Error Status Codes:
 |---|---|---|
 | `400 Bad Request` | `validation` | Form `file` part missing or read error; invalid label or metadata; non-empty `document_id` is not a UUID |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
-| `409 Conflict` | `conflict` | Supplied `document_id` already exists with different extracted text or OCR input |
+| `409 Conflict` | `conflict` | Supplied `document_id` already exists with different extracted text, OCR input or collection |
 | `413 Payload Too Large` | `validation` | Upload exceeds `MAX_UPLOAD_BYTES` |
 | `415 Unsupported Media Type` | `extraction` | Extension and content disagree, or content has no supported type |
 | `422 Unprocessable Entity` | `extraction` | Document text extraction failed (e.g., malformed binary structure, extracted PDF, DOCX, DOC or text exceeding 1,000,000 bytes, expanded DOCX XML exceeding 16 MiB, a DOC stream declaring a size larger than the file, or PDF extraction work exceeding its limits) |
@@ -287,14 +293,14 @@ curl -X POST localhost:8081/ingest \
 
 With [OCR enabled](configuration.md#environment-variables), a PDF whose parser
 returns `no_text` (fewer than 10 bytes of embedded text after trimming
-whitespace) is uploaded to S3 and accepted with HTTP 202 `processing`. PDFs with
-more embedded text, including partly scanned documents, are ingested from that
-text without OCR.
+whitespace) qualifies for OCR. Newly accepted OCR jobs return HTTP 202
+`processing` after the source file is saved to S3. Duplicate requests follow
+the [document identity rules](#document-identity). PDFs with more embedded text,
+including partly scanned documents, are ingested from that text without OCR.
 PostgreSQL initially stores empty content and `text_source = 'ocr_pending'`.
-Deduplication and caller-supplied identifier conflicts use the collection-scoped
-SHA-256 of the original PDF bytes, preserving that identity after text detection.
-Other formats and extraction errors keep their existing behavior. If the
-original cannot be stored, acceptance returns 503 `storage`.
+The original PDF bytes determine content identity even after text detection.
+When acceptance requires an original that cannot be stored, the API returns
+503 `storage`.
 
 During ingestion, Textract text detection runs against that original while the
 job lease is renewed. All result pages are read; detected lines are ordered by

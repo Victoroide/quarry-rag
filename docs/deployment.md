@@ -145,6 +145,47 @@ Each concurrent multipart upload starts at most one extraction child process. Th
 
 Size container memory to at least `base + EXTRACT_CONCURRENCY × EXTRACT_MEMORY_LIMIT_MB`, where `base` covers the server, buffered uploads and background ingestion. The child memory setting is a soft Go limit; allow additional headroom for runtime overhead and temporary allocations. For child process sandboxing, stack limits, timeouts and termination semantics, see [Extraction Boundaries](architecture.md#extraction-boundaries).
 
+## Content Deduplication Rollout
+
+Deploy the release with migration 009 and leave `INGEST_CONTENT_DEDUP=collection`
+until every replica that accepts uploads or consumes the shared queue has been
+upgraded. Drain and stop earlier replicas before setting
+`INGEST_CONTENT_DEDUP=off` on all ingest replicas. A remaining replica in
+`collection` mode can still match previously shared content.
+
+Switch back to `collection` on upgraded replicas to restore matching for new
+uploads.
+
+Previously returned IDs and existing shared mappings remain valid. Treat an
+explicit-ID conflict as observable and apply authorization at the trusted
+caller. With content matching disabled, repeated implicit uploads can each
+consume database, vector, and original-file storage and incur separate
+processing charges.
+
+### Downgrading
+
+Switch all upgraded replicas to `collection`. Pause ingestion traffic or
+block explicit retries for retained private UUIDs at the trusted caller. Let
+in-flight acceptances finish, then keep upgraded workers running to drain
+pending and leased private jobs. Check the shared database before starting
+earlier workers.
+
+```sql
+SELECT NOT EXISTS (
+    SELECT 1
+    FROM ingest_jobs AS j
+    JOIN documents AS d ON d.id = j.document_id
+    WHERE d.content_dedup = 'off'
+) AS private_queue_drained;
+```
+
+Start earlier workers only when the check returns `true`. Keep the pause or
+retry block in place throughout mixed-version queue consumption. Even in
+`collection` mode, an upgraded replica can requeue a failed private UUID.
+Earlier workers attempt to register a shared fingerprint at completion, and the
+database rejects that write for private documents. Retained private IDs require
+upgraded replicas for explicit retries.
+
 ## Concurrency Limits
 
 Query admission, embedding and extraction limits are process-local, so the cluster-wide maximum is each per-replica value multiplied by the replica count. `QUERY_CONCURRENCY` bounds concurrent queries and therefore concurrent synthesis calls. `EMBED_CONCURRENCY` bounds concurrent embedding calls from ingestion and queries together. `EXTRACT_CONCURRENCY` bounds concurrent multipart uploads, which use local CPU and memory but no model quota.
