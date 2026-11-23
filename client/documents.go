@@ -47,8 +47,9 @@ type DeleteResponse struct {
 
 // FileURL is a temporary download address for an original file.
 type FileURL struct {
-	URL       string `json:"url"`
-	ExpiresIn int    `json:"expires_in"`
+	URL string `json:"url"`
+	// ExpiresIn is the requested lifetime in seconds. The address can stop working sooner.
+	ExpiresIn int `json:"expires_in"`
 }
 
 // ListDocuments retrieves one page of document summaries.
