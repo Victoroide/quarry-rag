@@ -87,7 +87,7 @@ func (c *Client) Upload(
 	return key, nil
 }
 
-// PresignGet returns a presigned GET URL valid for 15 minutes.
+// PresignGet returns a presigned GET URL with a requested lifetime of 15 minutes.
 func (c *Client) PresignGet(ctx context.Context, s3Key string) (string, error) {
 	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(s3Key)})
 	contentType := mime.TypeByExtension(strings.ToLower(path.Ext(s3Key)))

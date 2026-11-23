@@ -325,12 +325,12 @@ OpenAI-compatible tracing sets `gen_ai.system` and `gen_ai.provider.name` to `op
   verify ownership when needed.
 - **Startup Verification**: Client initialization and `HeadBucket` share a 10-second deadline. Access denied (403), a missing bucket (404), or an expected-owner mismatch prevents startup. Transient errors log a warning and allow startup to continue; an initialized client remains available for later requests.
 - S3 stores originals for [accepted multipart uploads](api.md#variant-b-multipart-form-upload),
-  including recognized plain-text files and binary documents. It generates
-  presigned GET download links valid for up to 15 minutes. A link signed with
-  temporary credentials expires when the credentials expire or when the link
-  reaches its own deadline, whichever comes first. Downloads use attachment
-  disposition with the stored filename and an extension-derived content type.
-  Downloaders need no expected-owner header.
+  including recognized plain-text files and binary documents. Clients request
+  [presigned GET URLs for downloads](api.md#get-documentsdoc_idfile). Temporary
+  signing credentials limit new download requests to the end of their AWS
+  session. Revoking the signing principal's read permission, deleting or
+  deactivating its signing key, or tightening an applicable IAM or bucket
+  policy can also end access early. Downloaders need no expected-owner header.
 - **IAM Permissions Required**:
   - `s3:PutObject` on `arn:aws:s3:::{bucket}/documents/*`
   - `s3:GetObject` on `arn:aws:s3:::{bucket}/documents/*`

@@ -137,9 +137,6 @@ func TestSmoke_IngestDOCXFile(t *testing.T) {
 	}
 	defer func() { _ = fileResp.Body.Close() }()
 
-	fileBody, _ := io.ReadAll(fileResp.Body)
-	t.Logf("file response (%d): %s", fileResp.StatusCode, string(fileBody))
-
 	// Should return 200 with presigned URL if S3 upload succeeded, or 404 if S3 was down.
 	if fileResp.StatusCode != http.StatusOK && fileResp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 200 or 404, got %d", fileResp.StatusCode)
