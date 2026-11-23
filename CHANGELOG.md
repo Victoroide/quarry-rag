@@ -25,6 +25,8 @@ Notable changes are grouped by release.
 - Deployment documentation includes PostgreSQL connections in the cross-replica concurrency limits.
 - Documentation diagrams animate one step at a time at a slower pace, keep each highlight lit before it fades, and pause briefly before repeating.
 - The runtime image uses Alpine 3.24.4.
+- AWS retries distinguish throttling from transient errors and honor service-provided retry delays.
+- Textract OCR uses Smithy RPC v2 CBOR by default.
 
 ### Fixed
 
