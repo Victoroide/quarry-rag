@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"context"
 	"errors"
 	"io"
 	"mime"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Victoroide/quarry-rag/internal/extractor"
@@ -89,6 +91,40 @@ func TestPresignForcesAttachment(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPresignRequestsFullLifetimeWithTemporaryCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("presigning contacted the S3 endpoint")
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(server.Close)
+	client := newClient(aws.Config{
+		Region: "us-east-1",
+		Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			return aws.Credentials{
+				AccessKeyID:     "fixture-key",
+				SecretAccessKey: "fixture-secret",
+				SessionToken:    "fixture-session",
+				CanExpire:       true,
+				Expires:         time.Now().Add(time.Minute),
+			}, nil
+		}),
+	}, "fixture-bucket", "", func(o *awss3.Options) {
+		o.BaseEndpoint = &server.URL
+		o.UsePathStyle = true
+	})
+	address, err := client.PresignGet(t.Context(), "documents/report.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(address)
+	if err != nil {
+		t.Fatal("expected a parseable download address")
+	}
+	if got := parsed.Query().Get("X-Amz-Expires"); got != "900" {
+		t.Errorf("requested expiry = %q, want 900", got)
 	}
 }
 

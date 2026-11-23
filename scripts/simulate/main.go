@@ -57,10 +57,8 @@ type deleteResp struct {
 }
 
 type fileResp struct {
-	URL       string `json:"url"`
-	ExpiresIn int    `json:"expires_in"`
-	Error     string `json:"error"`
-	Message   string `json:"message"`
+	Error   string `json:"error"`
+	Message string `json:"message"`
 }
 
 // --- helpers ---
@@ -592,13 +590,13 @@ func scenario10() {
 	}
 	if ok {
 		var fr fileResp
-		_ = json.Unmarshal(body, &fr)
-		if !strings.Contains(fr.Message, "no file stored") && !strings.Contains(fr.Error, "not_found") {
+		if err := json.Unmarshal(body, &fr); err != nil || (!strings.Contains(fr.Message, "no file stored") && !strings.Contains(fr.Error, "not_found")) {
 			ok = false
-			reason = fmt.Sprintf("expected 'no file stored' message, got: %s", string(body))
+			reason = "expected 'no file stored' message or not_found error"
 		}
 	}
-	printScenario(10, "File retrieval URL", "GET", path, nil, resp.StatusCode, body, ok, reason)
+	// The response can contain a signed download address.
+	printScenario(10, "File retrieval URL", "GET", path, nil, resp.StatusCode, nil, ok, reason)
 }
 
 // ── SCENARIO 11: Delete document ──

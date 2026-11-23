@@ -577,7 +577,18 @@ Response fields (200 OK):
 | Field | Type | Description |
 |---|---|---|
 | `url` | string | Presigned GET URL generated for the S3 object |
-| `expires_in` | int | URL validity duration in seconds (always 900 seconds = 15 minutes) |
+| `expires_in` | int | Requested lifetime in seconds (900 seconds, or 15 minutes). This is the upper bound for starting a download. |
+
+If the signing credentials have 60 seconds left when the URL is signed, S3
+can accept new download requests for at most 60 seconds even though
+`expires_in` is 900. See the [S3 deployment guidance](deployment.md#aws-s3-original-file-storage)
+for credential and policy limits.
+
+S3 must still be able to serve the object when the download starts. Deletion
+or lifecycle expiration can make it unavailable sooner. An object retained
+beyond the requested lifetime still needs a fresh URL. To obtain one, call
+this endpoint again with a currently authorized service token. The new URL
+is subject to the current S3 permissions and object availability.
 
 Error Status Codes:
 
@@ -585,14 +596,14 @@ Error Status Codes:
 |---|---|---|
 | `400 Bad Request` | `validation` | Invalid path or `doc_id` is not a valid UUID |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
-| `404 Not Found` | `not_found` | S3 storage not configured or no file stored for the requested document |
+| `404 Not Found` | `not_found` | S3 storage is disabled or the requested document has no stored object key |
 | `500 Internal Server Error` | `internal` | Database lookup failure or error generating presigned URL |
 
 Example:
 
 ```sh
 curl localhost:8081/documents/8a3e792c-5df6-4b6e-a612-4f7db4959db2/file \
-  -H "X-Service-Token: dev-token"
+  -H "X-Service-Token: ${SERVICE_TOKEN}"
 ```
 
 ---

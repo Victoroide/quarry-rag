@@ -692,6 +692,7 @@ components:
           format: uri
         expires_in:
           type: integer
+          description: Requested lifetime in seconds (900), an upper bound on when a download can start.
     DeleteResponse:
       type: object
       description: 'See [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
