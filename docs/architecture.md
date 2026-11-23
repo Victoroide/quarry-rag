@@ -68,7 +68,7 @@ sequenceDiagram
     participant Pinecone as Vector Store
     Caller->>Handler: POST /ingest
     Handler->>Handler: Extract, remove content NUL, validate
-    opt Source storage enabled and no shared match to reuse
+    opt Source storage enabled and identity still unresolved
         Handler->>S3: Upload original file
     end
     Handler->>Postgres: AcceptDocument transaction

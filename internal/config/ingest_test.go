@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,4 +39,25 @@ func TestLoadIngestionSettings(t *testing.T) {
 	t.Setenv("INGEST_POLL_INTERVAL", "100ms")
 	_, err = Load()
 	require.NoError(t, err)
+}
+
+func TestLoadContentDedupPolicy(t *testing.T) {
+	t.Setenv("GO_RAG_FAKE_MODE", "true")
+	t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
+	for _, value := range []string{"", "collection", "off", "OFF", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("INGEST_CONTENT_DEDUP", value)
+			cfg, err := Load()
+			switch value {
+			case "", "collection":
+				require.NoError(t, err)
+				require.Equal(t, domain.ContentDedupCollection, cfg.IngestContentDedup)
+			case "off":
+				require.NoError(t, err)
+				require.Equal(t, domain.ContentDedupOff, cfg.IngestContentDedup)
+			default:
+				require.ErrorContains(t, err, "INGEST_CONTENT_DEDUP")
+			}
+		})
+	}
 }

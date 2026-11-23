@@ -9,7 +9,7 @@ import (
 )
 
 type textInput struct {
-	DocumentID string         `json:"document_id,omitempty" jsonschema:"Optional document UUID; omit to generate one."`
+	DocumentID string         `json:"document_id,omitempty" jsonschema:"Optional document UUID. When omitted, the service applies its content deduplication policy."`
 	Content    string         `json:"content" jsonschema:"Text to ingest."`
 	Metadata   map[string]any `json:"metadata,omitempty" jsonschema:"Optional JSON object stored with the document."`
 	DocType    string         `json:"doc_type,omitempty" jsonschema:"Optional document type label."`
@@ -19,7 +19,7 @@ type textInput struct {
 type fileInput struct {
 	Path       string         `json:"path" jsonschema:"Absolute path of a .pdf, .docx, .doc, .txt, .md or .markdown file inside a configured root."`
 	DocType    string         `json:"doc_type,omitempty" jsonschema:"Optional document type label."`
-	DocumentID string         `json:"document_id,omitempty" jsonschema:"Optional document UUID; omit to generate one."`
+	DocumentID string         `json:"document_id,omitempty" jsonschema:"Optional document UUID. When omitted, the service applies its content deduplication policy."`
 	Metadata   map[string]any `json:"metadata,omitempty" jsonschema:"Optional JSON object stored with the document."`
 	Collection string         `json:"collection,omitempty" jsonschema:"Optional collection label that scopes content deduplication. Omit or leave empty for the default collection."`
 }

@@ -106,9 +106,8 @@ func TestFailedRetriesAtDurableQueueLimit(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	require.Equal(t, "30", rec.Header().Get("Retry-After"))
 	require.JSONEq(t, `{"error":"queue","message":"ingest queue is full"}`, rec.Body.String())
-	require.Len(t, objects.uploads, 3)
-	require.NotContains(t, []string{occupantKey, failedKey}, objects.uploads[2])
-	require.Equal(t, []string{objects.uploads[2]}, objects.deletes)
+	require.Equal(t, []string{occupantKey, failedKey}, objects.uploads)
+	require.Empty(t, objects.deletes)
 	require.Equal(t, map[string]string{occupantKey: content, failedKey: original}, objects.data)
 	for id, key := range map[string]string{occupantID: occupantKey, failedID: failedKey} {
 		stored, lookupErr := c.GetDocumentS3Key(t.Context(), domain.DocumentID(id))

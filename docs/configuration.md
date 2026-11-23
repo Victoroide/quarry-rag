@@ -36,6 +36,7 @@ The table below lists the environment variables recognized by the service:
 | `HTTP_READ_TIMEOUT` | duration | `60s` | 5s to 30m | Maximum time to read a complete HTTP request, including the body. |
 | `HTTP_WRITE_TIMEOUT` | duration | `QUERY_TIMEOUT + 15s` | Greater than `QUERY_TIMEOUT` | Response write deadline; defaults to 75s with the default query budget. |
 | `INDEX_VISIBILITY_TIMEOUT` | duration | `30s` | 0s to 5m; less than `INGEST_JOB_TIMEOUT` | Pinecone only: maximum wait after vector writes for search to return the document's last embedded chunk; zero disables waiting. Timeout logs a warning and allows completion. |
+| `INGEST_CONTENT_DEDUP` | string | `collection` | `collection` or `off` | Selects the [document identity policy](api.md#document-identity) for new uploads. See [rollout and rollback](deployment.md#content-deduplication-rollout). |
 | `INGEST_JOB_TIMEOUT` | duration | `15m` | 1m to 2h; greater than lease | Maximum processing time per attempt. |
 | `INGEST_LEASE` | duration | `2m` | 30s to 30m | Lease duration, renewed every third of this interval. |
 | `INGEST_MAX_ATTEMPTS` | integer | `5` | 1 to 20 | Maximum processing attempts before recording terminal failure. |
@@ -148,6 +149,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `006_ingest_jobs.sql` | Adds durable ingestion jobs, lease and failure tracking, completion timestamps and document fingerprints. Normalizes previously persisted processing rows with fingerprints to completed and requeues other processing rows. |
 | `007_document_collections.sql` | Adds collection labels to documents and an index on `(collection, id)`; existing rows belong to the default collection. |
 | `008_document_text_source.sql` | Adds `text_source` to documents with the default `parser`, including existing rows; see [image-only PDF OCR](api.md#image-only-pdf-ocr). |
+| `009_content_dedup.sql` | Stores the upload's policy on the document referenced by each job, defaults existing rows to `collection`, and prevents private documents from registering shared fingerprints. |
 
 The optional vector schema is initialized separately after base migrations, under the same advisory lock; see the [vector data model](architecture.md#postgresql-vector-schema).
 

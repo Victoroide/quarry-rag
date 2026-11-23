@@ -30,8 +30,8 @@ const ingestJSONBodyLimit = 6*domain.MaxContentBytes + 2<<20
 
 // IngestRequest is the POST /ingest request body.
 //
-// DocumentID is optional. Supplied UUIDs become the persisted document identity;
-// malformed values are rejected. Omitted values generate a fresh UUID.
+// DocumentID is optional. The ingest policy determines the ID for omitted
+// values. A supplied value must be a UUID.
 type IngestRequest struct {
 	DocumentID string         `json:"document_id,omitempty"`
 	Content    string         `json:"content"`
@@ -74,7 +74,7 @@ func validateIngestFields(req *IngestRequest) *APIError {
 //   - application/json: existing JSON body with "content" field
 //   - multipart/form-data: file upload with text extraction
 func IngestHandler(wk *worker.Worker, cs domain.ChunkStore, s3Client ObjectStore, maxUploadBytes int64, opts ...IngestOption) http.HandlerFunc {
-	options := ingestOptions{maxPending: 1000, extract: tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
+	options := ingestOptions{maxPending: 1000, contentDedup: domain.ContentDedupCollection, extract: tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
 		return extractor.New(ft).Extract(ctx, bytes.NewReader(data))
 	})}
 	for _, opt := range opts {
@@ -110,7 +110,15 @@ func handleJSONIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	if !ok {
 		return
 	}
-	_, _ = acceptIngest(rw, r, wk, cs, domain.AcceptRequest{Document: domain.Document{ID: domain.DocumentID(docID), Content: req.Content, Metadata: req.Metadata}, CallerSupplied: req.DocumentID != "", DocType: req.DocType, Collection: req.Collection, MaxPending: opts.maxPending})
+	_, _ = acceptIngest(rw, r, wk, cs, domain.AcceptRequest{
+		Document:       domain.Document{ID: domain.DocumentID(docID), Content: req.Content, Metadata: req.Metadata},
+		CallerSupplied: req.DocumentID != "",
+		Fingerprint:    chunker.ScopedFingerprint(req.Collection, req.Content),
+		DocType:        req.DocType,
+		Collection:     req.Collection,
+		ContentDedup:   opts.contentDedup,
+		MaxPending:     opts.maxPending,
+	})
 }
 
 func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker, cs domain.ChunkStore, s3Client ObjectStore, maxUploadBytes int64, opts ingestOptions) {
@@ -223,40 +231,61 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		return
 	}
 	formDocType = req.DocType
+	identityContent, textSource := text, "parser"
+	if ocrPending {
+		identityContent = string(fileData)
+		textSource = "ocr_pending"
+	}
+	acceptReq := domain.AcceptRequest{
+		Document:       domain.Document{ID: domain.DocumentID(docID), Content: text, Metadata: metadata, FileName: &fileName, FileType: &ftStr, TextSource: textSource},
+		Fingerprint:    chunker.ScopedFingerprint(req.Collection, identityContent),
+		CallerSupplied: suppliedID != "",
+		DocType:        formDocType,
+		Collection:     req.Collection,
+		ContentDedup:   opts.contentDedup,
+		MaxPending:     opts.maxPending,
+		RequireSource:  s3Client != nil || ocrPending,
+	}
+	if acceptReq.RequireSource && opts.contentDedup == domain.ContentDedupCollection {
+		checkIdentity := acceptReq.CallerSupplied
+		if !checkIdentity && s3Client != nil {
+			_, matches, lookupErr := cs.CheckFingerprint(r.Context(), acceptReq.Fingerprint)
+			if lookupErr != nil {
+				writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+				return
+			}
+			checkIdentity = matches
+		}
+		if checkIdentity {
+			outcome, _ := acceptIngest(rw, r, wk, cs, acceptReq)
+			if outcome != domain.AcceptNeedsSource {
+				return
+			}
+		}
+	}
 	if ocrPending && s3Client == nil {
 		rw.Header().Set("Retry-After", "30")
 		writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 		return
 	}
-	fingerprint, textSource := chunker.ScopedFingerprint(req.Collection, text), "parser"
-	if ocrPending {
-		fingerprint = chunker.ScopedFingerprint(req.Collection, string(fileData))
-		textSource = "ocr_pending"
-	}
 	var s3Key *string
 	if s3Client != nil {
-		existingID, exists, lookupErr := cs.CheckFingerprint(r.Context(), fingerprint)
-		if lookupErr != nil {
-			writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+		docType := formDocType
+		if docType == "" {
+			docType = domain.DefaultDocType
+		}
+		// Each attempt owns a distinct object so rollback cannot delete another acceptance's file.
+		key, uploadErr := s3Client.Upload(r.Context(), docID+"/"+uuid.NewString(), docType, fileName, ft, bytes.NewReader(fileData))
+		if uploadErr != nil {
+			slog.ErrorContext(r.Context(), "upload source file", "error", uploadErr)
+			rw.Header().Set("Retry-After", "30")
+			writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 			return
 		}
-		if ocrPending || !exists || (suppliedID != "" && string(existingID) != docID) {
-			docType := formDocType
-			if docType == "" {
-				docType = domain.DefaultDocType
-			}
-			// Each attempt owns a distinct object so rollback cannot delete another acceptance's file.
-			key, uploadErr := s3Client.Upload(r.Context(), docID+"/"+uuid.NewString(), docType, fileName, ft, bytes.NewReader(fileData))
-			if uploadErr != nil {
-				slog.ErrorContext(r.Context(), "upload source file", "error", uploadErr)
-				rw.Header().Set("Retry-After", "30")
-				writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
-				return
-			}
-			s3Key = &key
-		}
+		s3Key = &key
+		acceptReq.Document.S3Key = s3Key
 	}
-	outcome, acceptErr := acceptIngest(rw, r, wk, cs, domain.AcceptRequest{Document: domain.Document{ID: domain.DocumentID(docID), Content: text, Metadata: metadata, FileName: &fileName, FileType: &ftStr, S3Key: s3Key, TextSource: textSource}, Fingerprint: fingerprint, CallerSupplied: suppliedID != "", DocType: formDocType, Collection: req.Collection, MaxPending: opts.maxPending})
+	outcome, acceptErr := acceptIngest(rw, r, wk, cs, acceptReq)
 	if s3Key != nil && outcome != domain.AcceptAccepted {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 		defer cancel()

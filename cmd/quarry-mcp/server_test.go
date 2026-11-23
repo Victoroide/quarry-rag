@@ -211,6 +211,7 @@ func TestToolRegistration(t *testing.T) {
 				if tool.Name == "quarry_ingest_text" || tool.Name == "quarry_ingest_file" {
 					assert.Contains(t, schema.Properties, "collection")
 					assert.NotEmpty(t, schema.Properties["collection"].Description)
+					assert.Contains(t, schema.Properties["document_id"].Description, "policy")
 				}
 				switch tool.Name {
 				case "quarry_query", "quarry_list_documents", "quarry_get_document":

@@ -88,6 +88,7 @@ func TestOCRUploadAcceptance(t *testing.T) {
 			if tc.status != 202 {
 				require.Empty(t, s.accepted)
 				require.Empty(t, objects.data)
+				require.Empty(t, s.lookup)
 				return
 			}
 			require.Len(t, s.accepted, 1)
@@ -129,4 +130,21 @@ func TestOCRUploadValidatesBeforeStorageAndRollsBack(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrivateOCRUploadSkipsSharedLookup(t *testing.T) {
+	store := &ocrAcceptStore{}
+	objects := &ocrObjects{}
+	data := []byte("%PDF-1.4\nprivate image-only PDF")
+	rw := httptest.NewRecorder()
+	h := IngestHandler(nil, store, objects, 1<<20, WithContentDedup(domain.ContentDedupOff), WithOCR(true),
+		WithExtractor(func(context.Context, extractor.FileType, []byte) (string, error) { return "", extractor.ErrNoText }))
+	h(rw, ocrUpload(t, "scan.pdf", "archive", data))
+	require.Equal(t, http.StatusAccepted, rw.Code, rw.Body.String())
+	require.Empty(t, store.lookup)
+	require.Len(t, store.accepted, 1)
+	require.Equal(t, domain.ContentDedupOff, store.accepted[0].ContentDedup)
+	require.Equal(t, chunker.ScopedFingerprint("archive", string(data)), store.accepted[0].Fingerprint)
+	require.Equal(t, data, objects.data)
+	require.False(t, objects.deleted)
 }
