@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.27.3, matching go.mod.
+- The Go version declared in [go.mod](go.mod).
 - Docker with a running daemon for integration tests and image builds.
 - golangci-lint v2.15.0, matching the CI configuration.
 

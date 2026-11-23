@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export GOWORK=off
 
 scripts=$(cd "$(dirname "$0")" && pwd)
 repository=$(cd "$scripts/../.." && pwd)
@@ -55,11 +56,14 @@ EOF
 }
 
 prepare_modules() {
+  local go_version
+  go_version=$(go -C "$repository" list -m -f '{{.GoVersion}}')
+
   mkdir -p "$fixture/dependency" "$fixture/windows-dependency" "$fixture/cmd/server"
-  cat > "$fixture/go.mod" <<'EOF'
+  cat > "$fixture/go.mod" <<EOF
 module example.test/release
 
-go 1.27.3
+go $go_version
 
 require (
   example.test/dependency v1.0.0
@@ -69,13 +73,13 @@ require (
 replace example.test/dependency => ./dependency
 replace example.test/windows-dependency => ./windows-dependency
 EOF
-  printf 'module example.test/dependency\n\ngo 1.27.3\n' > "$fixture/dependency/go.mod"
+  printf 'module example.test/dependency\n\ngo %s\n' "$go_version" > "$fixture/dependency/go.mod"
   printf 'package dependency\n' > "$fixture/dependency/dependency.go"
   printf 'Synthetic license.\n' > "$fixture/dependency/LiCeNcE.txt"
   printf 'Synthetic notice.\n' > "$fixture/dependency/NOTICE"
   printf 'Synthetic copying terms.\n' > "$fixture/dependency/COPYING.txt"
   printf 'Synthetic patent terms.\n' > "$fixture/dependency/PATENTS"
-  printf 'module example.test/windows-dependency\n\ngo 1.27.3\n' > "$fixture/windows-dependency/go.mod"
+  printf 'module example.test/windows-dependency\n\ngo %s\n' "$go_version" > "$fixture/windows-dependency/go.mod"
   printf 'package windowsdependency\n' > "$fixture/windows-dependency/dependency.go"
   printf 'Synthetic Windows license.\n' > "$fixture/windows-dependency/LICENSE"
   cat > "$fixture/cmd/server/main.go" <<'EOF'
