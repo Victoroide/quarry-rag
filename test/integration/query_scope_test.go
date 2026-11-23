@@ -116,4 +116,16 @@ func TestDocumentPreviewsAreRestrictedToCandidates(t *testing.T) {
 	cancel()
 	_, err = previews.DocumentPreviews(canceled, []string{allowed})
 	require.ErrorIs(t, err, context.Canceled)
+
+	_, err = client.Pool.Exec(t.Context(), `UPDATE documents SET collection='archive',doc_type='guide' WHERE id=$1`, allowed)
+	require.NoError(t, err)
+	previews.Collection, previews.DocType = "archive", "guide"
+	got, err = previews.DocumentPreviews(t.Context(), []string{private, allowed})
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{allowed: "Cedar Archive stores records."}, got)
+	_, err = client.Pool.Exec(t.Context(), `UPDATE documents SET status='processing' WHERE id=$1`, allowed)
+	require.NoError(t, err)
+	got, err = previews.DocumentPreviews(t.Context(), []string{allowed})
+	require.NoError(t, err)
+	require.Empty(t, got)
 }
