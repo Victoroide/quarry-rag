@@ -33,6 +33,7 @@ Notable changes are grouped by release.
 
 - Failed-document retries respect the persisted ingestion queue limit.
 - The API reference distinguishes JSON responses from streamed query answers and explains how callers recognize stream completion or interruption.
+- Deployment prerequisites now follow the selected vector store, model providers and optional AWS integrations. Offline setup documents the database, embedding dimensions and multipart parser behavior.
 - The ingestion and query sequence diagrams in the architecture documentation render again.
 - The architecture documentation lists the tracing middleware in the request middleware order.
 - **Breaking:** Startup rejects `CHUNK_OVERLAP` above `CHUNK_TOKEN_SIZE/2`, which was previously accepted, and chunk output now grows linearly with document size. Chunks keep the source spacing between sentences instead of adding a space after full-width terminators such as `。`.

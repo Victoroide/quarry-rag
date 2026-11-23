@@ -240,16 +240,21 @@ go run ./scripts/validate/main.go
 
 ## Offline Fake Mode Internals
 
-Setting `GO_RAG_FAKE_MODE=true` allows the entire microservice and its HTTP endpoints to run locally without connecting to AWS Bedrock, Pinecone, or S3.
+Start the service with the [offline quick start](../README.md#offline-fake-mode).
 
 ### Implementation Architecture
 
-When `FakeMode` is active in `cmd/server/main.go`:
-1. **Vector Store**: Instantiates `internal/store/memory.FakeVectorStore`, which stores vector embeddings in a thread-safe Go map (`sync.RWMutex`). Vector distance calculations use cosine similarity computed in memory.
-2. **Embedding Provider**: Instantiates `internal/embedder.FakeEmbedder`, generating deterministic 1024-dimensional float arrays based on hashing input texts.
-3. **LLM Converser**: Instantiates `internal/llm.FakeConverser`, returning structured responses without invoking external APIs.
-4. **Object Storage**: S3 client initialization is skipped. Multipart file ingestion extracts text directly in memory and continues through chunking and indexing without storing the raw binary.
-5. **Relational Storage**: PostgreSQL is still utilized via `DATABASE_URL` for real schema migrations, metadata storage, and duplicate fingerprint tracking.
+- `memory.FakeVectorStore` keeps vectors in a thread-safe Go map and computes
+  cosine similarity in memory.
+- `embedder.FakeEmbedder` hashes the input text to produce deterministic
+  embeddings with the configured `EMBEDDING_DIMENSIONS`. Its constructor falls
+  back to 1,024 for nonpositive arguments. Server startup validates the
+  configured dimension before calling the constructor.
+- `llm.FakeConverser` returns local responses.
+- Multipart ingestion decodes recognized plain text in process. PDF, DOCX and
+  DOC use the [isolated parser](architecture.md#extraction-boundaries) by
+  default. Offline ingestion skips OCR and retains no original files.
+- The service applies its normal migrations to the [metadata database](deployment.md#postgresql-metadata-and-chunk-store).
 
 Durable ingestion tests use disposable PostgreSQL databases and the offline vector store to cover restart recovery, terminal failures, deletion during processing, NUL handling and source upload failures. Lease and atomic acceptance tests live in `internal/store/postgres/jobs_test.go`; the short suite skips database-backed tests.
 
