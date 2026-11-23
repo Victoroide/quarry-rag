@@ -20,6 +20,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
 	"github.com/Victoroide/quarry-rag/internal/api/middleware"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v3"
 )
@@ -32,6 +33,41 @@ func readOpenAPI(t *testing.T) map[string]any {
 	require.NoError(t, yaml.Unmarshal(data, &doc))
 	require.Equal(t, "3.1.0", doc["openapi"])
 	return doc
+}
+
+func TestEvidenceExcerptReferenceDistinguishesPreviewLimit(t *testing.T) {
+	data, err := os.ReadFile("../../docs/api.md")
+	require.NoError(t, err)
+	_, fields, found := strings.Cut(string(data), "| `rerank_score` |")
+	require.True(t, found)
+	fields, _, _ = strings.Cut(fields, "\n\n")
+	for _, tt := range []struct {
+		field string
+		terms []string
+	}{
+		{"text", []string{"generated", "600 runes", "evidence", "sanitized", "context budget", "synthesis_context_tokens"}},
+		{"excerpt", []string{"one-based", "selection"}},
+		{"truncated", []string{"context budget"}},
+	} {
+		line := ""
+		for candidate := range strings.SplitSeq(fields, "\n") {
+			if strings.HasPrefix(candidate, "| `"+tt.field+"` |") {
+				line = strings.ToLower(candidate)
+				break
+			}
+		}
+		for _, term := range tt.terms {
+			assert.Contains(t, line, term, tt.field)
+		}
+	}
+	assert.True(t, strings.Contains(string(data), "[scored chunk fields](#scored-chunks)"), "evidence section must link to scored chunk fields")
+	doc := readOpenAPI(t)
+	paths := openAPIObject(t, doc["paths"])
+	query := openAPIObject(t, openAPIObject(t, paths["/query"])["post"])
+	summary := strings.ToLower(query["summary"].(string))
+	require.Contains(t, summary, "evidence")
+	require.Contains(t, summary, " or ")
+	require.Contains(t, summary, "answer")
 }
 
 func openAPIObject(t *testing.T, value any) map[string]any {

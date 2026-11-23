@@ -17,6 +17,7 @@ Notable changes are grouped by release.
 - `POST /query` streams answers as server-sent events when the request accepts `text/event-stream`.
 - Optional Bedrock reranking of retrieved chunks before synthesis (`RERANK_MODEL_ARN`).
 - OpenAI-compatible chat and embedding providers (`LLM_PROVIDER`, `EMBEDDING_PROVIDER`, `OPENAI_BASE_URL`) for local or self-hosted models.
+- Evidence-only queries return scoped excerpts without answer generation over JSON, SSE, the Go client and MCP.
 
 ### Changed
 

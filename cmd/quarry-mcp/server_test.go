@@ -14,7 +14,12 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/client"
+	serviceapi "github.com/Victoroide/quarry-rag/internal/api"
+	serviceconfig "github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/embedder"
+	"github.com/Victoroide/quarry-rag/internal/retriever"
+	"github.com/Victoroide/quarry-rag/internal/store/memory"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -565,4 +570,53 @@ func TestCollectionTools(t *testing.T) {
 	}
 	require.Equal(t, int32(1), queries.Load())
 	require.Equal(t, int32(1), lists.Load())
+}
+
+func TestQueryToolRespectsEvidencePolicy(t *testing.T) {
+	const docID = "00000000-0000-4000-8000-000000000001"
+	const evidence = "Fold the paper. <b>Sample</b> [label](#section)"
+	emb := embedder.NewFakeEmbedder(8)
+	embedding, err := emb.Embed(t.Context(), "Archive?")
+	require.NoError(t, err)
+	store := memory.NewFakeVectorStore()
+	require.NoError(t, store.Upsert(t.Context(), "", []domain.Chunk{{ID: "chunk", DocumentID: docID, Index: 2, Text: evidence, Embedding: embedding, Metadata: map[string]any{"doc_type": "guide"}}}))
+	server := httptest.NewServer(serviceapi.NewRouter(&serviceapi.RouterDeps{
+		Config:      &serviceconfig.Config{QueryAnswerPolicy: "evidence_only", ServiceToken: "token"},
+		VectorStore: store,
+		Retriever:   retriever.NewRetriever(store, emb, .7, 2),
+	}))
+	defer server.Close()
+	cs := connectServer(t, config{baseURL: server.URL, token: "token", timeout: time.Second})
+
+	for _, mode := range []string{"evidence", "", "generated"} {
+		t.Run(mode, func(t *testing.T) {
+			args := map[string]any{"query": "Archive?", "mode": "global", "allowed_document_ids": []string{docID}}
+			if mode != "" {
+				args["answer_mode"] = mode
+			}
+			result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "quarry_query", Arguments: args})
+			require.NoError(t, err)
+			fallback := result.Content[0].(*mcp.TextContent).Text
+			if mode == "generated" {
+				require.True(t, result.IsError)
+				require.Contains(t, fallback, "403 forbidden")
+				require.Nil(t, result.StructuredContent)
+				return
+			}
+			require.False(t, result.IsError, fallback)
+			require.NotContains(t, fallback, "Fold the paper")
+			data, err := json.Marshal(result.StructuredContent)
+			require.NoError(t, err)
+			var got queryOutput
+			require.NoError(t, json.Unmarshal(data, &got))
+			require.Empty(t, got.Answer)
+			require.Equal(t, "evidence_only", got.FinishReason)
+			require.Zero(t, got.TokenUsage)
+			require.Nil(t, got.Citations)
+			require.Len(t, got.Chunks, 1)
+			require.Equal(t, docID, got.Chunks[0].DocID)
+			require.Equal(t, 2, got.Chunks[0].ChunkIndex)
+			require.Equal(t, evidence, got.Chunks[0].Text)
+		})
+	}
 }

@@ -25,12 +25,13 @@ import (
 // caller is not permitted to see. A null value means "no restriction"; an empty
 // array matches nothing. The trusted caller supplies the authorization scope.
 type QueryRequest struct {
-	Query              string   `json:"query"`
-	Mode               string   `json:"mode,omitempty"`
-	FilterDocType      string   `json:"filter_doc_type,omitempty"`
-	MaxChunks          int      `json:"max_chunks,omitempty"`
-	IncludeCitations   bool     `json:"include_citations,omitempty"`
-	AllowedDocumentIDs []string `json:"allowed_document_ids,omitzero"`
+	Query              string              `json:"query"`
+	Mode               string              `json:"mode,omitempty"`
+	AnswerMode         requestedAnswerMode `json:"answer_mode,omitempty"`
+	FilterDocType      string              `json:"filter_doc_type,omitempty"`
+	MaxChunks          int                 `json:"max_chunks,omitempty"`
+	IncludeCitations   bool                `json:"include_citations,omitempty"`
+	AllowedDocumentIDs []string            `json:"allowed_document_ids,omitzero"`
 
 	Collection string `json:"collection,omitempty"`
 }
@@ -143,6 +144,11 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
+		answerMode, status, apiErr := resolveAnswerMode(req, cfg.QueryAnswerPolicy)
+		if apiErr != nil {
+			writeJSONError(w, status, apiErr.Error, apiErr.Message)
+			return
+		}
 		if err := acquireQuerySlot(r.Context(), slots, cfg.QueryQueueTimeout); err != nil {
 			writeQueryError(w, r, err)
 			return
@@ -155,6 +161,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			OriginalQuery:      req.Query,
 			MaxChunks:          effectiveMaxChunks(req.MaxChunks, cfg.MaxChunksPerQuery),
 			RequestedMode:      req.Mode,
+			AnswerMode:         answerMode,
 			FilterDocType:      req.FilterDocType,
 			IncludeCitations:   req.IncludeCitations,
 			AllowedDocumentIDs: req.AllowedDocumentIDs,
@@ -164,21 +171,24 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 
 		var stream *queryStream
 		if acceptsQueryStream(r) {
-			stream = newQueryStream(w, r, qc)
+			stream = newQueryStream(ctx, w, r, qc)
 		}
 
 		retrieval := pipeline.NewRetrievalStage(ret)
 		routing := pipeline.NewRoutingStage(ret)
 		if pool != nil {
-			retrieval = pipeline.NewRetrievalStageWithVisibility(ret, pgstore.Visibility{Pool: pool, Collection: req.Collection})
-			routing = pipeline.NewRoutingStageWithScope(ret, pgstore.Visibility{Pool: pool, Collection: req.Collection}, pgstore.Previews{Pool: pool})
+			visibility := pgstore.Visibility{Pool: pool, Collection: req.Collection, DocType: req.FilterDocType}
+			retrieval = pipeline.NewRetrievalStageWithVisibility(ret, visibility)
+			previews := pgstore.Previews{Pool: pool, Collection: req.Collection, DocType: req.FilterDocType}
+			routing = pipeline.NewRoutingStageWithScope(ret, visibility, previews)
+			qc.EvidenceVisibility = visibility
 		}
 		stages := []pipeline.QueryStage{
 			pipeline.NewDecomposeStage(),
 			routing,
 			retrieval,
 		}
-		if options.reranker != nil {
+		if answerMode != domain.AnswerModeEvidence && options.reranker != nil {
 			stages = append(stages, pipeline.NewRerankStage(options.reranker, cfg.RerankTimeout))
 		}
 		stages = append(stages, pipeline.NewSynthesisStage(amb, cfg))
@@ -219,13 +229,22 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			}
 		}
 
+		data, encodeErr := json.Marshal(resp)
+		if encodeErr != nil {
+			writeQueryError(w, r, encodeErr)
+			return
+		}
+		if scopeErr := qc.CheckEvidenceScope(ctx); scopeErr != nil {
+			writeQueryError(w, r, scopeErr)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if qc.EarlyExit && qc.ContentLanguage != "" {
 			w.Header().Set("Content-Language", qc.ContentLanguage)
 		}
 		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			slog.ErrorContext(r.Context(), "encode query response", "error", err)
+		if _, writeErr := w.Write(append(data, '\n')); writeErr != nil {
+			slog.ErrorContext(r.Context(), "write query response", "error", writeErr)
 		}
 	}
 }

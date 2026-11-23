@@ -148,6 +148,45 @@ func TestQueryResponseCompletion(t *testing.T) {
 	}
 }
 
+func TestEvidenceQueryClientHandlesJSONAndContextOnlyStream(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000001"
+	c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.JSONEq(t, `"evidence"`, string(body["answer_mode"]))
+		assert.JSONEq(t, `["`+id+`"]`, string(body["allowed_document_ids"]))
+		if r.Header.Get("Accept") == "text/event-stream" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, err := fmt.Fprint(w, "event: context\ndata: {\"scored_chunks\":[{\"doc_id\":\""+id+"\",\"text\":\"Paper folds.\"}]}\n\nevent: done\ndata: {\"finish_reason\":\"evidence_only\"}\n\n")
+			assert.NoError(t, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, err := fmt.Fprint(w, `{"finish_reason":"evidence_only","answer":"","scored_chunks":[{"doc_id":"`+id+`","text":"Paper folds."}]}`)
+		assert.NoError(t, err)
+	})
+	in := client.QueryRequest{Query: "Archive?", AnswerMode: client.AnswerModeEvidence, AllowedDocumentIDs: []string{id}}
+	response, err := c.Query(t.Context(), in)
+	require.NoError(t, err)
+	require.Equal(t, client.FinishReasonEvidenceOnly, response.FinishReason)
+	var names []string
+	err = c.QueryStream(t.Context(), in, func(event client.Event) error {
+		names = append(names, event.Type)
+		if event.Type == "context" {
+			var value client.QueryStreamContext
+			require.NoError(t, json.Unmarshal(event.Data, &value))
+			require.Equal(t, response.ScoredChunks, value.ScoredChunks)
+		} else {
+			var value client.QueryStreamDone
+			require.NoError(t, json.Unmarshal(event.Data, &value))
+			require.Equal(t, client.FinishReasonEvidenceOnly, value.FinishReason)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"context", "done"}, names)
+}
+
 func TestQueryStreamRejectsInvalidResponses(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, contentType string

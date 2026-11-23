@@ -20,6 +20,24 @@ type Event struct {
 	Data json.RawMessage
 }
 
+// QueryStreamContext is the payload of a context event.
+type QueryStreamContext struct {
+	Mode          string                `json:"mode"`
+	ChunksUsed    int                   `json:"chunks_used"`
+	ContextChunks int                   `json:"context_chunks"`
+	ScoredChunks  []ScoredChunkResponse `json:"scored_chunks"`
+}
+
+// QueryStreamDone is the payload of a done event.
+type QueryStreamDone struct {
+	FinishReason  string             `json:"finish_reason"`
+	TokenUsage    TokenUsage         `json:"token_usage"`
+	ContextTokens int                `json:"context_tokens"`
+	StageTimings  map[string]int64   `json:"stage_timings_ms"`
+	EarlyExit     bool               `json:"early_exit,omitempty"`
+	Citations     []CitationResponse `json:"citations,omitzero"`
+}
+
 // StreamError reports a query failure after the response stream has started.
 type StreamError struct {
 	Code    string
