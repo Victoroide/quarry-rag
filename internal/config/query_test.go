@@ -11,7 +11,7 @@ func queryConfigEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("GO_RAG_FAKE_MODE", "true")
 	t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
-	for _, key := range []string{"QUERY_TIMEOUT", "SYNTHESIS_TIMEOUT", "QUERY_CONCURRENCY", "QUERY_QUEUE_TIMEOUT", "MIN_RELEVANCE_SCORE", "HTTP_READ_TIMEOUT", "HTTP_WRITE_TIMEOUT", "HTTP_IDLE_TIMEOUT"} {
+	for _, key := range []string{"QUERY_TIMEOUT", "QUERY_ANSWER_POLICY", "SYNTHESIS_TIMEOUT", "QUERY_CONCURRENCY", "QUERY_QUEUE_TIMEOUT", "MIN_RELEVANCE_SCORE", "HTTP_READ_TIMEOUT", "HTTP_WRITE_TIMEOUT", "HTTP_IDLE_TIMEOUT"} {
 		t.Setenv(key, "")
 	}
 }
@@ -31,6 +31,7 @@ func TestQueryConfigDefaults(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, time.Minute, cfg.QueryTimeout)
+	require.Equal(t, "both", cfg.QueryAnswerPolicy)
 	require.Equal(t, 45*time.Second, cfg.SynthesisTimeout)
 	require.Equal(t, 32, cfg.QueryConcurrency)
 	require.Equal(t, 2*time.Second, cfg.QueryQueueTimeout)
@@ -42,6 +43,17 @@ func TestQueryConfigDefaults(t *testing.T) {
 	cfg, err = Load()
 	require.NoError(t, err)
 	require.Equal(t, 135*time.Second, cfg.HTTPWriteTimeout)
+}
+
+func TestQueryAnswerPolicyConfiguration(t *testing.T) {
+	queryConfigEnvironment(t)
+	t.Setenv("QUERY_ANSWER_POLICY", "evidence_only")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, "evidence_only", cfg.QueryAnswerPolicy)
+	t.Setenv("QUERY_ANSWER_POLICY", "generated")
+	_, err = Load()
+	require.ErrorContains(t, err, "QUERY_ANSWER_POLICY")
 }
 func TestQueryConfigRejectsInvalidBounds(t *testing.T) {
 	for _, tc := range []struct{ key, value string }{

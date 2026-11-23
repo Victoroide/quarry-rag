@@ -15,6 +15,12 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 )
 
+// Query answer policies control which answer modes callers can use.
+const (
+	QueryAnswerPolicyBoth         = "both"
+	QueryAnswerPolicyEvidenceOnly = "evidence_only"
+)
+
 // Config holds all operational parameters for the service.
 // Every field is populated from environment variables at startup.
 type Config struct {
@@ -110,6 +116,7 @@ type Config struct {
 	ServiceTokens []string
 
 	QueryTimeout      time.Duration
+	QueryAnswerPolicy string
 	SynthesisTimeout  time.Duration
 	QueryConcurrency  int
 	QueryQueueTimeout time.Duration
@@ -144,6 +151,7 @@ func Load() (*Config, error) {
 		VectorStore:           envOrDefault("VECTOR_STORE", "pinecone"),
 		S3Bucket:              os.Getenv("S3_BUCKET"),
 		SynthesisModel:        envOrDefault("SYNTHESIS_MODEL", "fallback"),
+		QueryAnswerPolicy:     envOrDefault("QUERY_ANSWER_POLICY", QueryAnswerPolicyBoth),
 		ServiceToken:          os.Getenv("SERVICE_TOKEN"),
 		ServiceTokens:         strings.Split(os.Getenv("SERVICE_TOKENS"), ","),
 		S3ExpectedBucketOwner: os.Getenv("S3_EXPECTED_BUCKET_OWNER"),
@@ -446,6 +454,9 @@ func (c *Config) validate() error {
 
 	if c.QueryTimeout < 5*time.Second || c.QueryTimeout > 10*time.Minute {
 		return fmt.Errorf("config: QUERY_TIMEOUT must be between 5s and 10m")
+	}
+	if c.QueryAnswerPolicy != "" && c.QueryAnswerPolicy != QueryAnswerPolicyBoth && c.QueryAnswerPolicy != QueryAnswerPolicyEvidenceOnly {
+		return fmt.Errorf("config: QUERY_ANSWER_POLICY must be both or evidence_only")
 	}
 	if c.SynthesisTimeout <= 0 || c.SynthesisTimeout >= c.QueryTimeout {
 		return fmt.Errorf("config: SYNTHESIS_TIMEOUT must be positive and below QUERY_TIMEOUT")

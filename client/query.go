@@ -6,15 +6,28 @@ import (
 	"net/http"
 )
 
+// AnswerMode selects what the service returns after retrieval.
+type AnswerMode string
+
+// Supported answer modes and evidence completion reason.
+const (
+	AnswerModeGenerated AnswerMode = "generated"
+	AnswerModeEvidence  AnswerMode = "evidence"
+
+	// FinishReasonEvidenceOnly reports completion with selected evidence.
+	FinishReasonEvidenceOnly = "evidence_only"
+)
+
 // QueryRequest selects the question, retrieval mode and authorized document scope.
 // A nil allowlist is unrestricted; a non-nil empty allowlist denies all documents.
 type QueryRequest struct {
-	Query              string   `json:"query"`
-	Mode               string   `json:"mode,omitempty"`
-	FilterDocType      string   `json:"filter_doc_type,omitempty"`
-	MaxChunks          int      `json:"max_chunks,omitempty"`
-	IncludeCitations   bool     `json:"include_citations,omitempty"`
-	AllowedDocumentIDs []string `json:"allowed_document_ids,omitzero"`
+	Query              string     `json:"query"`
+	Mode               string     `json:"mode,omitempty"`
+	AnswerMode         AnswerMode `json:"answer_mode,omitempty"`
+	FilterDocType      string     `json:"filter_doc_type,omitempty"`
+	MaxChunks          int        `json:"max_chunks,omitempty"`
+	IncludeCitations   bool       `json:"include_citations,omitempty"`
+	AllowedDocumentIDs []string   `json:"allowed_document_ids,omitzero"`
 
 	Collection string `json:"collection,omitempty"`
 }

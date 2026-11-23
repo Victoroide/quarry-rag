@@ -16,6 +16,8 @@ func FuzzDecodeJSONObject(f *testing.F) {
 		`{"content":"Readable document text.","metadata":{"page":1,"labels":["archive"]}}`,
 		`{"query":"first","query":"second"}`, `{"query":"first","QUERY":"second"}`,
 		`{"query":"first","\u0071uery":"second"}`, `{"unknown":true}`, `[]`, `null`, `{} {}`, `{"query":`,
+		`{"query":"Archive?","answer_mode":"evidence","allowed_document_ids":[]}`, `{"answer_mode":"evidence","ANSWER_MODE":"generated"}`,
+		`{"answer_mode":null}`, `{"answer_mode":[]}`, `{"answer_mode":"generated"}`,
 	} {
 		f.Add([]byte(body))
 	}

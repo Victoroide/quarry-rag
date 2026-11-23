@@ -14,7 +14,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 )
 
-// QueryStreamContext describes the evidence prepared for synthesis.
+// QueryStreamContext describes the evidence selected for the query.
 type QueryStreamContext struct {
 	Mode          string                `json:"mode"`
 	ChunksUsed    int                   `json:"chunks_used"`
@@ -40,6 +40,7 @@ type QueryStreamDone struct {
 type queryStream struct {
 	w        http.ResponseWriter
 	r        *http.Request
+	ctx      context.Context
 	qc       *pipeline.QueryContext
 	started  bool
 	writeErr error
@@ -62,8 +63,8 @@ func acceptsQueryStream(r *http.Request) bool {
 	return false
 }
 
-func newQueryStream(w http.ResponseWriter, r *http.Request, qc *pipeline.QueryContext) *queryStream {
-	s := &queryStream{w: w, r: r, qc: qc}
+func newQueryStream(ctx context.Context, w http.ResponseWriter, r *http.Request, qc *pipeline.QueryContext) *queryStream {
+	s := &queryStream{w: w, r: r, ctx: ctx, qc: qc}
 	qc.Stream = &pipeline.QueryStream{
 		Context: func() error {
 			return s.event("context", QueryStreamContext{Mode: qc.RetrievalMode, ChunksUsed: len(qc.RetrievedChunks), ContextChunks: qc.ContextChunks, ScoredChunks: queryScoredChunks(qc)})
@@ -83,6 +84,11 @@ func (s *queryStream) event(name string, value any) error {
 	if err != nil {
 		return err
 	}
+	if name != "error" {
+		if scopeErr := s.qc.CheckEvidenceScope(s.ctx); scopeErr != nil {
+			return scopeErr
+		}
+	}
 	if !s.started {
 		s.w.Header().Set("Content-Type", "text/event-stream")
 		s.w.Header().Set("Cache-Control", "no-cache")
@@ -101,6 +107,9 @@ func (s *queryStream) event(name string, value any) error {
 }
 
 func (s *queryStream) finish(ctx context.Context, err error) {
+	if err == nil {
+		err = s.done()
+	}
 	if err != nil {
 		if !s.started {
 			writeQueryError(s.w, s.r, err)
@@ -117,8 +126,10 @@ func (s *queryStream) finish(ctx context.Context, err error) {
 		if writeErr := s.event("error", body); writeErr != nil {
 			slog.DebugContext(ctx, "write query stream error", "error", writeErr)
 		}
-		return
 	}
+}
+
+func (s *queryStream) done() error {
 	done := QueryStreamDone{FinishReason: s.qc.FinishReason, TokenUsage: s.qc.TokenUsage, ContextTokens: s.qc.ContextTokens, StageTimings: s.qc.StageTimingsMS, EarlyExit: s.qc.EarlyExit}
 	if s.qc.IncludeCitations {
 		done.Citations = make([]CitationResponse, 0, len(s.qc.Citations))
@@ -126,7 +137,5 @@ func (s *queryStream) finish(ctx context.Context, err error) {
 			done.Citations = append(done.Citations, CitationResponse{Excerpt: c.Excerpt, DocID: string(c.DocumentID), ChunkIndex: c.ChunkIndex, Offset: c.Offset, Verified: c.Verified, Overlap: c.Overlap})
 		}
 	}
-	if err := s.event("done", done); err != nil {
-		slog.DebugContext(ctx, "write query stream completion", "error", err)
-	}
+	return s.event("done", done)
 }

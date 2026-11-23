@@ -94,7 +94,7 @@ paths:
       - $ref: '#/components/parameters/RequestID'
     post:
       operationId: queryDocuments
-      summary: Retrieve evidence and synthesize an answer
+      summary: Return selected evidence or a generated answer
       description: 'See [POST /query](api.md#post-query).'
       security:
         - ServiceToken: []
@@ -139,6 +139,8 @@ paths:
         '400':
           $ref: '#/components/responses/Error'
         '401':
+          $ref: '#/components/responses/Error'
+        '403':
           $ref: '#/components/responses/Error'
         '413':
           $ref: '#/components/responses/Error'
@@ -458,6 +460,10 @@ components:
           type: string
         mode:
           type: string
+        answer_mode:
+          type: string
+          enum: [generated, evidence]
+          description: 'Defaults to the deployed policy. See [evidence-only queries](api.md#evidence-only-queries).'
         filter_doc_type:
           type: string
         collection:
@@ -479,6 +485,7 @@ components:
       properties:
         finish_reason:
           type: string
+          enum: [stop, max_tokens, filtered, context_exceeded, no_evidence, evidence_only]
         answer:
           type: string
         mode:
@@ -587,6 +594,7 @@ components:
       properties:
         finish_reason:
           type: string
+          enum: ['', stop, max_tokens, filtered, context_exceeded, no_evidence, evidence_only]
         token_usage:
           $ref: '#/components/schemas/TokenUsage'
         context_tokens:

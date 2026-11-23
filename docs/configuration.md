@@ -49,7 +49,7 @@ The table below lists the environment variables recognized by the service:
 | `MAX_CHUNKS_PER_QUERY` | integer | `10` | 1 to 100 | Maximum chunks retrieved per query. Requests with omitted or zero `max_chunks` use this value; larger requests are capped at this value. |
 | `MAX_UPLOAD_BYTES` | int64 | `20971520` (20 MiB) | 1 to 104857600 (100 MiB) | Maximum accepted request payload size for multipart file uploads in bytes. |
 | `METRICS_ADDR` | string | `""` (disabled) | Optional TCP listen address | Separate metrics listener. See [Metrics](deployment.md#metrics) for listener exposure guidance. |
-| `MIN_RELEVANCE_SCORE` | float64 | `0` | 0 to 1, finite | Absolute evidence score floor applied before adaptive synthesis trimming; zero disables this floor. |
+| `MIN_RELEVANCE_SCORE` | float64 | `0` | 0 to 1, finite | Absolute relevance floor before adaptive context selection. Zero disables this floor. |
 | `OCR_PROVIDER` | string | `none` | `none` or `textract`; `textract` requires `S3_BUCKET` | Enables [image-only PDF OCR](api.md#image-only-pdf-ocr) after the parser finds no text. Offline fake mode never calls Textract and keeps the parser-only behavior. |
 | `OCR_TIMEOUT` | duration | `10m` | Positive; below `INGEST_JOB_TIMEOUT` when OCR is enabled | Total Textract start, polling and result pagination budget per ingestion attempt. Earlier job cancellation takes precedence. |
 | `OPENAI_API_KEY` | secret string | `""` | Optional; no whitespace or control characters | Bearer credential read only from configuration. Sent only to the configured endpoint; redirects are rejected. Keep it in secret storage and out of logs. |
@@ -64,7 +64,8 @@ The table below lists the environment variables recognized by the service:
 | `PINECONE_UPSERT_BATCH_SIZE` | integer | `100` | 1 to 1000 | Maximum records per vector upsert; each batch also has a 1.5 MiB estimated size limit. |
 | `QUERY_CONCURRENCY` | integer | `32` | 1 to 1024 | Maximum concurrent queries per handler instance. |
 | `QUERY_QUEUE_TIMEOUT` | duration | `2s` | 0s to 60s | Maximum wait for query admission; zero rejects immediately when all slots are occupied. |
-| `QUERY_TIMEOUT` | duration | `60s` | 5s to 10m | Total retrieval and synthesis budget after query admission; earlier caller deadlines take precedence. |
+| `QUERY_ANSWER_POLICY` | string | `both` | `both`, `evidence_only` | Deployment policy for [query answer modes](api.md#evidence-only-queries). |
+| `QUERY_TIMEOUT` | duration | `60s` | 5s to 10m | Total query budget after admission. Earlier caller deadlines take precedence. |
 | `REQUIRE_DOCUMENT_ALLOWLIST` | boolean | `false` | Boolean | Require a non-null `allowed_document_ids` field on every query; an empty list is accepted and skips embedding and search. |
 | `RERANK_MODEL_ARN` | string | `""` | Empty, or an `arn:` value without whitespace or control characters | Enables [reranking before synthesis](api.md#post-query); empty disables it. Ignored in offline fake mode. See [Bedrock permissions](deployment.md#bedrock-reranking). |
 | `RERANK_TIMEOUT` | duration | `5s` | 1s to 60s | Reranking call budget, including SDK retries and paginated results; earlier query or caller deadlines take precedence. |
@@ -74,7 +75,7 @@ The table below lists the environment variables recognized by the service:
 | `SERVICE_TOKEN` | string | `""` | No whitespace or control characters after trimming | Shared secret merged with `SERVICE_TOKENS`; see [Service Token Rotation](deployment.md#service-token-rotation). At least one token is required when `GO_RAG_FAKE_MODE=false`. |
 | `SERVICE_TOKENS` | comma-separated strings | `""` | No whitespace or control characters within a token after trimming | Additional secrets accepted in `X-Service-Token` for rotation; see [Service Token Rotation](deployment.md#service-token-rotation). Tokens are trimmed, empty entries are dropped and duplicates are removed across both variables. Startup warns with only the count of tokens shorter than 32 bytes; use secrets of at least 32 bytes. An empty combined list leaves routes open only in offline mode. |
 | `SHUTDOWN_DRAIN_DELAY` | duration | `5s` | 0s to 60s | Delay after readiness starts returning draining, before HTTP shutdown. A second termination signal skips the remaining delay. |
-| `SYNTHESIS_CONTEXT_TOKENS` | integer | `2400` | 256 to 100000 | Maximum sum of estimated tokens in sanitized synthesis excerpt bodies; excludes prompt instructions, the question and markers. |
+| `SYNTHESIS_CONTEXT_TOKENS` | integer | `2400` | 256 to 100000 | Maximum sum of estimated tokens in sanitized excerpt bodies. Generated answers also include prompt instructions, the question and markers. |
 | `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Bedrock model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
 | `SYNTHESIS_RELATIVE_SCORE_FLOOR` | float64 | `0.55` | 0 to 1, finite | Minimum candidate score relative to the best retrieved score. |
 | `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries with Bedrock. |

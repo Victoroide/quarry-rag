@@ -319,7 +319,7 @@ permissions and billing are described in [deployment](deployment.md#optional-pdf
 
 ### POST /query
 
-Executes vector similarity search and synthesizes an answer grounded in the retrieved document corpus.
+Executes vector similarity search and returns a grounded answer or selected excerpts.
 
 - **Method**: `POST`
 - **Path**: `/query`
@@ -333,6 +333,7 @@ Request fields:
 |---|---|---|---|
 | `query` | string | yes | Natural-language query string (1 to 10,000 decoded bytes) |
 | `mode` | string | no | Retrieval mode: `"auto"` (default), `"local"`, or `"global"`. Case-insensitive. `local` answers mainly from the most relevant authorized document (named entity or best match), topped up from the authorized scope when that document has fewer than 3 matching chunks. With no visible candidate, `local` uses `global`. Explicit `global` skips the routing probe |
+| `answer_mode` | string | no | `generated` or `evidence`. See [evidence-only queries](#evidence-only-queries) for the deployed default and evidence response |
 | `filter_doc_type` | string | no | Restricts vector retrieval to chunks matching the given `doc_type`, using the label normalization and limits above |
 | `collection` | string | no | Exact collection label, using the label rules above; omitted or empty searches all collections. Applied inside vector retrieval and routing, then checked against completed PostgreSQL documents. Intersects the type filter and document allowlist; vectors written before collection filtering need the [collection metadata backfill](development.md#collection-metadata-backfill) |
 | `max_chunks` | int | no | Requested chunks to retrieve (0 to 100), capped by [`MAX_CHUNKS_PER_QUERY`](configuration.md#environment-variables). Omitted or zero uses that configured maximum |
@@ -343,16 +344,16 @@ Response fields (200 OK):
 
 | Field | Type | Description |
 |---|---|---|
-| `finish_reason` | string | Completion reason when available: `stop`, `max_tokens`, `filtered`, `context_exceeded`, or `no_evidence` |
-| `answer` | string | Grounded answer in the question's language when evidence exists; localized fixed no-information answer otherwise, as described below |
+| `finish_reason` | string | Completion reason when available: `stop`, `max_tokens`, `filtered`, `context_exceeded`, `no_evidence`, or `evidence_only` |
+| `answer` | string | Grounded answer in the question's language, an empty string for `evidence_only`, or the localized fixed no-information answer described below |
 | `mode` | string | Retrieval mode executed: `"LOCAL"` or `"GLOBAL"`; automatic routing reflects only authorized, visible candidate documents |
 | `chunks_used` | int | Count of chunks from completed documents remaining after visibility, allowlist and minimum relevance filtering |
-| `context_chunks` | int | Count of chunks retained after score thresholding and passed into the LLM context (optional) |
-| `context_tokens` | int | Estimated token count of the prompt context (optional) |
+| `context_chunks` | int | Count of chunks retained for context (optional) |
+| `context_tokens` | int | Estimated tokens in the generation prompt or selected evidence bodies (optional) |
 | `early_exit` | bool | Indicates whether query execution completed early (optional) |
 | `stage_timings_ms` | map[string]int64 | Execution timings for pipeline stages in milliseconds (optional) |
 | `token_usage` | object | LLM token usage metrics (`input_tokens`, `output_tokens`, `total_tokens`) |
-| `scored_chunks` | array | Retrieved chunks ordered by reranking relevance when available, otherwise vector similarity |
+| `scored_chunks` | array | Retrieved chunks ordered by reranking relevance when available, otherwise vector similarity. Evidence-only queries return the selected excerpts |
 | `citations` | array | Citation checks; present whenever `include_citations` is true, including an empty array when no markers or evidence remain; otherwise omitted |
 
 Each `citations` entry contains:
@@ -384,7 +385,7 @@ Optional [Bedrock reranking](configuration.md#environment-variables) submits the
 
 Admitted queries run under the [query time budget](architecture.md#query-time-budget). A canceled request produces no further response bytes. Nonempty truncated or filtered answers retain their completion reason; empty synthesis text uses the `synthesis` error category below.
 
-Scored chunk fields:
+#### Scored chunks
 
 | Field | Type | Description |
 |---|---|---|
@@ -393,11 +394,45 @@ Scored chunk fields:
 | `chunk_index` | int | Position index of the chunk within the source document |
 | `score` | float64 | Cosine similarity score |
 | `rerank_score` | float64 | Bedrock relevance score, including zero; omitted when reranking is disabled or fails. Does not replace `score` |
-| `text` | string | Chunk text excerpt, truncated safely to a maximum of 600 runes without splitting UTF-8 characters |
+| `text` | string | Generated mode returns a preview of up to 600 runes. Evidence mode returns the selected sanitized excerpt body within the context budget set by `SYNTHESIS_CONTEXT_TOKENS` |
 | `kind` | string | Classification category if populated during ingestion (optional) |
 | `quality` | string | Quality rating if populated during ingestion (optional) |
-| `excerpt` | int | One-based prompt excerpt number; omitted when this chunk did not reach synthesis |
-| `truncated` | bool | True when the excerpt body was cut before synthesis; omitted otherwise. This describes synthesis truncation, independently of the response snippet limit |
+| `excerpt` | int | One-based selection index. Omitted for chunks outside the selection |
+| `truncated` | bool | True when the context budget cuts the selected excerpt body. Omitted otherwise |
+
+#### Evidence-only queries
+
+Set `answer_mode: "evidence"` to return selected excerpts. The service uses
+generated answers when the field is omitted under `QUERY_ANSWER_POLICY=both`.
+Under `QUERY_ANSWER_POLICY=evidence_only`, omission selects evidence and an
+explicit request for `generated` returns HTTP 403 `forbidden`.
+`include_citations: true` requires generated answers and returns HTTP 400 in
+evidence mode.
+
+Evidence mode uses the same retrieval scope, relevance floor and adaptive
+context selection as generated answers. It preserves vector retrieval order
+and embeds the question without calling an external reranker, answer model or
+citation checker. Hosted vector search receives the embedding and scope
+filters. Deployments that export trace contents apply their existing egress
+policy.
+
+With selected evidence, `scored_chunks` lists only the selected excerpts
+using the [scored chunk fields](#scored-chunks).
+`chunks_used` counts the candidates that passed filtering, and
+`context_chunks` counts the returned excerpts. Synthesis usage is zero and
+citations are omitted. Excerpts can contain misleading claims, markup, links
+or instructions. Render them as escaped plain text and treat them as
+untrusted data when passing them to downstream models.
+
+The service checks candidate chunks against current completed PostgreSQL
+records and reads the current document category. Before sending JSON or each
+successful SSE frame, it rechecks the retrieval and routing candidates and
+their categories. It recomputes routes that used document previews from the
+same PostgreSQL snapshot as the release check. A scope change detected before
+the response starts returns a pipeline error. After streaming starts, the
+service terminates the stream with an error. Previously delivered evidence
+remains with the recipient. With no evidence after filtering, both modes use
+the same localized response above.
 
 #### Streamed query answers
 
@@ -417,14 +452,18 @@ words incrementally.
 
 | Event | Payload | When |
 |---|---|---|
-| `context` | `mode`, `chunks_used`, `context_chunks`, `scored_chunks` | Once, after evidence filtering and synthesis excerpt selection, before generation |
+| `context` | `mode`, `chunks_used`, `context_chunks`, `scored_chunks` | Once, after evidence filtering and excerpt selection |
 | `delta` | `{"text":"..."}` | Incremental answer text; concatenate `text` values in order |
-| `done` | `finish_reason`, `token_usage`, `context_tokens`, `stage_timings_ms`, optional `early_exit`, and `citations` when requested | Successful completion; timings include synthesis |
+| `done` | `finish_reason`, `token_usage`, `context_tokens`, `stage_timings_ms`, optional `early_exit`, and `citations` when requested | Successful completion with timings for the completed stages |
 | `error` | `{"error":"...","message":"..."}` | A failure after the first frame; error categories and messages follow the table below |
 
-The context event uses the scored chunk fields above, including `excerpt` and `truncated`, so it identifies which retrieved chunks reached synthesis. Zero context counts are included. With `include_citations`, the `done` event always contains a citation array, including `[]` when no valid references remain. Citation checks run on the complete generated answer. Streaming preserves all text and markers as generated; checks omit out-of-range excerpt numbers and report each valid number in a marker once. The lexical check and offset definition above apply.
+The context event uses the scored chunk fields above, including `excerpt` and `truncated`, to identify the chunks selected for context. Zero context counts are included. With `include_citations`, the `done` event always contains a citation array, including `[]` when no valid references remain. Citation checks run on the complete generated answer. Streaming preserves all text and markers as generated; checks omit out-of-range excerpt numbers and report each valid number in a marker once. The lexical check and offset definition above apply.
 
 A no-evidence response sends `context`, one localized `delta`, and `done`, with zero token usage and context counts, `early_exit: true`, and `finish_reason: "no_evidence"`. Its `Content-Language` header follows the language selection described above.
+
+A successful evidence-only stream with selected excerpts sends `context`
+followed by `done` with `finish_reason: "evidence_only"`. The context frame
+contains the same excerpts as the JSON response.
 
 Both formats use the same JSON request body and service-token permissions.
 Validation, body and authorization limits, admission, deadlines, metrics and
@@ -457,8 +496,9 @@ Error Status Codes:
 
 | Status | Error Category | Condition |
 |---|---|---|
-| `400 Bad Request` | `validation` | Query missing, empty, or whitespace; query exceeding 10,000 decoded bytes; mode not auto, local, or global; max_chunks outside 0-100; invalid document type filter or collection; malformed JSON, unknown fields, duplicate top-level keys or trailing data |
+| `400 Bad Request` | `validation` | Invalid query, retrieval mode, answer mode, chunk limit, type or collection filter, or JSON body. Also returned for a citation request in evidence mode |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
+| `403 Forbidden` | `forbidden` | The deployed answer policy disallows generated answers |
 | `413 Payload Too Large` | `validation` | Request body exceeds the 1 MiB limit |
 | `415 Unsupported Media Type` | `validation` | Content-Type is not `application/json` |
 | `504 Gateway Timeout` | `timeout` | The query or synthesis deadline expired: `query processing timed out` |

@@ -7,13 +7,52 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/logctx"
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
+	"github.com/stretchr/testify/require"
 )
+
+func TestRouterEnforcesEvidenceOnlyPolicy(t *testing.T) {
+	router := NewRouter(&RouterDeps{Config: &config.Config{QueryAnswerPolicy: "evidence_only", ServiceToken: "token"}})
+	for _, tc := range []struct {
+		name, body, accept, contentType string
+		status                          int
+	}{
+		{"omitted", `{"query":"Archive?","allowed_document_ids":[]}`, "application/json", "application/json", 200},
+		{"SSE", `{"query":"Archive?","answer_mode":"evidence","allowed_document_ids":[]}`, "text/event-stream", "application/json; charset=utf-8", 200},
+		{"generated JSON", `{"query":"Archive?","answer_mode":"generated"}`, "application/json", "application/json", 403},
+		{"generated SSE", `{"query":"Archive?","answer_mode":"generated"}`, "text/event-stream", "application/json", 403},
+		{"invalid enum", `{"query":"Archive?","answer_mode":"other"}`, "application/json", "application/json", 400},
+		{"empty enum", `{"query":"Archive?","answer_mode":""}`, "application/json", "application/json", 400},
+		{"null enum", `{"query":"Archive?","answer_mode":null}`, "application/json", "application/json", 400},
+		{"wrong type", `{"query":"Archive?","answer_mode":true}`, "application/json", "application/json", 400},
+		{"duplicate", `{"query":"Archive?","answer_mode":"evidence","ANSWER_MODE":"generated"}`, "text/event-stream", "application/json", 400},
+		{"citations", `{"query":"Archive?","include_citations":true}`, "application/json", "application/json", 400},
+		{"form", "query=Archive&answer_mode=generated", "text/event-stream", "application/x-www-form-urlencoded", 415},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/query", strings.NewReader(tc.body))
+			req.Header.Set("X-Service-Token", "token")
+			req.Header.Set("Content-Type", tc.contentType)
+			req.Header.Set("Accept", tc.accept)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			if tc.status == 200 {
+				require.Contains(t, rec.Body.String(), `"finish_reason":"no_evidence"`)
+			}
+			if tc.status == 403 {
+				require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+				require.Contains(t, rec.Body.String(), `"error":"forbidden"`)
+			}
+		})
+	}
+}
 
 type requestLogPanicStore struct{ domain.ChunkStore }
 
