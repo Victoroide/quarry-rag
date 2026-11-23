@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -45,44 +46,128 @@ func TestQueryStreamParser(t *testing.T) {
 	require.JSONEq(t, `{"mode":"GLOBAL","chunks_used":0}`, string(events[0].Data))
 }
 
-func TestQueryStreamFailures(t *testing.T) {
+func TestQueryResponseCompletion(t *testing.T) {
+	const contextFields = `"mode":"GLOBAL","chunks_used":1,"context_chunks":1,` +
+		`"scored_chunks":[{"doc_id":"00000000-0000-4000-8000-000000000001","doc_type":"guide","chunk_index":0,"score":0.9,"text":"Archive evidence","excerpt":1}]`
+	const generationFields = `"token_usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14},` +
+		`"context_tokens":8,"stage_timings_ms":{"retrieval":2,"synthesis":5}`
+	const contextFrame = "event: context\ndata: {" + contextFields + "}\n\n"
+	const deltaFrame = "event: delta\ndata: {\"text\":\"Archive evidence\"}\n\n"
+	const doneFrame = "event: done\ndata: {\"finish_reason\":\"stop\"," + generationFields + "}\n\n"
+	const requestID = "request-123"
+	input := client.QueryRequest{Query: "archive", Mode: "global"}
+	for _, tc := range []struct {
+		name, accept, contentType, body string
+		status                          int
+		events                          []string
+		checkError                      func(*testing.T, error)
+	}{
+		{
+			name: "JSON success", accept: "application/json", contentType: "application/json", status: http.StatusOK,
+			body: `{"answer":"Archive evidence","finish_reason":"stop",` + contextFields + "," + generationFields + "}",
+		},
+		{
+			name: "JSON failure before context", accept: "text/event-stream", contentType: "application/json", status: http.StatusServiceUnavailable,
+			body: `{"error":"overloaded","message":"too many concurrent queries"}`,
+			checkError: func(t *testing.T, err error) {
+				var got *client.APIError
+				require.ErrorAs(t, err, &got)
+				require.Equal(t, &client.APIError{
+					StatusCode: http.StatusServiceUnavailable, Code: "overloaded", Message: "too many concurrent queries",
+					RequestID: requestID, RetryAfter: time.Second,
+				}, got)
+			},
+		},
+		{
+			name: "stream completed", accept: "text/event-stream", contentType: "text/event-stream", status: http.StatusOK,
+			body:   contextFrame + deltaFrame + doneFrame,
+			events: []string{"context", "delta", "done"},
+		},
+		{
+			name: "stream failure after context", accept: "text/event-stream", contentType: "text/event-stream", status: http.StatusOK,
+			body:   contextFrame + deltaFrame + "event: error\ndata: {\"error\":\"timeout\",\"message\":\"query processing timed out\"}\n\n",
+			events: []string{"context", "delta", "error"},
+			checkError: func(t *testing.T, err error) {
+				var got *client.StreamError
+				require.ErrorAs(t, err, &got)
+				require.Equal(t, &client.StreamError{
+					Code: "timeout", Message: "query processing timed out", RequestID: requestID,
+				}, got)
+			},
+		},
+		{
+			name: "stream interrupted without a terminal frame", accept: "text/event-stream", contentType: "text/event-stream", status: http.StatusOK,
+			body:   contextFrame + deltaFrame,
+			events: []string{"context", "delta"},
+			checkError: func(t *testing.T, err error) {
+				require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, "/api/query", r.URL.Path)
+				assert.Equal(t, tc.accept, r.Header.Get("Accept"))
+				assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+				assert.Equal(t, "synthetic-token", r.Header.Get("X-Service-Token"))
+				var got client.QueryRequest
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+				assert.Equal(t, input, got)
+				w.Header().Set("Content-Type", tc.contentType)
+				w.Header().Set("X-Request-ID", requestID)
+				if tc.status == http.StatusServiceUnavailable {
+					w.Header().Set("Retry-After", "1")
+				}
+				w.WriteHeader(tc.status)
+				_, err := io.WriteString(w, tc.body)
+				assert.NoError(t, err)
+			})
+			if tc.accept == "application/json" {
+				result, err := c.Query(t.Context(), input)
+				require.NoError(t, err)
+				require.Equal(t, "Archive evidence", result.Answer)
+				require.Equal(t, "stop", result.FinishReason)
+				require.Equal(t, 1, result.ChunksUsed)
+				require.Len(t, result.ScoredChunks, 1)
+				require.Equal(t, client.TokenUsage{InputTokens: 11, OutputTokens: 3, TotalTokens: 14}, result.TokenUsage)
+				return
+			}
+			var events []string
+			err := c.QueryStream(t.Context(), input, func(event client.Event) error {
+				events = append(events, event.Type)
+				return nil
+			})
+			require.Equal(t, tc.events, events)
+			if tc.checkError == nil {
+				require.NoError(t, err)
+				return
+			}
+			tc.checkError(t, err)
+		})
+	}
+}
+
+func TestQueryStreamRejectsInvalidResponses(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, contentType string
-		status                  int
 		want                    string
 	}{
-		{"http", `{"error":"overloaded","message":"too many concurrent queries"}`, "application/json", 503, "overloaded"},
-		{"stream error", "event: context\ndata: {}\n\nevent: error\ndata: {\"error\":\"timeout\",\"message\":\"query processing timed out\"}\n\n", "text/event-stream", 200, "timeout"},
-		{"truncated", "event: context\ndata: {}\n\nevent: delta\ndata: {\"text\":\"partial\"}\n\n", "text/event-stream", 200, "unexpected EOF"},
-		{"broken json", "event: context\ndata: {\n\n", "text/event-stream", 200, "invalid"},
-		{"wrong content type", `{}`, "application/json", 200, "Content-Type"},
-		{"missing context", "event: done\ndata: {}\n\n", "text/event-stream", 200, "context"},
-		{"empty error", "event: context\ndata: {}\n\nevent: error\ndata: {}\n\n", "text/event-stream", 200, "error"},
-		{"duplicate context", "event: context\ndata: {}\n\nevent: context\ndata: {}\n\n", "text/event-stream", 200, "duplicate"},
-		{"invalid delta", "event: context\ndata: {}\n\nevent: delta\ndata: {\"text\":null}\n\n", "text/event-stream", 200, "delta"},
+		{"broken json", "event: context\ndata: {\n\n", "text/event-stream", "invalid"},
+		{"wrong content type", `{}`, "application/json", "Content-Type"},
+		{"missing context", "event: done\ndata: {}\n\n", "text/event-stream", "context"},
+		{"empty error", "event: context\ndata: {}\n\nevent: error\ndata: {}\n\n", "text/event-stream", "error"},
+		{"duplicate context", "event: context\ndata: {}\n\nevent: context\ndata: {}\n\n", "text/event-stream", "duplicate"},
+		{"invalid delta", "event: context\ndata: {}\n\nevent: delta\ndata: {\"text\":null}\n\n", "text/event-stream", "delta"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", tc.contentType)
-				w.Header().Set("Retry-After", "2")
-				w.Header().Set("X-Request-ID", "request-123")
-				w.WriteHeader(tc.status)
-				_, err := fmt.Fprint(w, tc.body)
+				_, err := io.WriteString(w, tc.body)
 				assert.NoError(t, err)
 			})
 			err := c.QueryStream(t.Context(), client.QueryRequest{Query: "archive"}, func(client.Event) error { return nil })
 			require.ErrorContains(t, err, tc.want)
-			if tc.name == "http" {
-				var apiErr *client.APIError
-				require.ErrorAs(t, err, &apiErr)
-				require.Equal(t, 2*time.Second, apiErr.RetryAfter)
-			}
-			if tc.name == "stream error" {
-				var streamErr *client.StreamError
-				require.ErrorAs(t, err, &streamErr)
-				require.Equal(t, "timeout", streamErr.Code)
-				require.Equal(t, "request-123", streamErr.RequestID)
-			}
 		})
 	}
 }

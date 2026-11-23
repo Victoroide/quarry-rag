@@ -32,8 +32,12 @@ type StreamError struct {
 // Error returns the service error category and message.
 func (e *StreamError) Error() string { return e.Code + ": " + e.Message }
 
-// QueryStream delivers query events until done, an error, or callback failure.
-// It cancels the HTTP request before returning and never retries partial answers.
+// QueryStream delivers query events to fn. A valid done event completes the
+// stream if fn returns nil. A non-2xx HTTP response returns an [*APIError].
+// A terminal error event returns a [*StreamError] if fn returns nil.
+// EOF before either terminal event returns an error wrapping [io.ErrUnexpectedEOF].
+// QueryStream returns any callback error, cancels the HTTP request before
+// returning, and makes a single attempt.
 func (c *Client) QueryStream(ctx context.Context, input QueryRequest, fn func(Event) error, opts ...RequestOption) error {
 	if fn == nil {
 		return errors.New("stream callback is required")
