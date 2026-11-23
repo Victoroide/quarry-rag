@@ -64,7 +64,7 @@ The service is packaged using a multi-stage Docker build that outputs a minimal,
 
 Both base images are pinned by multi-platform index digest in the Dockerfile. Dependabot updates their tags and digests together.
 
-1. **`base`**: Builds on `golang:1.27.3-alpine3.23`, installs compilation tools (`gcc`, `musl-dev`, `git`), and downloads Go modules.
+1. **`base`**: Builds on the Go image pinned in the [Dockerfile](../Dockerfile), installs compilation tools (`gcc`, `musl-dev`, `git`), and downloads Go modules.
 2. **`test`**: Runs static checks (`go vet ./...`) and the short suite with data race instrumentation (`go test -short ./... -count=1 -race`); Docker-backed tests run in full on the host or CI runner.
 3. **`lint`**: Compiles and executes `golangci-lint` (v2.15.0) against `.golangci.yml`.
 4. **`builder`**: Compiles the statically linked binary (`CGO_ENABLED=0 go build -o /bin/server ./cmd/server`) and collects the license and notice files of the Go standard library and every linked module.
