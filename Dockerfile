@@ -1,4 +1,4 @@
-FROM golang:1.27.3-alpine3.23@sha256:5d5113301ffcac84e2bfb20c42648803fecaea6789c89bb9b66884e18cbb30a7 AS base
+FROM golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd AS base
 RUN apk add --no-cache gcc musl-dev git
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 go build -o /bin/server ./cmd/server
 RUN CGO_ENABLED=0 sh .github/scripts/third-party-licenses.sh ./cmd/server /licenses
 
 # ── final runtime image (minimal) ───────────────────────
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS runtime
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS runtime
 RUN apk add --no-cache ca-certificates tzdata && addgroup -S -g 10001 app && adduser -S -u 10001 -G app app
 WORKDIR /app
 COPY --from=builder /bin/server /app/server
