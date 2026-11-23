@@ -143,15 +143,26 @@ func TestAcceptAfterQueueLimitDecrease(t *testing.T) {
 }
 
 func TestConcurrentFailedRetryAdmission(t *testing.T) {
+	testConcurrentFailedRetryAdmission(t, domain.ContentDedupCollection)
+}
+
+func TestPrivateConcurrentFailedRetryAdmission(t *testing.T) {
+	testConcurrentFailedRetryAdmission(t, domain.ContentDedupOff)
+}
+
+func testConcurrentFailedRetryAdmission(t *testing.T, policy domain.ContentDedup) {
+	t.Helper()
 	t.Run("retry and new document compete for one slot", func(t *testing.T) {
 		c := jobsDatabase(t, setRepeatableReadDefault)
 		failure := "terminal processing error"
 		retry := jobsRequest("failed content")
 		retry.CallerSupplied = true
+		retry.ContentDedup = policy
 		failedID := failAdmissionDocument(t, c, retry, failure)
 		retry.MaxPending = 1
 		fresh := jobsRequest("new content")
 		fresh.MaxPending = 1
+		fresh.ContentDedup = policy
 
 		left, right := raceAdmissions(t, c, retry, fresh)
 		switch left.Outcome {
@@ -173,6 +184,7 @@ func TestConcurrentFailedRetryAdmission(t *testing.T) {
 		c := jobsDatabase(t, setRepeatableReadDefault)
 		retry := jobsRequest("failed content")
 		retry.CallerSupplied = true
+		retry.ContentDedup = policy
 		failedID := failAdmissionDocument(t, c, retry, "terminal processing error")
 		retry.MaxPending = 1
 
