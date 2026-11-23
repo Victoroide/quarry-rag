@@ -3,7 +3,9 @@
 The [OpenAPI 3.1 description](openapi.yaml) provides machine-readable routes and
 payload schemas. This reference owns endpoint behavior and limits.
 
-All API responses use `Content-Type: application/json`. Error responses follow a uniform structured JSON format:
+The API uses `Content-Type: application/json` by default. See
+[Streamed query answers](#streamed-query-answers) for the event-stream contract.
+The standard JSON error envelope has this structure.
 
 ```json
 {
@@ -393,7 +395,19 @@ Scored chunk fields:
 
 #### Streamed query answers
 
-Send `Accept: text/event-stream` to receive server-sent events; JSON remains the default. `text/event-stream` with any positive `q` value selects streaming, regardless of other listed types; wildcards such as `*/*` keep JSON. Each event is framed as `event: <name>`, a `data: <JSON>` line, and a blank line. Text, including newlines, is escaped inside JSON. Each frame is flushed, and the response sets `Content-Type: text/event-stream`, `Cache-Control: no-cache` and `X-Accel-Buffering: no`. Bedrock generation uses ConverseStream, OpenAI-compatible generation uses the [streaming chat API](deployment.md#openai-compatible-providers), and offline generation emits words incrementally.
+Send `Accept: text/event-stream` to receive server-sent events. An explicit
+`text/event-stream` preference with no `q` parameter or with `0 < q <= 1`
+selects streaming regardless of other listed types and weights. Requests
+without a qualifying preference receive JSON, including when `Accept` is
+omitted, contains only wildcards, or gives `text/event-stream` a weight of zero.
+
+The first frame commits HTTP 200 with `Content-Type: text/event-stream`,
+`Cache-Control: no-cache` and `X-Accel-Buffering: no`. Each event is framed as
+`event: <name>`, a `data: <JSON>` line, and a blank line. Text, including
+newlines, is escaped inside JSON. Each frame is flushed. Bedrock generation
+uses ConverseStream, OpenAI-compatible generation uses the [streaming chat
+API](deployment.md#openai-compatible-providers), and offline generation emits
+words incrementally.
 
 | Event | Payload | When |
 |---|---|---|
@@ -402,11 +416,20 @@ Send `Accept: text/event-stream` to receive server-sent events; JSON remains the
 | `done` | `finish_reason`, `token_usage`, `context_tokens`, `stage_timings_ms`, optional `early_exit`, and `citations` when requested | Successful completion; timings include synthesis |
 | `error` | `{"error":"...","message":"..."}` | A failure after the first frame; error categories and messages follow the table below |
 
-The context event uses the scored chunk fields above, including `excerpt` and `truncated`, so it identifies which retrieved chunks reached synthesis. Zero context counts are included. With `include_citations`, the final event always contains a citation array, including `[]` when no valid references remain. Citation checks run on the complete generated answer. Streaming preserves all text and markers as generated; checks omit out-of-range excerpt numbers and report each valid number in a marker once. The lexical check and offset definition above apply.
+The context event uses the scored chunk fields above, including `excerpt` and `truncated`, so it identifies which retrieved chunks reached synthesis. Zero context counts are included. With `include_citations`, the `done` event always contains a citation array, including `[]` when no valid references remain. Citation checks run on the complete generated answer. Streaming preserves all text and markers as generated; checks omit out-of-range excerpt numbers and report each valid number in a marker once. The lexical check and offset definition above apply.
 
 A no-evidence response sends `context`, one localized `delta`, and `done`, with zero token usage and context counts, `early_exit: true`, and `finish_reason: "no_evidence"`. Its `Content-Language` header follows the language selection described above.
 
-Authentication, JSON validation, body and authorization limits, admission, deadlines, metrics and tracing apply to both formats. Errors before the first frame retain the JSON status codes below. After the stream starts, HTTP status remains 200 and a failure ends with `error` instead of `done`. A disconnected client cancels generation and closes the upstream stream. A stream that closes without `done` is incomplete; discard it or retry the query as a new request.
+Both formats use the same JSON request body and service-token permissions.
+Validation, body and authorization limits, admission, deadlines, metrics and
+tracing apply to both. Errors sent before the first frame use
+`Content-Type: application/json` and the HTTP status codes below. Once
+streaming starts, the status stays at 200 and the terminal event reports the
+outcome. A client disconnect cancels generation, closes the upstream stream
+and can prevent delivery of the terminal event. If the connection closes
+before either `done` or `error` arrives, treat the answer as interrupted.
+Discard partial answers from failed or interrupted streams. To retry, send a
+new query request.
 
 For example, add `-N -H "Accept: text/event-stream"` to the query command to display frames as they arrive:
 

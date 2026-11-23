@@ -59,6 +59,19 @@ func streamQueryRequest(ctx context.Context, body string) *http.Request {
 	return r
 }
 
+func requireQueryResponseHeaders(t *testing.T, rec *httptest.ResponseRecorder, status int, contentType string) http.Header {
+	t.Helper()
+	resp := rec.Result()
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	require.Equal(t, status, resp.StatusCode)
+	require.Equal(t, contentType, resp.Header.Get("Content-Type"))
+	if contentType == "text/event-stream" {
+		require.Equal(t, "no-cache", resp.Header.Get("Cache-Control"))
+		require.Equal(t, "no", resp.Header.Get("X-Accel-Buffering"))
+	}
+	return resp.Header
+}
+
 type recordedEvent struct {
 	name string
 	data map[string]json.RawMessage
@@ -194,8 +207,7 @@ func TestQueryStreamFramingOrderAndCitations(t *testing.T) {
 	}}
 	h := streamQueryHandler(streamQueryConfig(), true, c)
 	h(rec, streamQueryRequest(t.Context(), `{"query":"archive","mode":"global","include_citations":true}`))
-	require.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
-	require.Equal(t, "no-cache", rec.Header().Get("Cache-Control"))
+	requireQueryResponseHeaders(t, rec, http.StatusOK, "text/event-stream")
 	events := recordedEvents(t, rec.Body.String())
 	require.Len(t, events, 4)
 	for i, name := range []string{"context", "delta", "delta", "done"} {
@@ -232,8 +244,8 @@ func TestQueryStreamNoEvidence(t *testing.T) {
 			return nil, nil
 		}})
 		h(rec, r)
-		require.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
-		require.Equal(t, "es", rec.Header().Get("Content-Language"))
+		headers := requireQueryResponseHeaders(t, rec, http.StatusOK, "text/event-stream")
+		require.Equal(t, "es", headers.Get("Content-Language"))
 		events := recordedEvents(t, rec.Body.String())
 		require.Len(t, events, 3)
 		for i, name := range []string{"context", "delta", "done"} {
@@ -266,12 +278,15 @@ func TestQueryStreamErrorsAfterContext(t *testing.T) {
 				}
 				return nil, tc.err
 			}}
-			streamQueryHandler(streamQueryConfig(), true, c)(rec, streamQueryRequest(t.Context(), `{"query":"archive","mode":"global"}`))
-			require.Equal(t, http.StatusOK, rec.Code)
+			streamQueryHandler(streamQueryConfig(), true, c)(rec, streamQueryRequest(t.Context(), `{"query":"archive","mode":"global","include_citations":true}`))
+			requireQueryResponseHeaders(t, rec, http.StatusOK, "text/event-stream")
 			events := recordedEvents(t, rec.Body.String())
 			require.Len(t, events, 3)
+			require.Equal(t, "context", events[0].name)
+			require.Equal(t, "delta", events[1].name)
 			require.Equal(t, "error", events[2].name)
 			require.JSONEq(t, `"`+tc.kind+`"`, string(events[2].data["error"]))
+			require.NotContains(t, events[2].data, "citations")
 			require.NotContains(t, rec.Body.String(), "private upstream detail")
 			require.Contains(t, logs.String(), `"msg":"query processing failed"`)
 		})
@@ -292,8 +307,7 @@ func TestQueryStreamPreEventErrorsRemainJSON(t *testing.T) {
 			cfg.RequireDocumentAllowlist = tc.name == "required allowlist"
 			rec := httptest.NewRecorder()
 			streamQueryHandler(cfg, false, nil)(rec, streamQueryRequest(t.Context(), tc.body))
-			require.Equal(t, tc.code, rec.Code)
-			require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+			requireQueryResponseHeaders(t, rec, tc.code, "application/json")
 		})
 	}
 	cfg := deadlineQueryConfig(t)
@@ -301,6 +315,7 @@ func TestQueryStreamPreEventErrorsRemainJSON(t *testing.T) {
 	h := deadlineQueryHandler(cfg, deadlineEmbedder{}, nil)
 	h(rec, streamQueryRequest(t.Context(), `{"query":"archive"}`))
 	deadlineAssertError(t, rec, 504, "timeout")
+	requireQueryResponseHeaders(t, rec, http.StatusGatewayTimeout, "application/json")
 }
 
 func TestQueryStreamDisconnectCancelsUpstream(t *testing.T) {
@@ -357,10 +372,14 @@ func TestQueryStreamThroughMiddlewareAndAuthentication(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /query", middleware.RequireServiceTokens([]string{"synthetic-token"}, streamQueryHandler(streamQueryConfig(), true, c)))
 	h := middleware.RequestID(middleware.Metrics(middleware.Tracing(middleware.Logging(middleware.Recovery(mux)), false), service))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, streamQueryRequest(t.Context(), `{"query":"archive","mode":"global"}`))
-	deadlineAssertError(t, rec, 401, "unauthorized")
-	require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	for _, accept := range []string{"application/json", "text/event-stream"} {
+		rec := httptest.NewRecorder()
+		r := streamQueryRequest(t.Context(), `{"query":"archive","mode":"global"}`)
+		r.Header.Set("Accept", accept)
+		h.ServeHTTP(rec, r)
+		deadlineAssertError(t, rec, http.StatusUnauthorized, "unauthorized")
+		require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	}
 	completed := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r); close(completed) }))
 	defer srv.Close()
@@ -423,8 +442,8 @@ func TestQueryStreamAdmissionAndSynthesisTimeout(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h(rec, streamQueryRequest(t.Context(), `{"query":"archive","mode":"global"}`))
 	deadlineAssertError(t, rec, 503, "overloaded")
-	require.Equal(t, "1", rec.Header().Get("Retry-After"))
-	require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	headers := requireQueryResponseHeaders(t, rec, http.StatusServiceUnavailable, "application/json")
+	require.Equal(t, "1", headers.Get("Retry-After"))
 	cancel()
 	<-finished
 	cfg.SynthesisTimeout = 10 * time.Millisecond
@@ -437,22 +456,40 @@ func TestQueryStreamAdmissionAndSynthesisTimeout(t *testing.T) {
 }
 
 func TestQueryStreamMinimumRelevanceAndNegotiation(t *testing.T) {
-	for _, accept := range []string{"text/event-stream", "application/json, text/event-stream;q=0.5", "text/event-stream;q=0", "text/event-stream;q=invalid", "application/json", "*/*"} {
-		t.Run(accept, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, accept, contentType string
+	}{
+		{"stream", "text/event-stream", "text/event-stream"},
+		{"stream preferred", "application/json, text/event-stream;q=0.5", "text/event-stream"},
+		{"zero weight", "text/event-stream;q=0", "application/json"},
+		{"out of range weight", "text/event-stream;q=1.1", "application/json"},
+		{"malformed weight", "text/event-stream;q=invalid", "application/json"},
+		{"JSON", "application/json", "application/json"},
+		{"wildcard", "*/*", "application/json"},
+		{"omitted", "", "application/json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			cfg := streamQueryConfig()
 			cfg.MinRelevanceScore = .95
 			rec := httptest.NewRecorder()
 			r := streamQueryRequest(t.Context(), `{"query":"archive","mode":"global"}`)
-			r.Header.Set("Accept", accept)
+			r.Header.Del("Accept")
+			if tc.accept != "" {
+				r.Header.Set("Accept", tc.accept)
+			}
 			streamQueryHandler(cfg, true, nil)(rec, r)
-			if accept == "text/event-stream" || strings.Contains(accept, "q=0.5") {
+			requireQueryResponseHeaders(t, rec, http.StatusOK, tc.contentType)
+			if tc.contentType == "text/event-stream" {
 				events := recordedEvents(t, rec.Body.String())
 				require.Len(t, events, 3)
 				require.JSONEq(t, `[]`, string(events[0].data["scored_chunks"]))
+				require.Equal(t, "done", events[2].name)
 				require.NotContains(t, events[2].data, "citations")
-			} else {
-				require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+				return
 			}
+			var response QueryResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+			require.Equal(t, "no_evidence", response.FinishReason)
 		})
 	}
 }
