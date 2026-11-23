@@ -72,7 +72,7 @@ sequenceDiagram
         Handler->>S3: Upload original file
     end
     Handler->>Postgres: AcceptDocument transaction
-    Note over Postgres: Reserve identity, store content and fingerprint, insert pending job
+    Note over Postgres: Resolve identity, check capacity for new jobs, commit document and job together
     alt Accepted, processing duplicate, or failed duplicate requeued
         Handler-->>Caller: 202 processing with existing or new ID
     else Completed duplicate
@@ -289,8 +289,7 @@ An HNSW index uses `vector_cosine_ops`; B-tree indexes cover `document_id` and `
 
 ### Worker Queue Mechanics
 
-- PostgreSQL stores accepted content and a pending job atomically before HTTP 202. [`WORKER_QUEUE_SIZE`](configuration.md#environment-variables) bounds outstanding jobs across replicas, including running work.
-- Identical content without an explicit identifier selects its existing document within its collection atomically. Completed duplicates return 200; in-flight duplicates return 202; failed duplicates return 202 and requeue the original identifier. Explicit identifiers preserve caller identity and reject conflicting content or collections with 409.
+- An advisory transaction lock serializes PostgreSQL admission across replicas. When acceptance needs a slot, PostgreSQL checks capacity and commits the document change and pending job together. See [queue admission and retries](api.md#queue-admission-and-retries) for the HTTP behavior.
 - [`INGEST_WORKERS`](configuration.md#environment-variables) sets worker loops per process. Each loop claims due jobs with `FOR UPDATE SKIP LOCKED` and renews its lease every `INGEST_LEASE / 3`. Polling discovers persisted work even when a notification is missed or another replica accepts it.
 - Expired leases are reclaimed. Every attempt first removes existing vectors for the document. Retryable failures use exponential backoff from 5 seconds to 5 minutes plus up to 1 second of jitter. Processing failures that are permanent or exhaust attempts remove partial vectors under the live lease before recording `failed` and `last_error`. Jobs exhausted through expired leases are failed during claiming; their remaining vectors stay hidden by document status and are removed before any requeued attempt.
 - Deletion cascades to the job. Completion requires both a processing document and its owned lease; if deletion wins, the worker removes any late vectors.

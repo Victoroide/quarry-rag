@@ -31,6 +31,7 @@ Notable changes are grouped by release.
 
 ### Fixed
 
+- Failed-document retries respect the persisted ingestion queue limit.
 - The ingestion and query sequence diagrams in the architecture documentation render again.
 - The architecture documentation lists the tracing middleware in the request middleware order.
 - **Breaking:** Startup rejects `CHUNK_OVERLAP` above `CHUNK_TOKEN_SIZE/2`, which was previously accepted, and chunk output now grows linearly with document size. Chunks keep the source spacing between sentences instead of adding a space after full-width terminators such as `。`.
