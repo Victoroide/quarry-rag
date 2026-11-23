@@ -24,6 +24,7 @@ Notable changes are grouped by release.
 - Synthesis context is selected by `SYNTHESIS_CONTEXT_TOKENS` estimated tokens and `SYNTHESIS_RELATIVE_SCORE_FLOOR` instead of at most 5 excerpts (8 for multi-part questions) cut near 1,200 characters.
 - Deployment documentation includes PostgreSQL connections in the cross-replica concurrency limits.
 - Documentation diagrams animate one step at a time at a slower pace, keep each highlight lit before it fades, and pause briefly before repeating.
+- The runtime image uses Alpine 3.24.4.
 
 ### Fixed
 
