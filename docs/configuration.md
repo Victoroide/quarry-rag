@@ -9,13 +9,13 @@ The table below lists the environment variables recognized by the service:
 | Variable | Type | Default | Constraints | Description |
 |---|---|---|---|---|
 | `AWS_ACCESS_KEY_ID` | string | `""` | Set together with `AWS_SECRET_ACCESS_KEY`, or leave both empty | Optional static AWS access key ID. When both keys are empty, AWS clients use the default credential chain. |
-| `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. See [AWS retries](deployment.md#3-aws-bedrock-embedding-and-llm-models) for retry policy details. |
+| `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. See [AWS retries](deployment.md#aws-retries-and-deadlines) for retry policy details. |
 | `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls, Bedrock reranking and S3 object storage. Required outside offline mode when either provider uses Bedrock, reranking is enabled, or original-file storage is enabled. |
 | `AWS_SECRET_ACCESS_KEY` | string | `""` | Set together with `AWS_ACCESS_KEY_ID`, or leave both empty | Optional static AWS secret access key. |
 | `AWS_SESSION_TOKEN` | string | `""` | Optional string | Session token for temporary static AWS credentials. |
 | `BEDROCK_EMBED_MODEL` | string | `"amazon.titan-embed-text-v2:0"` | Non-empty string | Bedrock model identifier used for generating text embeddings. |
 | `BEDROCK_FALLBACK_MODEL` | string | `"us.meta.llama4-maverick-17b-instruct-v1:0"` | Non-empty string | Bedrock model identifier for answer synthesis and fallback routing. |
-| `BEDROCK_GUARDRAIL_ID` | string | `""` (disabled) | Requires `LLM_PROVIDER=bedrock`; set together with `BEDROCK_GUARDRAIL_VERSION`; no whitespace or control characters | Optional Bedrock guardrail identifier attached to Converse and ConverseStream requests. See [synthesis behavior](architecture.md#query-stages) and [required permissions](deployment.md#3-aws-bedrock-embedding-and-llm-models). |
+| `BEDROCK_GUARDRAIL_ID` | string | `""` (disabled) | Requires `LLM_PROVIDER=bedrock`; set together with `BEDROCK_GUARDRAIL_VERSION`; no whitespace or control characters | Optional Bedrock guardrail identifier attached to Converse and ConverseStream requests. See [synthesis behavior](architecture.md#query-stages) and [required permissions](deployment.md#bedrock-guardrails). |
 | `BEDROCK_GUARDRAIL_VERSION` | string | `""` (disabled) | Set together with `BEDROCK_GUARDRAIL_ID`; `DRAFT` or a positive decimal integer without leading zeros | Guardrail version to apply. |
 | `BEDROCK_PRIMARY_MODEL` | string | `"amazon.nova-micro-v1:0"` | Non-empty string | Bedrock model identifier for low-latency reasoning and fast answer synthesis. |
 | `CHUNK_OVERLAP` | integer | `64` | 0 to `CHUNK_TOKEN_SIZE/2` (integer division) | Maximum estimated tokens retained from the previous chunk. Each chunk starts at least halfway through the previous one, in estimated tokens and bytes, so total chunk text is at most twice the normalized input. |
@@ -65,7 +65,7 @@ The table below lists the environment variables recognized by the service:
 | `QUERY_QUEUE_TIMEOUT` | duration | `2s` | 0s to 60s | Maximum wait for query admission; zero rejects immediately when all slots are occupied. |
 | `QUERY_TIMEOUT` | duration | `60s` | 5s to 10m | Total retrieval and synthesis budget after query admission; earlier caller deadlines take precedence. |
 | `REQUIRE_DOCUMENT_ALLOWLIST` | boolean | `false` | Boolean | Require a non-null `allowed_document_ids` field on every query; an empty list is accepted and skips embedding and search. |
-| `RERANK_MODEL_ARN` | string | `""` | Empty, or an `arn:` value without whitespace or control characters | Enables [reranking before synthesis](api.md#post-query); empty disables it. Ignored in offline fake mode. See [Bedrock permissions](deployment.md#3-aws-bedrock-embedding-and-llm-models). |
+| `RERANK_MODEL_ARN` | string | `""` | Empty, or an `arn:` value without whitespace or control characters | Enables [reranking before synthesis](api.md#post-query); empty disables it. Ignored in offline fake mode. See [Bedrock permissions](deployment.md#bedrock-reranking). |
 | `RERANK_TIMEOUT` | duration | `5s` | 1s to 60s | Reranking call budget, including SDK retries and paginated results; earlier query or caller deadlines take precedence. |
 | `S3_BUCKET` | string | `""` | Explicit bucket name | S3 bucket for original uploads. Empty disables source file storage with a startup warning. Startup checks bucket access within 10 seconds; a 403 or 404 prevents startup, while transient errors produce a warning and startup continues. |
 | `S3_EXPECTED_BUCKET_OWNER` | string | `""` | Empty or exactly 12 ASCII digits | Optional AWS account ID expected to own the bucket. Sent with uploads, deletions and bucket checks; omitted from presigned downloads. |
