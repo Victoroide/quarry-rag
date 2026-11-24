@@ -29,6 +29,7 @@ Notable changes are grouped by release.
 - Authenticated document status and inventory can include stable incarnations on request. [Document deletion](docs/api.md#delete-documentsdoc_id) returns `412` for reserved selectors and `400` for malformed queries.
 - Optional embedding input profiles enforce model-specific allowances, split overlong ingestion chunks and reject overlong queries before embedding.
 - Optional exact cosine search for small filtered pgvector scopes (`PGVECTOR_EXACT_SCOPE_MAX`, disabled by default) with bounded single-snapshot probing and `quarry_pgvector_search_total` metrics.
+- The [evidence evaluation](docs/development.md#evidence-evaluation) replays a labeled fixture locally and compares scoped retrieval, answer support and index visibility against opted-in staging deployments with receipt-qualified fixture cleanup.
 
 ### Changed
 

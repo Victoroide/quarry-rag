@@ -234,6 +234,159 @@ go run ./scripts/langeval -tag after
 go run ./scripts/langeval -compare baseline,after
 ```
 
+### Evidence Evaluation
+
+`go run ./scripts/evidenceeval` replays the frozen, purpose-written fixture in
+`internal/evaluation`. It prints JSON and uses no deployment or credentials.
+Version 1 has four documents and six queries, including two English–Spanish
+pairs and two no-answer queries. One document repeats the title and text of
+another in a separate collection. The empty-scope query grants access to zero
+documents.
+
+For a hosted comparison, select staging deployments with real model providers
+and equal retrieval settings where possible. Freeze the model revisions,
+embedding dimensions, chunking, relevance and context limits, reranking, output
+limit and seed where configurable. Record the deployment configuration revision
+with each target. Provide a JSON array of objects with these fields:
+
+| Field | Value |
+| --- | --- |
+| `name`, `base_url` | Unique lowercase target name and absolute API base address. |
+| `token_env` | Name of the environment variable holding the service token. Leave empty for an unauthenticated staging instance. |
+| `backend` | `postgres` or `pinecone`. |
+| `embedding_provider`, `embedding_model`, `dimensions` | Embedding provider, exact model identifier or revision, and output dimensions. |
+| `answer_provider`, `answer_models` | Synthesis provider and all routed model identifiers or revisions. |
+| `reranker`, `settings_revision` | Reranking model identifier or `off`, and a reference to the frozen deployment settings. |
+
+```sh
+RUN_SMOKE=1 go run ./scripts/evidenceeval --live --create --delete \
+  --targets staging-targets.json --baseline current --collection evidence-qa \
+  --ledger-dir ./evaluation-ledgers --max-requests 120 --instrument
+```
+
+Set `EVALUATION_COLLECTION_PREFIX` to the selected prefix on the staging
+deployment. The evaluator derives fixture IDs from a fresh namespace per target
+and scopes every query by collection and document allowlist. Keep the ledger
+directory private. Each ledger has an exclusive process lock and stores an
+invocation receipt and pending identity before submission.
+
+The authenticated `/evaluation/fixtures` routes require
+`X-Quarry-Evaluation-Fixture` and `X-Quarry-Evaluation-Receipt`. An older server
+returns an ordinary route error. The fixture routes accept only the built-in
+JSON fixtures. PostgreSQL creates a reservation and receipt with the admitted
+document in the same transaction. Fixture UUIDs remain reserved after
+deletion so delayed operations cannot target a replacement. Before enabling
+fixture admission, upgrade every API replica, ingest worker and operator
+cleanup binary that shares the stores. Older binaries can bypass the fixture
+guards. Clean up active fixtures before rolling back an upgraded writer.
+
+Apply the [serving-role upgrade](grant-catalog.md#upgrade-an-existing-serving-role)
+after migration 019. Grant the staging deployment's serving login receipt
+access only in the database that sets `EVALUATION_COLLECTION_PREFIX`:
+
+```sql
+GRANT SELECT, INSERT, UPDATE ON public.evaluation_fixtures TO quarry_service;
+```
+
+Status uses `X-Quarry-Evaluation-State` to distinguish missing, borrowed, owned,
+retired and durably deleted fixtures. An owned or deleted response carries its
+`X-Document-Incarnation`. The evaluator pins that revision and supplies it with
+the receipt on DELETE. Running ingestion defers cleanup. Workers and cleanup
+use the vector store bound at fixture admission, including the resolved
+Pinecone index and its default namespace. Cleanup deletes only that
+namespace's entries for the fixture ID and never sweeps a namespace named after
+the document. If cleanup reports `store_mismatch`, restore the original vector
+configuration and retry. For older receipts with an unknown binding, verify the
+original index and remaining IDs operationally. Offline fake mode refuses
+fixture admission, because its memory vectors cannot outlive the admitting
+process. Use PostgreSQL vectors or Pinecone.
+
+A lost or failed reply retains the ID until receipt-qualified recovery confirms
+the outcome. When a pending submission appears absent or borrowed, the
+evaluator uses `X-Quarry-Evaluation-Reconcile: absent` without an incarnation.
+The service retires fixture admission atomically without affecting any ordinary
+document that occupies that ID. A delayed admission cannot create a fixture
+after retirement.
+If admission already won, recovery records the owned incarnation for deletion
+on a later attempt.
+
+`--delete` uses the remaining shared cap. The report includes the ledger path
+and IDs still pending or accepted. A later cleanup takes a target file with
+just the matching deployment and its own explicit cap:
+
+```sh
+RUN_SMOKE=1 go run ./scripts/evidenceeval --delete \
+  --targets cleanup-target.json --cleanup <ledger-file> --max-requests 16
+```
+
+Each preflight, ingest, status check, query, and delete consumes one operation
+before dispatch. The client uses fresh HTTP/1 connections and makes no
+automatic retries. Check polling uses `--poll-deadline` (30 seconds by default)
+per accepted document and shares the absolute cap. Provider calls, retries and
+prices inside the deployment are unmeasured. The response's synthesis usage is
+reported separately when available. Supplying `--max-tokens` or `--max-spend`
+with a positive value stops before dispatch because the full provider charge
+cannot be bounded through the API.
+
+The staging diagnostic is available on generated JSON responses with
+[the configured collection prefix](configuration.md#environment-variables).
+The evaluator requests excerpt matches with `--instrument` and supplies its
+fixture namespace and invocation receipt. For a nonempty explicit fixture
+allowlist, the service verifies that every ID has an active reservation for
+that receipt and current incarnation, then checks retained chunks in the
+same snapshot. It returns `X-Quarry-Evaluation-Evidence` when verification
+succeeds. An empty allowlist discloses no matches. Its value is unpadded base64url JSON with span
+IDs, 1-based excerpt numbers and retained excerpt lengths in runes. An empty
+array represents an observed response with no matching span. An absent or
+invalid observation leaves coverage unmeasured. The diagnostic never includes
+snippet text.
+
+A hosted result requires a successful scoped answer, matching
+`X-Quarry-Evaluation-Execution` and `X-Quarry-Evaluation-Upstreams` from the
+staging service over certificate-verified TLS. The second header records the
+authenticated TLS origins used for both embedding and synthesis. The service
+recognizes the public OpenAI and standard regional Bedrock Runtime origins.
+Compatible endpoints without recognized provenance are labeled
+`live_unverified`. Fake deployments are labeled `offline`.
+
+The report includes these measurements per target and query slice:
+
+- Gold-document recall at K counts unique relevant documents among the first
+  K returned chunks in service order. Preview span recall counts verbatim
+  labeled spans visible in those public previews. Post-trim coverage uses only
+  the staging observation, including matches beyond the public preview.
+- Reported p50 and p95 use completed requests. Visibility uses a current
+  scoped chunk that matches the fixture body. Completed fixtures remain
+  eligible for quality queries when their visibility check fails or is
+  censored. Client-observed delay starts at the first completed status response.
+  Completion-event bounds add the age of the completion on the PostgreSQL
+  clock and bound uncertainty by the status request's client round trip.
+  The report includes separate censor bounds and marks event timing unmeasured
+  when the clock observation is unavailable.
+- Rates include numerators, denominators and descriptive Wilson intervals.
+  Error and result counts show which queries contribute to those denominators.
+  For comparisons, publish the planned sample size, per-target result counts
+  and the matched-query baseline before drawing conclusions. The paired
+  queries and this small corpus limit generalization.
+  Paired rates for coverage and human judgments use the shared measured
+  queries for each metric, with a separate sample count.
+
+To label generated claims, opt in with `--include-snippets`. Review each
+answer against its authorized passages and the accepted answers in the frozen
+fixture. Count atomic factual claims and mark claims without support in the
+available evidence. Independently record whether the answer meets the gold
+answer or abstention in the requested language. Omit an observation when the
+available evidence is insufficient to judge it. Save the labels as a JSON
+array with `target`, `query`, `response_sha256`, `claims`, `unsupported`, and
+`accepted` for each reviewed observation:
+
+```sh
+go run ./scripts/evidenceeval --annotate-report results.json --reviews labels.json
+```
+
+This updates the reported human-label rates without contacting the deployment.
+Raw answers and previews require `--include-snippets` on the output command.
+
 ### End-to-End Simulation (`scripts/simulate`)
 
 Simulates a sequential series of client interactions against a running instance on port 8081, verifying health checks, JSON ingestion, upload identity, vector query modes, and document deletion. The simulator expects the default `collection` policy.
