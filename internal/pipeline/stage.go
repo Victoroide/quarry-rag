@@ -52,6 +52,12 @@ type IngestContext struct {
 	DocType    string
 
 	IndexObservation domain.IndexObservation
+
+	// VectorRevision qualifies hosted vector IDs and metadata.
+	VectorRevision string
+	VectorAttempt  string
+	// MutateVectors fences hosted writes against deletion and lease loss.
+	MutateVectors func(context.Context, func(context.Context) error) error
 	// Stopping is closed when the worker stops claiming jobs; optional waits
 	// end early so the attempt can still complete.
 	Stopping <-chan struct{}
@@ -115,7 +121,8 @@ type QueryContext struct {
 	TopScore       float64
 
 	// Populated by retrieval stage.
-	RetrievedChunks []domain.ScoredChunk
+	RetrievedChunks   []domain.ScoredChunk
+	releaseCandidates []domain.ScoredChunk
 
 	// Populated by synthesis stage.
 	Excerpts         []domain.ScoredChunk

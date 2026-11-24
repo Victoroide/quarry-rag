@@ -148,6 +148,10 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 			ic.Chunks[i].Metadata = make(map[string]any)
 		}
 		ic.Chunks[i].Metadata["doc_type"] = docType
+		if ic.VectorRevision != "" {
+			ic.Chunks[i].Metadata[domain.VectorRevisionKey] = ic.VectorRevision
+			ic.Chunks[i].Metadata[domain.VectorAttemptKey] = ic.VectorAttempt
+		}
 		if ic.Collection != "" {
 			ic.Chunks[i].Metadata["collection"] = ic.Collection
 		}
@@ -159,11 +163,34 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 
 	// Upsert vectors to the default namespace with doc_id metadata.
 	var probe domain.VisibilityProbe
+	upsert := func(ctx context.Context) error {
+		incarnation := domain.VectorIncarnation(ctx)
+		for i := range ic.Chunks {
+			if len(ic.Chunks[i].Embedding) != 0 {
+				ic.Chunks[i].VectorIncarnation = incarnation
+			}
+		}
+		call := func(ctx context.Context) error {
+			if writer, ok := s.vectorStore.(domain.VisibilityWriter); s.lsnVisibility && s.visibilityTimeout > 0 && ok {
+				var err error
+				probe, err = writer.UpsertWithVisibility(ctx, "", ic.Chunks)
+				return err
+			}
+			return s.vectorStore.Upsert(ctx, "", ic.Chunks)
+		}
+		if store, ok := s.vectorStore.(domain.VectorDispatchStore); ok && store.ManagesVectorDispatch() {
+			return call(ctx)
+		}
+		return domain.DispatchVectorMutation(ctx, false, call)
+	}
 	var err error
-	if writer, ok := s.vectorStore.(domain.VisibilityWriter); s.lsnVisibility && s.visibilityTimeout > 0 && ok {
-		probe, err = writer.UpsertWithVisibility(ctx, "", ic.Chunks)
-	} else {
-		err = s.vectorStore.Upsert(ctx, "", ic.Chunks)
+	switch {
+	case ic.MutateVectors != nil:
+		err = ic.MutateVectors(ctx, upsert)
+	case ic.VectorRevision != "":
+		return errors.New("persist_stage: job vector guard is unavailable")
+	default:
+		err = upsert(ctx)
 	}
 	if err != nil {
 		return fmt.Errorf("persist_stage: upsert to default namespace: %w", err)
@@ -186,7 +213,7 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 		}
 	}
 	if !s.lsnVisibility {
-		probe = s.sampleProbe(ic.DocumentID, target.ID, min(embedded, 10))
+		probe = s.sampleProbe(ic, target, min(embedded, 10))
 	}
 	if embedded == 0 || probe == nil {
 		ic.observeIndex(domain.VisibilityUnknown)
@@ -200,19 +227,22 @@ func (ic *IngestContext) observeIndex(result domain.IndexVisibility) {
 	ic.IndexObservation = domain.IndexObservation{Visibility: result, ObservedAt: &now}
 }
 
-func (s *PersistStage) sampleProbe(docID domain.DocumentID, target domain.ChunkID, topK int) domain.VisibilityProbe {
+func (s *PersistStage) sampleProbe(ic *IngestContext, target domain.Chunk, topK int) domain.VisibilityProbe {
 	store, ok := s.vectorStore.(domain.FilteredVectorStore)
 	if !ok {
 		return nil
 	}
-	filter := domain.VectorFilter{DocumentIDs: []string{string(docID)}}
+	filter := domain.VectorFilter{DocumentIDs: []string{string(ic.DocumentID)}}
 	return func(ctx context.Context, embedding []float32) (domain.IndexVisibility, error) {
 		chunks, err := store.QueryFiltered(ctx, embedding, topK, filter)
 		if err != nil {
 			return "", err
 		}
 		for _, chunk := range chunks {
-			if chunk.Chunk.ID == target {
+			revision, _ := chunk.Chunk.Metadata[domain.VectorRevisionKey].(string)
+			attempt, _ := chunk.Chunk.Metadata[domain.VectorAttemptKey].(string)
+			if chunk.Chunk.ID == target.ID && revision == ic.VectorRevision && attempt == ic.VectorAttempt &&
+				chunk.Chunk.VectorIncarnation == target.VectorIncarnation {
 				return domain.VisibilitySampleSeen, nil
 			}
 		}

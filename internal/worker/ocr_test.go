@@ -80,7 +80,7 @@ func TestOCRFailureStopsPipeline(t *testing.T) {
 		{"no text", domain.Permanent(ocr.ErrNoText), nil, "failed"},
 		{"page limit", domain.Permanent(ocr.ErrPageLimit), nil, "failed"},
 		{"temporary", errors.New("temporary"), nil, "retry"},
-		{"lost lease", nil, domain.ErrJobNotOwned, "retry"},
+		{"lost lease", nil, domain.ErrJobNotOwned, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &ocrLeaseStore{leaseTestStore: leaseStore(0), storeErr: tc.storeErr}
@@ -88,7 +88,11 @@ func TestOCRFailureStopsPipeline(t *testing.T) {
 			w := New(s, []pipeline.Stage{ocrStage{func(*pipeline.IngestContext) error { run = true; return nil }}}, nil, Options{OCR: ocrFunc(func(context.Context, string) (string, error) { return "text", tc.extractErr })})
 			w.process(t.Context(), ocrJob())
 			require.False(t, run)
-			leaseEvent(t, s.leaseTestStore, tc.want)
+			if tc.want == "" {
+				require.Empty(t, s.events)
+			} else {
+				leaseEvent(t, s.leaseTestStore, tc.want)
+			}
 			if tc.name == "no text" {
 				require.Equal(t, "no_text", s.failure)
 			}
@@ -109,4 +113,15 @@ func TestOCRSavedTextSkipsDetectionOnRetry(t *testing.T) {
 	w.process(t.Context(), j)
 	require.True(t, run)
 	leaseEvent(t, s.leaseTestStore, "completed")
+}
+
+func TestOCRDoesNotDispatchAfterLeaseLoss(t *testing.T) {
+	store := &ocrLeaseStore{leaseTestStore: leaseStore(0)}
+	store.heartbeat = false
+	w := New(store, nil, nil, Options{OCR: ocrFunc(func(context.Context, string) (string, error) {
+		t.Error("stale OCR work reached the provider")
+		return "", nil
+	})})
+	w.process(t.Context(), ocrJob())
+	require.Empty(t, store.events)
 }

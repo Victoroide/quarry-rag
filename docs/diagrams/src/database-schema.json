@@ -1,16 +1,16 @@
 {
   "Width": 840,
-  "Height": 1000,
+  "Height": 1094,
   "Nodes": {
     "documents": {
       "X": 16,
       "Y": 78,
       "W": 352,
-      "H": 420
+      "H": 582
     },
     "document_deletions": {
       "X": 16,
-      "Y": 506,
+      "Y": 668,
       "W": 352,
       "H": 292
     },
@@ -32,6 +32,12 @@
       "W": 352,
       "H": 258
     },
+    "document_pdf_extractions": {
+      "X": 472,
+      "Y": 606,
+      "W": 352,
+      "H": 204
+    },
     "document_deletion_activation": {
       "X": 472,
       "Y": 818,
@@ -39,16 +45,10 @@
       "H": 74
     },
     "evaluation_fixtures": {
-      "X": 16,
-      "Y": 806,
+      "X": 472,
+      "Y": 900,
       "W": 352,
       "H": 132
-    },
-    "document_pdf_extractions": {
-      "X": 472,
-      "Y": 606,
-      "W": 352,
-      "H": 204
     }
   },
   "Groups": []

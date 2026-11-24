@@ -268,9 +268,9 @@ func TestMixedPDFClaimCannotCheckpointReclaimedAttempt(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, first.Attempts, current.Attempts)
 			require.Equal(t, first.Incarnation, current.Incarnation)
-			require.NotNil(t, first.LeaseToken)
-			require.NotNil(t, current.LeaseToken)
-			require.NotEqual(t, *first.LeaseToken, *current.LeaseToken)
+			require.NotEmpty(t, first.LeaseToken)
+			require.NotEmpty(t, current.LeaseToken)
+			require.NotEqual(t, first.LeaseToken, current.LeaseToken)
 			checkpoint := domain.PDFResult{Text: "Old OCR result from stalled request", Coverage: domain.PDFComplete, Pages: []domain.PDFPageResult{
 				{Number: 1, Source: "ocr", State: "text"}, {Number: 2, Source: "parser", State: "text"},
 			}}

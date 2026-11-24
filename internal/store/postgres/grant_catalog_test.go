@@ -398,7 +398,7 @@ func testGrantCatalogRoleBoundary(t *testing.T, databaseURL string) {
 		GRANT SELECT ON schema_migrations TO catalog_service;
 		GRANT SELECT, INSERT, UPDATE, DELETE ON documents, ingest_jobs, document_fingerprints TO catalog_service`)
 	operator := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION catalog_operator")
-	service := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION catalog_service")
+	service := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION catalog_service; SET plan_cache_mode = force_generic_plan")
 	auditor := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION catalog_auditor")
 	require.NoError(t, service.RunMigrations(t.Context()))
 	var operatorImport, auditorImport, auditorAudit, operatorAudit, servingAccess, servingImport, operatorHelper bool

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -35,6 +36,15 @@ func remove(ctx context.Context, cs domain.ChunkStore, vectors domain.VectorDele
 	if doc.S3Key != nil && objects == nil {
 		return ErrFileStorageUnavailable
 	}
+	store, guarded := cs.(interface {
+		CheckLiveVectorRemoval(context.Context, *domain.Document) error
+		RemoveLiveDocument(context.Context, *domain.Document) error
+	})
+	if guarded {
+		if err := store.CheckLiveVectorRemoval(ctx, doc); err != nil {
+			return err
+		}
+	}
 	if vectors != nil {
 		if err := vectors.DeleteAllVectorsInNamespace(ctx, string(doc.ID)); err != nil && status.Code(err) != codes.NotFound {
 			return fmt.Errorf("delete document namespace: %w", err)
@@ -48,8 +58,14 @@ func remove(ctx context.Context, cs domain.ChunkStore, vectors domain.VectorDele
 			return fmt.Errorf("delete source file: %w", err)
 		}
 	}
-	if err := cs.DeleteDocument(ctx, doc.ID); err != nil {
-		return fmt.Errorf("delete document metadata: %w", err)
+	var removeErr error
+	if guarded {
+		removeErr = store.RemoveLiveDocument(ctx, doc)
+	} else {
+		removeErr = cs.DeleteDocument(ctx, doc.ID)
+	}
+	if removeErr != nil {
+		return fmt.Errorf("delete document metadata: %w", removeErr)
 	}
 	if vectors != nil {
 		if err := vectors.DeleteByDocID(ctx, string(doc.ID)); err != nil && status.Code(err) != codes.NotFound {
@@ -77,6 +93,12 @@ func New(ctx context.Context, cfg *config.Config) (*Cleaner, error) {
 	pg, err := pgstore.NewClient(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("postgres connect: %w", err)
+	}
+	migrationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	migrationErr := pg.RunMigrations(migrationCtx)
+	cancel()
+	if migrationErr != nil {
+		return nil, errors.Join(fmt.Errorf("prepare cleanup schema: %w", migrationErr), pg.Close(ctx))
 	}
 	cleaner := &Cleaner{metadata: pg}
 	if cfg.VectorStore != "postgres" {

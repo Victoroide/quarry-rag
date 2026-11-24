@@ -49,6 +49,8 @@ type AcceptRequest struct {
 	LegacyParserFingerprint  string
 	LegacyOCRFingerprint     string
 	TryLegacyPDFText         bool
+	// SupportsScopedVectors permits tagged admission if the database is active.
+	SupportsScopedVectors bool
 }
 
 // AcceptResult identifies the document selected by acceptance.
@@ -75,11 +77,12 @@ type Job struct {
 	DocType     string
 	Attempts    int
 	LeaseOwner  string
-	LeaseToken  *string
+	LeaseToken  string
 	Incarnation string
 
-	Collection string
-	PDF        *PDFExtraction
+	Collection    string
+	PDF           *PDFExtraction
+	ScopedVectors bool
 }
 
 // JobStore coordinates durable ingestion through owned leases.
@@ -90,7 +93,11 @@ type JobStore interface {
 	RetryJob(context.Context, Job, time.Duration, string) error
 	FailJob(context.Context, Job, string) error
 	ReleaseJob(context.Context, Job) error
-	DocumentExists(context.Context, DocumentID) (bool, error)
+}
+
+// JobVectorGuard claims provider mutations for a live job attempt.
+type JobVectorGuard interface {
+	MutateJobVectors(context.Context, Job, func(context.Context) error) error
 }
 
 // ErrPermanent marks failures that cannot succeed on retry.
