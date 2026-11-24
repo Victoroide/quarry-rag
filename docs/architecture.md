@@ -298,7 +298,31 @@ The optional `chunk_vectors` table is created dynamically after base migrations,
 | `token_count` | `INTEGER NOT NULL` | Estimated chunk tokens. |
 | `embedding` | `vector(n) NOT NULL` | Finite, nonzero cosine vector; dimension comes from [configuration](configuration.md#environment-variables). |
 
-An HNSW index uses `vector_cosine_ops`; B-tree indexes cover `document_id` and `collection`. Search joins completed documents and returns similarity as one minus cosine distance. Search ranks a limited inner query by cosine distance alone so the HNSW index can serve it, enables strict-order iterative index scans so type, ID and collection predicates are applied until the limit is filled, and orders equal scores by chunk ID within the results. Results remain approximate, and an iterative scan stops after `hnsw.max_scan_tuples` candidates. Completion replaces vector records inside the same transaction as chunks and document status.
+An HNSW index uses `vector_cosine_ops`. B-tree indexes cover `document_id` and
+`collection`. Preparing or enabling exact search adds indexes on
+`(collection, doc_type, document_id)` and `(doc_type, document_id)`. Searches join
+completed documents and return similarity as one minus cosine distance.
+
+At [`PGVECTOR_EXACT_SCOPE_MAX=0`](configuration.md#environment-variables), search
+preserves its existing ranking and applies supplied labels to `chunk_vectors`.
+Disabled and unfiltered queries use a read-only transaction that inherits the
+pool's isolation level. With a positive setting, a filtered search or routing
+probe requires any supplied type and collection labels to match both
+`chunk_vectors` and `documents`. It counts at most `PGVECTOR_EXACT_SCOPE_MAX + 1`
+matching completed rows in a read-only repeatable-read transaction. Within the
+limit, search materializes the candidates and sorts by cosine distance and
+public chunk ID before taking the top results.
+
+Larger scopes, disabled mode and unfiltered searches use the HNSW-capable query
+with transaction-local `hnsw.iterative_scan = strict_order`. PostgreSQL chooses
+the scan based on statistics and filter selectivity. When it uses HNSW,
+`hnsw.max_scan_tuples` is an approximate bound on additional tuples visited
+outside the initial scan. Strict ordering applies to the rows found and recall
+can vary. Completion replaces vector records inside the same transaction as
+chunks and document status.
+
+When both LOCAL searches select exact ranking, top-up returns the broader
+search results in PostgreSQL order, including its collation for tied chunk IDs.
 
 ## Lifecycle and Concurrency Model
 

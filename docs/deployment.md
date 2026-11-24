@@ -289,6 +289,60 @@ Deployments that initialize pgvector at service startup need a serving login
 with the privileges described under
 [vector schema initialization](architecture.md#postgresql-vector-schema).
 
+With the default `PGVECTOR_EXACT_SCOPE_MAX=0`, startup skips the exact-scope
+composite indexes. With exact search enabled, startup validates both indexes and
+builds missing ones concurrently. On a populated database, prebuild them before
+enabling exact search so the builds can finish outside the 30-second startup
+deadline. Run the catalog check with the application's search path and a
+superuser or a role with effective `pg_read_all_stats` privileges. Inspect both
+names in the schema that owns `chunk_vectors`.
+
+```sql
+SELECT n.nspname AS vector_schema, expected.name, object.relkind,
+       i.indrelid = v.oid AS on_vector_table,
+       i.indisvalid AS valid, i.indisready AS ready, i.indislive AS live,
+       CASE WHEN pg_has_role('pg_read_all_stats', 'USAGE') THEN
+           EXISTS (SELECT FROM pg_stat_progress_create_index p
+                   WHERE p.index_relid = object.oid)
+       END AS building,
+       pg_get_indexdef(i.indexrelid) AS definition
+FROM pg_class v
+JOIN pg_namespace n ON n.oid = v.relnamespace
+CROSS JOIN (VALUES ('idx_chunk_vectors_collection_doc_type'),
+                   ('idx_chunk_vectors_doc_type_document_id')) AS expected(name)
+LEFT JOIN pg_class object ON object.relnamespace = v.relnamespace
+                         AND object.relname = expected.name
+LEFT JOIN pg_index i ON i.indexrelid = object.oid
+WHERE v.oid = 'chunk_vectors'::regclass;
+```
+
+For each existing object, verify `relkind = 'i'` and `on_vector_table = true`.
+Both indexes must be valid, ready and live. Compare their definitions with the
+nonunique B-tree statements below, including the key order. Both use default
+operator classes, collations and sort order. An expression, included column or
+predicate makes the definition incompatible.
+
+For each missing index, run the matching statement separately outside a
+transaction block. Replace `public` with the reported vector schema if needed,
+then repeat the catalog check.
+
+```sql
+SET statement_timeout = 0;
+CREATE INDEX CONCURRENTLY idx_chunk_vectors_collection_doc_type ON public.chunk_vectors USING btree (collection, doc_type, document_id);
+CREATE INDEX CONCURRENTLY idx_chunk_vectors_doc_type_document_id ON public.chunk_vectors USING btree (doc_type, document_id);
+```
+
+If startup reports a name conflict or incompatible definition, inspect that
+object and resolve the conflict before enabling exact search. If `building` is
+true, wait for the build to finish. A null value means progress visibility is
+insufficient. Have a privileged operator repeat the check in that case.
+
+Before recovering an interrupted build, confirm it belongs to `chunk_vectors`,
+matches the intended definition and has `valid = false`, `live = true` and
+`building = false`. The table owner can then drop the schema-qualified index
+with `DROP INDEX CONCURRENTLY` and run the matching create statement as a
+separate command. Repeat the catalog check before enabling exact search.
+
 ### Changing Models or Vector Stores
 
 A chat model change can reuse the existing vectors when the embedding model and

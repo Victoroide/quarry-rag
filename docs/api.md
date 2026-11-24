@@ -565,7 +565,7 @@ Error Status Codes:
 | `403 Forbidden` | `forbidden` | The deployed answer policy disallows generated answers |
 | `413 Payload Too Large` | `validation` or `input_too_large` | Request body exceeds the 1 MiB limit (`validation`), or strict counting establishes that the base input or smallest excerpt exceeds the model context window after reserving output tokens (`input_too_large`) |
 | `415 Unsupported Media Type` | `validation` | Content-Type is not `application/json` |
-| `504 Gateway Timeout` | `timeout` | The query or synthesis deadline expired: `query processing timed out` |
+| `504 Gateway Timeout` | `timeout` | The query, synthesis or PostgreSQL vector search deadline expired, or PostgreSQL returned SQLSTATE `57014` (`query_canceled`, shared by statement timeouts and administrative cancellations) while the request context remained active: `query processing timed out` |
 | `503 Service Unavailable` | `overloaded` | Query admission exceeded `QUERY_QUEUE_TIMEOUT`: `too many concurrent queries`; `Retry-After: 1` |
 | `503 Service Unavailable` | `upstream_throttled` | Upstream throttling or exhausted quota: `upstream service is busy`; `Retry-After: 2` |
 | `502 Bad Gateway` | `synthesis` | Synthesis returned no text (`answer synthesis returned no text`) or strict counting failed or exhausted its attempts before confirming a fit (`synthesis input counting failed`) |

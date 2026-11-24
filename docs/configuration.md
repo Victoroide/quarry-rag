@@ -61,6 +61,7 @@ The table below lists the environment variables recognized by the service:
 | `OPENAI_BASE_URL` | string | `""` | Required when either provider is `openai`; absolute HTTP or HTTPS address without credentials, query or fragment | Explicit API base address, including its version prefix when required. Endpoint paths are appended to this address; there is no implicit public endpoint. Use HTTPS for remote endpoints. |
 | `OPENAI_CHAT_MODEL` | string | `""` | Required when `LLM_PROVIDER=openai` | Chat completion model name; replaces Bedrock synthesis routing for this provider. |
 | `OPENAI_EMBEDDING_MODEL` | string | `""` | Required when `EMBEDDING_PROVIDER=openai` | Embedding model name. Choose a model and dimensions supported by the endpoint and vector index. |
+| `PGVECTOR_EXACT_SCOPE_MAX` | integer | `0` (disabled) | `0` to `100000` | PostgreSQL vectors only. Sets the matching completed chunk limit for exact cosine search on filtered queries and routing probes. See [PostgreSQL rollout](deployment.md#postgresql-vectors) and [vector search](architecture.md#postgresql-vector-schema). |
 | `PINECONE_API_KEY` | string | `""` | Non-empty string | API key for authenticating with Pinecone vector indices. Required when `GO_RAG_FAKE_MODE=false` and `VECTOR_STORE=pinecone`. |
 | `PINECONE_ENVIRONMENT` | string | `""` | Ignored | Has no effect and is not stored in configuration. A non-empty value adds the startup warning `PINECONE_ENVIRONMENT is ignored`. Remove it from deployment configuration. |
 | `PINECONE_INDEX_NAME` | string | `""` | Required when `GO_RAG_FAKE_MODE=false` and `VECTOR_STORE=pinecone` | Target Pinecone index, for example `quarry-rag`. There is no implicit default. Optional with PostgreSQL vectors or offline mode. |
@@ -317,6 +318,12 @@ Metrics use Prometheus text format:
   `visible` when search returns the document's last vector, and `timeout` when the
   wait expires or worker shutdown ends it first. Disabled waits and canceled
   attempts are not counted. The `persist` stage duration includes the wait.
+- `quarry_pgvector_search_total{strategy,status}` counts PostgreSQL vector
+  searches by `strategy` (`exact`, `hnsw`, `probe`) and `status` (`ok`,
+  `partial`, `timeout`, `canceled`, `error`). On `hnsw`, `partial` indicates fewer
+  results than `topK`. Explicit caller cancellation is recorded as `canceled`.
+  A PostgreSQL cancellation with an active caller is recorded according to the
+  [query timeout policy](api.md#post-query).
 
 The `route` label holds the matched method and path pattern, or `unmatched` for
 requests with no matching pattern. All durations are in seconds. Histograms use

@@ -25,10 +25,12 @@ Notable changes are grouped by release.
 - Pinecone queries can opt into bounded recovery of live chunks displaced by stale index hits.
 - Authenticated document status and inventory can include stable incarnations on request. [Document deletion](docs/api.md#delete-documentsdoc_id) returns `412` for reserved selectors and `400` for malformed queries.
 - Optional embedding input profiles enforce model-specific allowances, split overlong ingestion chunks and reject overlong queries before embedding.
+- Optional exact cosine search for small filtered pgvector scopes (`PGVECTOR_EXACT_SCOPE_MAX`, disabled by default) with bounded single-snapshot probing and `quarry_pgvector_search_total` metrics.
 
 ### Changed
 
 - Release archives are checked for platform coverage and package contents before publication. See [release packaging](docs/development.md#releases).
+- PostgreSQL vector queries handle server query timeouts consistently across locales.
 - The file download API and Go client describe `expires_in` as the requested lifetime and explain why access can end earlier.
 - The no-evidence answer follows `Accept-Language` for English, Spanish, Portuguese, French, German and Italian and sets `Content-Language`.
 - Documentation keeps each operational fact in one document and links to it elsewhere.
