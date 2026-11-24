@@ -58,10 +58,9 @@ func (c *Client) ConverseStreamWithModelAndSystem(ctx context.Context, modelID, 
 	case maxTokens > 0:
 		maxToks = int32(maxTokens)
 	}
-	topP := extractionTopP
 	input := &bedrockruntime.ConverseStreamInput{
 		ModelId: aws.String(modelID), Messages: messages,
-		InferenceConfig: &brtypes.InferenceConfiguration{Temperature: &temperature, TopP: &topP, MaxTokens: &maxToks},
+		InferenceConfig: inferenceConfig(modelID, temperature, maxToks),
 	}
 	if systemPrompt != "" {
 		input.System = []brtypes.SystemContentBlock{&brtypes.SystemContentBlockMemberText{Value: systemPrompt}}

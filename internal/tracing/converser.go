@@ -22,16 +22,57 @@ type modelConverser struct {
 	innerModel llm.ModelConverser
 }
 
-// WrapConverser preserves per-call model selection when the client supports it.
+type tracedCounter struct {
+	counter  llm.AttemptTokenCounter
+	provider string
+}
+
+type countModelConverser struct {
+	*modelConverser
+	*tracedCounter
+}
+
+type countStreamModelConverser struct {
+	*streamModelConverser
+	*tracedCounter
+}
+
+// WrapConverser preserves per-call model selection, streaming and bounded counting.
 func WrapConverser(inner llm.Converser, provider, model string) llm.Converser {
 	c := &converser{inner, provider, model}
-	if mc, ok := inner.(llm.ModelConverser); ok {
-		if stream, ok := inner.(llm.StreamConverser); ok {
-			return &streamModelConverser{&modelConverser{c, mc}, stream}
-		}
-		return &modelConverser{c, mc}
+	mc, ok := inner.(llm.ModelConverser)
+	if !ok {
+		return c
 	}
-	return c
+	base := &modelConverser{c, mc}
+	counter, hasCount := inner.(llm.AttemptTokenCounter)
+	if stream, ok := inner.(llm.StreamConverser); ok {
+		sm := &streamModelConverser{base, stream}
+		if hasCount {
+			return &countStreamModelConverser{sm, &tracedCounter{counter, provider}}
+		}
+		return sm
+	}
+	if hasCount {
+		return &countModelConverser{base, &tracedCounter{counter, provider}}
+	}
+	return base
+}
+
+func (c *modelConverser) AWSRegion() string {
+	if rp, ok := c.inner.(llm.RegionProvider); ok {
+		return rp.AWSRegion()
+	}
+	return ""
+}
+
+func (c *tracedCounter) CountTokensWithMaxAttempts(ctx context.Context, model, system string, messages []brtypes.Message, maxAttempts int) (llm.CountResult, error) {
+	ctx, span := start(ctx, "count_tokens "+model, "tool", trace.SpanKindClient,
+		attribute.String("quarry.synthesis.count_provider", c.provider))
+	defer span.End()
+	res, err := c.counter.CountTokensWithMaxAttempts(ctx, model, system, messages, maxAttempts)
+	recordInputCount(span, res, err)
+	return res, err
 }
 
 func (c *converser) Converse(ctx context.Context, messages []brtypes.Message) (*bedrockruntime.ConverseOutput, error) {

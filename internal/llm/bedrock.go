@@ -34,6 +34,7 @@ type ModelConverser interface {
 // Client wraps the AWS Bedrock Runtime client.
 type Client struct {
 	rt      *bedrockruntime.Client
+	region  string
 	modelID string
 	maxToks int32
 
@@ -47,6 +48,13 @@ func NewClient(ctx context.Context, cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("llm: load aws config: %w", err)
 	}
 	rt := bedrockruntime.NewFromConfig(awsCfg)
+	if cfg.SynthesisInputProfile == "strict" && rt.Options().BaseEndpoint != nil {
+		return nil, fmt.Errorf("%w: custom Bedrock runtime endpoint", ErrUnsupportedProfile)
+	}
+	region := awsCfg.Region
+	if region == "" {
+		region = cfg.AWSRegion
+	}
 	var guardrailConfig *brtypes.GuardrailConfiguration
 	if cfg.BedrockGuardrailID != "" {
 		guardrailConfig = &brtypes.GuardrailConfiguration{
@@ -56,26 +64,36 @@ func NewClient(ctx context.Context, cfg *config.Config) (*Client, error) {
 	}
 	return &Client{
 		rt:              rt,
+		region:          region,
 		modelID:         cfg.BedrockFallbackModel,
 		maxToks:         DefaultMaxTokens,
 		guardrailConfig: guardrailConfig,
 	}, nil
 }
 
+// AWSRegion returns the configured AWS region for capability verification.
+func (c *Client) AWSRegion() string {
+	if c == nil {
+		return ""
+	}
+	if c.region != "" {
+		return c.region
+	}
+	if c.rt != nil {
+		return c.rt.Options().Region
+	}
+	return ""
+}
+
 // Converse sends a synchronous Converse API call to the configured model.
 func (c *Client) Converse(ctx context.Context, messages []brtypes.Message) (*bedrockruntime.ConverseOutput, error) {
 	var temp float32
-	topP := extractionTopP
 	maxToks := c.maxToks
 	input := &bedrockruntime.ConverseInput{
 		GuardrailConfig: c.guardrailConfig,
 		ModelId:         aws.String(c.modelID),
 		Messages:        messages,
-		InferenceConfig: &brtypes.InferenceConfiguration{
-			Temperature: &temp,
-			TopP:        &topP,
-			MaxTokens:   &maxToks,
-		},
+		InferenceConfig: inferenceConfig(c.modelID, temp, maxToks),
 	}
 	output, err := c.rt.Converse(ctx, input, func(o *bedrockruntime.Options) {
 		o.HTTPClient = awsconf.GuardEvidenceSends(ctx, o.HTTPClient)
@@ -88,7 +106,6 @@ func (c *Client) Converse(ctx context.Context, messages []brtypes.Message) (*bed
 
 // ConverseWithModelAndSystem sends a request with per-call settings and a system prompt.
 func (c *Client) ConverseWithModelAndSystem(ctx context.Context, modelID, systemPrompt string, messages []brtypes.Message, temperature float32, maxTokens int) (*bedrockruntime.ConverseOutput, error) {
-	topP := extractionTopP
 	var maxToks int32
 	switch {
 	case maxTokens <= 0:
@@ -103,11 +120,7 @@ func (c *Client) ConverseWithModelAndSystem(ctx context.Context, modelID, system
 		GuardrailConfig: c.guardrailConfig,
 		ModelId:         aws.String(modelID),
 		Messages:        messages,
-		InferenceConfig: &brtypes.InferenceConfiguration{
-			Temperature: &temperature,
-			TopP:        &topP,
-			MaxTokens:   &maxToks,
-		},
+		InferenceConfig: inferenceConfig(modelID, temperature, maxToks),
 	}
 	if systemPrompt != "" {
 		input.System = []brtypes.SystemContentBlock{
@@ -121,6 +134,17 @@ func (c *Client) ConverseWithModelAndSystem(ctx context.Context, modelID, system
 		return nil, fmt.Errorf("llm: converse (model=%s): %w", modelID, err)
 	}
 	return output, nil
+}
+
+func inferenceConfig(model string, temperature float32, maxTokens int32) *brtypes.InferenceConfiguration {
+	inference := &brtypes.InferenceConfiguration{Temperature: &temperature, MaxTokens: &maxTokens}
+	// Claude 4.5 accepts either temperature or topP. Inference-profile IDs
+	// and foundation model ARNs also end in the revision ID.
+	if !strings.HasSuffix(model, "anthropic.claude-sonnet-4-5-20250929-v1:0") &&
+		!strings.HasSuffix(model, "anthropic.claude-haiku-4-5-20251001-v1:0") {
+		inference.TopP = aws.Float32(extractionTopP)
+	}
+	return inference
 }
 
 // BlockText returns the text carried by a text block or a guarded text block.

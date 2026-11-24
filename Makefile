@@ -28,6 +28,7 @@ fuzz:
 	go test -run='^$$' -fuzz='^FuzzSanitizeForPrompt$$' -fuzztime="$(FUZZTIME)" ./internal/textutil
 	go test -run='^$$' -fuzz='^FuzzNormalizeForIngest$$' -fuzztime="$(FUZZTIME)" ./internal/textutil
 	go test -run='^$$' -fuzz='^FuzzBuildSynthesisPrompt$$' -fuzztime="$(FUZZTIME)" ./internal/pipeline
+	go test -run='^$$' -fuzz='^FuzzCountOpenAIChatTokens$$' -fuzztime="$(FUZZTIME)" ./internal/llm
 	go test -run='^$$' -fuzz='^FuzzDecodeJSONObject$$' -fuzztime="$(FUZZTIME)" ./internal/api/handler
 	go test -run='^$$' -fuzz='^FuzzDecodeGrantBatch$$' -fuzztime="$(FUZZTIME)" ./internal/store/postgres
 	go test -run='^$$' -fuzz='^FuzzVerifyCitations$$' -fuzztime="$(FUZZTIME)" ./internal/pipeline

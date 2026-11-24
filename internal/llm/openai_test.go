@@ -280,3 +280,82 @@ func TestOpenAIStreamCallbackClosesBody(t *testing.T) {
 		t.Fatal("upstream body was not closed after callback error")
 	}
 }
+
+// refusingTransport models a stack that refuses the first stream and reopens
+// the request body for another send only when the request makes that possible.
+type refusingTransport struct {
+	sends  int
+	bodies []string
+}
+
+func (t *refusingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.sends++
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	_ = r.Body.Close()
+	t.bodies = append(t.bodies, string(body))
+	if t.sends > 1 {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}")), Header: make(http.Header), Request: r}, nil
+	}
+	if r.GetBody == nil {
+		return nil, errors.New("stream refused")
+	}
+	fresh, err := r.GetBody()
+	if err != nil {
+		return nil, err
+	}
+	retry := r.Clone(r.Context())
+	retry.Body = fresh
+	return t.RoundTrip(retry)
+}
+
+func refusingClient(t *testing.T) (*OpenAIHTTPClient, *refusingTransport) {
+	t.Helper()
+	server := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+	client, err := NewOpenAIHTTPClient(server.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &refusingTransport{}
+	client.client.Transport = transport
+	return client, transport
+}
+
+func TestOpenAIEvidenceCheckedRequestsAreNotReplayedByTheTransport(t *testing.T) {
+	payload := map[string]string{"message": "evidence"}
+	t.Run("ordinary requests keep transport retries", func(t *testing.T) {
+		client, transport := refusingClient(t)
+		response, err := client.Post(t.Context(), "/chat/completions", payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if transport.sends != 2 || transport.bodies[0] != transport.bodies[1] || transport.bodies[0] == "" {
+			t.Fatalf("ordinary retry changed: sends=%d bodies=%q", transport.sends, transport.bodies)
+		}
+	})
+	t.Run("checked requests send once per check", func(t *testing.T) {
+		client, transport := refusingClient(t)
+		checks := 0
+		ctx := domain.WithEvidenceCheck(t.Context(), func(context.Context) error { checks++; return nil })
+		refused, err := client.Post(ctx, "/chat/completions", payload)
+		if err == nil {
+			_ = refused.Body.Close()
+			t.Fatal("refused stream was replayed below the evidence check")
+		}
+		if transport.sends != 1 || checks != 1 {
+			t.Fatalf("checked request escaped its check: sends=%d checks=%d", transport.sends, checks)
+		}
+		response, err := client.Post(ctx, "/chat/completions", payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if transport.sends != 2 || checks != 2 || transport.bodies[1] != transport.bodies[0] {
+			t.Fatalf("application retry did not repeat the check: sends=%d checks=%d bodies=%q", transport.sends, checks, transport.bodies)
+		}
+	})
+}

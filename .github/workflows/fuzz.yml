@@ -43,6 +43,8 @@ jobs:
             target: FuzzNormalizeForIngest
           - package: ./internal/pipeline
             target: FuzzBuildSynthesisPrompt
+          - package: ./internal/llm
+            target: FuzzCountOpenAIChatTokens
           - package: ./internal/api/handler
             target: FuzzDecodeJSONObject
           - package: ./internal/store/postgres

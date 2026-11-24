@@ -72,6 +72,9 @@ type Config struct {
 
 	// SynthesisModel selects primary, fallback or hybrid answer routing.
 	SynthesisModel string
+	// SynthesisInputProfile enables complete pre-synthesis input counting and budgeting.
+	SynthesisInputProfile     string
+	SynthesisOpenAIDeployment string
 
 	// SynthesisContextTokens bounds the estimated tokens in excerpt bodies.
 	SynthesisContextTokens int
@@ -143,28 +146,30 @@ type Config struct {
 // and validates required fields.
 func Load() (*Config, error) {
 	cfg := &Config{
-		MetricsAddr:           os.Getenv("METRICS_ADDR"),
-		ServerPort:            envOrDefault("SERVER_PORT", "8081"),
-		AWSRegion:             os.Getenv("AWS_REGION"),
-		AWSAccessKeyID:        os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretKey:          os.Getenv("AWS_SECRET_ACCESS_KEY"),
-		BedrockEmbedModel:     envOrDefault("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0"),
-		BedrockPrimaryModel:   envOrDefault("BEDROCK_PRIMARY_MODEL", "amazon.nova-micro-v1:0"),
-		BedrockFallbackModel:  envOrDefault("BEDROCK_FALLBACK_MODEL", "us.meta.llama4-maverick-17b-instruct-v1:0"),
-		PineconeAPIKey:        os.Getenv("PINECONE_API_KEY"),
-		PineconeIndexName:     os.Getenv("PINECONE_INDEX_NAME"),
-		DatabaseURL:           os.Getenv("DATABASE_URL"),
-		VectorStore:           envOrDefault("VECTOR_STORE", "pinecone"),
-		S3Bucket:              os.Getenv("S3_BUCKET"),
-		SynthesisModel:        envOrDefault("SYNTHESIS_MODEL", "fallback"),
-		QueryAnswerPolicy:     envOrDefault("QUERY_ANSWER_POLICY", QueryAnswerPolicyBoth),
-		ServiceToken:          os.Getenv("SERVICE_TOKEN"),
-		ServiceTokens:         strings.Split(os.Getenv("SERVICE_TOKENS"), ","),
-		S3ExpectedBucketOwner: os.Getenv("S3_EXPECTED_BUCKET_OWNER"),
-		AWSSessionToken:       os.Getenv("AWS_SESSION_TOKEN"),
-		RerankModelARN:        os.Getenv("RERANK_MODEL_ARN"),
-		OCRProvider:           envOrDefault("OCR_PROVIDER", "none"),
-		IngestContentDedup:    domain.ContentDedup(envOrDefault("INGEST_CONTENT_DEDUP", string(domain.ContentDedupCollection))),
+		MetricsAddr:               os.Getenv("METRICS_ADDR"),
+		ServerPort:                envOrDefault("SERVER_PORT", "8081"),
+		AWSRegion:                 os.Getenv("AWS_REGION"),
+		AWSAccessKeyID:            os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretKey:              os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		BedrockEmbedModel:         envOrDefault("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0"),
+		BedrockPrimaryModel:       envOrDefault("BEDROCK_PRIMARY_MODEL", "amazon.nova-micro-v1:0"),
+		BedrockFallbackModel:      envOrDefault("BEDROCK_FALLBACK_MODEL", "us.meta.llama4-maverick-17b-instruct-v1:0"),
+		PineconeAPIKey:            os.Getenv("PINECONE_API_KEY"),
+		PineconeIndexName:         os.Getenv("PINECONE_INDEX_NAME"),
+		DatabaseURL:               os.Getenv("DATABASE_URL"),
+		VectorStore:               envOrDefault("VECTOR_STORE", "pinecone"),
+		S3Bucket:                  os.Getenv("S3_BUCKET"),
+		SynthesisModel:            envOrDefault("SYNTHESIS_MODEL", "fallback"),
+		SynthesisInputProfile:     os.Getenv("SYNTHESIS_INPUT_PROFILE"),
+		SynthesisOpenAIDeployment: os.Getenv("SYNTHESIS_OPENAI_DEPLOYMENT"),
+		QueryAnswerPolicy:         envOrDefault("QUERY_ANSWER_POLICY", QueryAnswerPolicyBoth),
+		ServiceToken:              os.Getenv("SERVICE_TOKEN"),
+		ServiceTokens:             strings.Split(os.Getenv("SERVICE_TOKENS"), ","),
+		S3ExpectedBucketOwner:     os.Getenv("S3_EXPECTED_BUCKET_OWNER"),
+		AWSSessionToken:           os.Getenv("AWS_SESSION_TOKEN"),
+		RerankModelARN:            os.Getenv("RERANK_MODEL_ARN"),
+		OCRProvider:               envOrDefault("OCR_PROVIDER", "none"),
+		IngestContentDedup:        domain.ContentDedup(envOrDefault("INGEST_CONTENT_DEDUP", string(domain.ContentDedupCollection))),
 	}
 	cfg.LLMProvider = envOrDefault("LLM_PROVIDER", "bedrock")
 	cfg.EmbeddingProvider = envOrDefault("EMBEDDING_PROVIDER", "bedrock")
@@ -427,6 +432,14 @@ func (c *Config) validate() error {
 	case "primary", "fallback", "hybrid":
 	default:
 		return fmt.Errorf("config: SYNTHESIS_MODEL must be primary, fallback or hybrid")
+	}
+	switch c.SynthesisInputProfile {
+	case "", "strict":
+	default:
+		return fmt.Errorf("config: SYNTHESIS_INPUT_PROFILE must be empty or strict")
+	}
+	if c.SynthesisInputProfile == "strict" && c.FakeMode {
+		return fmt.Errorf("config: SYNTHESIS_INPUT_PROFILE=strict is unsupported when GO_RAG_FAKE_MODE is enabled")
 	}
 
 	if c.SynthesisContextTokens < 256 || c.SynthesisContextTokens > 100000 {
