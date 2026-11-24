@@ -41,6 +41,7 @@ type sample struct {
 	Empty            bool               `json:"empty_answer"`
 	NoEvidence       bool               `json:"no_evidence"`
 	Reranked         bool               `json:"reranked"`
+	Upstreams        string             `json:"provider_upstreams,omitempty"`
 	Execution        string             `json:"provider_execution,omitempty"`
 	SynthesisUsage   *client.TokenUsage `json:"synthesis_usage"`
 	Digest           string             `json:"response_sha256,omitempty"`
