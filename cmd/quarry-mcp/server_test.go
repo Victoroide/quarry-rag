@@ -641,3 +641,39 @@ func TestQueryToolReportsEmbeddingInputLimit(t *testing.T) {
 	require.Nil(t, result.StructuredContent)
 	require.Contains(t, result.Content[0].(*mcp.TextContent).Text, "400 embedding_input_too_long:")
 }
+
+func TestQueryToolStrictBudgetFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, extraJSON, wantMethod string
+		wantTokens                  int
+		wantPresent                 bool
+	}{
+		{"strict", `,"count_method":"openai_cl100k_chat","model_input_tokens":512`, "openai_cl100k_chat", 512, true},
+		{"legacy", "", "", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, err := io.WriteString(w, `{"answer":"Ok","finish_reason":"stop","mode":"LOCAL","chunks_used":1,"context_chunks":1,"token_usage":{"input_tokens":512,"output_tokens":4,"total_tokens":516},"scored_chunks":[]`+tc.extraJSON+`}`)
+				assert.NoError(t, err)
+			}))
+			defer s.Close()
+			cs := connectServer(t, config{baseURL: s.URL, timeout: time.Second})
+			res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "quarry_query", Arguments: map[string]any{"query": "archive"}})
+			require.NoError(t, err)
+			require.False(t, res.IsError)
+			data, err := json.Marshal(res.StructuredContent)
+			require.NoError(t, err)
+			var raw map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &raw))
+			if !tc.wantPresent {
+				assert.NotContains(t, raw, "count_method")
+				assert.NotContains(t, raw, "model_input_tokens")
+				return
+			}
+			var got queryOutput
+			require.NoError(t, json.Unmarshal(data, &got))
+			assert.Equal(t, tc.wantMethod, got.CountMethod)
+			assert.Equal(t, tc.wantTokens, got.ModelInputTokens)
+		})
+	}
+}

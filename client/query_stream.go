@@ -30,12 +30,14 @@ type QueryStreamContext struct {
 
 // QueryStreamDone is the payload of a done event.
 type QueryStreamDone struct {
-	FinishReason  string             `json:"finish_reason"`
-	TokenUsage    TokenUsage         `json:"token_usage"`
-	ContextTokens int                `json:"context_tokens"`
-	StageTimings  map[string]int64   `json:"stage_timings_ms"`
-	EarlyExit     bool               `json:"early_exit,omitempty"`
-	Citations     []CitationResponse `json:"citations,omitzero"`
+	FinishReason     string             `json:"finish_reason"`
+	TokenUsage       TokenUsage         `json:"token_usage"`
+	ContextTokens    int                `json:"context_tokens"`
+	CountMethod      string             `json:"count_method,omitempty"`
+	ModelInputTokens int                `json:"model_input_tokens,omitempty"`
+	StageTimings     map[string]int64   `json:"stage_timings_ms"`
+	EarlyExit        bool               `json:"early_exit,omitempty"`
+	Citations        []CitationResponse `json:"citations,omitzero"`
 }
 
 // StreamError reports a query failure after the response stream has started.

@@ -29,12 +29,14 @@ type QueryStreamDelta struct {
 
 // QueryStreamDone contains final synthesis diagnostics and optional citations.
 type QueryStreamDone struct {
-	FinishReason  string             `json:"finish_reason"`
-	TokenUsage    domain.TokenUsage  `json:"token_usage"`
-	ContextTokens int                `json:"context_tokens"`
-	StageTimings  map[string]int64   `json:"stage_timings_ms"`
-	EarlyExit     bool               `json:"early_exit,omitempty"`
-	Citations     []CitationResponse `json:"citations,omitzero"`
+	FinishReason     string             `json:"finish_reason"`
+	TokenUsage       domain.TokenUsage  `json:"token_usage"`
+	ContextTokens    int                `json:"context_tokens"`
+	CountMethod      string             `json:"count_method,omitempty"`
+	ModelInputTokens int                `json:"model_input_tokens,omitempty"`
+	StageTimings     map[string]int64   `json:"stage_timings_ms"`
+	EarlyExit        bool               `json:"early_exit,omitempty"`
+	Citations        []CitationResponse `json:"citations,omitzero"`
 }
 
 type queryStream struct {
@@ -130,7 +132,15 @@ func (s *queryStream) finish(ctx context.Context, err error) {
 }
 
 func (s *queryStream) done() error {
-	done := QueryStreamDone{FinishReason: s.qc.FinishReason, TokenUsage: s.qc.TokenUsage, ContextTokens: s.qc.ContextTokens, StageTimings: s.qc.StageTimingsMS, EarlyExit: s.qc.EarlyExit}
+	done := QueryStreamDone{
+		FinishReason:     s.qc.FinishReason,
+		TokenUsage:       s.qc.TokenUsage,
+		ContextTokens:    s.qc.ContextTokens,
+		CountMethod:      s.qc.CountMethod,
+		ModelInputTokens: s.qc.ModelInputTokens,
+		StageTimings:     s.qc.StageTimingsMS,
+		EarlyExit:        s.qc.EarlyExit,
+	}
 	if s.qc.IncludeCitations {
 		done.Citations = make([]CitationResponse, 0, len(s.qc.Citations))
 		for _, c := range s.qc.Citations {

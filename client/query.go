@@ -78,17 +78,19 @@ type TokenUsage struct {
 
 // QueryResponse contains the answer, retrieved evidence and synthesis diagnostics.
 type QueryResponse struct {
-	FinishReason  string                `json:"finish_reason,omitempty"`
-	Answer        string                `json:"answer"`
-	Mode          string                `json:"mode"`
-	ChunksUsed    int                   `json:"chunks_used"`
-	ContextChunks int                   `json:"context_chunks,omitempty"`
-	ContextTokens int                   `json:"context_tokens,omitempty"`
-	EarlyExit     bool                  `json:"early_exit,omitempty"`
-	StageTimings  map[string]int64      `json:"stage_timings_ms,omitempty"`
-	TokenUsage    TokenUsage            `json:"token_usage"`
-	ScoredChunks  []ScoredChunkResponse `json:"scored_chunks"`
-	Citations     []CitationResponse    `json:"citations,omitzero"`
+	FinishReason     string                `json:"finish_reason,omitempty"`
+	Answer           string                `json:"answer"`
+	Mode             string                `json:"mode"`
+	ChunksUsed       int                   `json:"chunks_used"`
+	ContextChunks    int                   `json:"context_chunks,omitempty"`
+	ContextTokens    int                   `json:"context_tokens,omitempty"`
+	CountMethod      string                `json:"count_method,omitempty"`
+	ModelInputTokens int                   `json:"model_input_tokens,omitempty"`
+	EarlyExit        bool                  `json:"early_exit,omitempty"`
+	StageTimings     map[string]int64      `json:"stage_timings_ms,omitempty"`
+	TokenUsage       TokenUsage            `json:"token_usage"`
+	ScoredChunks     []ScoredChunkResponse `json:"scored_chunks"`
+	Citations        []CitationResponse    `json:"citations,omitzero"`
 }
 
 // RequestOption configures an individual HTTP request.

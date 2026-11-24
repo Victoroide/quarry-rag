@@ -22,13 +22,15 @@ type queryInput struct {
 }
 
 type queryOutput struct {
-	Answer        string            `json:"answer"`
-	FinishReason  string            `json:"finish_reason"`
-	Mode          string            `json:"mode"`
-	ChunksUsed    int               `json:"chunks_used"`
-	ContextChunks int               `json:"context_chunks"`
-	TokenUsage    client.TokenUsage `json:"token_usage"`
-	Chunks        []queryChunk      `json:"chunks"`
+	Answer           string            `json:"answer"`
+	FinishReason     string            `json:"finish_reason"`
+	Mode             string            `json:"mode"`
+	ChunksUsed       int               `json:"chunks_used"`
+	ContextChunks    int               `json:"context_chunks"`
+	CountMethod      string            `json:"count_method,omitempty"`
+	ModelInputTokens int               `json:"model_input_tokens,omitempty"`
+	TokenUsage       client.TokenUsage `json:"token_usage"`
+	Chunks           []queryChunk      `json:"chunks"`
 	// Citations is present when the request asked for citations.
 	Citations []client.CitationResponse `json:"citations,omitzero"`
 }
@@ -62,7 +64,7 @@ func registerQueryTool(s *mcp.Server, api *client.Client, token string) error {
 		if response.FinishReason == client.FinishReasonEvidenceOnly {
 			result = &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Retrieved excerpts are in the structured result."}}}
 		}
-		return result, queryOutput{Answer: response.Answer, FinishReason: response.FinishReason, Mode: response.Mode, ChunksUsed: response.ChunksUsed, ContextChunks: response.ContextChunks, TokenUsage: response.TokenUsage, Chunks: chunks, Citations: response.Citations}, nil
+		return result, queryOutput{Answer: response.Answer, FinishReason: response.FinishReason, Mode: response.Mode, ChunksUsed: response.ChunksUsed, ContextChunks: response.ContextChunks, CountMethod: response.CountMethod, ModelInputTokens: response.ModelInputTokens, TokenUsage: response.TokenUsage, Chunks: chunks, Citations: response.Citations}, nil
 	})
 	return nil
 }
