@@ -809,6 +809,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CitationResponse'
+        citation_coverage:
+          $ref: '#/components/schemas/CitationCoverage'
     ScoredChunkResponse:
       type: object
       description: 'See [scored chunks](api.md#post-query).'
@@ -858,6 +860,40 @@ components:
         overlap:
           type: number
           format: double
+        support:
+          $ref: '#/components/schemas/CitationSupport'
+    CitationSupport:
+      type: object
+      description: 'See [citation support](api.md#citation-support).'
+      additionalProperties: false
+      required: [status, method, version, evidence]
+      properties:
+        status:
+          type: string
+          enum: [supported, contradicted, insufficient, unchecked]
+        method:
+          type: string
+        version:
+          type: string
+        evidence:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: integer
+            minimum: 1
+    CitationCoverage:
+      type: object
+      description: 'See [citation support](api.md#citation-support).'
+      additionalProperties: false
+      required: [sentences, cited_sentences]
+      properties:
+        sentences:
+          type: integer
+          minimum: 0
+        cited_sentences:
+          type: integer
+          minimum: 0
     QueryStreamContext:
       type: object
       description: 'See [streamed query answers](api.md#streamed-query-answers).'
@@ -912,6 +948,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CitationResponse'
+        citation_coverage:
+          $ref: '#/components/schemas/CitationCoverage'
     TokenUsage:
       type: object
       description: 'See [POST /query](api.md#post-query).'

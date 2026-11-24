@@ -20,6 +20,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/api"
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
 	"github.com/Victoroide/quarry-rag/internal/chunker"
+	"github.com/Victoroide/quarry-rag/internal/citationsupport"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embedder"
@@ -55,6 +56,13 @@ func run() error {
 	noEvidenceCatalog, err := pipeline.LoadNoEvidenceCatalog(cfg.NoEvidenceCatalogFile)
 	if err != nil {
 		return fmt.Errorf("startup: NO_EVIDENCE_CATALOG_FILE: %w", err)
+	}
+	var citationVerifier *citationsupport.Verifier
+	if !cfg.FakeMode {
+		citationVerifier, err = citationsupport.New(cfg.CitationSupportModel, cfg.CitationSupportEndpoint, cfg.CitationSupportToken, cfg.CitationSupportCalibrationFile)
+		if err != nil {
+			return fmt.Errorf("startup: configure citation verifier: %w", err)
+		}
 	}
 	slog.SetDefault(slog.New(logctx.NewHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))))
 	shutdownTracing, err := tracing.Setup(ctx, cfg.Tracing, buildVersion())
@@ -255,6 +263,7 @@ func run() error {
 		Metrics:               serviceMetrics,
 		Reranker:              reranker,
 		NoEvidenceCatalog:     noEvidenceCatalog,
+		CitationVerifier:      citationVerifier,
 	})
 
 	srv := &http.Server{

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
 	"github.com/Victoroide/quarry-rag/internal/chunker"
+	"github.com/Victoroide/quarry-rag/internal/citationsupport"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embedder"
@@ -555,4 +556,131 @@ func TestEvidencePolicyRoutingWithStaleHostedHitsAndPreviewErrors(t *testing.T) 
 	require.NoError(t, restoreErr)
 	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	require.JSONEq(t, `{"error":"pipeline","message":"query processing failed"}`, rec.Body.String())
+}
+
+type citationGenerator struct {
+	llm.Generator
+	generate func(llm.Request) *llm.Response
+}
+
+func (g citationGenerator) Generate(_ context.Context, req llm.Request) (*llm.Response, error) {
+	return g.generate(req), nil
+}
+
+type citationVerifier func(citationsupport.Batch) []citationsupport.Status
+
+func (v citationVerifier) Version() string { return "fixture-pinned-revision" }
+
+func (v citationVerifier) Verify(_ context.Context, batch citationsupport.Batch) ([]citationsupport.Status, error) {
+	return v(batch), nil
+}
+
+func TestLocalQuerySkipsPineconeHitsWithoutDocumentIDs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	db := newEvidenceDatabase(t, pgtest.Start(t))
+	hit := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(uuid.NewString()), Text: "The library opens at nine.",
+		Metadata: map[string]any{"collection": "archive", "doc_type": "guide"}}
+	insertEvidenceDocument(t, db, hit, "archive", "guide")
+	for _, tc := range []struct {
+		name        string
+		withSupport bool
+	}{{"disabled", false}, {"enabled", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			searches := 0
+			vectors := pcstore.NewTestDriver(func(_ context.Context, _ *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+				searches++
+				result := evidenceMatch(t, hit)
+				if searches == 1 {
+					missing := evidenceMatch(t, hit).Matches[0]
+					missing.Vector.Id = uuid.NewString()
+					delete(missing.Vector.Metadata.Fields, "doc_id")
+					missing.Score = .75
+					result.Matches = append(result.Matches, missing)
+				}
+				return result, nil
+			})
+			cfg := &config.Config{MaxChunksPerQuery: 2, BedrockFallbackModel: "fixture"}
+			amb := llm.NewAmbassador(cfg)
+			amb.SetGenerator(citationGenerator{generate: func(req llm.Request) *llm.Response {
+				require.Contains(t, req.Messages[0].Content[0].Text, hit.Text)
+				return &llm.Response{Text: "The library opens at nine [1].", StopReason: "end_turn"}
+			}})
+			var opts []handler.QueryOption
+			if tc.withSupport {
+				opts = append(opts, handler.WithCitationSupport(citationVerifier(func(batch citationsupport.Batch) []citationsupport.Status {
+					require.Equal(t, []citationsupport.Pair{{Claim: "The library opens at nine", Body: hit.Text}}, batch.Pairs)
+					return []citationsupport.Status{citationsupport.Supported}
+				})))
+			}
+			query := handler.QueryHandler(retriever.NewRetriever(vectors, evidenceEmbedder{}, .7, 2), amb, cfg, db.Pool, opts...)
+			rec := httptest.NewRecorder()
+			serveEvidenceQuery(t, query, rec, "application/json", `{"query":"Archive?","mode":"local","collection":"archive","include_citations":true}`)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, 3, searches)
+			var got handler.QueryResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			require.Contains(t, got.Answer, "The library opens at nine")
+			require.Len(t, got.Citations, 1)
+			require.Equal(t, string(hit.DocumentID), got.Citations[0].DocID)
+			if tc.withSupport {
+				require.NotNil(t, got.Citations[0].Support)
+				require.Equal(t, citationsupport.Supported, got.Citations[0].Support.Status)
+			} else {
+				require.Nil(t, got.Citations[0].Support)
+			}
+		})
+	}
+}
+
+func TestCitationSupportUsesOnlyScopedPineconeBodies(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	db := newEvidenceDatabase(t, pgtest.Start(t))
+	allowed := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(uuid.NewString()), Text: "Fold the paper.",
+		Metadata: map[string]any{"collection": "archive", "doc_type": "guide"}}
+	insertEvidenceDocument(t, db, allowed, "archive", "guide")
+	outside := allowed
+	outside.ID, outside.DocumentID = domain.ChunkID(uuid.NewString()), domain.DocumentID(uuid.NewString())
+	insertEvidenceDocument(t, db, outside, "", "guide")
+	stale := allowed
+	stale.ID, stale.Text = domain.ChunkID(uuid.NewString()), "Stale paper instruction."
+	pineconeVectors := pcstore.NewTestDriver(func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+		require.Equal(t, map[string]any{"$eq": "archive"}, req.MetadataFilter.AsMap()["collection"])
+		return &pinecone.QueryVectorsResponse{Matches: append(evidenceMatch(t, allowed).Matches,
+			evidenceMatch(t, outside).Matches[0], evidenceMatch(t, stale).Matches[0])}, nil
+	})
+	cfg := &config.Config{MaxChunksPerQuery: 10, BedrockFallbackModel: "fallback"}
+	amb := llm.NewAmbassador(cfg)
+	amb.SetGenerator(citationGenerator{generate: func(req llm.Request) *llm.Response {
+		prompt := req.Messages[0].Content[0].Text
+		require.Equal(t, 1, strings.Count(prompt, allowed.Text))
+		require.NotContains(t, prompt, stale.Text)
+		return &llm.Response{Text: "Fold the paper [1][2][3].", StopReason: "end_turn"}
+	}})
+	calls := 0
+	verifier := citationVerifier(func(batch citationsupport.Batch) []citationsupport.Status {
+		calls++
+		require.Equal(t, []citationsupport.Pair{{Claim: "Fold the paper", Body: allowed.Text}}, batch.Pairs)
+		return []citationsupport.Status{citationsupport.Supported}
+	})
+	query := handler.QueryHandler(retriever.NewRetriever(pineconeVectors, evidenceEmbedder{}, .7, 10), amb, cfg, db.Pool, handler.WithCitationSupport(verifier))
+	for _, scope := range []string{"", `,"allowed_document_ids":null`, `,"allowed_document_ids":[]`} {
+		rec := httptest.NewRecorder()
+		serveEvidenceQuery(t, query, rec, "application/json", `{"query":"Archive?","mode":"global","collection":"archive","include_citations":true`+scope+`}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var got handler.QueryResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		if scope == `,"allowed_document_ids":[]` {
+			require.Equal(t, "no_evidence", got.FinishReason)
+			require.Empty(t, got.Citations)
+			continue
+		}
+		require.Len(t, got.Citations, 1)
+		require.Equal(t, string(allowed.DocumentID), got.Citations[0].DocID)
+		require.Equal(t, citationsupport.Supported, got.Citations[0].Support.Status)
+	}
+	require.Equal(t, 2, calls)
 }

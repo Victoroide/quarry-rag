@@ -61,12 +61,38 @@ type ScoredChunkResponse struct {
 
 // CitationResponse links an answer marker to an excerpt and its lexical check.
 type CitationResponse struct {
-	Excerpt    int     `json:"excerpt"`
-	DocID      string  `json:"doc_id"`
-	ChunkIndex int     `json:"chunk_index"`
-	Offset     int     `json:"offset"`
-	Verified   bool    `json:"verified"`
-	Overlap    float64 `json:"overlap"`
+	Excerpt    int              `json:"excerpt"`
+	DocID      string           `json:"doc_id"`
+	ChunkIndex int              `json:"chunk_index"`
+	Offset     int              `json:"offset"`
+	Verified   bool             `json:"verified"`
+	Overlap    float64          `json:"overlap"`
+	Support    *CitationSupport `json:"support,omitempty"`
+}
+
+// CitationSupportStatus is the calibrated assessment against the evidence set.
+type CitationSupportStatus string
+
+// Semantic citation assessment outcomes.
+const (
+	CitationSupported    CitationSupportStatus = "supported"
+	CitationContradicted CitationSupportStatus = "contradicted"
+	CitationInsufficient CitationSupportStatus = "insufficient"
+	CitationUnchecked    CitationSupportStatus = "unchecked"
+)
+
+// CitationSupport reports the status and one-based synthesis excerpt numbers.
+type CitationSupport struct {
+	Status   CitationSupportStatus `json:"status"`
+	Method   string                `json:"method"`
+	Version  string                `json:"version"`
+	Evidence []int                 `json:"evidence"`
+}
+
+// CitationCoverage counts generated sentences and those that have valid markers.
+type CitationCoverage struct {
+	Sentences      int `json:"sentences"`
+	CitedSentences int `json:"cited_sentences"`
 }
 
 // TokenUsage reports synthesis usage.
@@ -91,6 +117,7 @@ type QueryResponse struct {
 	TokenUsage       TokenUsage            `json:"token_usage"`
 	ScoredChunks     []ScoredChunkResponse `json:"scored_chunks"`
 	Citations        []CitationResponse    `json:"citations,omitzero"`
+	CitationCoverage *CitationCoverage     `json:"citation_coverage,omitempty"`
 }
 
 // RequestOption configures an individual HTTP request.

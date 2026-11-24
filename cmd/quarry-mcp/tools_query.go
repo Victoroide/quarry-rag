@@ -15,7 +15,7 @@ type queryInput struct {
 	AnswerMode         client.AnswerMode `json:"answer_mode,omitempty" jsonschema:"Choose a generated answer or selected excerpts. If omitted, the service sets the mode."`
 	FilterDocType      string            `json:"filter_doc_type,omitempty" jsonschema:"Only retrieve chunks from documents of this type."`
 	MaxChunks          int               `json:"max_chunks,omitempty" jsonschema:"Maximum evidence chunks, 0 to 100. 0 uses the service default; larger values are capped by the service."`
-	IncludeCitations   bool              `json:"include_citations,omitempty" jsonschema:"Request inline citation markers and lexical overlap checks against the synthesis excerpts."`
+	IncludeCitations   bool              `json:"include_citations,omitempty" jsonschema:"Request inline citations, lexical overlap and semantic support when enabled by the service."`
 	AllowedDocumentIDs []string          `json:"allowed_document_ids,omitempty" jsonschema:"Document UUIDs the caller may read. Omit for unrestricted retrieval; an empty list matches no documents."`
 
 	Collection string `json:"collection,omitempty" jsonschema:"Only retrieve documents with this collection label; empty means all collections."`
@@ -32,7 +32,8 @@ type queryOutput struct {
 	TokenUsage       client.TokenUsage `json:"token_usage"`
 	Chunks           []queryChunk      `json:"chunks"`
 	// Citations is present when the request asked for citations.
-	Citations []client.CitationResponse `json:"citations,omitzero"`
+	Citations        []client.CitationResponse `json:"citations,omitzero"`
+	CitationCoverage *client.CitationCoverage  `json:"citation_coverage,omitempty"`
 }
 
 type queryChunk struct {
@@ -64,7 +65,7 @@ func registerQueryTool(s *mcp.Server, api *client.Client, token string) error {
 		if response.FinishReason == client.FinishReasonEvidenceOnly {
 			result = &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "Retrieved excerpts are in the structured result."}}}
 		}
-		return result, queryOutput{Answer: response.Answer, FinishReason: response.FinishReason, Mode: response.Mode, ChunksUsed: response.ChunksUsed, ContextChunks: response.ContextChunks, CountMethod: response.CountMethod, ModelInputTokens: response.ModelInputTokens, TokenUsage: response.TokenUsage, Chunks: chunks, Citations: response.Citations}, nil
+		return result, queryOutput{Answer: response.Answer, FinishReason: response.FinishReason, Mode: response.Mode, ChunksUsed: response.ChunksUsed, ContextChunks: response.ContextChunks, CountMethod: response.CountMethod, ModelInputTokens: response.ModelInputTokens, TokenUsage: response.TokenUsage, Chunks: chunks, Citations: response.Citations, CitationCoverage: response.CitationCoverage}, nil
 	})
 	return nil
 }

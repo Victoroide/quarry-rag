@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/citationsupport"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/evaluation"
@@ -58,13 +59,20 @@ type ScoredChunkResponse struct {
 
 // CitationResponse links an answer marker to an excerpt and its lexical check.
 type CitationResponse struct {
-	Excerpt    int     `json:"excerpt"`
-	DocID      string  `json:"doc_id"`
-	ChunkIndex int     `json:"chunk_index"`
-	Offset     int     `json:"offset"`
-	Verified   bool    `json:"verified"`
-	Overlap    float64 `json:"overlap"`
+	Excerpt    int              `json:"excerpt"`
+	DocID      string           `json:"doc_id"`
+	ChunkIndex int              `json:"chunk_index"`
+	Offset     int              `json:"offset"`
+	Verified   bool             `json:"verified"`
+	Overlap    float64          `json:"overlap"`
+	Support    *CitationSupport `json:"support,omitempty"`
 }
+
+// CitationSupport is the semantic assessment of a claim against its evidence.
+type CitationSupport citationsupport.Assessment
+
+// CitationCoverage counts generated sentences and those that have valid markers.
+type CitationCoverage citationsupport.Coverage
 
 // QueryResponse is the POST /query response body.
 type QueryResponse struct {
@@ -81,6 +89,15 @@ type QueryResponse struct {
 	TokenUsage       domain.TokenUsage     `json:"token_usage"`
 	ScoredChunks     []ScoredChunkResponse `json:"scored_chunks"`
 	Citations        []CitationResponse    `json:"citations,omitzero"`
+	CitationCoverage *CitationCoverage     `json:"citation_coverage,omitempty"`
+}
+
+func citationResponses(citations []pipeline.Citation) []CitationResponse {
+	out := make([]CitationResponse, 0, len(citations))
+	for _, c := range citations {
+		out = append(out, CitationResponse{Excerpt: c.Excerpt, DocID: string(c.DocumentID), ChunkIndex: c.ChunkIndex, Offset: c.Offset, Verified: c.Verified, Overlap: c.Overlap, Support: (*CitationSupport)(c.Support)})
+	}
+	return out
 }
 
 // APIError is a structured JSON error response.
@@ -128,7 +145,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 	if queryTimeout <= 0 {
 		queryTimeout = time.Minute
 	}
-	synthesis := pipeline.NewSynthesisStageWithCatalog(amb, cfg, options.noEvidenceCatalog)
+	synthesis := pipeline.NewSynthesisStageWithCatalog(amb, cfg, options.noEvidenceCatalog).WithCitationSupport(options.citationVerifier)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !isJSONRequest(r) {
 			writeJSONError(w, http.StatusUnsupportedMediaType, "validation", "Content-Type must be application/json")
@@ -162,15 +179,16 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		defer cancel()
 
 		qc := &pipeline.QueryContext{
-			OriginalQuery:      req.Query,
-			MaxChunks:          effectiveMaxChunks(req.MaxChunks, cfg.MaxChunksPerQuery),
-			RequestedMode:      req.Mode,
-			AnswerMode:         answerMode,
-			FilterDocType:      req.FilterDocType,
-			IncludeCitations:   req.IncludeCitations,
-			AllowedDocumentIDs: req.AllowedDocumentIDs,
-			AcceptLanguage:     strings.Join(r.Header.Values("Accept-Language"), ","),
-			Collection:         req.Collection,
+			OriginalQuery:        req.Query,
+			MaxChunks:            effectiveMaxChunks(req.MaxChunks, cfg.MaxChunksPerQuery),
+			RequestedMode:        req.Mode,
+			AnswerMode:           answerMode,
+			FilterDocType:        req.FilterDocType,
+			IncludeCitations:     req.IncludeCitations,
+			AllowedDocumentIDs:   req.AllowedDocumentIDs,
+			AcceptLanguage:       strings.Join(r.Header.Values("Accept-Language"), ","),
+			Collection:           req.Collection,
+			RequireCitationScope: req.IncludeCitations && options.citationVerifier != nil,
 		}
 
 		var stream *queryStream
@@ -237,10 +255,8 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			ScoredChunks:     scoredChunks,
 		}
 		if req.IncludeCitations {
-			resp.Citations = make([]CitationResponse, 0, len(qc.Citations))
-			for _, citation := range qc.Citations {
-				resp.Citations = append(resp.Citations, CitationResponse{Excerpt: citation.Excerpt, DocID: string(citation.DocumentID), ChunkIndex: citation.ChunkIndex, Offset: citation.Offset, Verified: citation.Verified, Overlap: citation.Overlap})
-			}
+			resp.Citations = citationResponses(qc.Citations)
+			resp.CitationCoverage = (*CitationCoverage)(qc.CitationCoverage)
 		}
 
 		data, encodeErr := json.Marshal(resp)

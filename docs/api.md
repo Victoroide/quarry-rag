@@ -460,7 +460,7 @@ Request fields:
 | `filter_doc_type` | string | no | Restricts vector retrieval to chunks matching the given `doc_type`, using the label normalization and limits above |
 | `collection` | string | no | Exact collection label, using the label rules above; omitted or empty searches all collections. Applied inside vector retrieval and routing, then checked against completed PostgreSQL documents. Intersects the type filter and document allowlist; vectors written before collection filtering need the [collection metadata backfill](development.md#collection-metadata-backfill) |
 | `max_chunks` | int | no | Requested chunks to retrieve (0 to 100), capped by [`MAX_CHUNKS_PER_QUERY`](configuration.md#environment-variables). Omitted or zero uses that configured maximum |
-| `include_citations` | bool | no | Request numbered inline citations and lexical checks against the excerpts sent to synthesis; defaults to false |
+| `include_citations` | bool | no | Request numbered inline citations, lexical checks, and [semantic assessment](#citation-support) where enabled. Defaults to false |
 | `allowed_document_ids` | array of strings | no | Tenant/role allowlist of UUIDs, at most [`MAX_ALLOWED_DOCUMENT_IDS`](configuration.md#environment-variables) entries. IDs are canonicalized and deduplicated. Omitted or `null` means unrestricted unless `REQUIRE_DOCUMENT_ALLOWLIST=true`, which makes a non-null field mandatory. An empty list (`[]`) returns the no-information answer without embedding or search. The allowlist is applied inside vector search and routing |
 
 Response fields (200 OK):
@@ -480,6 +480,7 @@ Response fields (200 OK):
 | `token_usage` | object | LLM token usage metrics (`input_tokens`, `output_tokens`, `total_tokens`) |
 | `scored_chunks` | array | Retrieved chunks ordered by reranking relevance when available, otherwise vector similarity. Evidence-only queries return the selected excerpts |
 | `citations` | array | Citation checks; present whenever `include_citations` is true, including an empty array when no markers or evidence remain; otherwise omitted |
+| `citation_coverage` | object | Optional counts of generated sentences and those with a valid citation. See [citation support](#citation-support) |
 
 Each `citations` entry contains:
 
@@ -491,6 +492,7 @@ Each `citations` entry contains:
 | `offset` | int | Zero-based Unicode code point index of the marker's `[` in the cleaned JSON answer or unchanged streamed answer; references in one list marker share the offset |
 | `verified` | bool | Whether the rounded lexical overlap is at least 0.30; this is not an entailment check |
 | `overlap` | number | Fraction of distinct sentence tokens also found in the excerpt, rounded to two decimal places; zero for a sentence without tokens |
+| `support` | object | Optional [semantic assessment](#citation-support) of the sentence against its cited excerpts |
 
 For JSON responses with `include_citations`, markers match `[n]` or comma-separated lists of one-to-three-digit numbers, such as `[1, 2]`; adjacent markers are allowed. Numbers outside the excerpt range are removed. A marker with no valid numbers is removed with one preceding space. Retained markers list each valid number once, as comma-separated decimal numbers. Other bracketed text is unchanged. Without this option the answer is unchanged.
 
@@ -513,6 +515,21 @@ Document visibility is checked against PostgreSQL before answer generation. Olde
 Optional [Bedrock reranking](configuration.md#environment-variables) submits the original question and up to 100 authorized, visible candidate texts after retrieval and before synthesis context selection. Candidates are sorted by descending relevance; ties retain vector order. Reranking changes only the order: `MIN_RELEVANCE_SCORE` and `SYNTHESIS_RELATIVE_SCORE_FLOOR` still compare vector similarity, and candidates below the relative floor are skipped rather than ending selection. A failed, timed-out or invalid reranking response preserves vector order and omits reranking scores; a warning and [outcome counter](configuration.md#metrics) record the fallback. The `rerank` entry in `stage_timings_ms` measures this step.
 
 Admitted queries run under the [query time budget](architecture.md#query-time-budget). A canceled request produces no further response bytes. Nonempty truncated or filtered answers retain their completion reason; empty synthesis text uses the `synthesis` error category below.
+
+#### Citation support
+
+If the deployment enables [citation assessment](configuration.md#citation-verifier) and the request asks for citations, each citation has a `support` object with `status`, `method`, `version`, and `evidence`. The method is `multilingual_nli_v1` and the version identifies the digest-pinned verifier. The evidence array contains the one-based excerpt numbers for the full sentence. Markers in that sentence share its assessment. A sentence can combine multiple claims, so support applies to the whole sentence against the cited set.
+
+| Status | Meaning |
+|---|---|
+| `supported` | The verifier classified the cited evidence as supporting the sentence and met its calibrated threshold |
+| `contradicted` | The verifier classified the evidence as contradicting the sentence and met its calibrated threshold |
+| `insufficient` | The verifier classified the evidence as inadequate and met its calibrated threshold |
+| `unchecked` | The assessment abstained, for example because of a missing claim, an unvalidated language pair, a budget limit or an unavailable verifier |
+
+Assessments express model judgments about the supplied excerpts. The lexical `verified` and `overlap` fields describe lexical overlap. The `citation_coverage` object reports `sentences` and `cited_sentences` for generated answers. Sentence parsing recognizes Unicode punctuation, keeps decimals, leading-point names and recognizable abbreviations together, and retains punctuation inside quotations and inline code spans. Whitespace inside quotations and inline code spans is preserved in claims sent for assessment. Balanced parentheses keep a soft-wrapped clause in the surrounding sentence. Straight single quotes can enclose quoted text, and apostrophes within words stay with the word. After quoted terminal punctuation, a lowercase continuation on the next line stays with the preceding text. Blank lines and list items remain boundaries. A marker must follow claim text in the same sentence to count. A period after a capitalized, short or dotted token before a capital letter or digit can be part of an abbreviation. These ambiguous periods, ellipses and possible line wraps keep the surrounding text together and yield `unchecked`. When a quotation contains terminal punctuation, a capital letter, digit, uncased letter or another quotation later on the same line may start a new sentence. The parser keeps that text together and returns `unchecked`. An unclosed bracket, parenthesis, quotation or inline code span also yields `unchecked` for the affected text. The no-evidence answer has an empty citation array and omits coverage. SSE includes the assessment and coverage fields in `done`, with offsets in the original text.
+
+A citation-shaped number inside a quotation can be literal text. When a quoted number is ambiguous, or when JSON citation cleanup changes literal text, the affected sentence is omitted from verification and its assessment is `unchecked`. A backslash before a quotation mark, other than an escaped double quote inside a straight double-quoted string, also yields `unchecked`.
 
 #### Scored chunks
 
@@ -589,7 +606,7 @@ words incrementally.
 |---|---|---|
 | `context` | `mode`, `chunks_used`, `context_chunks`, `scored_chunks` | Once, after evidence filtering and excerpt selection |
 | `delta` | `{"text":"..."}` | Incremental answer text; concatenate `text` values in order |
-| `done` | `finish_reason`, `token_usage`, `context_tokens`, optional `count_method`, `model_input_tokens`, `stage_timings_ms`, optional `early_exit`, and `citations` when requested | Successful completion with timings for the completed stages |
+| `done` | `finish_reason`, `token_usage`, `context_tokens`, optional `count_method`, `model_input_tokens`, `stage_timings_ms`, optional `early_exit`, `citations` when requested, and optional `citation_coverage` | Successful completion with timings for the completed stages |
 | `error` | `{"error":"...","message":"..."}` | A failure after the first frame; error categories and messages follow the table below |
 
 The context event uses the scored chunk fields above, including `excerpt` and `truncated`, to identify the chunks selected for context. Zero context counts are included. With `include_citations`, the `done` event always contains a citation array, including `[]` when no valid references remain. Citation checks run on the complete generated answer. Streaming preserves all text and markers as generated; checks omit out-of-range excerpt numbers and report each valid number in a marker once. The lexical check and offset definition above apply.

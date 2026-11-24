@@ -38,6 +38,7 @@ type QueryStreamDone struct {
 	StageTimings     map[string]int64   `json:"stage_timings_ms"`
 	EarlyExit        bool               `json:"early_exit,omitempty"`
 	Citations        []CitationResponse `json:"citations,omitzero"`
+	CitationCoverage *CitationCoverage  `json:"citation_coverage,omitempty"`
 }
 
 // StreamError reports a query failure after the response stream has started.

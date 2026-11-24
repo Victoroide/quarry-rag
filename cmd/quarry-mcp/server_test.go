@@ -295,12 +295,13 @@ func TestListToolPaginationAndBounds(t *testing.T) {
 
 func TestQueryToolCitations(t *testing.T) {
 	for _, tc := range []struct {
-		name, citations string
-		include         bool
+		name, citations, coverage string
+		include                   bool
 	}{
-		{"requested", `[{"excerpt":1,"doc_id":"source","chunk_index":4,"offset":8,"verified":false,"overlap":0.25}]`, true},
-		{"empty", `[]`, true},
-		{"default", "", false},
+		{"requested", `[{"excerpt":1,"doc_id":"source","chunk_index":4,"offset":8,"verified":false,"overlap":0.25}]`, "", true},
+		{"support", `[{"excerpt":1,"doc_id":"source","chunk_index":4,"offset":8,"verified":false,"overlap":0.25,"support":{"status":"supported","method":"multilingual_nli_v1","version":"pinned","evidence":[1]}}]`, `{"sentences":2,"cited_sentences":1}`, true},
+		{"empty", `[]`, "", true},
+		{"default", "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +316,9 @@ func TestQueryToolCitations(t *testing.T) {
 				response := `{"answer":"Archive [1]","scored_chunks":[{"doc_id":"source","chunk_index":4,"excerpt":1,"truncated":true}]`
 				if tc.include {
 					response += `,"citations":` + tc.citations
+				}
+				if tc.coverage != "" {
+					response += `,"citation_coverage":` + tc.coverage
 				}
 				_, err := io.WriteString(w, response+"}")
 				assert.NoError(t, err)
@@ -336,6 +340,11 @@ func TestQueryToolCitations(t *testing.T) {
 				assert.JSONEq(t, tc.citations, string(fields["citations"]))
 			} else {
 				assert.NotContains(t, fields, "citations")
+			}
+			if tc.coverage != "" {
+				assert.JSONEq(t, tc.coverage, string(fields["citation_coverage"]))
+			} else {
+				assert.NotContains(t, fields, "citation_coverage")
 			}
 			var chunks []map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(fields["chunks"], &chunks))
