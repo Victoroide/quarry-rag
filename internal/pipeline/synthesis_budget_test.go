@@ -375,7 +375,7 @@ func TestStrictBudgetEdgeCases(t *testing.T) {
 		qc := &QueryContext{
 			OriginalQuery:   strings.Repeat("question ", 50),
 			RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{DocumentID: "doc", Text: "tiny"}, Score: .9}},
-			Stream:          &QueryStream{Context: func() error { streamStarted = true; return nil }, Delta: func(string) error { return nil }},
+			Stream:          &QueryStream{Context: func(context.Context) error { streamStarted = true; return nil }, Delta: func(context.Context, string) error { return nil }},
 		}
 		err := NewSynthesisStage(amb, cfg).Run(t.Context(), qc)
 		require.ErrorIs(t, err, ErrSynthesisInputTooLarge)
@@ -558,7 +558,7 @@ func TestStrictBudgetEdgeCases(t *testing.T) {
 				qc := &QueryContext{
 					OriginalQuery:   "Archive?",
 					RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{DocumentID: "doc", Text: "Evidence"}, Score: .9}},
-					Stream:          &QueryStream{Context: func() error { started = true; return nil }, Delta: func(string) error { return nil }},
+					Stream:          &QueryStream{Context: func(context.Context) error { started = true; return nil }, Delta: func(context.Context, string) error { return nil }},
 				}
 				parentCtx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 				defer cancel()

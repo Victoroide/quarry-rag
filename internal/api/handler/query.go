@@ -178,13 +178,14 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			stream = newQueryStream(ctx, w, r, qc)
 		}
 
+		routingCfg := pipeline.RoutingConfigFromConfig(cfg)
 		retrieval := pipeline.NewRetrievalStage(ret)
-		routing := pipeline.NewRoutingStage(ret)
+		routing := pipeline.NewRoutingStageWithConfig(ret, nil, nil, routingCfg)
 		if pool != nil {
 			visibility := pgstore.Visibility{Pool: pool, Collection: req.Collection, DocType: req.FilterDocType}
 			retrieval = pipeline.NewRetrievalStageWithVisibility(ret, visibility)
 			previews := pgstore.Previews{Pool: pool, Collection: req.Collection, DocType: req.FilterDocType}
-			routing = pipeline.NewRoutingStageWithScope(ret, visibility, previews)
+			routing = pipeline.NewRoutingStageWithConfig(ret, visibility, previews, routingCfg)
 			qc.EvidenceVisibility = visibility
 			qc.HostedVisibilityRefill = cfg.HostedVisibilityRefill && ret.SupportsVisibilityRefill()
 			qc.HostedVisibilityExtraRequests = cfg.HostedVisibilityExtraRequests

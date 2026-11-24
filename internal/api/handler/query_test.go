@@ -439,3 +439,94 @@ func TestQueryRejectsImmediatelyWithZeroQueueTimeout(t *testing.T) {
 	require.Equal(t, "1", rec.Header().Get("Retry-After"))
 	require.Empty(t, entered, "rejected request entered the pipeline")
 }
+
+type routingHandlerStore struct {
+	domain.VectorStore
+	probe []domain.ScoredChunk
+}
+
+func (s routingHandlerStore) QueryFiltered(_ context.Context, _ []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	out := make([]domain.ScoredChunk, 0, len(s.probe))
+	for _, sc := range s.probe {
+		if filter.DocumentIDs != nil {
+			matched := false
+			for _, id := range filter.DocumentIDs {
+				if string(sc.Chunk.DocumentID) == id {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		out = append(out, sc)
+		if len(out) >= topK {
+			break
+		}
+	}
+	return out, nil
+}
+
+func TestQueryHandlerHonorsRoutingPoliciesAndCalibration(t *testing.T) {
+	store := routingHandlerStore{
+		probe: []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "a1", DocumentID: "doc-a", Text: "Alpha vault retention policy."}, Score: 0.90},
+			{Chunk: domain.Chunk{ID: "b1", DocumentID: "doc-b", Text: "Beta vault retention policy."}, Score: 0.84},
+		},
+	}
+	emb := &deadlineEmbedder{release: closedQueryChannel()}
+
+	runQuery := func(t *testing.T, cfg *config.Config, body string) QueryResponse {
+		t.Helper()
+		amb := llm.NewAmbassador(cfg)
+		amb.SetClient(llm.NewFakeConverser())
+		ret := retriever.NewRetriever(store, emb, 0.70, 6)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/query", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		QueryHandler(ret, amb, cfg, nil).ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var got QueryResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		return got
+	}
+
+	// Legacy ignores routing margin even if set in config struct.
+	legacyMargin := 0.50
+	legacyCfg := deadlineQueryConfig(t)
+	legacyCfg.RoutingPolicy = config.RoutingPolicyLegacy
+	legacyCfg.RoutingMargin = &legacyMargin
+	legacyResp := runQuery(t, legacyCfg, `{"query":"retention policy"}`)
+	require.Equal(t, "LOCAL", legacyResp.Mode)
+
+	// Evidence policy with margin 0.15 catches 0.06 lead and switches to GLOBAL.
+	evidMargin := 0.15
+	evidCfg := deadlineQueryConfig(t)
+	evidCfg.RoutingPolicy = config.RoutingPolicyEvidence
+	evidCfg.RoutingMargin = &evidMargin
+	evidCfg.RoutingCalibrationMatched = true
+	evidCfg.EffectiveRoutingMargin = evidMargin
+	evidAmb := runQuery(t, evidCfg, `{"query":"retention policy"}`)
+	require.Equal(t, "GLOBAL", evidAmb.Mode)
+	require.Len(t, evidAmb.ScoredChunks, 2)
+
+	// Explicit mode overrides remain unchanged under evidence policy.
+	explicitLocal := runQuery(t, evidCfg, `{"query":"retention policy","mode":"local"}`)
+	require.Equal(t, "LOCAL", explicitLocal.Mode)
+
+	// Narrower margin (0.04 < 0.06 lead) allows strong-lead LOCAL.
+	narrowCfg := deadlineQueryConfig(t)
+	narrowCfg.RoutingPolicy = config.RoutingPolicyEvidence
+	narrowCfg.RoutingCalibrationMatched = true
+	narrowCfg.EffectiveRoutingMargin = 0.04
+	narrowResp := runQuery(t, narrowCfg, `{"query":"retention policy"}`)
+	require.Equal(t, "LOCAL", narrowResp.Mode)
+
+	// Missing calibration in evidence mode conservatively selects GLOBAL even with large lead.
+	uncalCfg := deadlineQueryConfig(t)
+	uncalCfg.RoutingPolicy = config.RoutingPolicyEvidence
+	uncalCfg.RoutingCalibrationMatched = false
+	uncalResp := runQuery(t, uncalCfg, `{"query":"retention policy"}`)
+	require.Equal(t, "GLOBAL", uncalResp.Mode)
+}

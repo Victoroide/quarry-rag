@@ -387,7 +387,7 @@ Request fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `query` | string | yes | Natural-language query string (1 to 10,000 decoded bytes) |
-| `mode` | string | no | Retrieval mode: `"auto"` (default), `"local"`, or `"global"`. Case-insensitive. `local` answers mainly from the most relevant authorized document (named entity or best match), topped up from the authorized scope when that document has fewer than 3 matching chunks. With no visible candidate, `local` uses `global`. Explicit `global` skips the routing probe |
+| `mode` | string | no | Retrieval mode: `"auto"` (default), `"local"`, or `"global"`. Case-insensitive. Automatic routing follows [`ROUTING_POLICY`](configuration.md#environment-variables). Explicit `local` answers mainly from the most relevant authorized document, topped up from the authorized scope when that document has fewer than three matching chunks. With no visible candidate, `local` uses `global`. Explicit `global` skips the routing probe. |
 | `answer_mode` | string | no | `generated` or `evidence`. See [evidence-only queries](#evidence-only-queries) for the deployed default and evidence response |
 | `filter_doc_type` | string | no | Restricts vector retrieval to chunks matching the given `doc_type`, using the label normalization and limits above |
 | `collection` | string | no | Exact collection label, using the label rules above; omitted or empty searches all collections. Applied inside vector retrieval and routing, then checked against completed PostgreSQL documents. Intersects the type filter and document allowlist; vectors written before collection filtering need the [collection metadata backfill](development.md#collection-metadata-backfill) |

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"sort"
 
@@ -13,7 +14,10 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 )
 
-const defaultTopK = 10
+const (
+	defaultTopK    = 10
+	minLocalChunks = 3
+)
 
 // RetrievalMode selects between local and global retrieval strategies.
 type RetrievalMode string
@@ -23,6 +27,87 @@ const (
 	RetrievalModeLocal  RetrievalMode = "LOCAL"
 	RetrievalModeGlobal RetrievalMode = "GLOBAL"
 )
+
+// RoutingPolicy selects how automatic retrieval routing decides LOCAL vs GLOBAL.
+type RoutingPolicy string
+
+// Supported automatic routing policies.
+const (
+	RoutingPolicyLegacy   RoutingPolicy = "legacy"
+	RoutingPolicyEvidence RoutingPolicy = "evidence"
+)
+
+// RouteReason is a bounded enum describing why a retrieval route was selected.
+type RouteReason string
+
+// Bounded route-reason constants recorded for diagnostics and metrics.
+const (
+	RouteReasonEmptyScope         RouteReason = "empty_scope"
+	RouteReasonExplicitGlobal     RouteReason = "explicit_global"
+	RouteReasonExplicitLocal      RouteReason = "explicit_local"
+	RouteReasonProbeFailed        RouteReason = "probe_failed"
+	RouteReasonEmptyProbe         RouteReason = "empty_probe"
+	RouteReasonMissingCalibration RouteReason = "missing_calibration"
+	RouteReasonMultiNeed          RouteReason = "multi_need"
+	RouteReasonAmbiguousEntities  RouteReason = "ambiguous_entities"
+	RouteReasonNegatedEntity      RouteReason = "negated_entity"
+	RouteReasonNamedEntity        RouteReason = "named_entity"
+	RouteReasonAmbiguousMargin    RouteReason = "ambiguous_margin"
+	RouteReasonScoreThreshold     RouteReason = "score_threshold"
+	RouteReasonStrongLead         RouteReason = "strong_lead"
+	RouteReasonLowScore           RouteReason = "low_score"
+)
+
+// ValidRouteReason reports whether r belongs to the bounded RouteReason enum.
+func ValidRouteReason(r RouteReason) bool {
+	switch r {
+	case RouteReasonEmptyScope, RouteReasonExplicitGlobal, RouteReasonExplicitLocal,
+		RouteReasonProbeFailed, RouteReasonEmptyProbe, RouteReasonMissingCalibration,
+		RouteReasonMultiNeed, RouteReasonAmbiguousEntities, RouteReasonNegatedEntity,
+		RouteReasonNamedEntity, RouteReasonAmbiguousMargin, RouteReasonScoreThreshold,
+		RouteReasonStrongLead, RouteReasonLowScore:
+		return true
+	default:
+		return false
+	}
+}
+
+// RoutingConfig configures policy and calibration state for evidence routing.
+type RoutingConfig struct {
+	Policy     RoutingPolicy
+	Margin     float64
+	Calibrated bool
+}
+
+// DocumentCandidate summarizes visible probe evidence for one distinct document.
+type DocumentCandidate struct {
+	DocID      string
+	BestScore  float64
+	ChunkCount int
+}
+
+// QuerySignals captures structural query cues without calling external providers.
+type QuerySignals struct {
+	ExplicitMultiRequest bool
+	StrongMultiNeedCue   bool
+	DistinctSubQueries   bool
+	ProbeSaturated       bool
+	ProbeCutoff          *float64
+}
+
+// EntityDecision summarizes preview entity matching over visible probe documents.
+type EntityDecision struct {
+	DocumentID string
+	Ambiguous  bool
+	Negated    bool
+}
+
+// RouteDecision records the selected retrieval mode, bounded reason and optional target document.
+type RouteDecision struct {
+	Mode            RetrievalMode
+	Reason          RouteReason
+	LocalDocumentID string
+}
 
 // Retriever implements pure-vector adaptive local/global retrieval.
 type Retriever struct {
@@ -86,18 +171,39 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, mode RetrievalMo
 // embedding the same text twice (once in routing, once here).
 // LOCAL searches localDocID first and tops up sparse results from filter.
 func (r *Retriever) RetrieveWithEmbedding(ctx context.Context, embedding []float32, mode RetrievalMode, localDocID string, topK int, filter domain.VectorFilter) (*Result, error) {
-	if topK <= 0 {
-		topK = r.topK
+	return r.retrieveWithEmbedding(ctx, embedding, mode, localDocID, nil, topK, filter, true)
+}
+
+// RetrieveEvidenceLocal searches only the selected document. localKeys lists
+// the spellings under which the vector store holds that document, which can
+// differ from the canonical localDocID; empty means localDocID alone. The caller
+// can fill sparse results from the previously fetched scope after visibility checks.
+func (r *Retriever) RetrieveEvidenceLocal(ctx context.Context, embedding []float32, localDocID string, localKeys []string, topK int, filter domain.VectorFilter) (*Result, error) {
+	return r.retrieveWithEmbedding(ctx, embedding, RetrievalModeLocal, localDocID, localKeys, topK, filter, false)
+}
+
+// ChunkLimit applies the retriever default when no explicit limit was supplied.
+func (r *Retriever) ChunkLimit(topK int) int {
+	if topK > 0 {
+		return topK
 	}
+	return r.topK
+}
+
+func (r *Retriever) retrieveWithEmbedding(ctx context.Context, embedding []float32, mode RetrievalMode, localDocID string, localKeys []string, topK int, filter domain.VectorFilter, topUp bool) (*Result, error) {
+	topK = r.ChunkLimit(topK)
 	if filter.MatchesNothing() {
 		return &Result{Mode: mode}, nil
 	}
 	mode, queryFilter := retrievalScope(mode, localDocID, filter)
+	if mode == RetrievalModeLocal && len(localKeys) != 0 {
+		queryFilter.DocumentIDs = localKeys
+	}
 	chunks, exact, err := r.queryFiltered(ctx, embedding, topK, queryFilter)
 	if err != nil {
 		return nil, fmt.Errorf("retriever: query: %w", err)
 	}
-	if mode == RetrievalModeLocal && len(chunks) < 3 {
+	if topUp && mode == RetrievalModeLocal && len(chunks) < minLocalChunks {
 		extra, scopeExact, err := r.queryFiltered(ctx, embedding, topK, filter)
 		if err != nil {
 			return nil, fmt.Errorf("retriever: top up: %w", err)
@@ -171,24 +277,118 @@ func retrievalResult(ctx context.Context, mode RetrievalMode, chunks []domain.Sc
 
 // DetermineModeWithQuery decides LOCAL or GLOBAL mode using structural signals only.
 func (r *Retriever) DetermineModeWithQuery(subQueryCount int, topScore float64, namedEntity string) RetrievalMode {
-	// Multiple information needs take priority over a single named entity.
+	return r.DetermineLegacyRoute(subQueryCount, topScore, namedEntity, "", "").Mode
+}
+
+// DetermineLegacyRoute preserves legacy routing decisions and reports the bounded RouteReason.
+func (r *Retriever) DetermineLegacyRoute(subQueryCount int, topScore float64, namedEntity, topDocID, entityDocID string) RouteDecision {
 	if subQueryCount > 1 {
-		return RetrievalModeGlobal
+		return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonMultiNeed}
 	}
-
-	// Named entity from DB on a single sub-query: the query targets
-	// a specific entity — retrieve locally regardless of
-	// similarity score.
+	target := entityDocID
+	if target == "" {
+		target = topDocID
+	}
 	if namedEntity != "" {
-		return RetrievalModeLocal
+		return RouteDecision{Mode: RetrievalModeLocal, Reason: RouteReasonNamedEntity, LocalDocumentID: target}
 	}
-
-	// Single sub-query, no named entity: use similarity as the signal.
 	if topScore >= r.threshold {
-		return RetrievalModeLocal
+		return RouteDecision{Mode: RetrievalModeLocal, Reason: RouteReasonScoreThreshold, LocalDocumentID: target}
 	}
+	return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonLowScore}
+}
 
-	return RetrievalModeGlobal
+// AggregateDocumentScores aggregates scoped visible probe hits by distinct document.
+// Each document's score is its strongest visible chunk score; ties break deterministically by document ID.
+func AggregateDocumentScores(chunks []domain.ScoredChunk) []DocumentCandidate {
+	if len(chunks) == 0 {
+		return nil
+	}
+	byDoc := make(map[string]DocumentCandidate, len(chunks))
+	for _, sc := range chunks {
+		if math.IsNaN(sc.Score) || math.IsInf(sc.Score, 0) {
+			continue
+		}
+		id := string(sc.Chunk.DocumentID)
+		cur, ok := byDoc[id]
+		if !ok {
+			byDoc[id] = DocumentCandidate{DocID: id, BestScore: sc.Score, ChunkCount: 1}
+			continue
+		}
+		cur.ChunkCount++
+		if sc.Score > cur.BestScore {
+			cur.BestScore = sc.Score
+		}
+		byDoc[id] = cur
+	}
+	if len(byDoc) == 0 {
+		return nil
+	}
+	docs := make([]DocumentCandidate, 0, len(byDoc))
+	for _, cand := range byDoc {
+		docs = append(docs, cand)
+	}
+	sort.Slice(docs, func(i, j int) bool {
+		if docs[i].BestScore == docs[j].BestScore {
+			return docs[i].DocID < docs[j].DocID
+		}
+		return docs[i].BestScore > docs[j].BestScore
+	})
+	return docs
+}
+
+// DetermineEvidenceRoute selects LOCAL or GLOBAL using aggregated visible document evidence,
+// calibrated margin, entity ambiguity/negation and explicit multi-request signals.
+func (r *Retriever) DetermineEvidenceRoute(cfg RoutingConfig, signals QuerySignals, docs []DocumentCandidate, entity EntityDecision) RouteDecision {
+	if len(docs) == 0 {
+		return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonEmptyProbe}
+	}
+	if !cfg.Calibrated || !(cfg.Margin >= 0 && cfg.Margin <= 1) {
+		return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonMissingCalibration}
+	}
+	if signals.ExplicitMultiRequest || signals.StrongMultiNeedCue || signals.DistinctSubQueries {
+		return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonMultiNeed}
+	}
+	if entity.Negated {
+		return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonNegatedEntity}
+	}
+	if entity.Ambiguous {
+		return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonAmbiguousEntities}
+	}
+	if entity.DocumentID != "" {
+		entityScore := 0.0
+		foundEntityDoc := false
+		for _, doc := range docs {
+			if doc.DocID == entity.DocumentID {
+				entityScore = doc.BestScore
+				foundEntityDoc = true
+				break
+			}
+		}
+		lead := docs[0].BestScore - entityScore
+		if !foundEntityDoc || (docs[0].BestScore >= r.threshold && lead > 0 && lead >= cfg.Margin) {
+			return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonAmbiguousMargin}
+		}
+		return RouteDecision{Mode: RetrievalModeLocal, Reason: RouteReasonNamedEntity, LocalDocumentID: entity.DocumentID}
+	}
+	topScore := docs[0].BestScore
+	if math.IsNaN(topScore) || topScore < r.threshold {
+		return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonLowScore}
+	}
+	runnerUp := math.Inf(-1)
+	if len(docs) > 1 {
+		runnerUp = docs[1].BestScore
+	}
+	if signals.ProbeSaturated {
+		if signals.ProbeCutoff == nil || math.IsNaN(*signals.ProbeCutoff) || math.IsInf(*signals.ProbeCutoff, 0) {
+			return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonAmbiguousMargin}
+		}
+		runnerUp = max(runnerUp, *signals.ProbeCutoff)
+	}
+	if lead := topScore - runnerUp; math.IsNaN(lead) || lead <= 0 || lead < cfg.Margin {
+		return RouteDecision{Mode: RetrievalModeGlobal, Reason: RouteReasonAmbiguousMargin}
+	}
+	return RouteDecision{Mode: RetrievalModeLocal, Reason: RouteReasonStrongLead, LocalDocumentID: docs[0].DocID}
 }
 
 // EmbedQuery embeds the query and optionally probes the authorized scope.

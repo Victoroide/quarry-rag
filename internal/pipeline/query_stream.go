@@ -11,8 +11,8 @@ import (
 // QueryStream receives context once, followed by incremental answer text.
 // Callbacks run synchronously and stop synthesis on their first error.
 type QueryStream struct {
-	Context func() error
-	Delta   func(string) error
+	Context func(context.Context) error
+	Delta   func(context.Context, string) error
 }
 
 func (q *QueryStream) start(ctx context.Context) error {
@@ -22,7 +22,7 @@ func (q *QueryStream) start(ctx context.Context) error {
 	if q.Context == nil || q.Delta == nil {
 		return errors.New("pipeline: stream callbacks are required")
 	}
-	return q.Context()
+	return q.Context(ctx)
 }
 
 func (s *SynthesisStage) finishWithoutEvidence(ctx context.Context, qc *QueryContext) error {
@@ -41,7 +41,7 @@ func (s *SynthesisStage) finishWithoutEvidence(ctx context.Context, qc *QueryCon
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return qc.Stream.Delta(qc.FinalAnswer)
+	return qc.Stream.Delta(ctx, qc.FinalAnswer)
 }
 
 func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, request llm.Request) (*llm.Response, error) {
@@ -51,6 +51,9 @@ func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, request
 		}
 	}
 	ctx = qc.withProviderEvidenceCheck(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := domain.CheckEvidenceBeforeSend(ctx); err != nil {
 		return nil, err
 	}
@@ -59,7 +62,12 @@ func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, request
 	if qc.Stream == nil {
 		result, err = s.ambassador.Generate(ctx, request)
 	} else {
-		result, err = s.ambassador.Stream(ctx, request, qc.Stream.Delta)
+		result, err = s.ambassador.Stream(ctx, request, func(delta string) error {
+			return qc.Stream.Delta(ctx, delta)
+		})
+	}
+	if guardErr := domain.RecordedEvidenceCheckError(ctx); guardErr != nil {
+		return nil, guardErr
 	}
 	if err != nil {
 		return nil, err
@@ -73,7 +81,7 @@ func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, request
 // withProviderEvidenceCheck attaches the hosted scope check unless the caller
 // already carries a check that includes it, as strict synthesis does.
 func (qc *QueryContext) withProviderEvidenceCheck(ctx context.Context) context.Context {
-	if qc.HostedVisibilityRefill && !domain.HasEvidenceCheck(ctx) {
+	if qc.checksCurrentEvidence() && !domain.HasEvidenceCheck(ctx) {
 		return domain.WithEvidenceCheck(ctx, qc.CheckEvidenceScope)
 	}
 	return ctx

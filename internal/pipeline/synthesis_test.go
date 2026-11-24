@@ -591,8 +591,8 @@ func TestSynthesisGuardrailContent(t *testing.T) {
 					contexts := 0
 					if streaming {
 						qc.Stream = &QueryStream{
-							Context: func() error { contexts++; return nil },
-							Delta:   func(text string) error { streamed.WriteString(text); return nil },
+							Context: func(context.Context) error { contexts++; return nil },
+							Delta:   func(_ context.Context, text string) error { streamed.WriteString(text); return nil },
 						}
 					}
 					require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))

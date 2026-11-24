@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "version": "1",
+      "provider": "replay",
+      "model": "quarry-char3-bow-v1",
+      "dimensions": 256,
+      "metric": "cosine",
+      "margin": 0.30,
+      "dev_split": {
+        "corpus_version": "routing-eval-v1",
+        "document_count": 10,
+        "query_count": 28,
+        "single_doc_recall": 1,
+        "single_doc_recall_loss": 0,
+        "ambiguous_recall": 1,
+        "ambiguous_false_local_rate": 0
+      }
+    },
+    {
+      "version": "1",
+      "provider": "replay",
+      "model": "quarry-char3-bow-v1",
+      "dimensions": 1024,
+      "metric": "cosine",
+      "margin": 0.28,
+      "dev_split": {
+        "corpus_version": "routing-eval-v1",
+        "document_count": 10,
+        "query_count": 28,
+        "single_doc_recall": 1,
+        "single_doc_recall_loss": 0,
+        "ambiguous_recall": 1,
+        "ambiguous_false_local_rate": 0
+      }
+    }
+  ]
+}

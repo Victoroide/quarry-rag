@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -142,7 +143,10 @@ func TestHostedEvidenceChecksEachProviderSend(t *testing.T) {
 				amb := llm.NewAmbassador(cfg)
 				amb.SetClient(converser)
 				if name == "stream retry" {
-					qc.Stream = &QueryStream{Context: func() error { return nil }, Delta: func(string) error { return nil }}
+					qc.Stream = &QueryStream{
+						Context: func(context.Context) error { return nil },
+						Delta:   func(context.Context, string) error { return nil },
+					}
 				}
 				err = NewSynthesisStage(amb, cfg).Run(t.Context(), qc)
 			}

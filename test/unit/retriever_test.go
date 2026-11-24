@@ -100,3 +100,38 @@ func TestRoutingProbeFailureFallsBackToGlobal(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Chunks, 1)
 }
+
+func TestAggregateDocumentScoresAndEvidenceRouting(t *testing.T) {
+	chunks := []domain.ScoredChunk{
+		{Chunk: domain.Chunk{ID: "a1", DocumentID: "doc-a"}, Score: 0.91},
+		{Chunk: domain.Chunk{ID: "a2", DocumentID: "doc-a"}, Score: 0.89},
+		{Chunk: domain.Chunk{ID: "a3", DocumentID: "doc-a"}, Score: 0.88},
+		{Chunk: domain.Chunk{ID: "b1", DocumentID: "doc-b"}, Score: 0.85},
+	}
+	docs := retriever.AggregateDocumentScores(chunks)
+	require.Len(t, docs, 2)
+	assert.Equal(t, "doc-a", docs[0].DocID)
+	assert.Equal(t, 0.91, docs[0].BestScore)
+	assert.Equal(t, 3, docs[0].ChunkCount)
+	assert.Equal(t, "doc-b", docs[1].DocID)
+
+	ret := retriever.NewRetriever(nil, nil, 0.70, 10)
+	cfg := retriever.RoutingConfig{Policy: retriever.RoutingPolicyEvidence, Margin: 0.10, Calibrated: true}
+
+	amb := ret.DetermineEvidenceRoute(cfg, retriever.QuerySignals{}, docs, retriever.EntityDecision{})
+	assert.Equal(t, retriever.RetrievalModeGlobal, amb.Mode)
+	assert.Equal(t, retriever.RouteReasonAmbiguousMargin, amb.Reason)
+
+	leadDocs := []retriever.DocumentCandidate{
+		{DocID: "doc-a", BestScore: 0.91, ChunkCount: 3},
+		{DocID: "doc-b", BestScore: 0.72, ChunkCount: 1},
+	}
+	lead := ret.DetermineEvidenceRoute(cfg, retriever.QuerySignals{}, leadDocs, retriever.EntityDecision{})
+	assert.Equal(t, retriever.RetrievalModeLocal, lead.Mode)
+	assert.Equal(t, retriever.RouteReasonStrongLead, lead.Reason)
+	assert.Equal(t, "doc-a", lead.LocalDocumentID)
+
+	uncalibrated := ret.DetermineEvidenceRoute(retriever.RoutingConfig{Policy: retriever.RoutingPolicyEvidence, Calibrated: false}, retriever.QuerySignals{}, leadDocs, retriever.EntityDecision{})
+	assert.Equal(t, retriever.RetrievalModeGlobal, uncalibrated.Mode)
+	assert.Equal(t, retriever.RouteReasonMissingCalibration, uncalibrated.Reason)
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embedder"
+	"github.com/Victoroide/quarry-rag/internal/llm"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
@@ -354,4 +355,129 @@ func TestEvidenceQueryChecksCurrentScopeAcrossVectorStores(t *testing.T) {
 			require.NoError(t, db.InsertChunks(ctx, []domain.Chunk{archive}))
 		})
 	}
+}
+
+func TestEvidencePolicyRoutingWithStaleHostedHitsAndPreviewErrors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	db := newEvidenceDatabase(t, pgtest.Start(t))
+	staleID, visibleID := uuid.NewString(), uuid.NewString()
+	staleChunk := domain.Chunk{
+		ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(staleID), Index: 0,
+		Text: "Stale Cedar Archive copy.", Metadata: map[string]any{"collection": "archive", "doc_type": "guide"},
+	}
+	visibleChunk := domain.Chunk{
+		ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(visibleID), Index: 1,
+		Text: "Fold the paper.", Metadata: map[string]any{"collection": "archive", "doc_type": "guide"},
+	}
+	insertEvidenceDocument(t, db, staleChunk, "archive", "guide")
+	_, err := db.Pool.Exec(t.Context(), `DELETE FROM documents WHERE id=$1`, staleID)
+	require.NoError(t, err)
+	currentChunk := staleChunk
+	currentChunk.Text = "Current Cedar Archive revision."
+	insertEvidenceDocument(t, db, currentChunk, "archive", "guide")
+	insertEvidenceDocument(t, db, visibleChunk, "archive", "guide")
+
+	mdStale, err := structpb.NewStruct(map[string]any{
+		"doc_id": staleID, "chunk_index": float64(0), "text": staleChunk.Text, "collection": "archive", "doc_type": "guide",
+	})
+	require.NoError(t, err)
+	mdVisible, err := structpb.NewStruct(map[string]any{
+		"doc_id": visibleID, "chunk_index": float64(1), "text": visibleChunk.Text, "collection": "archive", "doc_type": "guide",
+	})
+	require.NoError(t, err)
+
+	store := pcstore.NewTestDriver(func(_ context.Context, _ *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+		return &pinecone.QueryVectorsResponse{
+			Matches: []*pinecone.ScoredVector{
+				{Vector: &pinecone.Vector{Id: string(staleChunk.ID), Metadata: mdStale}, Score: 0.99},
+				{Vector: &pinecone.Vector{Id: string(visibleChunk.ID), Metadata: mdVisible}, Score: 0.85},
+			},
+		}, nil
+	})
+
+	margin := 0.10
+	cfg := &config.Config{
+		MaxChunksPerQuery:         10,
+		RoutingPolicy:             config.RoutingPolicyEvidence,
+		RoutingMargin:             &margin,
+		RoutingCalibrationMatched: true,
+		EffectiveRoutingMargin:    margin,
+		BedrockFallbackModel:      "fallback",
+	}
+	amb := llm.NewAmbassador(cfg)
+	amb.SetClient(llm.NewFakeConverser())
+	query := handler.QueryHandler(retriever.NewRetriever(store, evidenceEmbedder{}, 0.70, 10), amb, cfg, db.Pool)
+
+	// Stale top hosted hit is discarded before evidence aggregation; sole remaining visible doc leads => LOCAL.
+	rec := httptest.NewRecorder()
+	serveEvidenceQuery(t, query, rec, "application/json", `{"query":"Archive?","answer_mode":"evidence","collection":"archive"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got handler.QueryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, "LOCAL", got.Mode)
+	require.Len(t, got.ScoredChunks, 1)
+	require.Equal(t, visibleID, got.ScoredChunks[0].DocID)
+
+	for _, accept := range []string{"application/json", "text/event-stream"} {
+		t.Run(accept, func(t *testing.T) {
+			generated := httptest.NewRecorder()
+			serveEvidenceQuery(t, query, generated, accept, `{"query":"Archive?","collection":"archive"}`)
+			require.Equal(t, http.StatusOK, generated.Code, generated.Body.String())
+			require.Contains(t, generated.Body.String(), `"mode":"LOCAL"`)
+			require.Contains(t, generated.Body.String(), visibleID)
+			require.NotContains(t, generated.Body.String(), staleID)
+			require.NotContains(t, generated.Body.String(), staleChunk.Text)
+		})
+	}
+
+	t.Run("stale hits displace the visible document from the probe", func(t *testing.T) {
+		var searchLimits []uint32
+		displacing := pcstore.NewTestDriver(func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+			searchLimits = append(searchLimits, req.TopK)
+			require.Equal(t, map[string]any{"collection": map[string]any{"$eq": "archive"}}, req.MetadataFilter.AsMap())
+			matches := make([]*pinecone.ScoredVector, 0, 6)
+			for range 5 {
+				matches = append(matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: uuid.NewString(), Metadata: mdStale}, Score: 0.99})
+			}
+			matches = append(matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: string(visibleChunk.ID), Metadata: mdVisible}, Score: 0.85})
+			return &pinecone.QueryVectorsResponse{Matches: matches[:min(int(req.TopK), len(matches))]}, nil
+		})
+		displacedQuery := handler.QueryHandler(retriever.NewRetriever(displacing, evidenceEmbedder{}, 0.70, 10), amb, cfg, db.Pool)
+		displaced := httptest.NewRecorder()
+		serveEvidenceQuery(t, displacedQuery, displaced, "application/json", `{"query":"Archive?","collection":"archive"}`)
+		require.Equal(t, http.StatusOK, displaced.Code, displaced.Body.String())
+		require.Contains(t, displaced.Body.String(), `"mode":"GLOBAL"`)
+		require.Contains(t, displaced.Body.String(), visibleID)
+		require.NotContains(t, displaced.Body.String(), staleID)
+		require.Equal(t, []uint32{5, 10}, searchLimits)
+	})
+
+	t.Run("scope changes after the context frame", func(t *testing.T) {
+		stream := &evidenceRecorder{
+			ResponseRecorder: httptest.NewRecorder(),
+			onFlush: func() {
+				require.NoError(t, db.UpdateDocumentStatus(t.Context(), visibleChunk.DocumentID, "processing"))
+			},
+		}
+		t.Cleanup(func() {
+			require.NoError(t, db.UpdateDocumentStatus(context.WithoutCancel(t.Context()), visibleChunk.DocumentID, "completed"))
+		})
+		serveEvidenceQuery(t, query, stream, "text/event-stream", `{"query":"Archive?","collection":"archive"}`)
+		require.Equal(t, http.StatusOK, stream.Code)
+		require.Contains(t, stream.Body.String(), "event: context")
+		require.Contains(t, stream.Body.String(), "event: error")
+		require.NotContains(t, stream.Body.String(), "event: delta")
+	})
+
+	// Visibility/preview failure during evidence routing fails closed with 500 instead of silently degrading.
+	_, err = db.Pool.Exec(t.Context(), `ALTER TABLE documents RENAME TO unavailable_documents`)
+	require.NoError(t, err)
+	rec = httptest.NewRecorder()
+	serveEvidenceQuery(t, query, rec, "application/json", `{"query":"Archive?","answer_mode":"evidence","collection":"archive"}`)
+	_, restoreErr := db.Pool.Exec(t.Context(), `ALTER TABLE unavailable_documents RENAME TO documents`)
+	require.NoError(t, restoreErr)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	require.JSONEq(t, `{"error":"pipeline","message":"query processing failed"}`, rec.Body.String())
 }
