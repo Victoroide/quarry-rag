@@ -1,6 +1,7 @@
 package embedder
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -56,7 +57,7 @@ func TestOpenAIProfileSeparatesProviderFailures(t *testing.T) {
 			} else {
 				require.ErrorIs(t, err, tc.want)
 			}
-			if tc.want == domain.ErrEmbeddingModelLimit {
+			if errors.Is(tc.want, domain.ErrEmbeddingModelLimit) {
 				cfg.EmbeddingInputProfile = nil
 				legacy, err := NewOpenAIEmbedder(&cfg)
 				require.NoError(t, err)

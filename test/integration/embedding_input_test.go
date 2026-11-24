@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
 	"github.com/Victoroide/quarry-rag/internal/chunker"
@@ -31,22 +32,22 @@ func TestEmbeddingModelRejectionLeavesNoCompletedChunksOrVectors(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires a Docker daemon")
 	}
+	c, err := pgstore.NewClient(t.Context(), pgtest.StartVector(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
+	require.NoError(t, c.RunMigrations(t.Context()))
+	vectors, err := pgstore.NewVectorStore(t.Context(), c, 3)
+	require.NoError(t, err)
+
 	for _, tc := range []struct {
-		name, code string
-		attempts   int
-		message    string
+		name, code, firstWord string
+		attempts              int
+		message               string
 	}{
-		{"model window shrank", "context_length_exceeded", 3, "embedding model rejected the input length"},
-		{"unknown provider rejection", "invalid_model", 1, "openai: HTTP status 400"},
+		{"model window shrank", "context_length_exceeded", "firstword", 3, "embedding model rejected the input length"},
+		{"unknown provider rejection", "invalid_model", "otherword", 1, "openai: HTTP status 400"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := pgstore.NewClient(t.Context(), pgtest.StartVector(t))
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
-			require.NoError(t, c.RunMigrations(t.Context()))
-			vectors, err := pgstore.NewVectorStore(t.Context(), c, 3)
-			require.NoError(t, err)
-
 			inputs := make(chan string, 20)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var body struct{ Input string }
@@ -55,7 +56,7 @@ func TestEmbeddingModelRejectionLeavesNoCompletedChunksOrVectors(t *testing.T) {
 					return
 				}
 				inputs <- body.Input
-				if strings.Contains(body.Input, "secondword") {
+				if utf8.RuneCountInString(body.Input) > 9 {
 					w.WriteHeader(http.StatusBadRequest)
 					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": tc.code, "message": "private model detail"}})
 					return
@@ -81,13 +82,13 @@ func TestEmbeddingModelRejectionLeavesNoCompletedChunksOrVectors(t *testing.T) {
 				JobTimeout: time.Minute, PollInterval: 10 * time.Millisecond, Owner: "profile-rejection"})
 			w.Start(t.Context())
 			t.Cleanup(w.Shutdown)
-			rec := durableSubmit(t, w, c, `{"content":"firstword secondword"}`)
+			rec := durableSubmit(t, w, c, `{"content":"`+tc.firstWord+` secondword"}`)
 			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 			var accepted handler.IngestResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
 			durableStatus(t, c, accepted.DocumentID, "failed")
 			require.Len(t, inputs, 2)
-			require.Equal(t, "firstword", strings.TrimSpace(<-inputs))
+			require.Equal(t, tc.firstWord, strings.TrimSpace(<-inputs))
 			require.Equal(t, "secondword", strings.TrimSpace(<-inputs))
 
 			var chunks, vectorCount, jobs int
@@ -104,7 +105,7 @@ func TestEmbeddingModelRejectionLeavesNoCompletedChunksOrVectors(t *testing.T) {
 			require.Zero(t, vectorCount)
 			require.Zero(t, jobs)
 
-			const fits = "firstword smallword"
+			fits := tc.firstWord + " smallword"
 			rec = durableSubmit(t, w, c, `{"content":"`+fits+`"}`)
 			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
