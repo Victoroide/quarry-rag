@@ -3,14 +3,19 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
 	"github.com/Victoroide/quarry-rag/internal/chunker"
+	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embedder"
+	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
+	"github.com/Victoroide/quarry-rag/internal/retriever"
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
@@ -18,6 +23,16 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/stretchr/testify/require"
 )
+
+type countedPostgresVectors struct {
+	*pgstore.VectorStore
+	searches int
+}
+
+func (s *countedPostgresVectors) QueryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	s.searches++
+	return s.VectorStore.QueryFiltered(ctx, embedding, topK, filter)
+}
 
 func TestPostgresVectorsOfflineParity(t *testing.T) {
 	if testing.Short() {
@@ -84,4 +99,26 @@ func TestPostgresVectorsOfflineParity(t *testing.T) {
 	got, err := vectors.QueryFiltered(t.Context(), query, 10, domain.VectorFilter{DocumentIDs: []string{ids[0]}})
 	require.NoError(t, err)
 	require.Empty(t, got)
+
+	t.Run("hosted refill is inactive for pgvector", func(t *testing.T) {
+		store := &countedPostgresVectors{VectorStore: vectors}
+		ret := retriever.NewRetriever(tracing.WrapVectorStore(store, "postgresql"), e, .7, 10)
+		require.False(t, ret.SupportsVisibilityRefill())
+		cfg := &config.Config{MaxChunksPerQuery: 10, HostedVisibilityRefill: true, HostedVisibilityExtraRequests: 1}
+		metricsService := metrics.NewService(nil)
+		queryHandler := handler.QueryHandler(ret, nil, cfg, c.Pool)
+		body := `{"query":"archive","mode":"global","max_chunks":2,"allowed_document_ids":["` + ids[0] + `"]}`
+		response := scopeQuery(t, func(w http.ResponseWriter, r *http.Request) {
+			queryHandler(w, r.WithContext(metrics.WithService(r.Context(), metricsService)))
+		}, body)
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		require.Equal(t, 1, store.searches)
+		var result handler.QueryResponse
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+		require.Equal(t, "no_evidence", result.FinishReason)
+		require.Empty(t, result.ScoredChunks)
+		var exposition strings.Builder
+		require.NoError(t, metricsService.Registry.WriteText(&exposition))
+		require.NotContains(t, exposition.String(), "quarry_hosted_visibility_refill_total{")
+	})
 }
