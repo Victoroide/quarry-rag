@@ -128,16 +128,23 @@ func architecture() diagram {
 	return d
 }
 
+const schemaRowHeight = 18
+
+func schemaColumnBaseline(index int) float64 {
+	return 48 + float64(index)*schemaRowHeight
+}
+
 func dataModel() diagram {
 	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", MaxW: 840, MaxH: 1000,
-		Description: "Data model. The chunks, document_fingerprints and ingest_jobs tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column."}
+		Description: "Data model. The chunks, document_fingerprints, ingest_jobs and document_pdf_extractions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column."}
 	d.Nodes = []node{
 		{ID: "documents", Title: "documents", Columns: []column{
 			{"id", "UUID", "PK", ""}, {"content", "TEXT", "", ""}, {"metadata", "JSONB", "", ""}, {"status", "TEXT", "", ""}, {"chunk_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"file_name", "TEXT", "", ""}, {"file_type", "TEXT", "", ""}, {"s3_key", "TEXT", "", ""}, {"content_preview", "TEXT", "", ""}, {"doc_type", "TEXT", "", ""}, {"fingerprint", "TEXT", "", ""}, {"last_error", "TEXT", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"completed_at", "TIMESTAMPTZ", "", ""}, {"collection", "TEXT", "", ""}, {"text_source", "TEXT", "", ""}, {"content_dedup", "TEXT", "", ""},
 			{"incarnation", "UUID", "", ""}, {"index_visibility", "TEXT", "", ""}, {"index_visibility_observed_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "chunks", Title: "chunks", Columns: []column{{"id", "UUID", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"chunk_index", "INTEGER", "", ""}, {"text", "TEXT", "", ""}, {"token_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_fingerprints", Title: "document_fingerprints", Columns: []column{{"fingerprint", "TEXT", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"created_at", "TIMESTAMPTZ", "", ""}}},
-		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"lease_token", "UUID", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"pdf_required", "BOOLEAN", "", ""}, {"pdf_claim_attempt", "INTEGER", "", ""}, {"lease_token", "UUID", "", ""}}},
+		{ID: "document_pdf_extractions", Title: "document_pdf_extractions", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"profile", "TEXT", "", ""}, {"manifest", "JSONB", "", ""}, {"coverage", "TEXT", "", ""}, {"page_results", "JSONB", "", ""}, {"window_id", "UUID", "", ""}, {"started_at", "TIMESTAMPTZ", "", ""}, {"start_bound_at", "TIMESTAMPTZ", "", ""}, {"accepted_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_deletions", Title: "document_deletions", Columns: []column{
 			{"document_id", "UUID", "PK", ""}, {"incarnation", "UUID", "", ""}, {"kind", "TEXT", "", ""}, {"source_key", "TEXT", "", ""}, {"source_bucket", "TEXT", "", ""}, {"vector_mode", "TEXT", "", ""}, {"vector_index", "TEXT", "", ""}, {"vector_namespace", "TEXT", "", ""}, {"memory_owner", "UUID", "", ""}, {"step", "INTEGER", "", ""}, {"held", "BOOLEAN", "", ""}, {"finalized", "BOOLEAN", "", ""}, {"claim", "UUID", "", ""}, {"claim_until", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_deletion_activation", Title: "document_deletion_activation", Columns: []column{{"singleton", "BOOLEAN", "PK", ""}, {"activated_at", "TIMESTAMPTZ", "", ""}}},
@@ -149,15 +156,20 @@ func dataModel() diagram {
 		id, to, card  string
 		x, sourceY, y float64
 	}{
-		{"documents-chunks", "chunks", "0..n", 428, 136, 168},
-		{"documents-fingerprints", "document_fingerprints", "0..n", 416, 148, 354},
-		{"documents-jobs", "ingest_jobs", "0..1", 404, 160, 466},
-		{"documents-evaluation", "evaluation_fixtures", "0..1", 392, 172, 796},
+		{"documents-chunks", "chunks", "0..n", 428, 126, 138},
+		{"documents-fingerprints", "document_fingerprints", "0..n", 416, 138, 296},
+		{"documents-jobs", "ingest_jobs", "0..1", 404, 150, 382},
+		{"documents-pdf-extractions", "document_pdf_extractions", "0..1", 392, 162, 648},
 	} {
 		l := &label{Text: v.card, X: 464, Y: v.y - 14, Size: edgeLabelSize, Kind: "muted", Owner: v.id}
 		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {472, v.y}}})
 	}
-	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs", "documents-evaluation"})
+	d.Edges = append(d.Edges, edge{
+		ID: "documents-evaluation", From: "documents", To: "evaluation_fixtures",
+		Label:  &label{Text: "0..1", X: 420, Y: 888, Size: edgeLabelSize, Kind: "muted", Owner: "documents-evaluation"},
+		Points: []point{{368, 174}, {380, 174}, {380, 902}, {368, 902}},
+	})
+	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs", "documents-pdf-extractions", "documents-evaluation"})
 	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 978, Size: sublabelSize, Kind: "muted"}}
 	return d
 }
@@ -245,7 +257,7 @@ func sceneLabels(d diagram) []label {
 			labels = append(labels, label{Text: line, X: n.Box.X + 16, Y: n.Box.Y + 41 + float64(i)*20, Size: sublabelSize, Owner: n.ID, Kind: "muted"})
 		}
 		for i, c := range n.Columns {
-			y := n.Box.Y + 72 + float64(i)*20
+			y := n.Box.Y + schemaColumnBaseline(i)
 			if c.Key != "" {
 				labels = append(labels, label{Text: c.Key, X: n.Box.X + 12, Y: y, Size: edgeLabelSize, Owner: n.ID, Kind: "accent"})
 			}

@@ -146,13 +146,16 @@ func TestPublishedServingRoleKeepsReservationGuards(t *testing.T) {
 		wrong, claimErr := serving.ClaimJobForFixtureStore(ctx, "wrong-store", time.Minute, 3, identity)
 		require.NoError(t, claimErr)
 		require.Nil(t, wrong, identity)
+		wrong, claimErr = serving.ClaimPDFJobForFixtureStore(ctx, "wrong-store-with-ocr", time.Minute, 3, identity)
+		require.NoError(t, claimErr)
+		require.Nil(t, wrong, identity)
 	}
 	err = serving.WithOrdinaryRemoval(ctx, id, func(context.Context) error {
 		require.FailNow(t, "ordinary removal must stop at the reservation")
 		return nil
 	})
 	require.ErrorIs(t, err, domain.ErrFixtureDeletionRequired)
-	job, err := serving.ClaimJobForFixtureStore(ctx, "bound-store", time.Minute, 3, "pinecone:bound")
+	job, err := serving.ClaimPDFJobForFixtureStore(ctx, "bound-store-with-ocr", time.Minute, 3, "pinecone:bound")
 	require.NoError(t, err)
 	require.NotNil(t, job)
 	require.Equal(t, id, job.Document.ID)

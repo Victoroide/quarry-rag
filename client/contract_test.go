@@ -38,14 +38,16 @@ func (s summaryStore) GetDocumentSummary(context.Context, domain.DocumentID) (*d
 	return &s.docs[0], nil
 }
 
+func (s summaryStore) WithDocumentIncarnations() domain.DocumentLister { return s }
+
 func TestDocumentPageRoundTrip(t *testing.T) {
 	observedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	doc := domain.DocumentSummary{ID: "00000000-0000-4000-8000-000000000001", DocType: "guide", Collection: "tenant-a", Status: "completed", ChunkCount: 3, IndexVisibility: domain.VisibilityTransactional, IndexVisibilityObservedAt: &observedAt}
+	doc := domain.DocumentSummary{ID: "00000000-0000-4000-8000-000000000001", DocType: "guide", Collection: "tenant-a", Status: "completed", ChunkCount: 3, PDFCoverage: domain.PDFPartial, IndexVisibility: domain.VisibilityTransactional, IndexVisibilityObservedAt: &observedAt}
 	server := httptest.NewServer(handler.ListDocumentsHandler(summaryStore{docs: []domain.DocumentSummary{doc}}))
 	defer server.Close()
 	c, err := client.New(server.URL)
 	require.NoError(t, err)
-	page, err := c.ListDocuments(t.Context(), client.ListOptions{Limit: 1, IncludeIndexVisibility: true})
+	page, err := c.ListDocuments(t.Context(), client.ListOptions{Limit: 1, IncludeIndexVisibility: true, IncludePDFCoverage: true})
 	require.NoError(t, err)
 	require.Len(t, page.Documents, 1)
 	encoded, err := json.Marshal(page.Documents[0])
@@ -56,12 +58,19 @@ func TestDocumentPageRoundTrip(t *testing.T) {
 	assert.Equal(t, 1, page.Count)
 	require.NotNil(t, page.NextAfter)
 	assert.Equal(t, doc.ID, *page.NextAfter)
+	defaultPage, err := c.ListDocuments(t.Context(), client.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, defaultPage.Documents, 1)
+	assert.Empty(t, defaultPage.Documents[0].PDFCoverage)
 }
 
 func TestDocumentStatusRoundTrip(t *testing.T) {
 	for _, collection := range []string{"", "tenant-a"} {
 		t.Run(collection, func(t *testing.T) {
-			doc := domain.DocumentSummary{ID: "00000000-0000-4000-8000-000000000001", Collection: collection, Status: "processing"}
+			doc := domain.DocumentSummary{ID: "00000000-0000-4000-8000-000000000001", Incarnation: "00000000-0000-4000-8000-000000000002", Collection: collection, Status: "processing"}
+			if collection != "" {
+				doc.PDFCoverage = domain.PDFPending
+			}
 			mux := http.NewServeMux()
 			mux.HandleFunc("GET /documents/{doc_id}", handler.DocumentStatusHandler(summaryStore{docs: []domain.DocumentSummary{doc}}))
 			server := httptest.NewServer(mux)
@@ -70,6 +79,20 @@ func TestDocumentStatusRoundTrip(t *testing.T) {
 			require.NoError(t, err)
 			summary, err := c.GetDocumentWithIndexVisibility(t.Context(), doc.ID)
 			require.NoError(t, err)
+			assert.Empty(t, summary.PDFCoverage)
+			assert.Equal(t, "unknown", summary.IndexVisibility)
+			assert.Nil(t, summary.IndexVisibilityObservedAt)
+			summary, err = c.GetDocumentWithPDFCoverage(t.Context(), doc.ID)
+			require.NoError(t, err)
+			assert.Empty(t, summary.IndexVisibility)
+			observed, err := c.GetDocumentWithIndexVisibilityAndPDFCoverage(t.Context(), doc.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "unknown", observed.IndexVisibility)
+			assert.Equal(t, summary.PDFCoverage, observed.PDFCoverage)
+			both, err := c.GetDocumentWithIncarnationAndPDFCoverage(t.Context(), doc.ID)
+			require.NoError(t, err)
+			assert.Equal(t, doc.Incarnation, both.Incarnation)
+			assert.Equal(t, summary.PDFCoverage, both.PDFCoverage)
 			encoded, err := json.Marshal(summary)
 			require.NoError(t, err)
 			var fields map[string]any
@@ -77,8 +100,11 @@ func TestDocumentStatusRoundTrip(t *testing.T) {
 			assert.Equal(t, collection, fields["collection"])
 			assert.Equal(t, doc.ID, summary.ID)
 			assert.Equal(t, "processing", summary.Status)
-			assert.Equal(t, "unknown", summary.IndexVisibility)
-			assert.Nil(t, summary.IndexVisibilityObservedAt)
+			if collection != "" {
+				assert.Equal(t, "pending", fields["pdf_coverage"])
+			} else {
+				assert.NotContains(t, fields, "pdf_coverage")
+			}
 		})
 	}
 }

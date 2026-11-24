@@ -82,6 +82,7 @@ GRANT USAGE ON SCHEMA public TO quarry_service, quarry_operator, quarry_auditor;
 GRANT SELECT ON public.schema_migrations TO quarry_service;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.documents, public.chunks,
   public.ingest_jobs, public.document_fingerprints TO quarry_service;
+GRANT SELECT, INSERT, UPDATE ON public.document_pdf_extractions TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
   public.evaluation_fixture_reserved(uuid) TO quarry_service;
 GRANT SELECT (revision) ON public.grant_catalog_policy_revision TO quarry_operator;

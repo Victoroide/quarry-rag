@@ -253,6 +253,9 @@ func parseSQL(sql string) (sqlSchema, error) {
 				if regexp.MustCompile(`(?is)^ALTER\s+COLUMN\s+\w+\s+(?:(?:SET\s+DEFAULT\s+.+)|(?:DROP\s+DEFAULT)|(?:(?:SET|DROP)\s+NOT\s+NULL))$`).MatchString(part) {
 					continue
 				}
+				if regexp.MustCompile(`(?is)^ADD\s+CONSTRAINT\s+\w+\s+CHECK\s*\(.+\)(?:\s+NOT\s+VALID)?$`).MatchString(part) {
+					continue
+				}
 				return nil, fmt.Errorf("unsupported table alteration: %s", part)
 			}
 			if add != nil {

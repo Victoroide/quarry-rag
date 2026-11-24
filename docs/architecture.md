@@ -275,7 +275,7 @@ Embedded SQL migrations define the relational schema and apply in numeric order 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.svg">
-  <img alt="Data model. The chunks, document_fingerprints and ingest_jobs tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column. The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes." src="diagrams/database-schema-light.svg">
+  <img alt="Data model. The chunks, document_fingerprints, ingest_jobs and document_pdf_extractions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column. The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes." src="diagrams/database-schema-light.svg">
 </picture>
 
 ### Table Definitions

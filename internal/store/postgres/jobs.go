@@ -19,8 +19,13 @@ func (c *Client) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (
 	if req.ContentDedup == "" {
 		req.ContentDedup = domain.ContentDedupCollection
 	}
+	if req.PDF != nil {
+		if err := validatePDFAdmission(req); err != nil {
+			return domain.AcceptResult{}, err
+		}
+	}
 	for attempt := 0; attempt < 2; attempt++ {
-		result, err := c.acceptDocument(ctx, req)
+		result, err := c.acceptDocument(ctx, req, false, false)
 		var pgErr *pgconn.PgError
 		if attempt == 0 && errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			continue
@@ -33,6 +38,14 @@ func (c *Client) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (
 	return domain.AcceptResult{}, errors.New("postgres: acceptance retry exhausted")
 }
 
+// AcceptExistingPDF resolves a UUID or a shared original without admitting a new document.
+func (c *Client) AcceptExistingPDF(ctx context.Context, req domain.AcceptRequest, includeLegacy bool) (domain.AcceptResult, error) {
+	if !req.CallerSupplied && (req.ContentDedup != domain.ContentDedupCollection || !includeLegacy) {
+		return domain.AcceptResult{}, errors.New("postgres: anonymous PDF lookup requires collection deduplication in mixed mode")
+	}
+	return c.acceptDocument(ctx, req, true, includeLegacy)
+}
+
 func identityFingerprint(policy domain.ContentDedup, id domain.DocumentID, fingerprint string) string {
 	if policy == domain.ContentDedupOff {
 		return chunker.Fingerprint("quarry.document.v1\x00" + string(id) + "\x00" + fingerprint)
@@ -40,7 +53,7 @@ func identityFingerprint(policy domain.ContentDedup, id domain.DocumentID, finge
 	return fingerprint
 }
 
-func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
+func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, existingPDFOnly, includeLegacy bool) (domain.AcceptResult, error) {
 	result := domain.AcceptResult{DocumentID: req.Document.ID}
 	// Reads after the advisory lock wait must see the previous holder's commit.
 	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
@@ -76,7 +89,7 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 		var policy domain.ContentDedup
 		err = tx.QueryRow(ctx, `SELECT status,fingerprint,content,collection,content_dedup FROM documents WHERE id=$1 FOR UPDATE`, string(req.Document.ID)).Scan(&state, &fingerprint, &content, &collection, &policy)
 		if err == nil {
-			if req.EvaluationReceipt != "" {
+			if req.EvaluationReceipt != "" || collection != req.Collection {
 				result.Outcome = domain.AcceptConflict
 				return result, nil
 			}
@@ -84,17 +97,42 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 				legacy := chunker.ScopedFingerprint(collection, content)
 				fingerprint = &legacy
 			}
-			if collection != req.Collection || *fingerprint != identityFingerprint(policy, req.Document.ID, req.Fingerprint) {
+			matches := *fingerprint == identityFingerprint(policy, req.Document.ID, req.Fingerprint)
+			if existingPDFOnly {
+				result.Outcome, err = matchExistingPDF(ctx, tx, req, policy, *fingerprint, includeLegacy)
+				if err != nil || result.Outcome != domain.AcceptAccepted {
+					return result, err
+				}
+				matches = true
+			} else if !matches && req.PDF != nil {
+				matches, err = matchesLegacyPDF(ctx, tx, req, policy, *fingerprint)
+				if err != nil {
+					return result, err
+				}
+			}
+			if !matches {
 				result.Outcome = domain.AcceptConflict
 				return result, nil
 			}
 			id = string(req.Document.ID)
 		}
 	} else if req.ContentDedup == domain.ContentDedupCollection {
-		err = tx.QueryRow(ctx, `SELECT d.id::text,d.status FROM document_fingerprints f JOIN documents d ON d.id=f.document_id WHERE f.fingerprint=$1 FOR UPDATE OF d`, req.Fingerprint).Scan(&id, &state)
+		if req.PDF != nil || existingPDFOnly {
+			id, state, err = findSharedPDF(ctx, tx, req)
+		} else {
+			err = tx.QueryRow(ctx, `SELECT d.id::text,d.status FROM document_fingerprints f JOIN documents d ON d.id=f.document_id WHERE f.fingerprint=$1 FOR UPDATE OF d`, req.Fingerprint).Scan(&id, &state)
+		}
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return result, err
+	}
+	if existingPDFOnly && id == "" {
+		result.Outcome = domain.AcceptNeedsSource
+		return result, nil
+	}
+	if id == "" && req.TryLegacyPDFText && !req.CallerSupplied && req.ContentDedup == domain.ContentDedupCollection && req.PDF != nil && req.PDF.Coverage == domain.PDFComplete {
+		result.Outcome = domain.AcceptNeedsPDFText
+		return result, nil
 	}
 	if id != "" {
 		result.DocumentID = domain.DocumentID(id)
@@ -111,6 +149,29 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 			return result, fmt.Errorf("unexpected document status %q", state)
 		}
 	}
+	var reopenPDF, rotateWindow bool
+	if id != "" && (req.PDF != nil || existingPDFOnly) {
+		var pdfCoverage domain.PDFCoverage
+		var unusable, expired, intentExpired bool
+		err = tx.QueryRow(ctx, `SELECT p.coverage,octet_length(d.content)<$2,
+			COALESCE(COALESCE(p.accepted_at,p.start_bound_at,p.started_at)+make_interval(secs=>$3)<=clock_timestamp(),FALSE),
+			COALESCE(p.started_at+make_interval(secs=>$3)<=clock_timestamp(),FALSE)
+			FROM document_pdf_extractions p JOIN documents d ON d.id=p.document_id WHERE d.id=$1`, id, domain.MinPDFTextBytes, domain.PDFOCRLifetime.Seconds()).Scan(&pdfCoverage, &unusable, &expired, &intentExpired)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return result, err
+		}
+		unusableCheckpoint := pdfCoverage == domain.PDFPartial && unusable
+		reopenPDF = pdfCoverage == domain.PDFFailed || unusableCheckpoint
+		if reopenPDF && !req.CallerSupplied {
+			result.Outcome = domain.AcceptOCRRetryRequired
+			return result, nil
+		}
+		if reopenPDF && (unusableCheckpoint || intentExpired) && !expired {
+			result.Outcome = domain.AcceptOCRRetryAfterExpiry
+			return result, nil
+		}
+		rotateWindow = expired
+	}
 
 	var count int
 	if countErr := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT 1 FROM ingest_jobs LIMIT $1) q`, req.MaxPending).Scan(&count); countErr != nil {
@@ -124,7 +185,11 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 		if _, err = tx.Exec(ctx, `UPDATE documents SET status='processing',last_error=NULL,index_visibility=NULL,index_visibility_observed_at=NULL,updated_at=NOW() WHERE id=$1`, id); err != nil {
 			return result, err
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id) VALUES($1) ON CONFLICT DO NOTHING`, id); err != nil {
+		if reopenPDF {
+			if requeueErr := requeuePDF(ctx, tx, id, rotateWindow); requeueErr != nil {
+				return result, requeueErr
+			}
+		} else if _, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id) VALUES($1) ON CONFLICT DO NOTHING`, id); err != nil {
 			return result, err
 		}
 		result.Outcome = domain.AcceptRequeued
@@ -181,48 +246,66 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 			return result, err
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id) VALUES($1)`, string(req.Document.ID)); err != nil {
+	if req.PDF != nil {
+		err = insertPDFJob(ctx, tx, req)
+	} else {
+		_, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id) VALUES($1)`, string(req.Document.ID))
+	}
+	if err != nil {
 		return result, err
 	}
 	result.Outcome = domain.AcceptAccepted
 	return result, tx.Commit(ctx)
 }
 
-const claimJobPrefix = `UPDATE ingest_jobs j SET state='running',attempts=j.attempts+1,lease_owner=$1,lease_until=NOW()+make_interval(secs=>$2),lease_token=gen_random_uuid(),updated_at=NOW()
-   WHERE j.document_id=(SELECT ready.document_id FROM ingest_jobs ready
-   WHERE ((ready.state='pending' AND ready.next_attempt_at<=NOW()) OR (ready.state='running' AND ready.lease_until<NOW()))
-   AND `
+const claimJobPrefix = `WITH claimed AS (
+	UPDATE ingest_jobs j SET state='running',attempts=j.attempts+1,lease_owner=$1,lease_until=NOW()+make_interval(secs=>$2),
+		pdf_claim_attempt=CASE WHEN $3 THEN j.attempts+1 END,lease_token=gen_random_uuid(),updated_at=NOW()
+	WHERE j.document_id=(SELECT ready.document_id FROM ingest_jobs ready
+		WHERE ($3 OR NOT EXISTS(SELECT 1 FROM ingest_jobs WHERE pdf_required))
+		AND ((ready.state='pending' AND ready.next_attempt_at<=NOW()) OR (ready.state='running' AND ready.lease_until<NOW()))
+		AND `
 
 const claimJobSuffix = `
-   ORDER BY ready.next_attempt_at,ready.created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-   RETURNING j.document_id::text,j.attempts,j.lease_token::text`
+		ORDER BY ready.next_attempt_at,ready.created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+	RETURNING j.document_id,j.attempts,j.lease_token)
+	SELECT d.id::text,j.attempts,d.content,d.metadata,d.file_name,d.file_type,d.s3_key,d.doc_type,d.fingerprint,d.collection,
+		d.text_source,COALESCE(d.incarnation,d.id)::text,j.lease_token::text,p.profile,p.coverage,p.manifest
+	FROM claimed j JOIN documents d ON d.id=j.document_id
+	LEFT JOIN document_pdf_extractions p ON p.document_id=d.id`
 
 // The reservation predicate is owner-defined, so a serving login needs no
 // privilege on the receipt table to lease ordinary work.
-const claimGuardedJob = claimJobPrefix + `evaluation_fixture_claimable(ready.document_id, $3::text)` + claimJobSuffix
+const claimGuardedJob = claimJobPrefix + `evaluation_fixture_claimable(ready.document_id, NULLIF($4::text, ''))` + claimJobSuffix
 
 const claimBeforeFixtureMigration = claimJobPrefix + `to_regclass('evaluation_fixtures') IS NULL` + claimJobSuffix
 
 // ClaimJob leases ordinary work on both current and pre-fixture schemas.
 func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration, maxAttempts int) (*domain.Job, error) {
-	return c.claimGuarded(ctx, owner, lease, maxAttempts, nil)
+	return c.ClaimJobForFixtureStore(ctx, owner, lease, maxAttempts, "")
 }
 
 // ClaimJobForFixtureStore permits fixture jobs only for their reserved vector store.
 func (c *Client) ClaimJobForFixtureStore(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity string) (*domain.Job, error) {
-	if vectorIdentity == "" {
-		return c.ClaimJob(ctx, owner, lease, maxAttempts)
-	}
-	return c.claimGuarded(ctx, owner, lease, maxAttempts, &vectorIdentity)
+	return c.claimGuarded(ctx, owner, lease, maxAttempts, false, vectorIdentity)
 }
 
-func (c *Client) claimGuarded(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity *string) (*domain.Job, error) {
-	job, err := c.claimJob(ctx, owner, maxAttempts, claimGuardedJob, owner, lease.Seconds(), vectorIdentity)
+// ClaimPDFJob also leases jobs that require a mixed-PDF worker.
+func (c *Client) ClaimPDFJob(ctx context.Context, owner string, lease time.Duration, maxAttempts int) (*domain.Job, error) {
+	return c.ClaimPDFJobForFixtureStore(ctx, owner, lease, maxAttempts, "")
+}
+
+// ClaimPDFJobForFixtureStore applies both the PDF and fixture claim rules.
+func (c *Client) ClaimPDFJobForFixtureStore(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity string) (*domain.Job, error) {
+	return c.claimGuarded(ctx, owner, lease, maxAttempts, true, vectorIdentity)
+}
+
+func (c *Client) claimGuarded(ctx context.Context, owner string, lease time.Duration, maxAttempts int, pdfCapable bool, vectorIdentity string) (*domain.Job, error) {
+	job, err := c.claimJob(ctx, owner, maxAttempts, claimGuardedJob, owner, lease.Seconds(), pdfCapable, vectorIdentity)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "42883" {
-		// A mixed rollout can run this binary before the fixture migration. The
-		// fallback only claims while the reservation table is absent.
-		return c.claimJob(ctx, owner, maxAttempts, claimBeforeFixtureMigration, owner, lease.Seconds())
+		// Before the fixture migration, only claim while the reservation table is absent.
+		return c.claimJob(ctx, owner, maxAttempts, claimBeforeFixtureMigration, owner, lease.Seconds(), pdfCapable)
 	}
 	return job, err
 }
@@ -231,7 +314,12 @@ func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, st
 	for range 10 {
 		j := &domain.Job{LeaseOwner: owner}
 		var id string
-		err := c.Pool.QueryRow(ctx, statement, args...).Scan(&id, &j.Attempts, &j.LeaseToken)
+		var metadata, manifest []byte
+		var fingerprint, profile *string
+		var coverage *domain.PDFCoverage
+		err := c.Pool.QueryRow(ctx, statement, args...).
+			Scan(&id, &j.Attempts, &j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType,
+				&j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource, &j.Incarnation, &j.LeaseToken, &profile, &coverage, &manifest)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -239,23 +327,23 @@ func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, st
 			return nil, fmt.Errorf("postgres: claim job: %w", err)
 		}
 		j.Document.ID = domain.DocumentID(id)
+		if profile != nil && coverage != nil {
+			j.PDF = &domain.PDFExtraction{Profile: *profile, Coverage: *coverage}
+		}
 		if j.Attempts > maxAttempts {
 			if failErr := c.FailJob(ctx, *j, "exceeded maximum attempts"); failErr != nil && !errors.Is(failErr, domain.ErrJobNotOwned) {
 				return nil, failErr
 			}
 			continue
 		}
-		var metadata []byte
-		var fingerprint *string
-		err = c.Pool.QueryRow(ctx, `SELECT d.content,d.metadata,d.file_name,d.file_type,d.s3_key,d.doc_type,d.fingerprint,d.collection,d.text_source FROM documents d JOIN ingest_jobs j ON d.id=j.document_id WHERE d.id=$1 AND j.lease_token=$2`, id, j.LeaseToken).Scan(&j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType, &j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("postgres: load job document: %w", err)
-		}
 		if fingerprint != nil {
 			j.Document.Fingerprint = *fingerprint
+		}
+		if j.PDF != nil && j.PDF.Coverage == domain.PDFPending {
+			j.PDF.Pages, err = domain.DecodePDFPages(manifest)
+			if err != nil {
+				return nil, fmt.Errorf("postgres: load PDF job manifest: %w", err)
+			}
 		}
 		if err = json.Unmarshal(metadata, &j.Document.Metadata); err != nil {
 			return nil, fmt.Errorf("postgres: decode job metadata: %w", err)
@@ -279,7 +367,7 @@ const jobLive = jobClaim + ` AND lease_until>clock_timestamp()`
 // unchanged, so a lease deadline must be tested by a later statement.
 func lockClaimedJob(ctx context.Context, tx pgx.Tx, j domain.Job) (bool, error) {
 	var locked int
-	err := tx.QueryRow(ctx, `SELECT 1 FROM ingest_jobs WHERE `+jobClaim+` FOR UPDATE`, string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken).Scan(&locked)
+	err := tx.QueryRow(ctx, `SELECT 1 FROM ingest_jobs WHERE `+jobClaim+` AND EXISTS(SELECT 1 FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$5) FOR UPDATE`, string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken, j.Incarnation).Scan(&locked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -316,7 +404,7 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	var policy domain.ContentDedup
 	var fingerprint *string
 	var collection string
-	err = tx.QueryRow(ctx, `SELECT content_dedup,fingerprint,collection FROM documents WHERE id=$1 AND status='processing' FOR UPDATE`, string(j.Document.ID)).Scan(&policy, &fingerprint, &collection)
+	err = tx.QueryRow(ctx, `SELECT content_dedup,fingerprint,collection FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2 AND status='processing' FOR UPDATE`, string(j.Document.ID), j.Incarnation).Scan(&policy, &fingerprint, &collection)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -410,7 +498,7 @@ func (c *Client) changeJob(ctx context.Context, j domain.Job, query string, args
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var id string
-	err = tx.QueryRow(ctx, `SELECT id::text FROM documents WHERE id=$1 FOR UPDATE`, string(j.Document.ID)).Scan(&id)
+	err = tx.QueryRow(ctx, `SELECT id::text FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2 FOR UPDATE`, string(j.Document.ID), j.Incarnation).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ErrJobNotOwned
 	}
@@ -438,6 +526,11 @@ func (c *Client) changeJob(ctx context.Context, j domain.Job, query string, args
 		state := "processing"
 		if args == nil {
 			state = "failed"
+			if j.PDF != nil {
+				if _, err = tx.Exec(ctx, `UPDATE document_pdf_extractions SET coverage='failed' WHERE document_id=$1 AND coverage='pending'`, id); err != nil {
+					return err
+				}
+			}
 		}
 		_, err = tx.Exec(ctx, `UPDATE documents SET status=$2,last_error=$3,updated_at=NOW() WHERE id=$1`, id, state, jobError(*message))
 		if err != nil {
@@ -477,7 +570,7 @@ func (c *Client) StoreOCRText(ctx context.Context, j domain.Job, text string) er
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var id string
-	err = tx.QueryRow(ctx, `SELECT d.id::text FROM documents d JOIN ingest_jobs j ON j.document_id=d.id WHERE d.id=$1 AND d.status='processing' AND j.lease_owner=$2 AND j.attempts=$3 AND j.lease_token IS NOT DISTINCT FROM $4 AND j.state='running' AND j.lease_until>clock_timestamp() FOR UPDATE OF d,j`, string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken).Scan(&id)
+	err = tx.QueryRow(ctx, `SELECT d.id::text FROM documents d JOIN ingest_jobs j ON j.document_id=d.id WHERE d.id=$1 AND d.status='processing' AND COALESCE(d.incarnation,d.id)=$5 AND j.lease_owner=$2 AND j.attempts=$3 AND j.lease_token IS NOT DISTINCT FROM $4 AND j.state='running' AND j.lease_until>clock_timestamp() FOR UPDATE OF d,j`, string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken, j.Incarnation).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ErrJobNotOwned
 	}

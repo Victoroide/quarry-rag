@@ -16,6 +16,7 @@ Notable changes are grouped by release.
 - Opt-in evidence-based automatic retrieval routing (`ROUTING_POLICY=evidence`, `ROUTING_MARGIN`, `ROUTING_PROFILE_FILE`) using visible per-document score aggregation, entity ambiguity and exclusion matching, calibrated margins, and bounded `quarry_query_route_reason_total` metrics.
 - `INGEST_CONTENT_DEDUP=off` lets deployments disable content matching across upload IDs and retain explicit UUID retries.
 - Optional OCR of image-only PDF uploads through Amazon Textract (`OCR_PROVIDER=textract`, requires `S3_BUCKET`; migration 008).
+- Opt-in page-aware OCR recovers scanned pages in mixed PDFs. Request recorded extraction coverage in document summaries with `include_pdf_coverage=true`.
 - Optional PostgreSQL vector store (`VECTOR_STORE=postgres`, pgvector) that writes vectors in the completion transaction.
 - The README shows release and Go reference badges and describes installing released artifacts.
 - Queries report which retrieved chunks reached synthesis (`excerpt`, `truncated`) and, with `include_citations`, return citations checked against their excerpts.

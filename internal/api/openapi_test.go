@@ -460,6 +460,7 @@ func TestOpenAPIDocumentIncarnationSelectors(t *testing.T) {
 		operation := openAPIObject(t, openAPIObject(t, paths[path])["get"])
 		require.Contains(t, operation["parameters"], map[string]any{"$ref": "#/components/parameters/IncludeIncarnation"})
 		require.Contains(t, operation["parameters"], map[string]any{"$ref": "#/components/parameters/IncludeIndexVisibility"})
+		require.Contains(t, operation["parameters"], map[string]any{"$ref": "#/components/parameters/IncludePDFCoverage"})
 	}
 	operation := openAPIObject(t, openAPIObject(t, paths["/documents/{doc_id}"])["delete"])
 	parameters, ok := operation["parameters"].([]any)

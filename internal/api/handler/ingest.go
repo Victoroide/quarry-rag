@@ -48,13 +48,20 @@ type IngestResponse struct {
 }
 
 func validateIngestRequest(req *IngestRequest) *APIError {
-	if strings.TrimSpace(req.Content) == "" {
-		return &APIError{Error: "validation", Message: "content is required"}
-	}
-	if len(req.Content) > domain.MaxContentBytes {
-		return &APIError{Error: "validation", Message: "content exceeds maximum length of 1000000 bytes"}
+	if apiErr := validateIngestContent(req.Content); apiErr != nil {
+		return apiErr
 	}
 	return validateIngestFields(req)
+}
+
+func validateIngestContent(content string) *APIError {
+	if strings.TrimSpace(content) == "" {
+		return &APIError{Error: "validation", Message: "content is required"}
+	}
+	if len(content) > domain.MaxContentBytes {
+		return &APIError{Error: "validation", Message: "content exceeds maximum length of 1000000 bytes"}
+	}
+	return nil
 }
 
 func validateIngestFields(req *IngestRequest) *APIError {
@@ -191,23 +198,6 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		return
 	}
 
-	var text string
-	var extractErr error
-	if ft == extractor.FileTypeText {
-		extract := tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
-			return extractor.New(ft).Extract(ctx, bytes.NewReader(data))
-		})
-		text, extractErr = extract(extractCtx, ft, fileData)
-	} else {
-		text, extractErr = opts.extract(extractCtx, ft, fileData)
-	}
-	ocrPending := extractErr != nil && opts.ocr && ft == extractor.FileTypePDF && extractionErrorIs(extractErr, extractor.ErrNoText)
-	if extractErr != nil && !ocrPending {
-		writeExtractionError(rw, r, extractErr)
-		return
-	}
-
-	text = strings.ReplaceAll(text, "\x00", "")
 	suppliedID := r.FormValue("document_id")
 	docID, ok := ingestDocumentID(rw, suppliedID)
 	if !ok {
@@ -235,35 +225,72 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		}
 		collection = values[0]
 	}
-	req := IngestRequest{Content: text, DocType: formDocType, Collection: collection, Metadata: metadata}
-	var apiErr *APIError
-	if ocrPending {
-		text, req.Content = "", ""
-		apiErr = validateIngestFields(&req)
-	} else {
-		apiErr = validateIngestRequest(&req)
-	}
-	if apiErr != nil {
+	req := IngestRequest{DocType: formDocType, Collection: collection, Metadata: metadata}
+	if apiErr := validateIngestFields(&req); apiErr != nil {
 		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
 	}
 	formDocType = req.DocType
-	identityContent, textSource := text, "parser"
-	if ocrPending {
-		identityContent = string(fileData)
-		textSource = "ocr_pending"
-	}
 	acceptReq := domain.AcceptRequest{
-		Document:       domain.Document{ID: domain.DocumentID(docID), Content: text, Metadata: metadata, FileName: &fileName, FileType: &ftStr, TextSource: textSource},
-		Fingerprint:    chunker.ScopedFingerprint(req.Collection, identityContent),
+		Document:       domain.Document{ID: domain.DocumentID(docID), Metadata: metadata, FileName: &fileName, FileType: &ftStr, TextSource: "parser"},
 		CallerSupplied: suppliedID != "",
 		DocType:        formDocType,
 		Collection:     req.Collection,
 		ContentDedup:   opts.contentDedup,
 		MaxPending:     opts.maxPending,
-		RequireSource:  s3Client != nil || ocrPending,
 	}
-	if acceptReq.RequireSource && opts.contentDedup == domain.ContentDedupCollection {
+	if ft == extractor.FileTypePDF && (acceptReq.CallerSupplied || opts.extractPages != nil) {
+		setPDFOriginalFingerprints(&acceptReq, fileData)
+		if (acceptReq.CallerSupplied || acceptReq.ContentDedup == domain.ContentDedupCollection) &&
+			acceptExistingPDFUpload(rw, r, wk, cs, opts, fileData, acceptReq) {
+			return
+		}
+	}
+
+	var text string
+	var extractErr error
+	var pdfExtraction *domain.PDFExtraction
+	switch {
+	case ft == extractor.FileTypePDF && opts.extractPages != nil:
+		pdfExtraction, text, extractErr = inspectPDFUpload(extractCtx, opts.extractPages, fileData)
+	case ft == extractor.FileTypeText:
+		extract := tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
+			return extractor.New(ft).Extract(ctx, bytes.NewReader(data))
+		})
+		text, extractErr = extract(extractCtx, ft, fileData)
+	default:
+		text, extractErr = opts.extract(extractCtx, ft, fileData)
+	}
+	ocrPending := extractErr != nil && opts.ocr && opts.extractPages == nil && ft == extractor.FileTypePDF && extractionErrorIs(extractErr, extractor.ErrNoText)
+	if extractErr != nil && !ocrPending {
+		writeExtractionError(rw, r, extractErr)
+		return
+	}
+	text = strings.ReplaceAll(text, "\x00", "")
+	if ocrPending || pdfExtraction != nil && pdfExtraction.Coverage == domain.PDFPending {
+		text = ""
+	} else if apiErr := validateIngestContent(text); apiErr != nil {
+		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+		return
+	}
+	acceptReq.Document.Content = text
+	acceptReq.RequireSource = s3Client != nil || ocrPending || pdfExtraction != nil
+	if ocrPending {
+		acceptReq.Document.TextSource = "ocr_pending"
+		acceptReq.Fingerprint = acceptReq.LegacyOCRFingerprint
+		if acceptReq.Fingerprint == "" {
+			acceptReq.Fingerprint = chunker.ScopedFingerprint(req.Collection, string(fileData))
+		}
+	} else if pdfExtraction == nil {
+		acceptReq.Fingerprint = chunker.ScopedFingerprint(req.Collection, text)
+	}
+	if pdfExtraction != nil {
+		acceptReq.PDF = pdfExtraction
+		acceptReq.TryLegacyPDFText = !acceptReq.CallerSupplied && opts.contentDedup == domain.ContentDedupCollection && pdfExtraction.Coverage == domain.PDFComplete
+		if acceptMixedPDF(rw, r, wk, cs, opts, fileData, &acceptReq) {
+			return
+		}
+	} else if acceptReq.RequireSource && opts.contentDedup == domain.ContentDedupCollection {
 		checkIdentity := acceptReq.CallerSupplied
 		if !checkIdentity && s3Client != nil {
 			_, matches, lookupErr := cs.CheckFingerprint(r.Context(), acceptReq.Fingerprint)
@@ -280,7 +307,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 			}
 		}
 	}
-	if ocrPending && s3Client == nil {
+	if (ocrPending || pdfExtraction != nil) && s3Client == nil {
 		rw.Header().Set("Retry-After", "30")
 		writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 		return
@@ -317,4 +344,23 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 			slog.ErrorContext(cleanupCtx, "remove unaccepted source file", "error", err)
 		}
 	}
+}
+
+func inspectPDFUpload(ctx context.Context, extract func(context.Context, []byte) (domain.PDFPages, error), data []byte) (*domain.PDFExtraction, string, error) {
+	pages, err := extract(ctx, data)
+	if err != nil {
+		return nil, "", err
+	}
+	if validationErr := pages.Validate(); validationErr != nil {
+		return nil, "", validationErr
+	}
+	profile := &domain.PDFExtraction{Profile: domain.MixedPDFProfile, Pages: pages, Coverage: pages.CoverageBeforeOCR()}
+	if profile.Coverage == domain.PDFPending {
+		return profile, "", nil
+	}
+	text := pages.Text()
+	if len(text) < domain.MinPDFTextBytes {
+		return nil, "", extractor.ErrNoText
+	}
+	return profile, text, nil
 }

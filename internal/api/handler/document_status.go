@@ -48,6 +48,7 @@ func DocumentStatusHandler(cs domain.ChunkStore) http.HandlerFunc {
 type documentSummaryProjection struct {
 	incarnation     bool
 	indexVisibility bool
+	pdfCoverage     bool
 }
 
 func documentSummaryOptions(query url.Values) documentSummaryProjection {
@@ -55,7 +56,11 @@ func documentSummaryOptions(query url.Values) documentSummaryProjection {
 		values := query[key]
 		return len(values) == 1 && values[0] == "true"
 	}
-	return documentSummaryProjection{incarnation: enabled("include_incarnation"), indexVisibility: enabled("include_index_visibility")}
+	return documentSummaryProjection{
+		incarnation:     enabled("include_incarnation"),
+		indexVisibility: enabled("include_index_visibility"),
+		pdfCoverage:     enabled("include_pdf_coverage"),
+	}
 }
 
 func selectDocumentLister(cs domain.ChunkStore, include bool) (domain.DocumentLister, bool) {
@@ -76,6 +81,9 @@ func (p documentSummaryProjection) body(doc domain.DocumentSummary) any {
 		doc.IndexVisibilityObservedAt = nil
 	} else if doc.IndexVisibility == "" {
 		doc.IndexVisibility = domain.VisibilityUnknown
+	}
+	if !p.pdfCoverage {
+		doc.PDFCoverage = ""
 	}
 	if p.incarnation {
 		return doc.WithIncarnation()

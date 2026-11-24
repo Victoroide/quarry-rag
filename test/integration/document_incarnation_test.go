@@ -26,6 +26,9 @@ func TestLegacyDocumentSummarySchema(t *testing.T) {
 	id := uuid.NewString()
 	_, err := c.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,collection) VALUES($1,'archive content','archive')`, id)
 	require.NoError(t, err)
+	_, err = c.Pool.Exec(t.Context(), `INSERT INTO document_pdf_extractions(document_id,profile,manifest,coverage)
+		VALUES($1,$2,'[{"number":1,"evidence":"embedded","text":"archive content"}]','complete')`, id, domain.MixedPDFProfile)
+	require.NoError(t, err)
 	legacy, err := os.ReadFile("testdata/legacy_document_schemas.yaml")
 	require.NoError(t, err)
 	var schemas map[string]any
@@ -45,20 +48,24 @@ func TestLegacyDocumentSummarySchema(t *testing.T) {
 	require.NoError(t, yaml.Load(openAPI, &published, yaml.WithPlugin(mergekey.New(mergekey.WithDisable(true)))))
 	router := incarnationRouter(c)
 	for _, tc := range []struct {
-		name, path, route, legacySchema string
-		paged                           bool
+		name, path, route, legacySchema, incarnationSchema string
+		paged                                              bool
 	}{
-		{"status", "/documents/" + id, "/documents/{doc_id}", "DocumentSummary", false},
-		{"stream", "/documents?collection=archive", "/documents", "DocumentList", false},
-		{"page", "/documents?collection=archive&limit=1", "/documents", "DocumentList", true},
+		{"status", "/documents/" + id, "/documents/{doc_id}", "DocumentSummary", "DocumentIncarnationSummary", false},
+		{"stream", "/documents?collection=archive", "/documents", "DocumentList", "DocumentIncarnationList", false},
+		{"page", "/documents?collection=archive&limit=1", "/documents", "DocumentList", "DocumentIncarnationList", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			legacyValidator := documentResponseValidator(t, schemas, map[string]any{"$ref": "#/components/schemas/" + tc.legacySchema})
+			incarnationValidator := documentResponseValidator(t, schemas, map[string]any{"$ref": "#/components/schemas/" + tc.incarnationSchema})
 			contract := published.Paths[tc.route].Get.Responses["200"].Content["application/json"].Schema
 			require.NotEmpty(t, contract)
 			publishedValidator := documentResponseValidator(t, published.Components.Schemas, contract)
-			for _, option := range []string{"", "include_incarnation=false", "include_incarnation=True", "include_incarnation=true&include_incarnation=false",
-				"include_index_visibility=false", "include_index_visibility=True", "include_index_visibility=true&include_index_visibility=true"} {
+			for _, option := range []string{
+				"", "include_incarnation=false", "include_incarnation=True", "include_incarnation=true&include_incarnation=false",
+				"include_pdf_coverage=false", "include_pdf_coverage=True", "include_pdf_coverage=true&include_pdf_coverage=false",
+				"include_index_visibility=false", "include_index_visibility=True", "include_index_visibility=true&include_index_visibility=true",
+			} {
 				rec := incarnationRead(t, router, withQuery(tc.path, option), "incarnation-reader")
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				var body map[string]any
@@ -76,6 +83,7 @@ func TestLegacyDocumentSummarySchema(t *testing.T) {
 			var extended map[string]any
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &extended))
 			require.Error(t, legacyValidator.Validate(extended), "the legacy schema must reject the opt-in field")
+			require.NoError(t, incarnationValidator.Validate(extended), "the published incarnation schema must accept a row with hidden coverage")
 			require.NoError(t, publishedValidator.Validate(extended), "the published schema must accept the opt-in body")
 			for _, option := range []string{"include_index_visibility=true", "include_index_visibility=true&include_incarnation=true"} {
 				rec := incarnationRead(t, router, withQuery(tc.path, option), "incarnation-reader")
@@ -94,6 +102,25 @@ func TestLegacyDocumentSummarySchema(t *testing.T) {
 				}
 				require.Equal(t, "unknown", observed["index_visibility"])
 				require.NotContains(t, observed, "index_visibility_observed_at")
+			}
+			for _, projection := range []struct {
+				query     string
+				oldSchema *jsonschema.Resolved
+			}{
+				{"include_pdf_coverage=true", legacyValidator},
+				{"include_incarnation=true&include_pdf_coverage=true", incarnationValidator},
+				{"include_index_visibility=true&include_incarnation=true&include_pdf_coverage=true", incarnationValidator},
+			} {
+				rec := incarnationRead(t, router, withQuery(tc.path, projection.query), "incarnation-reader")
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				var body map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				require.NoError(t, publishedValidator.Validate(body))
+				require.Error(t, projection.oldSchema.Validate(body))
+				require.Contains(t, rec.Body.String(), `"pdf_coverage":"complete"`)
+				if strings.Contains(projection.query, "include_index_visibility=true") {
+					require.Contains(t, rec.Body.String(), `"index_visibility":"unknown"`)
+				}
 			}
 		})
 	}

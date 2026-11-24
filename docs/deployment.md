@@ -478,6 +478,30 @@ pricing before enabling it. S3 and other ingestion charges also apply. Detection
 can continue in AWS after a local timeout or deletion, and incurred charges are
 not canceled by stopping ingestion.
 
+### Mixed PDF OCR Rollout
+
+Deploy migration 015 with `OCR_PDF_MODE=image_only`. If the serving login and
+metadata owner are separate, have the metadata owner apply the
+`document_pdf_extractions` grant from [role provisioning](grant-catalog.md#database-roles)
+before starting the upgraded binary. This grant is required even when keeping
+`image_only` because listing and job claims read the table. Upgrade every replica
+that accepts uploads or consumes the queue, and stop earlier consumers before
+enabling `OCR_PDF_MODE=mixed`. Keep Textract configured on the processing
+replicas. The database refuses new mixed work while an incompatible consumer
+holds a live lease. While mixed work is queued, only compatible consumers can
+start new leases on that queue. Each claim receives its own lease identifier,
+including a reclaim by the same replica after release or terminal retry.
+
+Mixed mode retains the parser's 1,000-page cap on the original. Textract bills
+for every submitted page, including pages whose text Quarry already has.
+
+To roll back, return upload replicas to `image_only`, let in-flight uploads
+finish and keep compatible Textract workers running until the mixed queue
+drains. Confirm `SELECT count(*) FROM ingest_jobs WHERE pdf_required` returns
+zero before starting older binaries. Retain migration 015 and its data.
+Keep UUID retries for documents accepted in mixed mode on binaries that
+support migration 015 to preserve original-byte identity matching.
+
 ## Vector Index Maintenance
 
 For a Pinecone deployment, use `make reconcile` during a maintenance window to

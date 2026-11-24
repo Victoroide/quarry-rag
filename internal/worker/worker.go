@@ -133,6 +133,13 @@ func (w *Worker) loop(ctx context.Context) {
 }
 
 func (w *Worker) claim(ctx context.Context) (*domain.Job, error) {
+	if _, ready := w.opts.OCR.(pdfDetector); ready {
+		if store, ok := w.store.(interface {
+			ClaimPDFJobForFixtureStore(context.Context, string, time.Duration, int, string) (*domain.Job, error)
+		}); ok {
+			return store.ClaimPDFJobForFixtureStore(ctx, w.opts.Owner, w.opts.Lease, w.opts.MaxAttempts, w.opts.FixtureVectorIdentity)
+		}
+	}
 	if store, ok := w.store.(domain.FixtureJobStore); ok {
 		return store.ClaimJobForFixtureStore(ctx, w.opts.Owner, w.opts.Lease, w.opts.MaxAttempts, w.opts.FixtureVectorIdentity)
 	}
@@ -245,8 +252,11 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		stateCtx, stateCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 		defer stateCancel()
 		message := err.Error()
-		if errors.Is(err, ocr.ErrNoText) {
-			message = "no_text"
+		switch {
+		case errors.Is(err, ocr.ErrNoText):
+			message = ocr.ErrNoText.Error()
+		case errors.Is(err, domain.ErrPDFOCRExpired):
+			message = domain.ErrPDFOCRExpired.Error()
 		}
 		failErr := w.store.FailJob(stateCtx, job, message)
 		w.recordOutcome(parent, job, "failed", failErr)
@@ -277,10 +287,20 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 			err = fmt.Errorf("ingestion panic: %v", recovered)
 		}
 	}()
-	if job.Document.TextSource == "ocr_pending" {
+	switch {
+	case job.PDF != nil && job.PDF.Coverage == domain.PDFPending:
+		if extractErr := w.extractPDFText(ctx, job, ic); extractErr != nil {
+			return extractErr
+		}
+	case job.PDF != nil && job.PDF.Coverage == domain.PDFPartial && len(ic.RawText) < domain.MinPDFTextBytes:
+		return domain.Permanent(ocr.ErrNoText)
+	case job.Document.TextSource == "ocr_pending":
 		if extractErr := w.extractText(ctx, job, ic); extractErr != nil {
 			return extractErr
 		}
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
 	}
 	if w.vectors != nil {
 		if err = w.vectors.DeleteByDocID(ctx, string(job.Document.ID)); err != nil {

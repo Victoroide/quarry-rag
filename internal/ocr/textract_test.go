@@ -133,3 +133,69 @@ func TestTextractStartErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestTextractPagePaginationAndRetryIdentity(t *testing.T) {
+	var tokens []string
+	page := func(n int32) types.Block { return types.Block{BlockType: types.BlockTypePage, Page: aws.Int32(n)} }
+	c := &Client{bucket: "synthetic-bucket", timeout: time.Minute, api: fakeTextract{
+		start: func(_ context.Context, in *textract.StartDocumentTextDetectionInput) (*textract.StartDocumentTextDetectionOutput, error) {
+			key := aws.ToString(in.DocumentLocation.S3Object.Name)
+			require.Equal(t, "original.pdf", key)
+			tokens = append(tokens, aws.ToString(in.ClientRequestToken))
+			return &textract.StartDocumentTextDetectionOutput{JobId: aws.String("stable")}, nil
+		},
+		get: func(_ context.Context, in *textract.GetDocumentTextDetectionInput) (*textract.GetDocumentTextDetectionOutput, error) {
+			require.Equal(t, "stable", aws.ToString(in.JobId))
+			out := &textract.GetDocumentTextDetectionOutput{JobStatus: types.JobStatusPartialSuccess, DocumentMetadata: &types.DocumentMetadata{Pages: aws.Int32(5)}}
+			if in.NextToken == nil {
+				out.Blocks = []types.Block{page(1), page(2), line(1, .7, .1, "Second"), line(5, 0, 0, "Final page")}
+				out.NextToken = aws.String("next")
+			} else {
+				require.Equal(t, "next", aws.ToString(in.NextToken))
+				out.Blocks = []types.Block{page(5), page(4), line(1, .1, .1, "First"), line(4, 0, 0, "Untrusted")}
+				out.Warnings = []types.Warning{{Pages: []int32{4}}}
+			}
+			return out, nil
+		},
+	}}
+	for range 2 {
+		result, err := c.ExtractPages(t.Context(), "original.pdf", "profile-v1", "first-window", 5, nil)
+		require.NoError(t, err)
+		require.True(t, result.Partial)
+		require.Equal(t, Page{Present: true, Text: "First\nSecond"}, result.Pages[1])
+		require.Equal(t, Page{Present: true}, result.Pages[2])
+		require.NotContains(t, result.Pages, 3)
+		require.Equal(t, Page{Present: true, Failed: true, Text: "Untrusted"}, result.Pages[4])
+		require.Equal(t, "Final page", result.Pages[5].Text)
+	}
+	require.Equal(t, tokens[0], tokens[1])
+	_, err := c.ExtractPages(t.Context(), "original.pdf", "profile-v2", "first-window", 5, nil)
+	require.NoError(t, err)
+	require.NotEqual(t, tokens[0], tokens[2])
+	_, err = c.ExtractPages(t.Context(), "original.pdf", "profile-v1", "second-window", 5, nil)
+	require.NoError(t, err)
+	require.NotEqual(t, tokens[0], tokens[3])
+	_, err = c.ExtractPages(t.Context(), "original.pdf", "profile-v1", "first-window", domain.MaxPDFPages+1, nil)
+	require.ErrorIs(t, err, ErrPageLimit)
+	require.Len(t, tokens, 4)
+}
+
+func TestTextractMixedRequiresStartCheckpointBeforePolling(t *testing.T) {
+	c := &Client{bucket: "synthetic-bucket", timeout: time.Minute, api: fakeTextract{get: func(context.Context, *textract.GetDocumentTextDetectionInput) (*textract.GetDocumentTextDetectionOutput, error) {
+		t.Fatal("provider polled after the lease was lost")
+		return nil, nil
+	}}}
+	_, err := c.ExtractPages(t.Context(), "original.pdf", "profile", "window", 1, func(context.Context) error {
+		return domain.ErrJobNotOwned
+	})
+	require.ErrorIs(t, err, domain.ErrJobNotOwned)
+}
+
+func TestTextractMixedRejectsPageCountMismatch(t *testing.T) {
+	c := &Client{bucket: "synthetic-bucket", timeout: time.Minute, api: fakeTextract{get: func(context.Context, *textract.GetDocumentTextDetectionInput) (*textract.GetDocumentTextDetectionOutput, error) {
+		return &textract.GetDocumentTextDetectionOutput{JobStatus: types.JobStatusSucceeded, DocumentMetadata: &types.DocumentMetadata{Pages: aws.Int32(8)}}, nil
+	}}}
+	_, err := c.ExtractPages(t.Context(), "original.pdf", "profile", "window", 7, nil)
+	require.ErrorIs(t, err, ErrDetectionFailed)
+	require.ErrorIs(t, err, domain.ErrPermanent)
+}

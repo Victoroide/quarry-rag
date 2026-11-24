@@ -4,45 +4,51 @@
   "Nodes": {
     "documents": {
       "X": 16,
-      "Y": 82,
+      "Y": 78,
       "W": 352,
-      "H": 488
+      "H": 420
     },
     "document_deletions": {
       "X": 16,
-      "Y": 586,
+      "Y": 506,
       "W": 352,
-      "H": 352
+      "H": 292
     },
     "chunks": {
       "X": 472,
-      "Y": 82,
+      "Y": 78,
       "W": 352,
-      "H": 178
+      "H": 150
     },
     "document_fingerprints": {
       "X": 472,
-      "Y": 268,
+      "Y": 236,
       "W": 352,
-      "H": 124
+      "H": 96
     },
     "ingest_jobs": {
       "X": 472,
-      "Y": 400,
+      "Y": 340,
       "W": 352,
-      "H": 262
+      "H": 258
     },
     "document_deletion_activation": {
       "X": 472,
-      "Y": 840,
+      "Y": 818,
       "W": 352,
-      "H": 98
+      "H": 74
     },
     "evaluation_fixtures": {
-      "X": 472,
-      "Y": 670,
+      "X": 16,
+      "Y": 806,
       "W": 352,
-      "H": 162
+      "H": 132
+    },
+    "document_pdf_extractions": {
+      "X": 472,
+      "Y": 606,
+      "W": 352,
+      "H": 204
     }
   },
   "Groups": []

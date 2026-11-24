@@ -236,7 +236,8 @@ DOCX uploads use the deployment's [story selection](#docx-story-selection).
 See [Word binary extraction](#word-binary-extraction) for `.doc` support.
 
 Multipart uploads follow the same [document identity rules](#document-identity),
-using extracted text or the [original PDF bytes for OCR](#image-only-pdf-ocr).
+using extracted text or a PDF source identity in [image-only](#image-only-pdf-ocr)
+or [mixed](#mixed-pdf-ocr) OCR mode.
 A configured source store must accept the original file before a new document
 is accepted. In collection mode, the service can resolve an explicit UUID or a
 shared match before uploading a source. Each PUT uses a unique object key.
@@ -249,7 +250,7 @@ Error Status Codes:
 |---|---|---|
 | `400 Bad Request` | `validation` | Form `file` part missing or read error; invalid label or metadata; non-empty `document_id` is not a UUID |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
-| `409 Conflict` | `conflict` | Supplied `document_id` already exists with different extracted text, OCR input or collection |
+| `409 Conflict` | `conflict` | Supplied `document_id` already exists with different extracted text, OCR input or collection, or a [mixed PDF retry](#mixed-pdf-ocr) requires its existing UUID or result expiry |
 | `413 Payload Too Large` | `validation` | Upload exceeds `MAX_UPLOAD_BYTES` |
 | `415 Unsupported Media Type` | `extraction` | Extension and content disagree, or content has no supported type |
 | `422 Unprocessable Entity` | `extraction` | File parsing failed or exceeded the [extraction limits](architecture.md#extraction-boundaries) |
@@ -350,7 +351,7 @@ With [OCR enabled](configuration.md#environment-variables), a PDF whose parser
 returns `no_text` (fewer than 10 bytes of embedded text after trimming
 whitespace) qualifies for OCR. Newly accepted OCR jobs return HTTP 202
 `processing` after the source file is saved to S3. Duplicate requests follow
-the [document identity rules](#document-identity). PDFs with more embedded text,
+the [document identity rules](#document-identity). PDFs with at least 10 bytes of trimmed embedded text,
 including partly scanned documents, are ingested from that text without OCR.
 PostgreSQL initially stores empty content and `text_source = 'ocr_pending'`.
 The original PDF bytes determine content identity even after text detection.
@@ -369,6 +370,66 @@ result; delete the document and upload it again to request a new detection. Empt
 limit errors also fail ingestion. Poll [document status](#get-documentsdoc_id)
 for the outcome. The decoded-text limit above still applies; provider limits,
 permissions and billing are described in [deployment](deployment.md#optional-pdf-ocr).
+
+#### Mixed PDF OCR
+
+In [mixed mode](configuration.md#environment-variables), the isolated parser
+checks every page before a source is accepted. Clean digital PDFs, including
+text in Form XObjects, fonts selected through graphics-state dictionaries and
+simple layout rules, go directly to ingestion. When
+any page needs detection, Textract receives the full original. Raster samples
+are checked against the declared dimensions and decoded-stream budget. Mixed
+mode supports raw, Flate and ASCII85 image streams with supported sample
+layouts, including the default Flate predictor with or without an explicit
+setting. Inline images and other unverifiable streams return an extraction
+error before submission.
+
+Quarry selects at most one text source per page and preserves page order. An
+embedded page is considered readable with at least 10 trimmed UTF-8 bytes and
+four Unicode letters after excluding running page labels. This applies across
+scripts. Decoding loss leaves the readable portions available and marks the
+page unresolved. Printable free-text annotations with nonblank text and no
+appearance stream also leave the page unresolved. Their detected text can
+contribute with partial coverage. Hidden annotations and blank pages contribute
+no text.
+
+Quarry keeps usable embedded text on pages with ambiguous imagery and reports
+partial coverage. These pages alone do not trigger a Textract request. A sparse
+overlay can use substantive OCR text while retaining partial coverage. Detection
+that returns only running page labels also leaves coverage partial. A page with
+no recognized lines can include unsupported handwriting. The stored page
+result distinguishes it from a blank page, a missing provider page, or a provider
+warning.
+
+Selected [document summaries](#get-documents) report `pdf_coverage` for documents
+accepted under this policy. `pending` means detection has yet to be saved, `complete` means the
+policy resolved all pages, `partial` means some coverage remains unresolved,
+and `failed` means detection ended without a saved result. Ingestion can
+complete with usable partial text. It fails with `no_text` when the selected
+text has fewer than 10 trimmed UTF-8 bytes. Coverage describes extraction evidence,
+and the ingestion status separately tracks indexing.
+
+The collection, original bytes and versioned extraction policy determine mixed
+PDF identity. Matching explicit UUID retries work across both modes on updated
+replicas. Quarry checks the stored collection and policy, using original bytes
+for mixed or legacy OCR identities and bounded legacy extraction for historical
+parser identities.
+For collection-wide uploads without a UUID, mixed mode matches existing mixed
+or legacy OCR identities by original bytes before inspecting the PDF. On a miss
+for a clean digital PDF, Quarry checks the
+historical identity using the bounded legacy parser. If that parser fails for any
+reason other than finding no text, the request returns the extraction error
+before any source or document is stored, and the upload can be retried. To
+upgrade an existing completed document, delete it and submit the source again.
+
+Automatic retries reuse the same object and provider token for up to seven days
+from the first start intent. Completed detection is saved before indexing, so
+an indexing retry uses the saved text. Resubmit the same PDF and its existing
+`document_id` to retry a terminal detection failure. When the prior result
+expires, the retry creates a fresh provider token. Quarry measures this expiry
+from the first acknowledged start, or uses the latest possible start when the
+provider response is unknown. An unusable partial result or expired automatic
+window returns 409 until this later expiry and an explicit UUID retry.
 
 ---
 
@@ -612,6 +673,7 @@ Optional query parameters:
 | `collection` | string | Exact collection label, using the label rules above; omitted or empty lists all collections. Filters both streaming and paginated listings before ordering and limiting |
 | `include_incarnation` | bool | Send a single literal `true` to include the incarnation in each summary |
 | `include_index_visibility` | bool | Send a single literal `true` to include the index visibility observation in each summary |
+| `include_pdf_coverage` | bool | Send a single literal `true` to include recorded PDF coverage in each summary. Can be combined with `include_incarnation` |
 
 Without pagination parameters, PostgreSQL streams the full listing without buffering every row. The response writes `documents` before `count`; an empty listing is `{"documents":[],"count":0}`. If a stream fails after it begins, its JSON is incomplete; discard the partial result and retry. Stores without summary support retain the reference listing and return an empty array when no documents exist.
 
@@ -643,6 +705,7 @@ Document summary fields:
 | `index_visibility` | string | Opt-in evidence recorded for indexing during ingestion |
 | `index_visibility_observed_at` | string | RFC 3339 timestamp included with a recorded observation when opted in |
 | `last_error` | string | Last ingestion error, included only for failed documents when recorded |
+| `pdf_coverage` | string | Opt-in extraction coverage when recorded by [mixed PDF OCR](#mixed-pdf-ocr) |
 | `incarnation` | string | Opt-in UUID for one lifetime of a document. It stays stable through ingestion status changes. Rows present at migration use their document UUID. Reusing a document UUID creates a new incarnation |
 
 | Index visibility | Meaning |
@@ -689,7 +752,7 @@ Returns one document summary with the fields described above. Poll this endpoint
 - **Auth**: Required (`X-Service-Token`)
 - **Response**: The document summary object (200 OK)
 
-Use `include_incarnation=true` and `include_index_visibility=true` as for [inventory](#get-documents). The Go client provides `GetDocumentWithIncarnation` and `ListDocumentsWithIncarnation` for the incarnation projection. Older servers can leave the requested fields empty in the Go client.
+Use `include_incarnation=true`, `include_index_visibility=true` and `include_pdf_coverage=true` as for [inventory](#get-documents). The Go client provides `GetDocumentWithIncarnation`, `GetDocumentWithIndexVisibility`, `GetDocumentWithPDFCoverage`, and `GetDocumentWithIncarnationAndPDFCoverage` for status reads. For inventory, use `ListOptions.IncludePDFCoverage` with either list method. The MCP tools `quarry_get_document` and `quarry_list_documents` accept `include_pdf_coverage`. Older servers may omit these optional fields.
 
 | Status | Error Category | Condition |
 |---|---|---|

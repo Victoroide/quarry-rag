@@ -23,6 +23,7 @@ type DocumentSummary struct {
 	Incarnation               string          `json:"-"`
 	IndexVisibility           IndexVisibility `json:"index_visibility,omitempty"`
 	IndexVisibilityObservedAt *time.Time      `json:"index_visibility_observed_at,omitempty"`
+	PDFCoverage               PDFCoverage     `json:"pdf_coverage,omitempty"`
 }
 
 type documentSummaryJSON DocumentSummary

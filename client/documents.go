@@ -15,6 +15,8 @@ type ListOptions struct {
 
 	Collection             string
 	IncludeIndexVisibility bool
+	// IncludePDFCoverage requests recorded mixed PDF extraction coverage.
+	IncludePDFCoverage bool
 }
 
 // DocumentSummary describes a document and its collection without content or metadata.
@@ -33,6 +35,7 @@ type DocumentSummary struct {
 	LastError                 *string    `json:"last_error,omitempty"`
 	IndexVisibility           string     `json:"index_visibility,omitempty"`
 	IndexVisibilityObservedAt *time.Time `json:"index_visibility_observed_at,omitempty"`
+	PDFCoverage               string     `json:"pdf_coverage,omitempty"`
 }
 
 // DocumentPage contains ordered document summaries and an optional continuation cursor.
@@ -103,22 +106,35 @@ func (c *Client) listDocuments(ctx context.Context, opts ListOptions, includeInc
 	if opts.IncludeIndexVisibility {
 		query.Set("include_index_visibility", "true")
 	}
+	if opts.IncludePDFCoverage {
+		query.Set("include_pdf_coverage", "true")
+	}
 	return c.jsonRequest(ctx, http.MethodGet, "/documents?"+query.Encode(), nil, response)
 }
 
 // GetDocument retrieves a document's ingestion status and summary.
 func (c *Client) GetDocument(ctx context.Context, id string) (*DocumentSummary, error) {
-	return c.getDocument(ctx, id, "")
+	return c.getDocument(ctx, id)
+}
+
+// GetDocumentWithPDFCoverage retrieves the status and any recorded PDF coverage.
+func (c *Client) GetDocumentWithPDFCoverage(ctx context.Context, id string) (*DocumentSummary, error) {
+	return c.getDocument(ctx, id, "include_pdf_coverage")
 }
 
 // GetDocumentWithIndexVisibility retrieves a summary with its index visibility observation.
 func (c *Client) GetDocumentWithIndexVisibility(ctx context.Context, id string) (*DocumentSummary, error) {
-	return c.getDocument(ctx, id, "?include_index_visibility=true")
+	return c.getDocument(ctx, id, "include_index_visibility")
 }
 
-func (c *Client) getDocument(ctx context.Context, id, query string) (*DocumentSummary, error) {
+// GetDocumentWithIndexVisibilityAndPDFCoverage requests both optional observations.
+func (c *Client) GetDocumentWithIndexVisibilityAndPDFCoverage(ctx context.Context, id string) (*DocumentSummary, error) {
+	return c.getDocument(ctx, id, "include_index_visibility", "include_pdf_coverage")
+}
+
+func (c *Client) getDocument(ctx context.Context, id string, projections ...string) (*DocumentSummary, error) {
 	var response DocumentSummary
-	if err := c.jsonRequest(ctx, http.MethodGet, "/documents/"+url.PathEscape(id)+query, nil, &response); err != nil {
+	if err := c.readDocument(ctx, id, &response, projections...); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -126,11 +142,32 @@ func (c *Client) getDocument(ctx context.Context, id, query string) (*DocumentSu
 
 // GetDocumentWithIncarnation retrieves the status summary and its incarnation.
 func (c *Client) GetDocumentWithIncarnation(ctx context.Context, id string) (*DocumentIncarnationSummary, error) {
+	return c.getDocumentWithIncarnation(ctx, id, "include_incarnation")
+}
+
+// GetDocumentWithIncarnationAndPDFCoverage retrieves the status with both optional fields.
+func (c *Client) GetDocumentWithIncarnationAndPDFCoverage(ctx context.Context, id string) (*DocumentIncarnationSummary, error) {
+	return c.getDocumentWithIncarnation(ctx, id, "include_incarnation", "include_pdf_coverage")
+}
+
+func (c *Client) getDocumentWithIncarnation(ctx context.Context, id string, projections ...string) (*DocumentIncarnationSummary, error) {
 	var response DocumentIncarnationSummary
-	if err := c.jsonRequest(ctx, http.MethodGet, "/documents/"+url.PathEscape(id)+"?include_incarnation=true", nil, &response); err != nil {
+	if err := c.readDocument(ctx, id, &response, projections...); err != nil {
 		return nil, err
 	}
 	return &response, nil
+}
+
+func (c *Client) readDocument(ctx context.Context, id string, response any, projections ...string) error {
+	path := "/documents/" + url.PathEscape(id)
+	query := url.Values{}
+	for _, projection := range projections {
+		query.Set(projection, "true")
+	}
+	if len(query) != 0 {
+		path += "?" + query.Encode()
+	}
+	return c.jsonRequest(ctx, http.MethodGet, path, nil, response)
 }
 
 // DeleteDocument removes a document and its stored chunks, vectors and original file.

@@ -10,7 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const summaryColumns = `id::text, doc_type, collection, s3_key, status, chunk_count, file_name, file_type, created_at, updated_at, completed_at, last_error, COALESCE(index_visibility,'unknown'), index_visibility_observed_at`
+const summaryColumns = `id::text, doc_type, collection, s3_key, status, chunk_count, file_name, file_type, created_at, updated_at, completed_at, last_error, COALESCE(index_visibility,'unknown'), index_visibility_observed_at,
+	COALESCE((SELECT coverage FROM document_pdf_extractions WHERE document_id=documents.id),'')`
 
 var _ domain.DocumentLister = (*Client)(nil)
 
@@ -33,7 +34,7 @@ func (c documentLister) columns() string {
 
 func (c documentLister) scanDocumentSummary(row pgx.Row) (*domain.DocumentSummary, error) {
 	var doc domain.DocumentSummary
-	dest := []any{&doc.ID, &doc.DocType, &doc.Collection, &doc.S3Key, &doc.Status, &doc.ChunkCount, &doc.FileName, &doc.FileType, &doc.CreatedAt, &doc.UpdatedAt, &doc.CompletedAt, &doc.LastError, &doc.IndexVisibility, &doc.IndexVisibilityObservedAt}
+	dest := []any{&doc.ID, &doc.DocType, &doc.Collection, &doc.S3Key, &doc.Status, &doc.ChunkCount, &doc.FileName, &doc.FileType, &doc.CreatedAt, &doc.UpdatedAt, &doc.CompletedAt, &doc.LastError, &doc.IndexVisibility, &doc.IndexVisibilityObservedAt, &doc.PDFCoverage}
 	if c.includeIncarnation {
 		dest = append(dest, &doc.Incarnation)
 	}
