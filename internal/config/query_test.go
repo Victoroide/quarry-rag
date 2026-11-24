@@ -1,9 +1,11 @@
 package config
 
 import (
+	"net/url"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -140,4 +142,69 @@ func TestQueryConfigAcceptsBoundaries(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestCitationSupportConfiguration(t *testing.T) {
+	host := uuid.NewString() + ".example"
+	endpoint := func(scheme string) string { return (&url.URL{Scheme: scheme, Host: host, Path: "/verify"}).String() }
+	for _, tc := range []struct {
+		name, key, value, token, wantError string
+	}{
+		{"local defaults", "", "", "", ""},
+		{"mutable model", "CITATION_SUPPORT_MODEL", "example:latest", "", "CITATION_SUPPORT_MODEL"},
+		{"timeout", "CITATION_SUPPORT_TIMEOUT", "0s", "", "CITATION_SUPPORT_TIMEOUT"},
+		{"total timeout", "CITATION_SUPPORT_TIMEOUT", "60s", "", "CITATION_SUPPORT_TIMEOUT"},
+		{"pair limit", "CITATION_SUPPORT_MAX_PAIRS", "33", "", "CITATION_SUPPORT_MAX_PAIRS"},
+		{"pair minimum", "CITATION_SUPPORT_MAX_PAIRS", "0", "", "CITATION_SUPPORT_MAX_PAIRS"},
+		{"plaintext external", "CITATION_SUPPORT_ENDPOINT", endpoint("http"), "fixture-token", "requires HTTPS"},
+		{"unauthenticated external", "CITATION_SUPPORT_ENDPOINT", endpoint("https"), "", "TOKEN is required"},
+		{"authenticated external", "CITATION_SUPPORT_ENDPOINT", endpoint("https"), "fixture-token", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queryConfigEnvironment(t)
+			t.Setenv("GO_RAG_FAKE_MODE", "false")
+			t.Setenv("AWS_REGION", "us-east-1")
+			t.Setenv("VECTOR_STORE", "postgres")
+			t.Setenv("SERVICE_TOKEN", "fixture-service-token")
+			t.Setenv("CITATION_SUPPORT_MODEL", "example@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+			for _, env := range []string{"CITATION_SUPPORT_TIMEOUT", "CITATION_SUPPORT_MAX_PAIRS", "CITATION_SUPPORT_ENDPOINT", "CITATION_SUPPORT_TOKEN", "CITATION_SUPPORT_CALIBRATION_FILE"} {
+				t.Setenv(env, "")
+			}
+			t.Setenv("CITATION_SUPPORT_TOKEN", tc.token)
+			if tc.key != "" {
+				t.Setenv(tc.key, tc.value)
+			}
+			cfg, err := Load()
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.value, cfg.CitationSupportEndpoint)
+			require.Equal(t, 2*time.Second, cfg.CitationSupportTimeout)
+			require.Equal(t, 8, cfg.CitationSupportMaxPairs)
+			t.Setenv("CITATION_SUPPORT_MODEL", "")
+			t.Setenv("CITATION_SUPPORT_TIMEOUT", "ignored")
+			t.Setenv("CITATION_SUPPORT_ENDPOINT", "ignored")
+			cfg, err = Load()
+			require.NoError(t, err)
+			require.Empty(t, cfg.CitationSupportModel)
+		})
+	}
+}
+
+func TestCitationSupportConfigurationIgnoresInheritedSettingsOffline(t *testing.T) {
+	queryConfigEnvironment(t)
+	t.Setenv("CITATION_SUPPORT_MODEL", "unusable")
+	t.Setenv("CITATION_SUPPORT_ENDPOINT", "not an address")
+	t.Setenv("CITATION_SUPPORT_TOKEN", "not a token")
+	t.Setenv("CITATION_SUPPORT_CALIBRATION_FILE", "missing.json")
+	t.Setenv("CITATION_SUPPORT_MAX_PAIRS", "-1")
+	t.Setenv("CITATION_SUPPORT_TIMEOUT", "bad")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.CitationSupportModel)
+	require.Empty(t, cfg.CitationSupportEndpoint)
+	require.Empty(t, cfg.CitationSupportToken)
+	require.Empty(t, cfg.CitationSupportCalibrationFile)
 }

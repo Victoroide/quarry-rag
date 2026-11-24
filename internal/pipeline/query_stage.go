@@ -485,7 +485,7 @@ func (qc *QueryContext) evidenceAutoRouting() bool {
 }
 
 func (qc *QueryContext) checksCurrentEvidence() bool {
-	return qc.EvidenceVisibility != nil || qc.HostedVisibilityRefill || qc.AnswerMode == domain.AnswerModeEvidence
+	return qc.EvidenceVisibility != nil || qc.HostedVisibilityRefill || qc.RequireCitationScope || qc.AnswerMode == domain.AnswerModeEvidence
 }
 
 func (qc *QueryContext) observeUntaggedEvidence(ctx context.Context, ret *retriever.Retriever) error {
@@ -889,6 +889,7 @@ type SynthesisStage struct {
 	ambassador        *llm.Ambassador
 	cfg               *config.Config
 	noEvidenceCatalog *NoEvidenceCatalog
+	citationVerifier  CitationVerifier
 }
 
 // NewSynthesisStage creates a SynthesisStage.
@@ -979,6 +980,7 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	defer cancel()
 	qc.Excerpts, qc.Truncated = nil, nil
 	qc.Citations = nil
+	qc.CitationCoverage = nil
 	if qc.IncludeCitations {
 		qc.Citations = make([]Citation, 0)
 	}
@@ -1082,7 +1084,7 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 			return fmt.Errorf("synthesis_stage: %w: output reserve %d exceeds window %d", ErrSynthesisInputTooLarge, reservedOutput, profile.ContextWindow)
 		}
 		builder.modelID, builder.maxTokens = modelID, reservedOutput
-		if qc.EvidenceVisibility != nil || qc.HostedVisibilityRefill {
+		if qc.EvidenceVisibility != nil || qc.HostedVisibilityRefill || qc.RequireCitationScope {
 			builder.evidenceCheck = qc.checkStrictEvidence
 		}
 		outcome, err := budgetStrictSynthesisInput(synthesisCtx, s.ambassador, s.cfg, builder, profile, inputBudget, chunks, truncated)
@@ -1115,10 +1117,9 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		return ErrSynthesisEmpty
 	}
 	if qc.IncludeCitations {
-		if qc.Stream == nil {
-			qc.FinalAnswer, qc.Citations = VerifyCitations(qc.FinalAnswer, qc.Excerpts)
-		} else {
-			qc.Citations = VerifyStreamCitations(qc.FinalAnswer, qc.Excerpts)
+		cancel()
+		if err := s.finalizeCitations(ctx, qc); err != nil {
+			return fmt.Errorf("citation support: %w", err)
 		}
 	}
 	switch result.StopReason {

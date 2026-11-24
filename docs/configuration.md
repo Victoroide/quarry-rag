@@ -99,6 +99,12 @@ The table below lists the environment variables recognized by the service:
 | `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Bedrock model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
 | `SYNTHESIS_RELATIVE_SCORE_FLOOR` | float64 | `0.55` | 0 to 1, finite | Minimum candidate score relative to the best retrieved score. |
 | `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries with Bedrock. |
+| `CITATION_SUPPORT_MODEL` | string | empty | Immutable `name@sha256:<digest>` | Enables [semantic citation assessment](#citation-verifier) for requests that ask for citations. |
+| `CITATION_SUPPORT_TIMEOUT` | duration | `2s` | Positive and below `QUERY_TIMEOUT` | Optional assessment budget within the query deadline. |
+| `CITATION_SUPPORT_MAX_PAIRS` | int | `8` | 1 to 32 | Distinct claim and excerpt-body pairs per answer. |
+| `CITATION_SUPPORT_ENDPOINT` | string | empty | Absolute verifier address | An empty value uses HTTP on `127.0.0.1:8091` at `/citation-support/v1`. An external address requires HTTPS and a bearer token. |
+| `CITATION_SUPPORT_TOKEN` | secret | empty | Bearer token | Authenticates the verifier request. Optional for literal loopback. |
+| `CITATION_SUPPORT_CALIBRATION_FILE` | path | empty | Local JSON file, up to 8 MiB | Loads the [held-out evaluation](development.md#citation-verifier-calibration) at startup. |
 | `VECTOR_STORE` | string | `"pinecone"` | `pinecone` or `postgres` | Persistent vector backend; offline fake mode always uses memory. PostgreSQL vectors require the [deployment prerequisites](deployment.md#postgresql-vectors). |
 | `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including pending, delayed and running jobs. |
 
@@ -270,6 +276,16 @@ exporter settings.
 | `OTEL_TRACES_SAMPLER_ARG` | string | Unset | A ratio from 0 to 1 for ratio samplers; malformed values fail startup when tracing is enabled | Ratio for ratio-based sampling. |
 
 ---
+
+## Citation Verifier
+
+Serve the digest-pinned multilingual verifier within the deployment's authorized data boundary. The endpoint and token come from service configuration. The service sends a single POST with JSON and denies redirects. Configure egress rules for the allowed deployment-owned address.
+
+The verifier protocol sends `model`, `pairs`, and `claims`. Each pair has a generated `claim` and the exact sanitized, possibly truncated excerpt `body` that reached synthesis. Each entry in `claims` is an array of zero-based pair indices for one claim and its complete evidence set. The batch contains at most 32 claim groups and occupies at most 32 KiB as encoded JSON. The request includes no question, document identifiers or other metadata. A joint set must fit as a whole.
+
+Return HTTP 200 with the same digest-pinned `model` and a `results` array in claim order. Each result has a `claim_language` and an `evidence_languages` array in the referenced pair order. Use canonical BCP 47 tags and `und` when the language cannot be established. Supply `scores` with `supported`, `contradicted`, and `insufficient` probabilities that sum to one, or `null` to abstain. The response is capped at 32 KiB. Mixed source languages within a set abstain. Single excerpts and joint sets require their own calibration.
+
+The service ignores verifier settings when the model is empty or `GO_RAG_FAKE_MODE` is enabled. With a model and no qualifying calibration profiles, citation support reports `unchecked` without a verifier request. A malformed configured file or model digest mismatch fails startup when verifier settings are active.
 
 ## MCP Server Environment
 

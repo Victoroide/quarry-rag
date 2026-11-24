@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/citationsupport"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
@@ -92,6 +93,8 @@ type QueryContext struct {
 	HostedVisibilityExtraRequests int
 	// IncludeCitations asks synthesis for inline citation markers and verifies them.
 	IncludeCitations bool
+	// RequireCitationScope pins current evidence for semantic citation assessment.
+	RequireCitationScope bool
 	// AllowedDocumentIDs, when non-nil, restricts retrieved chunks to this
 	// allowlist BEFORE synthesis (tenant/role scoping). Nil = no restriction;
 	// non-nil empty = matches nothing.
@@ -129,6 +132,7 @@ type QueryContext struct {
 	Excerpts         []domain.ScoredChunk
 	Truncated        []bool
 	Citations        []Citation
+	CitationCoverage *citationsupport.Coverage
 	FinishReason     string
 	FinalAnswer      string
 	TokenUsage       domain.TokenUsage
