@@ -24,3 +24,13 @@ func TestCodeQLConcurrency(t *testing.T) {
 		"cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
 	}, workflow["concurrency"])
 }
+
+func TestCodeQLTriggers(t *testing.T) {
+	workflow := readCodeQLWorkflow(t)
+	triggers, ok := workflow["on"].(map[string]any)
+	require.True(t, ok, "expected named workflow triggers")
+	for _, event := range []string{"push", "pull_request"} {
+		require.Equal(t, map[string]any{"branches": []any{"main"}}, triggers[event], event)
+	}
+	require.Equal(t, []any{map[string]any{"cron": "31 4 * * *"}}, triggers["schedule"])
+}
