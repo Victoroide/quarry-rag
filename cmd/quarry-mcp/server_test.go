@@ -18,6 +18,7 @@ import (
 	serviceconfig "github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embedder"
+	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -619,4 +620,24 @@ func TestQueryToolRespectsEvidencePolicy(t *testing.T) {
 			require.Equal(t, evidence, got.Chunks[0].Text)
 		})
 	}
+}
+
+func TestQueryToolReportsEmbeddingInputLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "embedding.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"provider":"openai","model":"embed","revision":"r1","max_characters":6}`), 0o600))
+	profile, err := embeddinginput.Load(path, embeddinginput.Target{Provider: "openai", Model: "embed"})
+	require.NoError(t, err)
+	store := memory.NewFakeVectorStore()
+	server := httptest.NewServer(serviceapi.NewRouter(&serviceapi.RouterDeps{
+		Config:      &serviceconfig.Config{ServiceToken: "token"},
+		VectorStore: store,
+		Retriever:   retriever.NewRetriever(store, embedder.NewFakeEmbedder(8), .7, 2, retriever.WithEmbeddingInputProfile(profile)),
+	}))
+	defer server.Close()
+	cs := connectServer(t, config{baseURL: server.URL, token: "token", timeout: time.Second})
+	result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "quarry_query", Arguments: map[string]any{"query": "archive details"}})
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Nil(t, result.StructuredContent)
+	require.Contains(t, result.Content[0].(*mcp.TextContent).Text, "400 embedding_input_too_long:")
 }

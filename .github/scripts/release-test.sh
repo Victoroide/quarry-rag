@@ -100,7 +100,9 @@ check_licenses() {
   prepare_modules
   (
     cd "$fixture"
+    printf 'Synthetic embedded data license.\n' > cmd/server/LICENSE-UNICODE
     GOOS=linux GOARCH=amd64 sh "$scripts/third-party-licenses.sh" ./cmd/server "$scratch/linux licenses"
+    cmp cmd/server/LICENSE-UNICODE "$scratch/linux licenses/example.test/release/cmd/server/LICENSE-UNICODE"
     for name in LiCeNcE.txt NOTICE COPYING.txt PATENTS; do
       cmp "dependency/$name" "$scratch/linux licenses/example.test/dependency@v1.0.0/$name"
     done

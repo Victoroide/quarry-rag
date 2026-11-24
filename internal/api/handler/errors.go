@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/aws/smithy-go"
 	"google.golang.org/grpc/codes"
@@ -60,6 +61,10 @@ func queryErrorResponse(err error) (code int, retry string, body APIError) {
 		return 0, "", APIError{}
 	case errors.Is(err, errQueryOverloaded):
 		return http.StatusServiceUnavailable, "1", APIError{Error: "overloaded", Message: "too many concurrent queries"}
+	case errors.Is(err, embeddinginput.ErrInputLimit):
+		return http.StatusBadRequest, "", APIError{Error: "embedding_input_too_long", Message: "query exceeds the embedding input profile limit"}
+	case errors.Is(err, domain.ErrEmbeddingModelLimit):
+		return http.StatusBadGateway, "", APIError{Error: "embedding_model_limit", Message: "embedding model rejected the input length"}
 	case isUpstreamThrottled(err):
 		return http.StatusServiceUnavailable, "2", APIError{Error: "upstream_throttled", Message: "upstream service is busy"}
 	case errors.Is(err, pipeline.ErrSynthesisEmpty):

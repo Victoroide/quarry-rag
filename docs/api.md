@@ -497,6 +497,7 @@ Error Status Codes:
 | Status | Error Category | Condition |
 |---|---|---|
 | `400 Bad Request` | `validation` | Invalid query, retrieval mode, answer mode, chunk limit, type or collection filter, or JSON body. Also returned for a citation request in evidence mode |
+| `400 Bad Request` | `embedding_input_too_long` | The query exceeds the [embedding input profile](configuration.md#embedding-input-profiles). The service skips this check for an empty allowlist. |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `403 Forbidden` | `forbidden` | The deployed answer policy disallows generated answers |
 | `413 Payload Too Large` | `validation` | Request body exceeds the 1 MiB limit |
@@ -505,6 +506,7 @@ Error Status Codes:
 | `503 Service Unavailable` | `overloaded` | Query admission exceeded `QUERY_QUEUE_TIMEOUT`: `too many concurrent queries`; `Retry-After: 1` |
 | `503 Service Unavailable` | `upstream_throttled` | Upstream throttling or exhausted quota: `upstream service is busy`; `Retry-After: 2` |
 | `502 Bad Gateway` | `synthesis` | Synthesis returned no text: `answer synthesis returned no text` |
+| `502 Bad Gateway` | `embedding_model_limit` | The provider reports a model-window violation with an input profile enabled |
 | `500 Internal Server Error` | `pipeline` | Other pipeline failures: `query processing failed`; internal error details are recorded only in server logs |
 
 Example:

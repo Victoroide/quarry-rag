@@ -9,13 +9,17 @@ fi
 export LC_ALL=C
 modules=$(mktemp)
 trap 'rm -f "$modules" "$modules.sorted"' EXIT HUP INT TERM
-go list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}}@{{.Version}} {{.Dir}}{{end}}{{end}}' "$1" > "$modules"
+go list -deps -f '{{if .Module}}{{if .Module.Main}}local:{{.ImportPath}} {{.Dir}}{{else}}{{.Module.Path}}@{{.Module.Version}} {{.Module.Dir}}{{end}}{{end}}' "$1" > "$modules"
 sort -u "$modules" > "$modules.sorted"
 mkdir -p "$2"
 output=$(cd "$2" && pwd)
 
 while IFS=' ' read -r module directory; do
   [ -n "$module" ] || continue
+  local_package=false
+  case "$module" in
+    local:*) module=${module#local:}; local_package=true ;;
+  esac
   found=false
   for file in "$directory"/*; do
     [ -f "$file" ] || continue
@@ -29,7 +33,7 @@ while IFS=' ' read -r module directory; do
         ;;
     esac
   done
-  if [ "$found" = false ]; then
+  if [ "$found" = false ] && [ "$local_package" = false ]; then
     echo "no license or notice files found for $module" >&2
     exit 1
   fi

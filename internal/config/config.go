@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 )
 
 // Query answer policies control which answer modes callers can use.
@@ -59,7 +60,8 @@ type Config struct {
 	ChunkTokenSize int
 	ChunkOverlap   int
 
-	EmbeddingDimensions int
+	EmbeddingDimensions   int
+	EmbeddingInputProfile *embeddinginput.Profile
 
 	S3Bucket       string
 	MaxUploadBytes int64
@@ -270,7 +272,26 @@ func Load() (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	if err := cfg.loadEmbeddingInputProfile(os.Getenv("EMBEDDING_INPUT_PROFILE")); err != nil {
+		return nil, fmt.Errorf("config: EMBEDDING_INPUT_PROFILE: %w", err)
+	}
 	return cfg, nil
+}
+
+func (c *Config) loadEmbeddingInputProfile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if c.FakeMode {
+		return fmt.Errorf("requires a configured embedding provider")
+	}
+	target := embeddinginput.Target{Provider: c.EmbeddingProvider, Model: c.BedrockEmbedModel}
+	if c.EmbeddingProvider == "openai" {
+		target.Model, target.BaseURL = c.OpenAIEmbeddingModel, c.OpenAIBaseURL
+	}
+	var err error
+	c.EmbeddingInputProfile, err = embeddinginput.Load(path, target)
+	return err
 }
 
 func (c *Config) validate() error {

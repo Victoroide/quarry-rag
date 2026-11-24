@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/awsconf"
 	"github.com/Victoroide/quarry-rag/internal/config"
+	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	"github.com/aws/smithy-go"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -40,6 +44,7 @@ type BedrockEmbedder struct {
 	dimensions int
 	sem        *semaphore.Weighted
 	timeout    time.Duration
+	profile    *embeddinginput.Profile
 }
 
 // NewBedrockEmbedder creates an embedder from the service configuration.
@@ -55,6 +60,7 @@ func NewBedrockEmbedder(ctx context.Context, cfg *config.Config) (*BedrockEmbedd
 		dimensions: cfg.EmbeddingDimensions,
 		sem:        semaphore.NewWeighted(int64(cfg.EmbedConcurrency)),
 		timeout:    cfg.EmbedTimeout,
+		profile:    cfg.EmbeddingInputProfile,
 	}, nil
 }
 
@@ -68,6 +74,9 @@ func (e *BedrockEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 	// The timeout bounds the model call, not the wait for a concurrency slot.
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
+	if _, err := e.profile.Check(ctx, text); err != nil {
+		return nil, err
+	}
 	return e.embedSingle(ctx, text)
 }
 
@@ -87,6 +96,9 @@ func (e *BedrockEmbedder) embedSingle(ctx context.Context, text string) ([]float
 		Body:        payload,
 	})
 	if err != nil {
+		if e.profile != nil {
+			err = bedrockEmbeddingError(err)
+		}
 		return nil, fmt.Errorf("embedder: invoke model: %w", err)
 	}
 	var resp titanEmbedResponse
@@ -103,4 +115,20 @@ func (e *BedrockEmbedder) embedSingle(ctx context.Context, text string) ([]float
 	}
 	slog.DebugContext(ctx, "generated embedding", "dimensions", len(resp.Embedding), "characters", len(text))
 	return resp.Embedding, nil
+}
+
+func bedrockEmbeddingError(err error) error {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "AccessDeniedException":
+			return domain.ErrEmbeddingDenied
+		case "ValidationException":
+			message := strings.TrimPrefix(apiErr.ErrorMessage(), "400 Bad Request: ")
+			if strings.HasPrefix(message, "Too many input tokens.") || message == "Input is too long for requested model." {
+				return domain.ErrEmbeddingModelLimit
+			}
+		}
+	}
+	return err
 }

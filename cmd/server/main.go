@@ -174,7 +174,7 @@ func run() error {
 	chk := chunker.NewChunker(cfg.ChunkTokenSize, cfg.ChunkOverlap)
 
 	// Initialize retriever.
-	ret := retriever.NewRetriever(vectorStore, emb, cfg.LocalRetrievalThreshold, cfg.MaxChunksPerQuery)
+	ret := retriever.NewRetriever(vectorStore, emb, cfg.LocalRetrievalThreshold, cfg.MaxChunksPerQuery, retriever.WithEmbeddingInputProfile(cfg.EmbeddingInputProfile))
 
 	var reranker retriever.Reranker
 	if !cfg.FakeMode && cfg.RerankModelARN != "" {

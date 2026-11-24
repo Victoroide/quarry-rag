@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
+	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 	"github.com/Victoroide/quarry-rag/internal/llm"
 	"golang.org/x/sync/semaphore"
 )
@@ -20,6 +21,7 @@ type OpenAIEmbedder struct {
 	dimensions int
 	sem        *semaphore.Weighted
 	timeout    time.Duration
+	profile    *embeddinginput.Profile
 }
 
 // NewOpenAIEmbedder creates an embedder with the configured concurrency and deadline.
@@ -31,7 +33,10 @@ func NewOpenAIEmbedder(cfg *config.Config) (*OpenAIEmbedder, error) {
 	if strings.TrimSpace(cfg.OpenAIEmbeddingModel) == "" || cfg.EmbeddingDimensions < 1 || cfg.EmbeddingDimensions > 4096 || cfg.EmbedConcurrency < 1 || cfg.EmbedTimeout <= 0 {
 		return nil, errors.New("openai: invalid embedding configuration")
 	}
-	return &OpenAIEmbedder{transport, cfg.OpenAIEmbeddingModel, cfg.EmbeddingDimensions, semaphore.NewWeighted(int64(cfg.EmbedConcurrency)), cfg.EmbedTimeout}, nil
+	return &OpenAIEmbedder{
+		http: transport, model: cfg.OpenAIEmbeddingModel, dimensions: cfg.EmbeddingDimensions,
+		sem: semaphore.NewWeighted(int64(cfg.EmbedConcurrency)), timeout: cfg.EmbedTimeout, profile: cfg.EmbeddingInputProfile,
+	}, nil
 }
 
 // Embed validates dimensions, cardinality and finite values before returning a vector.
@@ -42,6 +47,9 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 	defer e.sem.Release(1)
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
+	if _, err := e.profile.Check(ctx, text); err != nil {
+		return nil, err
+	}
 	request := struct {
 		Model          string `json:"model"`
 		Input          string `json:"input"`
@@ -53,7 +61,7 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 			Embedding []*float32 `json:"embedding"`
 		} `json:"data"`
 	}
-	if err := e.http.Decode(ctx, "/embeddings", request, &response); err != nil {
+	if err := e.http.DecodeEmbedding(ctx, request, &response, e.profile != nil); err != nil {
 		return nil, err
 	}
 	if len(response.Data) != 1 || response.Data[0].Index != 0 || len(response.Data[0].Embedding) != e.dimensions {

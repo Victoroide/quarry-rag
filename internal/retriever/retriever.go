@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 )
 
 const defaultTopK = 10
@@ -29,19 +30,32 @@ type Retriever struct {
 	embedder    domain.EmbeddingProvider
 	threshold   float64
 	topK        int
+	profile     *embeddinginput.Profile
+}
+
+// Option configures a Retriever.
+type Option func(*Retriever)
+
+// WithEmbeddingInputProfile validates a query before calling the embedding provider.
+func WithEmbeddingInputProfile(profile *embeddinginput.Profile) Option {
+	return func(r *Retriever) { r.profile = profile }
 }
 
 // NewRetriever creates a Retriever with the given dependencies.
-func NewRetriever(vs domain.VectorStore, emb domain.EmbeddingProvider, threshold float64, topK int) *Retriever {
+func NewRetriever(vs domain.VectorStore, emb domain.EmbeddingProvider, threshold float64, topK int, opts ...Option) *Retriever {
 	if topK <= 0 {
 		topK = defaultTopK
 	}
-	return &Retriever{
+	r := &Retriever{
 		vectorStore: vs,
 		embedder:    emb,
 		threshold:   threshold,
 		topK:        topK,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Result holds the retrieval output.
@@ -60,7 +74,7 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, mode RetrievalMo
 	if filter.MatchesNothing() {
 		return &Result{Mode: mode}, nil
 	}
-	embedding, err := r.embedder.Embed(ctx, query)
+	embedding, err := r.embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("retriever: embed query: %w", err)
 	}
@@ -163,7 +177,7 @@ func (r *Retriever) EmbedQuery(ctx context.Context, query string, filter domain.
 	if filter.MatchesNothing() {
 		return nil, nil, false, nil
 	}
-	embedding, err = r.embedder.Embed(ctx, query)
+	embedding, err = r.embed(ctx, query)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("retriever: embed query: %w", err)
 	}
@@ -176,6 +190,13 @@ func (r *Retriever) EmbedQuery(ctx context.Context, query string, filter domain.
 		return embedding, nil, true, nil
 	}
 	return embedding, candidates, false, nil
+}
+
+func (r *Retriever) embed(ctx context.Context, text string) ([]float32, error) {
+	if _, err := r.profile.Check(ctx, text); err != nil {
+		return nil, err
+	}
+	return r.embedder.Embed(ctx, text)
 }
 
 func (r *Retriever) queryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
