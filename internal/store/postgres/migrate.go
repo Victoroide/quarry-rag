@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+
+	"github.com/jackc/pgx/v5"
 )
 
 //go:embed migrations/*.sql
@@ -88,13 +90,24 @@ func (c *Client) runMigrations(ctx context.Context) error {
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockID); err != nil {
 		return fmt.Errorf("lock migrations: %w", err)
 	}
-	if _, err = tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
-		version INTEGER PRIMARY KEY,
-		name TEXT NOT NULL,
-		checksum TEXT NOT NULL,
-		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	)`); err != nil {
-		return fmt.Errorf("create migration history: %w", err)
+	// DDL and stored function search paths belong to the first metadata schema.
+	// A lower-priority schema may contain another corpus's migration history.
+	if err = bindMetadataSchema(ctx, tx); err != nil {
+		return fmt.Errorf("bind migrations to metadata schema: %w", err)
+	}
+	var hasHistory bool
+	if err = tx.QueryRow(ctx, `SELECT to_regclass(format('%I.schema_migrations', current_schema())) IS NOT NULL`).Scan(&hasHistory); err != nil {
+		return fmt.Errorf("check migration history: %w", err)
+	}
+	if !hasHistory {
+		if _, err = tx.Exec(ctx, `CREATE TABLE schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			checksum TEXT NOT NULL,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`); err != nil {
+			return fmt.Errorf("create migration history: %w", err)
+		}
 	}
 	rows, err := tx.Query(ctx, `SELECT version, checksum FROM schema_migrations`)
 	if err != nil {
@@ -128,6 +141,9 @@ func (c *Client) runMigrations(ctx context.Context) error {
 		if _, ok := applied[migration.version]; ok {
 			continue
 		}
+		if err := prepareLegacyMigration(ctx, tx, migration.name); err != nil {
+			return fmt.Errorf("prepare migration %03d: %w", migration.version, err)
+		}
 		if _, err := tx.Exec(ctx, migration.sql); err != nil {
 			return fmt.Errorf("apply migration %03d: %w", migration.version, err)
 		}
@@ -139,4 +155,25 @@ func (c *Client) runMigrations(ctx context.Context) error {
 		return fmt.Errorf("commit migrations: %w", err)
 	}
 	return nil
+}
+
+// The published column probes also see readable tables in other schemas.
+// Ensure the local columns before executing the original, checksummed SQL.
+func prepareLegacyMigration(ctx context.Context, tx pgx.Tx, name string) error {
+	var statement string
+	switch name {
+	case "003_add_content_preview.sql":
+		statement = `ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_preview TEXT`
+	case "004_add_doc_type.sql":
+		statement = `ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_type TEXT NOT NULL DEFAULT 'candidate'`
+	default:
+		return nil
+	}
+	_, err := tx.Exec(ctx, statement)
+	return err
+}
+
+func bindMetadataSchema(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT set_config('search_path', format('%I, pg_temp', current_schema()), true)`)
+	return err
 }

@@ -3,10 +3,8 @@ package handler
 import (
 	"encoding/json"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
-	"golang.org/x/text/unicode/norm"
+	"github.com/Victoroide/quarry-rag/internal/textutil"
 )
 
 func validateDocType(value string) (string, *APIError) {
@@ -14,19 +12,11 @@ func validateDocType(value string) (string, *APIError) {
 }
 
 func validateLabel(field, value string) (string, *APIError) {
-	if !utf8.ValidString(value) {
-		return "", &APIError{Error: "validation", Message: field + " must be valid UTF-8"}
+	label, err := textutil.NormalizeLabel(value)
+	if err != nil {
+		return "", &APIError{Error: "validation", Message: field + " " + err.Error()}
 	}
-	value = norm.NFC.String(strings.TrimSpace(value))
-	if len(value) > 128 {
-		return "", &APIError{Error: "validation", Message: field + " exceeds maximum length of 128 bytes"}
-	}
-	for _, r := range value {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return "", &APIError{Error: "validation", Message: field + " must not contain control or format characters"}
-		}
-	}
-	return value, nil
+	return label, nil
 }
 
 func validateMetadata(metadata map[string]any) *APIError {
