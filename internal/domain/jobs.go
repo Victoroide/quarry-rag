@@ -32,20 +32,23 @@ const (
 
 // AcceptRequest supplies document identity, content, and queue admission limits.
 type AcceptRequest struct {
-	Document       Document
-	CallerSupplied bool
-	Fingerprint    string
-	DocType        string
-	Collection     string
-	ContentDedup   ContentDedup
-	RequireSource  bool
-	MaxPending     int
+	Document                 Document
+	CallerSupplied           bool
+	Fingerprint              string
+	DocType                  string
+	Collection               string
+	ContentDedup             ContentDedup
+	RequireSource            bool
+	MaxPending               int
+	EvaluationReceipt        string
+	EvaluationVectorIdentity string
 }
 
 // AcceptResult identifies the document selected by acceptance.
 type AcceptResult struct {
-	DocumentID DocumentID
-	Outcome    AcceptOutcome
+	DocumentID  DocumentID
+	Outcome     AcceptOutcome
+	Incarnation string
 }
 
 // DocumentAcceptor durably stores accepted documents and their pending work.

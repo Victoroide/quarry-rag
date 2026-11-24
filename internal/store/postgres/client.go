@@ -199,7 +199,7 @@ func (c *Client) ListDocuments(ctx context.Context) ([]domain.DocumentRef, error
 
 // DeleteDocument deletes a document by ID. Chunks and fingerprints cascade via FK.
 func (c *Client) DeleteDocument(ctx context.Context, id domain.DocumentID) error {
-	_, err := c.Pool.Exec(ctx, `DELETE FROM documents WHERE id = $1`, string(id))
+	_, err := c.execRemoval(ctx, `DELETE FROM documents WHERE id = $1`, string(id))
 	if err != nil {
 		return fmt.Errorf("postgres: delete document %s: %w", id, err)
 	}

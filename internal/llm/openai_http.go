@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/evaluation"
 )
 
 const maxOpenAIResponseBytes = 4 << 20
@@ -77,6 +78,12 @@ func (c *OpenAIHTTPClient) post(ctx context.Context, path string, payload any, e
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		defer func() { _ = response.Body.Close() }()
 		return nil, openAIStatusError(ctx, response, embeddingErrors)
+	}
+	switch path {
+	case "/embeddings":
+		evaluation.ObserveUpstream(ctx, evaluation.EmbeddingCall, "openai", response)
+	case "/chat/completions":
+		evaluation.ObserveUpstream(ctx, evaluation.SynthesisCall, "openai", response)
 	}
 	return response, nil
 }

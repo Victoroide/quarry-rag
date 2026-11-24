@@ -13,6 +13,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/evaluation"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
@@ -83,6 +84,10 @@ func IngestHandler(wk *worker.Worker, cs domain.ChunkStore, s3Client ObjectStore
 	return func(rw http.ResponseWriter, r *http.Request) {
 		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err == nil && mediaType == "multipart/form-data" {
+			if len(r.Header.Values(evaluation.ReceiptHeader)) != 0 {
+				fixtureUnavailable(rw)
+				return
+			}
 			handleFileIngest(rw, r, wk, cs, s3Client, maxUploadBytes, options)
 			return
 		}
@@ -110,14 +115,26 @@ func handleJSONIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	if !ok {
 		return
 	}
+	var receipt string
+	if len(r.Header.Values(evaluation.ReceiptHeader)) != 0 {
+		ns, supplied, fixture, valid := fixtureRequest(r, opts.fixturePrefix, docID)
+		if _, supported := cs.(domain.EvaluationFixtureStore); !valid || !supported || opts.fixtureVectorIdentity == "" ||
+			req.Collection != ns.Collection(fixture.Distractor) || req.Content != fixture.Text {
+			fixtureUnavailable(rw)
+			return
+		}
+		receipt = supplied
+	}
 	_, _ = acceptIngest(rw, r, wk, cs, domain.AcceptRequest{
-		Document:       domain.Document{ID: domain.DocumentID(docID), Content: req.Content, Metadata: req.Metadata},
-		CallerSupplied: req.DocumentID != "",
-		Fingerprint:    chunker.ScopedFingerprint(req.Collection, req.Content),
-		DocType:        req.DocType,
-		Collection:     req.Collection,
-		ContentDedup:   opts.contentDedup,
-		MaxPending:     opts.maxPending,
+		Document:                 domain.Document{ID: domain.DocumentID(docID), Content: req.Content, Metadata: req.Metadata},
+		CallerSupplied:           req.DocumentID != "",
+		Fingerprint:              chunker.ScopedFingerprint(req.Collection, req.Content),
+		DocType:                  req.DocType,
+		Collection:               req.Collection,
+		ContentDedup:             opts.contentDedup,
+		MaxPending:               opts.maxPending,
+		EvaluationReceipt:        receipt,
+		EvaluationVectorIdentity: opts.fixtureVectorIdentity,
 	})
 }
 

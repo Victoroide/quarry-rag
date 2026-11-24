@@ -64,6 +64,10 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, s3Client
 			objects = tracing.WrapObjectStore(s3Client)
 		}
 		if err := cleanup.Remove(ctx, cs, pcDriver, objects, doc); err != nil {
+			if errors.Is(err, domain.ErrFixtureDeletionRequired) {
+				writeJSONError(w, http.StatusPreconditionFailed, "precondition", "evaluation fixture requires receipt-qualified deletion")
+				return
+			}
 			if errors.Is(err, cleanup.ErrFileStorageUnavailable) {
 				writeJSONError(w, http.StatusServiceUnavailable, "storage", "stored file cannot be deleted because file storage is not configured")
 				return

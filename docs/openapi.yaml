@@ -104,6 +104,24 @@ paths:
           description: 'Language of the no-evidence answer; see [POST /query](api.md#post-query).'
           schema:
             type: string
+        - name: X-Quarry-Evaluation-Fixture
+          in: header
+          description: 'Fixture namespace for the [staging evaluation diagnostic](development.md#evidence-evaluation).'
+          schema:
+            type: string
+            format: uuid
+        - name: X-Quarry-Evaluation-Receipt
+          in: header
+          description: Receipt for checking active fixture ownership when observing a nonempty allowlist
+          schema:
+            type: string
+            format: uuid
+        - name: X-Quarry-Evaluation-Observe
+          in: header
+          description: 'Set to `off` to skip the [excerpt observation](development.md#evidence-evaluation).'
+          schema:
+            type: string
+            enum: ['off']
       requestBody:
         required: true
         content:
@@ -126,6 +144,18 @@ paths:
                 type: string
             X-Accel-Buffering:
               description: '`no` on streamed answers; see [streamed query answers](api.md#streamed-query-answers).'
+              schema:
+                type: string
+            X-Quarry-Evaluation-Evidence:
+              description: 'Optional scoped excerpt matches for the [staging evaluation diagnostic](development.md#evidence-evaluation).'
+              schema:
+                type: string
+            X-Quarry-Evaluation-Execution:
+              description: 'Provider execution provenance for the [staging evaluation](development.md#evidence-evaluation).'
+              schema:
+                type: string
+            X-Quarry-Evaluation-Upstreams:
+              description: 'TLS-verified embedding and synthesis origins, in call-role order; see [staging evaluation](development.md#evidence-evaluation).'
               schema:
                 type: string
           content:
@@ -288,6 +318,152 @@ paths:
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/Error'
+  /evaluation/fixtures:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+      - $ref: '#/components/parameters/EvaluationNamespace'
+      - $ref: '#/components/parameters/EvaluationReceipt'
+    post:
+      operationId: ingestEvaluationFixture
+      summary: Accept an evaluation fixture with a durable receipt
+      description: 'See the [fixture lifecycle](development.md#evidence-evaluation).'
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluationFixtureIngestRequest'
+      responses:
+        '202':
+          description: Fixture accepted
+          headers:
+            X-Quarry-Evaluation-State:
+              $ref: '#/components/headers/EvaluationState'
+            X-Document-Incarnation:
+              $ref: '#/components/headers/EvaluationRevision'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '412':
+          $ref: '#/components/responses/Error'
+        '413':
+          $ref: '#/components/responses/Error'
+        '415':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/IngestError'
+  /evaluation/fixtures/{doc_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+      - $ref: '#/components/parameters/DocumentID'
+      - $ref: '#/components/parameters/EvaluationNamespace'
+      - $ref: '#/components/parameters/EvaluationReceipt'
+    get:
+      operationId: getEvaluationFixture
+      summary: Inspect a fixture receipt and its current document
+      description: 'See the [fixture lifecycle](development.md#evidence-evaluation).'
+      security:
+        - ServiceToken: []
+      responses:
+        '200':
+          description: Current fixture status
+          headers:
+            X-Quarry-Evaluation-State:
+              $ref: '#/components/headers/EvaluationState'
+            X-Document-Incarnation:
+              $ref: '#/components/headers/EvaluationRevision'
+            X-Quarry-Evaluation-Database-Time:
+              description: 'PostgreSQL observation time for the [completion-event bounds](development.md#evidence-evaluation).'
+              schema:
+                type: string
+                format: date-time
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentIncarnationSummary'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '404':
+          description: Fixture absent, retired before admission, or durably deleted
+          headers:
+            X-Quarry-Evaluation-State:
+              $ref: '#/components/headers/EvaluationState'
+            X-Document-Incarnation:
+              $ref: '#/components/headers/EvaluationRevision'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+        '409':
+          description: The receipt does not own the fixture ID
+          headers:
+            X-Quarry-Evaluation-State:
+              description: Receipt state is borrowed
+              schema:
+                type: string
+                enum: [borrowed]
+            X-Document-Incarnation:
+              $ref: '#/components/headers/EvaluationRevision'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+        '412':
+          $ref: '#/components/responses/EvaluationFixturePrecondition'
+        '500':
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deleteEvaluationFixture
+      summary: Remove a receipt-qualified fixture revision
+      description: 'See the [fixture lifecycle](development.md#evidence-evaluation).'
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: X-Document-Incarnation
+          in: header
+          description: Required for revision-qualified deletion. Omit for absence reconciliation.
+          schema:
+            type: string
+            format: uuid
+        - name: X-Quarry-Evaluation-Reconcile
+          in: header
+          description: Retire absent admission intent without sweeping vectors.
+          schema:
+            type: string
+            enum: [absent]
+      responses:
+        '200':
+          description: Durable fixture deletion or absence retirement receipt
+          headers:
+            X-Quarry-Evaluation-State:
+              $ref: '#/components/headers/EvaluationState'
+            X-Document-Incarnation:
+              $ref: '#/components/headers/EvaluationRevision'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/EvaluationFixtureConflict'
+        '412':
+          $ref: '#/components/responses/EvaluationFixturePrecondition'
+        '500':
+          $ref: '#/components/responses/Error'
   /documents/{doc_id}/file:
     parameters:
       - $ref: '#/components/parameters/RequestID'
@@ -350,7 +526,31 @@ components:
       schema:
         type: boolean
         default: false
+    EvaluationNamespace:
+      name: X-Quarry-Evaluation-Fixture
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+    EvaluationReceipt:
+      name: X-Quarry-Evaluation-Receipt
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
   headers:
+    EvaluationState:
+      description: 'Receipt state for the [fixture lifecycle](development.md#evidence-evaluation).'
+      schema:
+        type: string
+        enum: [missing, borrowed, owned, busy, deleted, retired, store_mismatch]
+    EvaluationRevision:
+      description: Optional incarnation when the receipt owns a current or deleted fixture revision
+      schema:
+        type: string
+        format: uuid
     RequestID:
       description: 'Correlation value; see [Request IDs](api.md#request-ids).'
       schema:
@@ -360,6 +560,28 @@ components:
       schema:
         type: integer
   responses:
+    EvaluationFixtureConflict:
+      description: A revision-qualified delete found a running job, or absence reconciliation found an owned or borrowed fixture
+      headers:
+        X-Quarry-Evaluation-State:
+          $ref: '#/components/headers/EvaluationState'
+        X-Document-Incarnation:
+          $ref: '#/components/headers/EvaluationRevision'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIError'
+    EvaluationFixturePrecondition:
+      description: Fixture qualification failed, the deployment has no durable vector store, or the original vector store is unavailable
+      headers:
+        X-Quarry-Evaluation-State:
+          $ref: '#/components/headers/EvaluationState'
+        X-Document-Incarnation:
+          $ref: '#/components/headers/EvaluationRevision'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APIError'
     Health:
       description: Backing-store health
       headers:
@@ -472,6 +694,10 @@ components:
           type: string
         collection:
           type: string
+    EvaluationFixtureIngestRequest:
+      allOf:
+        - $ref: '#/components/schemas/IngestRequest'
+        - required: [document_id, collection]
     MultipartIngestRequest:
       type: object
       description: 'See [multipart ingestion](api.md#variant-b-multipart-form-upload), [DOCX story selection](api.md#docx-story-selection) and [Word binary extraction](api.md#word-binary-extraction).'

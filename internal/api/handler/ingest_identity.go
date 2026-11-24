@@ -63,6 +63,9 @@ func acceptIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker, cs
 		return result.Outcome, nil
 	}
 	trace.SpanFromContext(r.Context()).SetAttributes(tracing.DocumentAttributes(string(result.DocumentID))...)
+	if req.EvaluationReceipt != "" && result.Outcome == domain.AcceptAccepted && result.Incarnation != "" {
+		fixtureHeaders(rw, domain.FixtureOwned, result.Incarnation)
+	}
 	rw.Header().Set("Content-Type", "application/json")
 	rw.WriteHeader(code)
 	if err = json.NewEncoder(rw).Encode(IngestResponse{DocumentID: string(result.DocumentID), Status: state}); err != nil {

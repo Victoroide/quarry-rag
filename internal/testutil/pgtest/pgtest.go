@@ -28,6 +28,9 @@ func StartVector(t testing.TB, opts ...testcontainers.ContainerCustomizer) strin
 
 func start(t testing.TB, containerImage string, opts ...testcontainers.ContainerCustomizer) string {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
 	ctx := context.Background()
 	// The image opens its port for a temporary server during initialization,
 	// so readiness also waits for the second startup log line.

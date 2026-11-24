@@ -9,6 +9,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,6 +32,14 @@ func (v Visibility) VisibleEvidence(ctx context.Context, candidates []domain.Sco
 // VisibleEvidenceWithPreviews checks current evidence and reads previews only
 // for visible probe documents using the same statement snapshot.
 func (v Visibility) VisibleEvidenceWithPreviews(ctx context.Context, candidates []domain.ScoredChunk, probeIDs []string) ([]domain.ScoredChunk, map[string]string, error) {
+	return v.visibleEvidence(ctx, v.Pool, candidates, probeIDs)
+}
+
+type evidenceQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer, candidates []domain.ScoredChunk, probeIDs []string) ([]domain.ScoredChunk, map[string]string, error) {
 	chunkIDs := make([]string, 0, len(candidates))
 	docIDs := make([]string, 0, len(candidates))
 	indices := make([]int64, 0, len(candidates))
@@ -69,7 +78,7 @@ func (v Visibility) VisibleEvidenceWithPreviews(ctx context.Context, candidates 
 		return input, previews, nil
 	}
 
-	rows, err := v.Pool.Query(ctx, `
+	rows, err := source.Query(ctx, `
 SELECT hit.ord, d.doc_type, CASE WHEN d.id=ANY($7::uuid[]) THEN d.content_preview END
 FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[]) WITH ORDINALITY AS hit(chunk_id, doc_id, idx, hash, ord)
 JOIN chunks c ON c.id=hit.chunk_id AND c.document_id=hit.doc_id AND c.chunk_index=hit.idx
@@ -105,6 +114,28 @@ ORDER BY hit.ord`, chunkIDs, docIDs, indices, digests, v.Collection, v.DocType, 
 		return nil, nil, fmt.Errorf("postgres: visible evidence: %w", err)
 	}
 	return visible, previews, nil
+}
+
+// VerifyEvaluationEvidence uses the same snapshot for fixture receipts and
+// chunk bodies so a concurrent delete cannot mix document incarnations.
+func (v Visibility) VerifyEvaluationEvidence(ctx context.Context, receipt string, allowed []string, selected []domain.ScoredChunk) (bool, error) {
+	tx, err := v.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var owned int
+	err = tx.QueryRow(ctx, `
+SELECT count(*)
+FROM evaluation_fixtures f
+JOIN documents d ON d.id=f.active_document_id AND d.incarnation=f.incarnation
+WHERE d.id=ANY($1::uuid[]) AND f.receipt=$2 AND d.collection=$3
+  AND f.vector_identity IS NOT NULL`, allowed, receipt, v.Collection).Scan(&owned)
+	if err != nil || owned != len(allowed) {
+		return false, err
+	}
+	visible, _, err := v.visibleEvidence(ctx, tx, selected, nil)
+	return err == nil && len(visible) == len(selected), err
 }
 
 // VisibleDocumentIDs returns the visible documents among the supplied IDs.

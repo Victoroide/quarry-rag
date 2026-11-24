@@ -14,6 +14,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
+	"github.com/Victoroide/quarry-rag/internal/evaluation"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
 )
 
@@ -143,6 +144,8 @@ type Config struct {
 	Warnings          []string
 	Tracing           TracingConfig
 
+	EvaluationCollectionPrefix string
+
 	RerankModelARN string
 	RerankTimeout  time.Duration
 }
@@ -185,6 +188,7 @@ func Load() (*Config, error) {
 		Audience: os.Getenv("AUTHZ_AUDIENCE"),
 		JWKSFile: os.Getenv("AUTHZ_JWKS_FILE"),
 	}
+	cfg.EvaluationCollectionPrefix = os.Getenv("EVALUATION_COLLECTION_PREFIX")
 	cfg.LLMProvider = envOrDefault("LLM_PROVIDER", "bedrock")
 	cfg.EmbeddingProvider = envOrDefault("EMBEDDING_PROVIDER", "bedrock")
 	cfg.OpenAIBaseURL = os.Getenv("OPENAI_BASE_URL")
@@ -531,6 +535,9 @@ func (c *Config) validate() error {
 	}
 	if c.QueryAnswerPolicy != "" && c.QueryAnswerPolicy != QueryAnswerPolicyBoth && c.QueryAnswerPolicy != QueryAnswerPolicyEvidenceOnly {
 		return fmt.Errorf("config: QUERY_ANSWER_POLICY must be both or evidence_only")
+	}
+	if c.EvaluationCollectionPrefix != "" && !evaluation.ValidPrefix(c.EvaluationCollectionPrefix) {
+		return fmt.Errorf("config: EVALUATION_COLLECTION_PREFIX must be a lowercase collection prefix of 1 to 40 characters")
 	}
 	if c.SynthesisTimeout <= 0 || c.SynthesisTimeout >= c.QueryTimeout {
 		return fmt.Errorf("config: SYNTHESIS_TIMEOUT must be positive and below QUERY_TIMEOUT")

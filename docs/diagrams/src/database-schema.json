@@ -16,27 +16,33 @@
     },
     "chunks": {
       "X": 472,
-      "Y": 108,
+      "Y": 82,
       "W": 352,
-      "H": 196
+      "H": 178
     },
     "document_fingerprints": {
       "X": 472,
-      "Y": 386,
+      "Y": 268,
       "W": 352,
-      "H": 128
+      "H": 124
     },
     "ingest_jobs": {
       "X": 472,
-      "Y": 550,
+      "Y": 400,
       "W": 352,
-      "H": 268
+      "H": 262
     },
     "document_deletion_activation": {
       "X": 472,
       "Y": 840,
       "W": 352,
       "H": 98
+    },
+    "evaluation_fixtures": {
+      "X": 472,
+      "Y": 670,
+      "W": 352,
+      "H": 162
     }
   },
   "Groups": []

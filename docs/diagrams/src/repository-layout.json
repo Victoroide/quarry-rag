@@ -1,6 +1,6 @@
 {
   "Width": 840,
-  "Height": 1000,
+  "Height": 996,
   "Nodes": {
     "internal": {
       "X": 28,
@@ -12,187 +12,193 @@
       "X": 52,
       "Y": 108,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/api/handler": {
       "X": 76,
-      "Y": 136,
+      "Y": 135,
       "W": 320,
-      "H": 28
+      "H": 27
     },
     "internal/api/middleware": {
       "X": 76,
-      "Y": 164,
+      "Y": 162,
       "W": 320,
-      "H": 28
+      "H": 27
     },
     "internal/awsconf": {
       "X": 52,
-      "Y": 192,
+      "Y": 189,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/chunker": {
       "X": 52,
-      "Y": 220,
+      "Y": 216,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/cleanup": {
       "X": 52,
-      "Y": 248,
+      "Y": 243,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/config": {
       "X": 52,
-      "Y": 276,
+      "Y": 270,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/credential": {
       "X": 52,
-      "Y": 304,
+      "Y": 297,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/domain": {
       "X": 52,
-      "Y": 332,
+      "Y": 324,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/embedder": {
       "X": 52,
-      "Y": 360,
+      "Y": 351,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/embeddinginput": {
       "X": 52,
-      "Y": 388,
+      "Y": 378,
       "W": 344,
-      "H": 28
+      "H": 27
+    },
+    "internal/evaluation": {
+      "X": 52,
+      "Y": 405,
+      "W": 344,
+      "H": 27
     },
     "internal/extractor": {
       "X": 52,
-      "Y": 416,
+      "Y": 432,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/llm": {
       "X": 52,
-      "Y": 444,
+      "Y": 459,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/logctx": {
       "X": 52,
-      "Y": 472,
+      "Y": 486,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/metrics": {
       "X": 52,
-      "Y": 500,
+      "Y": 513,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/ocr": {
       "X": 52,
-      "Y": 528,
+      "Y": 540,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/pipeline": {
       "X": 52,
-      "Y": 556,
+      "Y": 567,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/retriever": {
       "X": 52,
-      "Y": 584,
+      "Y": 594,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/store": {
       "X": 52,
-      "Y": 612,
+      "Y": 621,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/store/memory": {
       "X": 76,
-      "Y": 640,
+      "Y": 648,
       "W": 320,
-      "H": 28
+      "H": 27
     },
     "internal/store/pinecone": {
       "X": 76,
-      "Y": 668,
+      "Y": 675,
       "W": 320,
-      "H": 28
+      "H": 27
     },
     "internal/store/postgres": {
       "X": 76,
-      "Y": 696,
+      "Y": 702,
       "W": 320,
-      "H": 28
+      "H": 27
     },
     "internal/store/s3": {
       "X": 76,
-      "Y": 724,
+      "Y": 729,
       "W": 320,
-      "H": 28
+      "H": 27
     },
     "internal/subjectauth": {
       "X": 52,
-      "Y": 752,
+      "Y": 756,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/testutil": {
       "X": 52,
-      "Y": 780,
+      "Y": 783,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/testutil/docxtest": {
       "X": 76,
-      "Y": 808,
+      "Y": 810,
       "W": 320,
-      "H": 28
+      "H": 27
     },
     "internal/testutil/pgtest": {
       "X": 76,
-      "Y": 836,
+      "Y": 837,
       "W": 320,
-      "H": 28
+      "H": 27
     },
     "internal/textutil": {
       "X": 52,
       "Y": 864,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/tracing": {
       "X": 52,
-      "Y": 892,
+      "Y": 891,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/wordprocessingml": {
       "X": 52,
-      "Y": 920,
+      "Y": 918,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "internal/worker": {
       "X": 52,
-      "Y": 948,
+      "Y": 945,
       "W": 344,
-      "H": 28
+      "H": 27
     },
     "cmd": {
       "X": 444,
@@ -236,81 +242,87 @@
       "W": 344,
       "H": 28
     },
-    "scripts/fuzz": {
+    "scripts/evidenceeval": {
       "X": 468,
       "Y": 456,
       "W": 344,
       "H": 28
     },
-    "scripts/grant-catalog": {
+    "scripts/fuzz": {
       "X": 468,
       "Y": 484,
       "W": 344,
       "H": 28
     },
-    "scripts/langeval": {
+    "scripts/grant-catalog": {
       "X": 468,
       "Y": 512,
       "W": 344,
       "H": 28
     },
-    "scripts/reconcile": {
+    "scripts/langeval": {
       "X": 468,
       "Y": 540,
       "W": 344,
       "H": 28
     },
-    "scripts/simulate": {
+    "scripts/reconcile": {
       "X": 468,
       "Y": 568,
       "W": 344,
       "H": 28
     },
-    "scripts/validate": {
+    "scripts/simulate": {
       "X": 468,
       "Y": 596,
       "W": 344,
       "H": 28
     },
+    "scripts/validate": {
+      "X": 468,
+      "Y": 624,
+      "W": 344,
+      "H": 28
+    },
     "test": {
       "X": 444,
-      "Y": 652,
+      "Y": 680,
       "W": 368,
       "H": 32
     },
     "test/integration": {
       "X": 468,
-      "Y": 684,
+      "Y": 712,
       "W": 344,
       "H": 32
     },
     "test/smoke": {
       "X": 468,
-      "Y": 716,
+      "Y": 744,
       "W": 344,
       "H": 32
     },
     "test/unit": {
       "X": 468,
-      "Y": 748,
+      "Y": 776,
       "W": 344,
       "H": 32
     },
     "tools": {
       "X": 444,
-      "Y": 812,
+      "Y": 840,
       "W": 368,
       "H": 32
     },
     "tools/diagrams": {
       "X": 468,
-      "Y": 844,
+      "Y": 872,
       "W": 344,
       "H": 32
     },
     "tools/diagrams/fonts": {
       "X": 492,
-      "Y": 876,
+      "Y": 904,
       "W": 320,
       "H": 32
     },
@@ -334,7 +346,7 @@
         "X": 16,
         "Y": 72,
         "W": 392,
-        "H": 912
+        "H": 908
       }
     },
     {
@@ -370,14 +382,14 @@
         "X": 432,
         "Y": 392,
         "W": 392,
-        "H": 240
+        "H": 268
       }
     },
     {
       "Title": "",
       "Box": {
         "X": 432,
-        "Y": 644,
+        "Y": 672,
         "W": 392,
         "H": 144
       }
@@ -386,7 +398,7 @@
       "Title": "",
       "Box": {
         "X": 432,
-        "Y": 804,
+        "Y": 832,
         "W": 392,
         "H": 112
       }

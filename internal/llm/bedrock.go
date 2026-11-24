@@ -8,6 +8,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/awsconf"
 	"github.com/Victoroide/quarry-rag/internal/config"
+	"github.com/Victoroide/quarry-rag/internal/evaluation"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
@@ -47,7 +48,9 @@ func NewClient(ctx context.Context, cfg *config.Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("llm: load aws config: %w", err)
 	}
-	rt := bedrockruntime.NewFromConfig(awsCfg)
+	rt := bedrockruntime.NewFromConfig(awsCfg, func(options *bedrockruntime.Options) {
+		options.HTTPClient = evaluation.ObserveBedrockHTTP(options.HTTPClient, evaluation.SynthesisCall)
+	})
 	if cfg.SynthesisInputProfile == "strict" && rt.Options().BaseEndpoint != nil {
 		return nil, fmt.Errorf("%w: custom Bedrock runtime endpoint", ErrUnsupportedProfile)
 	}

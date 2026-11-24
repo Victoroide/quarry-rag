@@ -23,6 +23,15 @@ type ObjectDeleter interface {
 
 // Remove deletes external data before metadata so failed operations remain retryable.
 func Remove(ctx context.Context, cs domain.ChunkStore, vectors domain.VectorDeleter, objects ObjectDeleter, doc *domain.Document) error {
+	if guard, ok := cs.(domain.DocumentRemovalGuard); ok {
+		return guard.WithOrdinaryRemoval(ctx, doc.ID, func(guardCtx context.Context) error {
+			return remove(guardCtx, cs, vectors, objects, doc)
+		})
+	}
+	return remove(ctx, cs, vectors, objects, doc)
+}
+
+func remove(ctx context.Context, cs domain.ChunkStore, vectors domain.VectorDeleter, objects ObjectDeleter, doc *domain.Document) error {
 	if doc.S3Key != nil && objects == nil {
 		return ErrFileStorageUnavailable
 	}

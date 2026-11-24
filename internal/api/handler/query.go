@@ -10,6 +10,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/evaluation"
 	"github.com/Victoroide/quarry-rag/internal/llm"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
@@ -197,6 +198,11 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		}
 		stages = append(stages, pipeline.NewSynthesisStage(amb, cfg))
 
+		var upstreams *evaluation.UpstreamProof
+		_, scopedEvaluation := evaluationScope(r, cfg.EvaluationCollectionPrefix, qc)
+		if scopedEvaluation && !cfg.FakeMode && stream == nil {
+			ctx, upstreams = evaluation.TrackUpstreams(ctx)
+		}
 		_, err := pipeline.RunRetrievalPipeline(ctx, qc, stages)
 		if err == nil {
 			err = ctx.Err()
@@ -243,6 +249,24 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		if scopeErr := qc.CheckEvidenceScope(ctx); scopeErr != nil {
 			writeQueryError(w, r, scopeErr)
 			return
+		}
+		proof := evaluationProof(ctx, r, cfg.EvaluationCollectionPrefix, qc)
+		if err := ctx.Err(); err != nil {
+			writeQueryError(w, r, err)
+			return
+		}
+		if proof != "" {
+			w.Header().Set(evaluation.MatchesHeader, proof)
+		}
+		if scopedEvaluation {
+			if execution := evaluationExecution(cfg, qc); execution != "" {
+				w.Header().Set(evaluation.ExecutionHeader, execution)
+				if upstreams != nil {
+					if hosts := upstreams.Header(); evaluation.ValidUpstreams(hosts, cfg.EmbeddingProvider, cfg.LLMProvider) {
+						w.Header().Set(evaluation.UpstreamsHeader, hosts)
+					}
+				}
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if qc.EarlyExit && qc.ContentLanguage != "" {

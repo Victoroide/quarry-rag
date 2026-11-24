@@ -15,6 +15,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
+	"github.com/Victoroide/quarry-rag/internal/evaluation"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/smithy-go"
@@ -53,7 +54,9 @@ func NewBedrockEmbedder(ctx context.Context, cfg *config.Config) (*BedrockEmbedd
 	if err != nil {
 		return nil, fmt.Errorf("embedder: load aws config: %w", err)
 	}
-	rt := bedrockruntime.NewFromConfig(awsCfg)
+	rt := bedrockruntime.NewFromConfig(awsCfg, func(options *bedrockruntime.Options) {
+		options.HTTPClient = evaluation.ObserveBedrockHTTP(options.HTTPClient, evaluation.EmbeddingCall)
+	})
 	return &BedrockEmbedder{
 		rt:         rt,
 		modelID:    cfg.BedrockEmbedModel,
