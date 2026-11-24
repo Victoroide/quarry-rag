@@ -94,7 +94,7 @@ Failing inputs are saved under the affected package's `testdata/fuzz/<Target>/` 
 | Workflow | Trigger | Checks |
 |---|---|---|
 | [CI](../.github/workflows/ci.yml) | Pushes to `main` and pull requests | Lint; Test with race detection; Build service and runtime image; Check reachable vulnerabilities; Check vector diagrams. |
-| [CodeQL](../.github/workflows/codeql.yml) | Pushes to `main`, pull requests targeting `main` and weekly | Analyze Go for security issues. |
+| [CodeQL](../.github/workflows/codeql.yml) | Pushes to `main`, pull requests targeting `main` and a daily schedule at 04:31 UTC | Analyze Go for security issues. |
 | [Dependency review](../.github/workflows/dependency-review.yml) | Pull requests | Review dependency changes; reject vulnerabilities of high severity or above. |
 | [Scorecard](../.github/workflows/scorecard.yml) | Pushes to `main`, weekly, branch protection changes and manual dispatch | Publish Scorecard results, retain the SARIF artifact for five days and upload it to code scanning. |
 | [Release](../.github/workflows/release.yml) | Version tags matching `v*.*.*` | Builds archives and the runtime image, signs provenance, and publishes the release only after both builds and attestations succeed. |
