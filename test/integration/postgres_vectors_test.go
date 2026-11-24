@@ -34,6 +34,11 @@ func (s *countedPostgresVectors) QueryFiltered(ctx context.Context, embedding []
 	return s.VectorStore.QueryFiltered(ctx, embedding, topK, filter)
 }
 
+func (s *countedPostgresVectors) QueryFilteredWithExactness(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
+	s.searches++
+	return s.VectorStore.QueryFilteredWithExactness(ctx, embedding, topK, filter)
+}
+
 func TestPostgresVectorsOfflineParity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires a Docker daemon")
