@@ -209,6 +209,7 @@ func heterogeneousBudgetChunks() []domain.ScoredChunk {
 	}
 	return chunks
 }
+
 func TestStrictHostedSendsApplyBothEvidenceChecks(t *testing.T) {
 	scopeChange := func(row domain.ScoredChunk) domain.ScoredChunk {
 		row.Chunk.Metadata = map[string]any{"collection": "archive", "doc_type": "report"}
@@ -274,4 +275,76 @@ func TestStrictHostedSendsApplyBothEvidenceChecks(t *testing.T) {
 			require.ErrorIs(t, err, domain.ErrEvidenceCheck)
 		})
 	}
+}
+
+func TestStrictRemoteOverflowCannotAcceptEmptyFallback(t *testing.T) {
+	cfg := &config.Config{AWSRegion: "us-east-1", SynthesisInputProfile: "strict"}
+	amb := llm.NewAmbassador(cfg)
+	double := &calibratedBedrockDouble{
+		countFn: func(_ context.Context, _, _ string, messages []brtypes.Message, _ int) (llm.CountResult, error) {
+			tokens := 994
+			if strings.Contains(flattenBedrockMessages(messages), `id="1"`) {
+				tokens = 1200
+			}
+			return llm.CountResult{InputTokens: tokens, Attempts: 1, Method: llm.CountMethodBedrockCountTokens}, nil
+		},
+	}
+	amb.SetClient(double)
+	builder := synthesisPromptBuilder{question: "Q?", boundary: "0123456789abcdef", modelID: testBedrockFallback, maxTokens: 1024}
+	chunks := []domain.ScoredChunk{{Chunk: domain.Chunk{Text: " \t"}}, {Chunk: domain.Chunk{Text: "\n"}}}
+	out, err := budgetRemoteStrictInput(t.Context(), amb, cfg, builder, 1000, chunks, []bool{false, false})
+	require.ErrorIs(t, err, ErrSynthesisInputTooLarge)
+	require.Empty(t, out.chunks)
+	require.Empty(t, out.truncated)
+	require.Equal(t, 1, double.countCalls)
+	require.Zero(t, double.converseCalls)
+}
+
+func TestStrictRemoteMinimumKeepsOriginalTruncationFlag(t *testing.T) {
+	cfg := &config.Config{AWSRegion: "us-east-1", SynthesisInputProfile: "strict"}
+	amb := llm.NewAmbassador(cfg)
+	provider := &calibratedBedrockDouble{
+		countFn: func(_ context.Context, _, _ string, messages []brtypes.Message, _ int) (llm.CountResult, error) {
+			if strings.Contains(flattenBedrockMessages(messages), `id="2"`) {
+				return llm.CountResult{InputTokens: 1200, Attempts: 2, Method: llm.CountMethodBedrockCountTokens}, nil
+			}
+			return llm.CountResult{InputTokens: 1000, Attempts: 1, Method: llm.CountMethodBedrockCountTokens}, nil
+		},
+	}
+	amb.SetClient(provider)
+	builder := synthesisPromptBuilder{question: "Q?", boundary: "0123456789abcdef", modelID: testBedrockFallback, maxTokens: 1024}
+	chunks := []domain.ScoredChunk{{Chunk: domain.Chunk{Text: "界"}}, {Chunk: domain.Chunk{Text: "More evidence."}}}
+	for _, wasTruncated := range []bool{false, true} {
+		out, err := budgetRemoteStrictInput(t.Context(), amb, cfg, builder, 1000, chunks, []bool{wasTruncated, false})
+		require.NoError(t, err)
+		require.Equal(t, chunks[:1], out.chunks)
+		require.Equal(t, []bool{wasTruncated}, out.truncated)
+	}
+}
+
+func TestStrictSynthesisUsesOnlySubstantiveEvidence(t *testing.T) {
+	cfg := &config.Config{
+		AWSRegion: "us-east-1", BedrockFallbackModel: testBedrockFallback, SynthesisInputProfile: "strict",
+		SynthesisContextTokens: 256, SynthesisRelativeScoreFloor: .7,
+	}
+	provider := &calibratedBedrockDouble{
+		countFn: func(context.Context, string, string, []brtypes.Message, int) (llm.CountResult, error) {
+			return llm.CountResult{InputTokens: 250, Attempts: 1, Method: llm.CountMethodBedrockCountTokens}, nil
+		},
+	}
+	amb := llm.NewAmbassador(cfg)
+	amb.SetClient(provider)
+	qc := &QueryContext{OriginalQuery: "Q?", RetrievedChunks: []domain.ScoredChunk{
+		{Chunk: domain.Chunk{Text: "\u200b \t"}, Score: .95},
+		{Chunk: domain.Chunk{Text: "First."}, Score: .6},
+		{Chunk: domain.Chunk{Text: "Second."}, Score: .5},
+	}}
+	require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+	require.Equal(t, 1, provider.countCalls)
+	require.Equal(t, 1, provider.converseCalls)
+	require.Equal(t, 2, qc.ContextChunks)
+	require.Equal(t, []bool{false, false}, qc.Truncated)
+	user := flattenBedrockMessages(provider.sent.messages)
+	require.Contains(t, user, "id=\"1\">\nFirst.\n")
+	require.Contains(t, user, "id=\"2\">\nSecond.\n")
 }

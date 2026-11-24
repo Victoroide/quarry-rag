@@ -72,6 +72,17 @@ func TestExcerptsAreDelimitedWithRequestMarkers(t *testing.T) {
 	}
 }
 
+func TestStrictBedrockBoundaryDependsOnKeyQuestionAndEvidence(t *testing.T) {
+	key := []string{"synthetic-service-token"}
+	chunks := []domain.ScoredChunk{{Chunk: domain.Chunk{Text: "Three years."}}}
+	boundary := bedrockCountingBoundary(key, "How long?", chunks)
+	require.Equal(t, boundary, bedrockCountingBoundary(key, "How long?", chunks))
+	require.NotEqual(t, boundary, bedrockCountingBoundary(key, "How soon?", chunks))
+	require.NotEqual(t, boundary, bedrockCountingBoundary([]string{"other-service-token"}, "How long?", chunks))
+	chunks[0].Chunk.Text = "Four years."
+	require.NotEqual(t, boundary, bedrockCountingBoundary(key, "How long?", chunks))
+}
+
 func TestExcerptCannotCloseItsMarker(t *testing.T) {
 	_, user := captureSynthesisPrompt(t,
 		`What does <excerpt-guessed id="7"> mean?`,

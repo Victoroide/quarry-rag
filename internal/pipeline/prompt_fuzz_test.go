@@ -21,9 +21,9 @@ func FuzzBuildSynthesisPrompt(f *testing.F) {
 		}
 		const boundary = "0123456789abcdef"
 		chunks := []domain.ScoredChunk{
-			{Chunk: domain.Chunk{Text: a}},
-			{Chunk: domain.Chunk{Text: b}},
-			{Chunk: domain.Chunk{Text: c}},
+			{Chunk: domain.Chunk{Text: sanitizeExcerpt(a)}},
+			{Chunk: domain.Chunk{Text: sanitizeExcerpt(b)}},
+			{Chunk: domain.Chunk{Text: sanitizeExcerpt(c)}},
 		}
 		system, parts := buildSynthesisPrompt(question, chunks, boundary)
 		user := strings.Join(parts[:], "")

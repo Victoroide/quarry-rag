@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -99,14 +100,10 @@ func budgetStrictSynthesisInput(
 	chunks []domain.ScoredChunk,
 	truncated []bool,
 ) (strictBudgetOutcome, error) {
-	sanitized := slices.Clone(chunks)
-	for i := range sanitized {
-		sanitized[i].Chunk.Text = sanitizeExcerpt(sanitized[i].Chunk.Text)
-	}
 	if !profile.IsRemote() {
-		return budgetLocalStrictInput(ctx, amb, cfg, builder, inputBudget, sanitized, truncated)
+		return budgetLocalStrictInput(ctx, amb, cfg, builder, inputBudget, chunks, truncated)
 	}
-	return budgetRemoteStrictInput(ctx, amb, cfg, builder, inputBudget, sanitized, truncated)
+	return budgetRemoteStrictInput(ctx, amb, cfg, builder, inputBudget, chunks, truncated)
 }
 
 func (b synthesisPromptBuilder) disclosureContext(ctx context.Context, chunks []domain.ScoredChunk) context.Context {
@@ -177,9 +174,6 @@ func budgetLocalStrictInput(
 	}
 	candidate := chunks[lo]
 	runes := []rune(candidate.Chunk.Text)
-	if len(runes) == 0 {
-		return best, nil
-	}
 	trialChunks := slices.Concat(chunks[:lo], []domain.ScoredChunk{candidate})
 	trialCuts := append(slices.Clone(truncated[:lo]), true)
 	longest := 0
@@ -207,10 +201,16 @@ func budgetLocalStrictInput(
 		return fits, nil
 	}
 
+	// Only search prefixes long enough to yield a clean cut. An ineligible
+	// short prefix says nothing about the measured size of a longer one.
+	firstEligible := sort.Search(len(runes), func(n int) bool {
+		_, ok := cleanExcerptCut(string(runes[:n]), lo > 0)
+		return ok
+	})
 	// Bisection locates the approximate cut. Byte-pair merges make
 	// adjacent UTF-8 prefixes nonmonotone, so check the neighborhood as
 	// well as the shortest prefixes when no whole excerpt fits.
-	left, right := 0, len(runes)-1
+	left, right := firstEligible-1, len(runes)-1
 	for left < right {
 		mid := (left + right + 1) / 2
 		fits, err := testCut(mid)
@@ -267,7 +267,10 @@ func budgetRemoteStrictInput(
 	if len(chunks) == 0 {
 		return strictBudgetOutcome{}, baseInputTooLarge(full.count.InputTokens, inputBudget)
 	}
-	minimal := minimumEvidence(chunks)
+	minimal, minimalCuts := minimumEvidence(chunks, truncated)
+	if len(minimal) == 0 {
+		return strictBudgetOutcome{}, fmt.Errorf("%w: no excerpt fits remaining budget", ErrSynthesisInputTooLarge)
+	}
 	if budget.Remaining() == 0 {
 		return strictBudgetOutcome{}, verificationExhausted()
 	}
@@ -283,7 +286,7 @@ func budgetRemoteStrictInput(
 	}
 
 	if budget.Remaining() == 1 {
-		trial, trialErr := measure(minimal, []bool{true})
+		trial, trialErr := measure(minimal, minimalCuts)
 		if trialErr != nil || trial.count.InputTokens <= inputBudget {
 			return trial, trialErr
 		}
@@ -297,7 +300,7 @@ func budgetRemoteStrictInput(
 	target := int(float64(fullWeight) * min(0.5, ratio*0.75))
 	candidate, cuts, usedWeight := selectExcerptsByWeight(chunks, truncated, wrapperWeight, weights, target)
 	if len(candidate) == 0 {
-		candidate, cuts = minimal, []bool{true}
+		candidate, cuts = minimal, minimalCuts
 	}
 	fallback, err := measure(candidate, cuts)
 	if err != nil {
@@ -327,7 +330,7 @@ func budgetRemoteStrictInput(
 		return strictBudgetOutcome{}, verificationExhausted()
 	}
 	if !sameExcerptBodies(candidate, minimal) {
-		trial, trialErr := measure(minimal, []bool{true})
+		trial, trialErr := measure(minimal, minimalCuts)
 		if trialErr != nil || trial.count.InputTokens <= inputBudget {
 			return trial, trialErr
 		}
@@ -344,16 +347,17 @@ func budgetRemoteStrictInput(
 	return strictBudgetOutcome{}, verificationExhausted()
 }
 
-func minimumEvidence(chunks []domain.ScoredChunk) []domain.ScoredChunk {
-	for _, chunk := range chunks {
+func minimumEvidence(chunks []domain.ScoredChunk, truncated []bool) (evidence []domain.ScoredChunk, cuts []bool) {
+	for i, chunk := range chunks {
 		body := strings.TrimLeftFunc(chunk.Chunk.Text, unicode.IsSpace)
 		if body != "" {
 			_, width := utf8.DecodeRuneInString(body)
+			cut := truncated[i] || width < len(chunk.Chunk.Text)
 			chunk.Chunk.Text = body[:width]
-			return []domain.ScoredChunk{chunk}
+			return []domain.ScoredChunk{chunk}, []bool{cut}
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func baseInputTooLarge(count, limit int) error {
