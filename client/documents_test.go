@@ -73,3 +73,33 @@ func TestListDocumentsCollectionEncoding(t *testing.T) {
 	_, err := c.ListDocuments(t.Context(), client.ListOptions{Collection: "café & reports"})
 	require.NoError(t, err)
 }
+
+func TestDocumentIncarnationReads(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000001"
+	const incarnation = "2d43ca14-76bc-4f72-bf85-e7a607a1197d"
+	c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "synthetic-token", r.Header.Get("X-Service-Token"))
+		summary := map[string]string{"document_id": id, "incarnation": incarnation}
+		switch r.URL.Path {
+		case "/api/documents":
+			assert.Equal(t, "after=cursor&collection=archive&include_incarnation=true&limit=100", r.URL.RawQuery)
+			writeJSON(t, w, map[string]any{"documents": []any{summary}, "count": 1, "next_after": id})
+		case "/api/documents/" + id:
+			assert.Equal(t, "include_incarnation=true", r.URL.RawQuery)
+			writeJSON(t, w, summary)
+		default:
+			t.Errorf("unexpected route: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	summary, err := c.GetDocumentWithIncarnation(t.Context(), id)
+	require.NoError(t, err)
+	require.Equal(t, id, summary.ID)
+	require.Equal(t, incarnation, summary.Incarnation)
+	page, err := c.ListDocumentsWithIncarnation(t.Context(), client.ListOptions{Collection: "archive", After: "cursor"})
+	require.NoError(t, err)
+	require.Equal(t, 1, page.Count)
+	require.Equal(t, &summary.ID, page.NextAfter)
+	require.Equal(t, []client.DocumentIncarnationSummary{*summary}, page.Documents)
+}

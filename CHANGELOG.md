@@ -18,6 +18,7 @@ Notable changes are grouped by release.
 - Optional Bedrock reranking of retrieved chunks before synthesis (`RERANK_MODEL_ARN`).
 - OpenAI-compatible chat and embedding providers (`LLM_PROVIDER`, `EMBEDDING_PROVIDER`, `OPENAI_BASE_URL`) for local or self-hosted models.
 - Evidence-only queries return scoped excerpts without answer generation over JSON, SSE, the Go client and MCP.
+- Authenticated document status and inventory can include stable incarnations on request. [Document deletion](docs/api.md#delete-documentsdoc_id) returns `412` for reserved selectors and `400` for malformed queries.
 
 ### Changed
 

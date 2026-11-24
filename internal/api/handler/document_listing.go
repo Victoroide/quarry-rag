@@ -13,13 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain.DocumentLister) {
-	query := r.URL.Query()
-	collection, apiErr := listingCollection(r)
-	if apiErr != nil {
-		writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
-		return
-	}
+func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain.DocumentLister, query url.Values, collection string, include bool) {
 	scoped, ok := lister.(domain.CollectionDocumentLister)
 	if collection != "" && !ok {
 		writeJSONError(w, http.StatusInternalServerError, "internal", "collection filtering is unavailable")
@@ -27,7 +21,7 @@ func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain
 	}
 
 	if !query.Has("limit") && !query.Has("after") {
-		streamDocumentSummaries(w, r, lister, scoped, collection)
+		streamDocumentSummaries(w, r, lister, scoped, collection, include)
 		return
 	}
 	limit, err := strconv.Atoi(query.Get("limit"))
@@ -62,21 +56,29 @@ func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain
 	if len(docs) == limit {
 		next = &docs[len(docs)-1].ID
 	}
+	var documents any = docs
+	if include {
+		projected := make([]domain.DocumentIncarnationSummary, len(docs))
+		for i, doc := range docs {
+			projected[i] = doc.WithIncarnation()
+		}
+		documents = projected
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(struct {
-		Documents []domain.DocumentSummary `json:"documents"`
-		Count     int                      `json:"count"`
-		NextAfter *string                  `json:"next_after"`
-	}{docs, len(docs), next}); err != nil {
+		Documents any     `json:"documents"`
+		Count     int     `json:"count"`
+		NextAfter *string `json:"next_after"`
+	}{documents, len(docs), next}); err != nil {
 		slog.ErrorContext(r.Context(), "encode document list", "error", err)
 	}
 }
 
-func streamDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain.DocumentLister, scoped domain.CollectionDocumentLister, collection string) {
+func streamDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain.DocumentLister, scoped domain.CollectionDocumentLister, collection string, include bool) {
 	count := 0
 	started := false
 	visit := func(doc domain.DocumentSummary) error {
-		encoded, err := json.Marshal(doc)
+		encoded, err := json.Marshal(documentSummaryBody(doc, include))
 		if err != nil {
 			return err
 		}
@@ -120,11 +122,7 @@ func streamDocumentSummaries(w http.ResponseWriter, r *http.Request, lister doma
 	}
 }
 
-func listingCollection(r *http.Request) (string, *APIError) {
-	query, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil {
-		return "", &APIError{Error: "validation", Message: "invalid query parameters"}
-	}
+func listingCollection(query url.Values) (string, *APIError) {
 	if len(query["collection"]) > 1 {
 		return "", &APIError{Error: "validation", Message: "collection must occur at most once"}
 	}

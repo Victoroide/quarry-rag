@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/stretchr/testify/require"
 )
 
 type fileDeleteContextKey struct{}
@@ -81,4 +83,66 @@ func TestDeleteReturnsStorageUnavailable(t *testing.T) {
 	if resp.Code != http.StatusServiceUnavailable || body.Error != "storage" || body.Message != "stored file cannot be deleted because file storage is not configured" || store.deleted {
 		t.Fatalf("status = %d, body = %+v, deleted = %v", resp.Code, body, store.deleted)
 	}
+}
+
+func TestDeleteRejectsReservedIncarnationSelectors(t *testing.T) {
+	for _, tc := range []struct {
+		name, query string
+		headers     http.Header
+		status      int
+	}{
+		{name: "header", headers: http.Header{"X-Document-Incarnation": {"e22e083c-1695-4f93-841f-829c5e9e0978"}}, status: http.StatusPreconditionFailed},
+		{name: "empty header", headers: http.Header{"X-Document-Incarnation": {""}}, status: http.StatusPreconditionFailed},
+		{name: "duplicate header", headers: http.Header{"X-Document-Incarnation": {"", "value"}}, status: http.StatusPreconditionFailed},
+		{name: "release", query: "release_held=true", status: http.StatusPreconditionFailed},
+		{name: "false release", query: "release_held=false", status: http.StatusPreconditionFailed},
+		{name: "empty release", query: "release_held=", status: http.StatusPreconditionFailed},
+		{name: "encoded duplicate release", query: "release_held=false&release%5fheld=true", status: http.StatusPreconditionFailed},
+		{name: "malformed query", query: "release_held=%zz", status: http.StatusBadRequest},
+		{name: "ambiguous separator", query: "flag=on;release_held=true", status: http.StatusBadRequest},
+		{name: "bare control", query: "unrelated=value", status: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, accessed, deleted := exerciseDeletion(t, tc.query, tc.headers)
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			require.Equal(t, tc.status == http.StatusOK, accessed)
+			require.Equal(t, tc.status == http.StatusOK, deleted)
+		})
+	}
+}
+
+func FuzzDeleteReservedIncarnationSelectors(f *testing.F) {
+	f.Add("release%5fheld=true", false, "")
+	f.Add("release_held=%", false, "")
+	f.Add("", true, "")
+	f.Add("unrelated=1", false, "")
+	f.Fuzz(func(t *testing.T, query string, headerPresent bool, value string) {
+		var headers http.Header
+		if headerPresent {
+			headers = http.Header{"x-document-incarnation": {value}}
+		}
+		params, err := url.ParseQuery(query)
+		wantCleanup := err == nil && !params.Has("release_held") && !headerPresent
+		rec, accessed, deleted := exerciseDeletion(t, query, headers)
+		require.Equal(t, wantCleanup, rec.Code == http.StatusOK)
+		require.Equal(t, wantCleanup, accessed)
+		require.Equal(t, wantCleanup, deleted)
+	})
+}
+
+func exerciseDeletion(t *testing.T, query string, headers http.Header) (*httptest.ResponseRecorder, bool, bool) {
+	t.Helper()
+	const id = "8a3e792c-5df6-4b6e-a612-4f7db4959db2"
+	var accessed bool
+	store := &fileDeleteStore{document: &domain.Document{ID: id}, check: func(context.Context) error {
+		accessed = true
+		return nil
+	}}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/"+id, http.NoBody)
+	req.SetPathValue("doc_id", id)
+	req.URL.RawQuery = query
+	req.Header = headers
+	rec := httptest.NewRecorder()
+	DeleteHandler(store, nil, nil)(rec, req)
+	return rec, accessed, store.deleted
 }
