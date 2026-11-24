@@ -25,9 +25,9 @@ func (q *QueryStream) start(ctx context.Context) error {
 	return q.Context()
 }
 
-func finishSynthesisWithoutEvidence(ctx context.Context, qc *QueryContext) error {
+func (s *SynthesisStage) finishWithoutEvidence(ctx context.Context, qc *QueryContext) error {
 	qc.FinishReason = "no_evidence"
-	qc.FinalAnswer, qc.ContentLanguage = noEvidenceAnswer(qc.AcceptLanguage)
+	qc.FinalAnswer, qc.ContentLanguage = s.noEvidenceCatalog.answer(qc.AcceptLanguage)
 	qc.ContextTokens, qc.ContextChunks = 0, 0
 	qc.CountMethod, qc.ModelInputTokens = "", 0
 	qc.TokenUsage = domain.TokenUsage{}

@@ -484,13 +484,19 @@ func (s *RerankStage) Run(ctx context.Context, qc *QueryContext) error {
 // SynthesisStage synthesizes a final answer from retrieved chunks.
 // Model selection follows the configured synthesis routing policy.
 type SynthesisStage struct {
-	ambassador *llm.Ambassador
-	cfg        *config.Config
+	ambassador        *llm.Ambassador
+	cfg               *config.Config
+	noEvidenceCatalog *NoEvidenceCatalog
 }
 
 // NewSynthesisStage creates a SynthesisStage.
 func NewSynthesisStage(amb *llm.Ambassador, cfg *config.Config) *SynthesisStage {
-	return &SynthesisStage{ambassador: amb, cfg: cfg}
+	return NewSynthesisStageWithCatalog(amb, cfg, nil)
+}
+
+// NewSynthesisStageWithCatalog creates a synthesis stage with fixed no-evidence translations.
+func NewSynthesisStageWithCatalog(amb *llm.Ambassador, cfg *config.Config, catalog *NoEvidenceCatalog) *SynthesisStage {
+	return &SynthesisStage{ambassador: amb, cfg: cfg, noEvidenceCatalog: catalog}
 }
 
 // ID returns the stage identifier.
@@ -589,13 +595,13 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		}
 	}
 	if len(qc.RetrievedChunks) == 0 {
-		return finishSynthesisWithoutEvidence(ctx, qc)
+		return s.finishWithoutEvidence(ctx, qc)
 	}
 
 	strict := s.cfg.SynthesisInputProfile != "" && qc.AnswerMode != domain.AnswerModeEvidence
 	chunks, truncated := trimChunksForSynthesis(qc.RetrievedChunks, s.cfg.SynthesisContextTokens, s.cfg.SynthesisRelativeScoreFloor, strict)
 	if strict && len(chunks) == 0 {
-		return finishSynthesisWithoutEvidence(ctx, qc)
+		return s.finishWithoutEvidence(ctx, qc)
 	}
 	qc.ContextChunks = len(chunks)
 	qc.Truncated = truncated

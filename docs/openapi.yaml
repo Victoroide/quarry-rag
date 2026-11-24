@@ -138,6 +138,10 @@ paths:
               description: 'Language of the no-evidence answer; see [POST /query](api.md#post-query).'
               schema:
                 type: string
+            Vary:
+              description: 'Includes `Accept-Language` for a no-evidence answer.'
+              schema:
+                type: string
             Cache-Control:
               description: '`no-cache` on streamed answers; see [streamed query answers](api.md#streamed-query-answers).'
               schema:

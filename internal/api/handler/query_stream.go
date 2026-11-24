@@ -95,9 +95,7 @@ func (s *queryStream) event(name string, value any) error {
 		s.w.Header().Set("Content-Type", "text/event-stream")
 		s.w.Header().Set("Cache-Control", "no-cache")
 		s.w.Header().Set("X-Accel-Buffering", "no")
-		if s.qc.EarlyExit && s.qc.ContentLanguage != "" {
-			s.w.Header().Set("Content-Language", s.qc.ContentLanguage)
-		}
+		setQueryLanguageHeaders(s.w.Header(), s.qc)
 		s.w.WriteHeader(http.StatusOK)
 		s.started = true
 	}

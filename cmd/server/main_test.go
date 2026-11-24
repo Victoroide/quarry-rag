@@ -10,12 +10,69 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
+	"github.com/stretchr/testify/require"
 )
+
+func TestStartupRejectsInvalidNoEvidenceCatalog(t *testing.T) {
+	t.Setenv("GO_RAG_FAKE_MODE", "true")
+	t.Setenv("DATABASE_URL", "invalid postgres configuration")
+	path := filepath.Join(t.TempDir(), "no-evidence.json")
+	t.Setenv("NO_EVIDENCE_CATALOG_FILE", path)
+	require.ErrorContains(t, run(), "NO_EVIDENCE_CATALOG_FILE")
+	for _, tc := range []struct{ name, body, detail string }{
+		{"built-in tag", `{"en":"replacement"}`, "duplicate language tag"},
+		{"German alias with script", `{"ger-Latn":"replacement"}`, "duplicate language tag"},
+		{"repeated variant", `{"sl-rozaj-rozaj":"text"}`, "invalid language tag"},
+		{"repeated extension", `{"ar-u-nu-latn-u-ca-gregory":"text"}`, "invalid language tag"},
+		{"deprecated and preferred calendar", `{"ar-u-ca-islamicc":"first answer","ar-u-ca-islamic-civil":"second answer"}`, "duplicate language tag"},
+		{"deprecated and preferred transform", `{"ar-t-m0-names":"first answer","ar-t-m0-prprname":"second answer"}`, "duplicate language tag"},
+		{"duplicate Unicode attribute", `{"ar-u-foo-foo-nu-latn":"first answer","ar-u-foo-nu-latn":"second answer"}`, "duplicate language tag"},
+		{"transform key in Unicode locale extension", `{"ar-u-m0-names":"text"}`, "invalid language tag extension"},
+		{"wrong extended language prefix", `{"en-cmn":"text"}`, "invalid language tag"},
+		{"multiple extended languages", `{"zh-cmn-yue":"text"}`, "invalid language tag"},
+		{"reserved primary language", `{"root":"text"}`, "invalid language tag"},
+		{"deprecated and preferred language", `{"dek":"first","sqm":"second"}`, "duplicate language tag"},
+		{"extended and primary language", `{"zh-hnm":"first","hnm":"second"}`, "duplicate language tag"},
+		{"extended language under another prefix", `{"en-hnm":"text"}`, "invalid language tag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(path, []byte(tc.body), 0o600))
+			err := run()
+			require.ErrorContains(t, err, "NO_EVIDENCE_CATALOG_FILE")
+			require.ErrorContains(t, err, tc.detail)
+		})
+	}
+}
+
+func TestStartupAcceptsRegisteredNoEvidenceLanguages(t *testing.T) {
+	t.Setenv("GO_RAG_FAKE_MODE", "true")
+	t.Setenv("DATABASE_URL", "invalid postgres configuration")
+	path := filepath.Join(t.TempDir(), "no-evidence.json")
+	t.Setenv("NO_EVIDENCE_CATALOG_FILE", path)
+	for _, tc := range []struct{ name, body string }{
+		{"extended Hainanese", `{"zh-hnm":"text"}`},
+		{"primary Hainanese", `{"hnm":"text"}`},
+		{"extended Cantonese", `{"zh-yue":"text"}`},
+		{"extended Bhutanese Sign Language", `{"sgn-dyl":"text"}`},
+		{"Classical Sanskrit", `{"cls":"text"}`},
+		{"Interslavic with script", `{"isv-Latn":"text"}`},
+		{"deprecated language", `{"dek":"text"}`},
+		{"preferred language", `{"sqm":"text"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(path, []byte(tc.body), 0o600))
+			err := run()
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "NO_EVIDENCE_CATALOG_FILE")
+		})
+	}
+}
 
 func TestServeWaitsForActiveRequests(t *testing.T) {
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")

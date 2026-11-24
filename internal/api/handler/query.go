@@ -128,6 +128,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 	if queryTimeout <= 0 {
 		queryTimeout = time.Minute
 	}
+	synthesis := pipeline.NewSynthesisStageWithCatalog(amb, cfg, options.noEvidenceCatalog)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !isJSONRequest(r) {
 			writeJSONError(w, http.StatusUnsupportedMediaType, "validation", "Content-Type must be application/json")
@@ -196,7 +197,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		if answerMode != domain.AnswerModeEvidence && options.reranker != nil {
 			stages = append(stages, pipeline.NewRerankStage(options.reranker, cfg.RerankTimeout))
 		}
-		stages = append(stages, pipeline.NewSynthesisStage(amb, cfg))
+		stages = append(stages, synthesis)
 
 		var upstreams *evaluation.UpstreamProof
 		_, scopedEvaluation := evaluationScope(r, cfg.EvaluationCollectionPrefix, qc)
@@ -269,13 +270,18 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if qc.EarlyExit && qc.ContentLanguage != "" {
-			w.Header().Set("Content-Language", qc.ContentLanguage)
-		}
+		setQueryLanguageHeaders(w.Header(), qc)
 		w.WriteHeader(http.StatusOK)
 		if _, writeErr := w.Write(append(data, '\n')); writeErr != nil {
 			slog.ErrorContext(r.Context(), "write query response", "error", writeErr)
 		}
+	}
+}
+
+func setQueryLanguageHeaders(headers http.Header, qc *pipeline.QueryContext) {
+	if qc.EarlyExit && qc.ContentLanguage != "" {
+		headers.Set("Content-Language", qc.ContentLanguage)
+		headers.Add("Vary", "Accept-Language")
 	}
 }
 

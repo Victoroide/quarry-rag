@@ -67,10 +67,6 @@ func newNoEvidenceCatalog(additions []noEvidenceMessage) *NoEvidenceCatalog {
 // maxAcceptLanguageBytes bounds header parsing; longer values use English.
 const maxAcceptLanguageBytes = 1024
 
-func noEvidenceAnswer(acceptLanguage string) (answer, tag string) {
-	return builtinNoEvidenceCatalog().answer(acceptLanguage)
-}
-
 func (c *NoEvidenceCatalog) answer(header string) (answer, tag string) {
 	if c == nil || c.matcher == nil {
 		c = builtinNoEvidenceCatalog()

@@ -441,6 +441,8 @@ func TestOpenAPIPayloadBindings(t *testing.T) {
 				headers := openAPIObject(t, response["headers"])
 				contentLanguage := resolveOpenAPIObject(t, doc, headers["Content-Language"])
 				require.Equal(t, "string", openAPIObject(t, contentLanguage["schema"])["type"])
+				vary := resolveOpenAPIObject(t, doc, headers["Vary"])
+				require.Equal(t, "string", openAPIObject(t, vary["schema"])["type"])
 			}
 			for _, value := range responses {
 				response := resolveOpenAPIObject(t, doc, value)

@@ -145,6 +145,7 @@ type Config struct {
 	Tracing           TracingConfig
 
 	EvaluationCollectionPrefix string
+	NoEvidenceCatalogFile      string
 
 	RerankModelARN string
 	RerankTimeout  time.Duration
@@ -174,6 +175,7 @@ func Load() (*Config, error) {
 		SynthesisInputProfile:     os.Getenv("SYNTHESIS_INPUT_PROFILE"),
 		SynthesisOpenAIDeployment: os.Getenv("SYNTHESIS_OPENAI_DEPLOYMENT"),
 		QueryAnswerPolicy:         envOrDefault("QUERY_ANSWER_POLICY", QueryAnswerPolicyBoth),
+		NoEvidenceCatalogFile:     os.Getenv("NO_EVIDENCE_CATALOG_FILE"),
 		ServiceToken:              os.Getenv("SERVICE_TOKEN"),
 		ServiceTokens:             strings.Split(os.Getenv("SERVICE_TOKENS"), ","),
 		S3ExpectedBucketOwner:     os.Getenv("S3_EXPECTED_BUCKET_OWNER"),

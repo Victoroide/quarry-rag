@@ -52,6 +52,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("startup: configuration error: %w", err)
 	}
+	noEvidenceCatalog, err := pipeline.LoadNoEvidenceCatalog(cfg.NoEvidenceCatalogFile)
+	if err != nil {
+		return fmt.Errorf("startup: NO_EVIDENCE_CATALOG_FILE: %w", err)
+	}
 	slog.SetDefault(slog.New(logctx.NewHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))))
 	shutdownTracing, err := tracing.Setup(ctx, cfg.Tracing, buildVersion())
 	if err != nil {
@@ -250,6 +254,7 @@ func run() error {
 		Probes:                probes,
 		Metrics:               serviceMetrics,
 		Reranker:              reranker,
+		NoEvidenceCatalog:     noEvidenceCatalog,
 	})
 
 	srv := &http.Server{
