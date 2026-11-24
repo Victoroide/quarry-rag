@@ -9,6 +9,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"golang.org/x/sync/errgroup"
 )
@@ -19,11 +20,17 @@ var ErrNoChunks = errors.New("no chunks produced")
 // ChunkStage splits a raw document into chunks using the sliding window chunker.
 type ChunkStage struct {
 	chunker *chunker.Chunker
+	profile *embeddinginput.Profile
 }
 
 // NewChunkStage creates a ChunkStage.
 func NewChunkStage(c *chunker.Chunker) *ChunkStage {
-	return &ChunkStage{chunker: c}
+	return NewChunkStageWithEmbeddingProfile(c, nil)
+}
+
+// NewChunkStageWithEmbeddingProfile creates a ChunkStage with local model limits.
+func NewChunkStageWithEmbeddingProfile(c *chunker.Chunker, p *embeddinginput.Profile) *ChunkStage {
+	return &ChunkStage{chunker: c, profile: p}
 }
 
 // ID returns the stage identifier.
@@ -31,7 +38,11 @@ func (s *ChunkStage) ID() StageID { return StageChunk }
 
 // Run splits the raw text into chunks.
 func (s *ChunkStage) Run(ctx context.Context, ic *IngestContext) error {
-	ic.Chunks = s.chunker.Chunk(ic.DocumentID, ic.RawText)
+	var err error
+	ic.Chunks, err = s.chunker.ChunkForEmbedding(ctx, ic.DocumentID, ic.RawText, s.profile)
+	if err != nil {
+		return fmt.Errorf("chunk_stage: document %s: %w", ic.DocumentID, err)
+	}
 	if len(ic.Chunks) == 0 {
 		return fmt.Errorf("chunk_stage: document %s: %w", ic.DocumentID, ErrNoChunks)
 	}
@@ -61,7 +72,13 @@ func (s *EmbedStage) Run(ctx context.Context, ic *IngestContext) error {
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(s.concurrency)
 	for i := range ic.Chunks {
+		if groupCtx.Err() != nil {
+			break
+		}
 		group.Go(func() error {
+			if err := groupCtx.Err(); err != nil {
+				return err
+			}
 			emb, err := s.embedder.Embed(groupCtx, ic.Chunks[i].Text)
 			if err != nil {
 				return fmt.Errorf("embed_stage: chunk %s: %w", ic.Chunks[i].ID, err)
@@ -71,6 +88,9 @@ func (s *EmbedStage) Run(ctx context.Context, ic *IngestContext) error {
 		})
 	}
 	if err := group.Wait(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	slog.DebugContext(ctx, "document chunks embedded", "document_id", ic.DocumentID, "chunks", len(ic.Chunks))

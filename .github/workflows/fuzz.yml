@@ -29,6 +29,10 @@ jobs:
             target: FuzzExtractors
           - package: ./internal/chunker
             target: FuzzChunk
+          - package: ./internal/chunker
+            target: FuzzChunkEmbeddingProfile
+          - package: ./internal/embeddinginput
+            target: FuzzDecodeProfile
           - package: ./internal/textutil
             target: FuzzSanitizeForPrompt
           - package: ./internal/textutil

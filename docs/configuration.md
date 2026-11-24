@@ -22,6 +22,7 @@ The table below lists the environment variables recognized by the service:
 | `CHUNK_TOKEN_SIZE` | integer | `512` | 2 to 8192 | Maximum estimated tokens per text chunk. Dense scripts count one token per character; chunks never exceed 30,000 bytes. |
 | `DATABASE_URL` | string | `""` | Valid PostgreSQL connection string | PostgreSQL connection string for document metadata and chunk storage. Always required in all modes. Pool size and statement timeout defaults are described under [Schema Migrations](#schema-migrations). |
 | `EMBEDDING_DIMENSIONS` | integer | `1024` | Bedrock: 256, 512, or 1024; OpenAI-compatible: 1 to 4096 | Embedding vector dimensions: requested from Bedrock Titan; with an OpenAI-compatible provider, the model's output size. Responses with a different length, missing values or non-finite values are rejected. Must match the vector index dimensions; the PostgreSQL vector backend accepts at most 2000. |
+| `EMBEDDING_INPUT_PROFILE` | file path | `""` (disabled) | Local JSON profile for the configured embedding provider and model | See [Embedding input profiles](#embedding-input-profiles). |
 | `EMBEDDING_PROVIDER` | string | `bedrock` | `bedrock` or `openai` | Embedding backend; selected independently of the synthesis provider. |
 | `EMBED_CONCURRENCY` | integer | `10` | 1 to 50 | Maximum number of concurrent embedding requests dispatched to the selected provider. |
 | `EMBED_TIMEOUT` | duration | `15s` | 1s to 2m | Deadline for each embedding call after acquiring a concurrency slot, including retries when supported. The caller context also bounds waiting for a slot. An earlier caller deadline takes precedence. |
@@ -83,6 +84,83 @@ The table below lists the environment variables recognized by the service:
 | `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including pending, delayed and running jobs. |
 
 ---
+
+## Embedding input profiles
+
+Set `EMBEDDING_INPUT_PROFILE` to the path of a UTF-8 JSON file. Mount the profile
+and any tokenizer artifact as read-only files accessible to the service. Startup
+validates both files locally. An empty setting retains estimated chunking.
+Profiles require a configured provider and are unavailable in offline fake mode.
+
+Every profile declares `provider`, `model` and `revision`. The first two must match
+the embedding provider and model settings. Use the provider's revision identifier
+when one is available. For a compatible endpoint, bind the revision to the
+deployment that serves the configured model ID and update the profile when the
+deployment changes. Every declared allowance is a positive integer.
+`max_bytes` measures UTF-8 text bytes and `max_characters` counts Unicode code
+points. The service checks every declared allowance.
+
+For Titan Text Embeddings V2, use the published character ceiling or a lower
+allowance. Byte-only profiles still enforce the 50,000-character ceiling. The
+model also has an 8,192-token window. This profile checks characters and
+provides no exact token counts.
+
+```json
+{
+  "provider": "bedrock",
+  "model": "amazon.titan-embed-text-v2:0",
+  "revision": "0",
+  "max_characters": 50000
+}
+```
+
+For the public OpenAI embeddings endpoint, `text-embedding-3-small`,
+`text-embedding-3-large` and `text-embedding-ada-002` support exact counting with
+`cl100k_base`. Use the published model ID as the revision for these IDs and set
+`max_tokens` to at most 8192. Obtain the published `cl100k_base.tiktoken` vocabulary
+out of band and specify its path, relative to the profile or absolute. Startup
+checks its SHA-256 against the published digest. Exact mode rejects other
+endpoints and model IDs. For a compatible server with documented character or
+byte limits, declare those limits and omit `max_tokens` and the tokenizer.
+Exact profiles include the version of the local Unicode 16 pre-tokenizer in
+their fingerprint.
+
+```json
+{
+  "provider": "openai",
+  "model": "text-embedding-3-small",
+  "revision": "text-embedding-3-small",
+  "max_tokens": 8192,
+  "tokenizer": {
+    "type": "tiktoken",
+    "version": "cl100k_base",
+    "sha256": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
+    "artifact": "cl100k_base.tiktoken"
+  }
+}
+```
+
+Ingestion applies the profile before embedding or persisting chunks. It splits
+normalized text at Unicode 17 grapheme boundaries, preferring nearby word
+boundaries and omitting overlap when splitting to meet the profile. It can
+revisit earlier boundaries when the first split leaves text that cannot fit.
+Ingestion fails if no valid partition fits the limits and the 10,000-chunk cap,
+or if the provider rejects an input for its model window. A model-window
+rejection ends the attempt without rechunking from the provider response. See
+[query errors](api.md#post-query) for the query response.
+
+Profiled chunk IDs incorporate the chunking algorithm version, profile
+fingerprint and chunk settings. Activate one profile across all replicas that
+share an ingestion queue. Drain pending and in-flight work before changing
+profile or rolling back so attempts use consistent settings. Existing completed
+documents retain their stored chunks and IDs. To rebuild them, replay stored
+document text into an isolated Quarry deployment with a fresh metadata database
+and vector target. Supply each original document UUID, collection, document
+type and caller metadata. The [document identity rules](api.md#document-identity)
+explain when a submission resolves to an existing document instead of queuing
+new work. Before cutover, check that replacement chunk IDs and vectors are
+present and that queries with citations resolve to the rebuilt chunk indices.
+Copying stored chunks to another vector backend preserves their geometry.
 
 ## Tracing
 
