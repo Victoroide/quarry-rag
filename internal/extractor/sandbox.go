@@ -31,12 +31,13 @@ var (
 	ErrExtractionUnavailable = errors.New("extractor: extraction is unavailable")
 )
 
-// SandboxConfig sets the child executable, resource limits and optional Word binary stories.
+// SandboxConfig sets the child executable, resource limits and optional Word stories.
 type SandboxConfig struct {
 	Executable    string
 	Timeout       time.Duration
 	MemoryLimitMB int
 	DOCStories    DOCStories
+	DOCXStories   DOCXStories
 }
 
 // Sandbox extracts documents in a separate process with bounded input and output.
@@ -45,6 +46,7 @@ type Sandbox struct {
 	timeout       time.Duration
 	memoryLimitMB int
 	docStories    DOCStories
+	docxStories   DOCXStories
 }
 
 // NewSandbox defaults to the current executable and checks its availability.
@@ -61,6 +63,9 @@ func NewSandbox(cfg SandboxConfig) (*Sandbox, error) {
 	if !cfg.DOCStories.valid() {
 		return nil, fmt.Errorf("%w: invalid DOC stories", ErrExtractionUnavailable)
 	}
+	if cfg.DOCXStories&^allDOCXStories != 0 {
+		return nil, fmt.Errorf("%w: invalid DOCX stories", ErrExtractionUnavailable)
+	}
 	if cfg.Executable == "" {
 		var err error
 		cfg.Executable, err = os.Executable()
@@ -72,14 +77,16 @@ func NewSandbox(cfg SandboxConfig) (*Sandbox, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrExtractionUnavailable, err)
 	}
-	return &Sandbox{executable: path, timeout: cfg.Timeout, memoryLimitMB: cfg.MemoryLimitMB, docStories: cfg.DOCStories}, nil
+	return &Sandbox{executable: path, timeout: cfg.Timeout, memoryLimitMB: cfg.MemoryLimitMB, docStories: cfg.DOCStories, docxStories: cfg.DOCXStories}, nil
 }
 
 type childHeader struct {
-	Type       FileType   `json:"type"`
-	TimeoutMS  int64      `json:"timeout_ms"`
-	MaxStack   int        `json:"max_stack"`
-	DOCStories DOCStories `json:"doc_stories,omitempty"`
+	Type              FileType    `json:"type"`
+	TimeoutMS         int64       `json:"timeout_ms"`
+	MaxStack          int         `json:"max_stack"`
+	DOCStories        DOCStories  `json:"doc_stories,omitempty"`
+	DOCXStories       DOCXStories `json:"docx_stories,omitempty"`
+	DOCXDetectionWork uint64      `json:"docx_detection_work,omitempty"`
 }
 
 type childResponse struct {
@@ -111,8 +118,12 @@ func (s *Sandbox) Extract(ctx context.Context, ft FileType, data []byte) (string
 	childCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	request := childHeader{Type: ft, TimeoutMS: s.timeout.Milliseconds(), MaxStack: childMaxStack}
-	if ft == FileTypeDOC {
+	switch ft {
+	case FileTypeDOC:
 		request.DOCStories = s.docStories
+	case FileTypeDOCX:
+		request.DOCXStories = s.docxStories
+		request.DOCXDetectionWork = docxDetectionWork(ctx)
 	}
 	header, err := json.Marshal(request)
 	if err != nil {
@@ -203,6 +214,10 @@ func RunChild(stdin io.Reader, stdout io.Writer) int {
 	if !header.DOCStories.valid() || (header.Type != FileTypeDOC && header.DOCStories != 0) {
 		return writeChildResponse(stdout, "", errors.New("extractor: invalid DOC stories"))
 	}
+	if header.DOCXStories&^allDOCXStories != 0 || header.DOCXDetectionWork > maxDOCXRelationshipsBytes ||
+		(header.Type != FileTypeDOCX && (header.DOCXStories != 0 || header.DOCXDetectionWork != 0)) {
+		return writeChildResponse(stdout, "", errors.New("extractor: invalid extraction header"))
+	}
 	debug.SetMaxStack(header.MaxStack)
 	// Prefer terminating the parser if the kernel must reclaim memory.
 	_ = os.WriteFile("/proc/self/oom_score_adj", []byte("1000"), 0o600)
@@ -217,10 +232,15 @@ func RunChild(stdin io.Reader, stdout io.Writer) int {
 		return writeChildResponse(stdout, "", err)
 	}
 	var text string
-	if hook != nil {
+	switch {
+	case hook != nil:
 		text, err = hook()
-	} else {
-		text, err = NewWithDOCStories(header.Type, header.DOCStories).Extract(ctx, bytes.NewReader(data))
+	default:
+		extractCtx := ctx
+		if header.Type == FileTypeDOCX {
+			extractCtx = withDOCXDetectionWork(ctx, header.DOCXDetectionWork)
+		}
+		text, err = NewWithStories(header.Type, header.DOCStories, header.DOCXStories).Extract(extractCtx, bytes.NewReader(data))
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return 1

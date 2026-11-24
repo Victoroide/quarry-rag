@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/extractor"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadExtractionSettings(t *testing.T) {
@@ -53,5 +54,31 @@ func TestLoadExtractionSettings(t *testing.T) {
 	}
 	if want, parseErr := extractor.ParseDOCStories("body,comments,headers"); parseErr != nil || cfg.DOCStories != want || want == 0 {
 		t.Fatalf("configured DOC stories: got %v, want %v (%v)", cfg.DOCStories, want, parseErr)
+	}
+}
+
+func TestLoadDOCXStories(t *testing.T) {
+	t.Setenv("GO_RAG_FAKE_MODE", "true")
+	t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
+	for _, tt := range []struct{ value, canonical string }{
+		{"", "body,footnotes,endnotes"},
+		{"comments, body ,headers,footers", "body,headers,footers,comments"},
+		{"endnotes", "endnotes"},
+	} {
+		t.Run(tt.canonical, func(t *testing.T) {
+			t.Setenv("DOCX_STORIES", tt.value)
+			cfg, err := Load()
+			require.NoError(t, err)
+			want, err := extractor.ParseDOCXStories(tt.canonical)
+			require.NoError(t, err)
+			require.Equal(t, want, cfg.DOCXStories)
+		})
+	}
+	for _, value := range []string{" ", "BODY", "images", "body,", "body,,headers", "body, body"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("DOCX_STORIES", value)
+			_, err := Load()
+			require.ErrorContains(t, err, "DOCX_STORIES")
+		})
 	}
 }

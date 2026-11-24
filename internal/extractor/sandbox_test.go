@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Victoroide/quarry-rag/internal/testutil/docxtest"
+	"github.com/stretchr/testify/require"
 )
 
 const docReadTestExecutable = "quarry-doc-reader"
@@ -147,6 +150,30 @@ func TestSandboxExtractsPDF(t *testing.T) {
 	}
 }
 
+func TestSandboxUsesDOCXStoryProfile(t *testing.T) {
+	data := docxPartsBytes(t, storyFixture(docxStrictNamespace, testDOCXStrictNS))
+	for _, list := range []string{"", "headers,comments"} {
+		t.Run(list, func(t *testing.T) {
+			profile := storyProfile(t, list)
+			sb, err := NewSandbox(SandboxConfig{Timeout: 5 * time.Second, DOCXStories: profile})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := sb.Extract(t.Context(), FileTypeDOCX, data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := NewDOCX(profile).Extract(t.Context(), bytes.NewReader(data))
+			if err != nil || got != want {
+				t.Fatalf("child got %q, want %q, error %v", got, want, err)
+			}
+			if _, err := sb.Extract(t.Context(), FileTypePDF, sandboxPDF("")); err != nil {
+				t.Fatalf("DOCX settings interfered with PDF extraction: %v", err)
+			}
+		})
+	}
+}
+
 func TestSandboxSurvivesParserStackOverflow(t *testing.T) {
 	sb := uploadSandbox(t, 15*time.Second)
 	data := sandboxPDF("/Bomb " + strings.Repeat("[", 6_000_000) + strings.Repeat("]", 6_000_000))
@@ -248,5 +275,76 @@ func TestRunChildRejectsInvalidInput(t *testing.T) {
 		if err := json.Unmarshal(out.Bytes(), &response); err != nil || code != 0 || response.Error != "extractor: invalid DOC stories" || response.Text != nil {
 			t.Fatalf("invalid story mask: code=%d response=%s decode=%v", code, &out, err)
 		}
+	}
+}
+
+func TestRunChildValidatesDOCXStoryMaskWithValidPayload(t *testing.T) {
+	docx := docxBytes(t, docxtest.Document(docxWordNamespace, testDOCXOfficeNS, docxtest.Paragraph("Readable source text.")))
+	pdf := sandboxPDF("")
+	for _, tt := range []struct {
+		name   string
+		header childHeader
+		data   []byte
+		want   string
+	}{
+		{"unknown DOCX mask bits", childHeader{Type: FileTypeDOCX, DOCXStories: 255}, docx, ""},
+		{"DOCX mask on PDF", childHeader{Type: FileTypePDF, DOCXStories: docxBody}, pdf, ""},
+		{"valid DOCX mask", childHeader{Type: FileTypeDOCX, DOCXStories: docxBody}, docx, "Readable source text."},
+		{"valid PDF control", childHeader{Type: FileTypePDF}, pdf, "Archive operating hours."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.header.TimeoutMS, tt.header.MaxStack = 5000, childMaxStack
+			header, err := json.Marshal(tt.header)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := bytes.NewReader(append(append(header, '\n'), tt.data...))
+			var out bytes.Buffer
+			if code := RunChild(input, &out); code != 0 {
+				t.Fatalf("child exited with %d: %s", code, &out)
+			}
+			var response childResponse
+			if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if tt.want == "" {
+				if response.Error != "extractor: invalid extraction header" || response.Text != nil {
+					t.Fatalf("expected only the invalid-header error, got %s", &out)
+				}
+			} else if response.Error != "" || response.Text == nil || *response.Text != tt.want {
+				t.Fatalf("expected successful extraction of %q, got %s", tt.want, &out)
+			}
+		})
+	}
+}
+
+func TestDOCXRenamedMainSharesUploadXMLWorkBudget(t *testing.T) {
+	profile := storyProfile(t, "body,headers")
+	// A race-instrumented child can take longer to read a full-budget fixture.
+	sandbox, err := NewSandbox(SandboxConfig{Timeout: 2 * time.Minute, DOCXStories: profile})
+	require.NoError(t, err)
+	for _, tt := range []struct {
+		name  string
+		extra int
+	}{{"exact limit", 0}, {"one byte above", 1}} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := docxtest.RenamedMainAtWorkLimit(t, maxDocumentXMLBytes, maxDOCXXMLWorkBytes+tt.extra)
+			ft, ctx, err := ResolveForExtraction(t.Context(), "renamed.docx", data)
+			require.NoError(t, err)
+			require.Equal(t, FileTypeDOCX, ft)
+			got, err := NewDOCX(profile).Extract(ctx, bytes.NewReader(data))
+			child, childErr := sandbox.Extract(ctx, ft, data)
+			if tt.extra == 0 {
+				require.NoError(t, err)
+				require.NoError(t, childErr)
+				require.Equal(t, 3, strings.Count(got, "[DOCX header]"))
+				require.Equal(t, got, child)
+			} else {
+				require.ErrorContains(t, err, "cumulative")
+				require.ErrorContains(t, childErr, "cumulative")
+				require.Empty(t, got)
+				require.Empty(t, child)
+			}
+		})
 	}
 }

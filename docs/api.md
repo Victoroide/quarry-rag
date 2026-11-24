@@ -229,9 +229,7 @@ BOM-marked UTF-16, replaces invalid encoding sequences, removes NUL and trims
 surrounding whitespace. The decoded text must fit the 1,000,000-byte limit.
 PDF, DOCX and DOC extraction uses an isolated process.
 
-DOCX extraction supports body text, text boxes, footnotes and endnotes in
-transitional and strict Open XML documents. Headers, footers and comments are
-not extracted. All extracted parts share the 1,000,000-byte text limit.
+DOCX uploads use the deployment's [story selection](#docx-story-selection).
 
 See [Word binary extraction](#word-binary-extraction) for `.doc` support.
 
@@ -252,7 +250,7 @@ Error Status Codes:
 | `409 Conflict` | `conflict` | Supplied `document_id` already exists with different extracted text, OCR input or collection |
 | `413 Payload Too Large` | `validation` | Upload exceeds `MAX_UPLOAD_BYTES` |
 | `415 Unsupported Media Type` | `extraction` | Extension and content disagree, or content has no supported type |
-| `422 Unprocessable Entity` | `extraction` | Document text extraction failed (e.g., malformed binary structure, extracted PDF, DOCX, DOC or text exceeding 1,000,000 bytes, expanded DOCX XML exceeding 16 MiB, a DOC stream declaring a size larger than the file, or PDF extraction work exceeding its limits) |
+| `422 Unprocessable Entity` | `extraction` | File parsing failed or exceeded the [extraction limits](architecture.md#extraction-boundaries) |
 | `422 Unprocessable Entity` | `extraction` | Isolated parser failure: `document could not be parsed`; extraction timeout: `document extraction exceeded the time limit` |
 | `503 Service Unavailable` | `busy` | All upload slots remain occupied beyond `EXTRACT_QUEUE_TIMEOUT`: `too many concurrent uploads`, with `Retry-After: 5` |
 | `503 Service Unavailable` | `extraction` | The extraction child cannot be started: `document extraction is unavailable` |
@@ -286,6 +284,41 @@ curl -X POST localhost:8081/ingest \
   -F "doc_type=research" \
   -F 'metadata={"author":"research-team"}'
 ```
+
+#### DOCX story selection
+
+The service extracts selected stories from transitional and strict Open XML
+documents. Body extraction includes text boxes. The parser follows internal
+relationships to related stories, including renamed notes. For older packages
+without a main-part relationship table, it also recognizes conventional notes
+alongside `word/document.xml`.
+
+Headers and footers come from section references. The parser includes a shared
+part once, in order of first reference within each story type. Comment
+selection follows live anchors in the body, section headers and footers, and
+referenced notes, even when their prose is excluded from the output. Tracked
+deletions, moved-from content and notes referenced only by deleted text are
+skipped. Unknown ignorable markup contributes content only when its children
+are marked for processing, and an element or selected branch that must
+understand a namespace the parser does not support fails the upload. Deleted
+and moved-away paragraph marks join adjacent paragraphs through content
+controls and other wrappers, but not across a table, table cell, text box,
+note or comment boundary. Output groups body, footnotes, endnotes, headers,
+footers and comments in that order. Each readable header, footer and comment
+has its own text block labeled `[DOCX header]`, `[DOCX footer]` or
+`[DOCX comment]`. Comment authors, initials, dates and IDs are excluded. Enable
+comments only where annotations are intended for indexing.
+
+An absent optional story is skipped. An unsafe or conflicting relationship,
+a missing target part, an unresolved reference to a selected comment or
+malformed XML fails extraction before the document is accepted.
+
+Changes to [`DOCX_STORIES`](configuration.md#environment-variables) apply to
+new uploads. To reprocess an existing document under a different selection,
+upload the original file again. If the extracted text changes, use a new
+document ID or delete the old document before reusing its ID. The
+[document identity rules](#document-identity) apply to the newly extracted
+text in its collection.
 
 #### Word binary extraction
 

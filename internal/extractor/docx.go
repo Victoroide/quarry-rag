@@ -21,6 +21,7 @@ const (
 	docxFooters
 	docxComments
 	defaultDOCXStories = docxBody | docxFootnotes | docxEndnotes
+	allDOCXStories     = defaultDOCXStories | docxHeaders | docxFooters | docxComments
 )
 
 // ParseDOCXStories parses a comma-separated set. An empty value selects the defaults.

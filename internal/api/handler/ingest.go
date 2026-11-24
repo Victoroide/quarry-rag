@@ -168,7 +168,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		return
 	}
 
-	ft, err := extractor.ResolveContext(r.Context(), header.Filename, fileData)
+	ft, extractCtx, err := extractor.ResolveForExtraction(r.Context(), header.Filename, fileData)
 	if err != nil {
 		writeExtractionError(rw, r, err)
 		return
@@ -180,9 +180,9 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		extract := tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
 			return extractor.New(ft).Extract(ctx, bytes.NewReader(data))
 		})
-		text, extractErr = extract(r.Context(), ft, fileData)
+		text, extractErr = extract(extractCtx, ft, fileData)
 	} else {
-		text, extractErr = opts.extract(r.Context(), ft, fileData)
+		text, extractErr = opts.extract(extractCtx, ft, fileData)
 	}
 	ocrPending := extractErr != nil && opts.ocr && ft == extractor.FileTypePDF && extractionErrorIs(extractErr, extractor.ErrNoText)
 	if extractErr != nil && !ocrPending {

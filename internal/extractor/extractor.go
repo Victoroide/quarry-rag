@@ -49,13 +49,19 @@ func New(ft FileType) Extractor {
 
 // NewWithDOCStories configures optional stories when extracting Word binary files.
 func NewWithDOCStories(ft FileType, stories DOCStories) Extractor {
+	return NewWithStories(ft, stories, 0)
+}
+
+// NewWithStories configures the optional stories of Word binary and Open XML
+// files. A zero DOCX selection uses the DOCX defaults.
+func NewWithStories(ft FileType, doc DOCStories, docx DOCXStories) Extractor {
 	switch ft {
 	case FileTypePDF:
 		return &pdfExtractor{}
 	case FileTypeDOCX:
-		return NewDOCX(0)
+		return NewDOCX(docx)
 	case FileTypeDOC:
-		return &docExtractor{stories: stories}
+		return &docExtractor{stories: doc}
 	case FileTypeText:
 		return &textExtractor{}
 	default:
