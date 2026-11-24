@@ -34,6 +34,14 @@ func TestIngestSourceStorageReference(t *testing.T) {
 	require.Contains(t, ocr, "(#document-identity)")
 }
 
+func TestDOCReingestRefersToOmittedIDPolicy(t *testing.T) {
+	api, err := os.ReadFile("../../docs/api.md")
+	require.NoError(t, err)
+	section := ingestDocSection(t, string(api), "#### Word binary extraction", "\n#### ")
+	require.Regexp(t, "For uploads that omit `document_id`, see\\s+\\[document identity\\]\\(#document-identity\\)", section)
+	require.NotContains(t, section, "to use collection matching")
+}
+
 func ingestDocSection(t *testing.T, doc, start, end string) string {
 	t.Helper()
 	_, section, found := strings.Cut(doc, start)

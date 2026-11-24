@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"net/http"
@@ -55,7 +56,9 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		handler.WithOCR(deps.Config.OCRProvider == "textract" && !deps.Config.FakeMode),
 	}
 	if deps.Config.ExtractIsolation {
-		sb, err := extractor.NewSandbox(extractor.SandboxConfig{Timeout: deps.Config.ExtractTimeout, MemoryLimitMB: deps.Config.ExtractMemoryLimitMB})
+		sb, err := extractor.NewSandbox(extractor.SandboxConfig{
+			Timeout: deps.Config.ExtractTimeout, MemoryLimitMB: deps.Config.ExtractMemoryLimitMB, DOCStories: deps.Config.DOCStories,
+		})
 		if err != nil {
 			slog.Error("initialize document extraction", "error", err)
 			ingestOpts = append(ingestOpts, handler.WithExtractor(func(context.Context, extractor.FileType, []byte) (string, error) {
@@ -64,6 +67,10 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		} else {
 			ingestOpts = append(ingestOpts, handler.WithExtractor(tracing.WrapExtract(sb.Extract)))
 		}
+	} else if stories := deps.Config.DOCStories; stories != 0 {
+		ingestOpts = append(ingestOpts, handler.WithExtractor(tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
+			return extractor.NewWithDOCStories(ft, stories).Extract(ctx, bytes.NewReader(data))
+		})))
 	}
 	probes := deps.Probes
 	if probes == nil {

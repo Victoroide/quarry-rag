@@ -14,6 +14,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
+	"github.com/Victoroide/quarry-rag/internal/extractor"
 )
 
 // Query answer policies control which answer modes callers can use.
@@ -99,6 +100,7 @@ type Config struct {
 	ExtractConcurrency       int
 	ExtractMemoryLimitMB     int
 	ExtractQueueTimeout      time.Duration
+	DOCStories               extractor.DOCStories
 	MaxAllowedDocumentIDs    int
 	RequireDocumentAllowlist bool
 
@@ -241,6 +243,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.ExtractQueueTimeout, err = envDurationOrDefault("EXTRACT_QUEUE_TIMEOUT", 5*time.Second); err != nil {
 		return nil, err
+	}
+	if cfg.DOCStories, err = extractor.ParseDOCStories(os.Getenv("DOC_STORIES")); err != nil {
+		return nil, fmt.Errorf("config: DOC_STORIES: %w", err)
 	}
 
 	if cfg.RequireDocumentAllowlist, err = envBoolOrDefault("REQUIRE_DOCUMENT_ALLOWLIST", false); err != nil {

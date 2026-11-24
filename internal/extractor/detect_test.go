@@ -105,7 +105,7 @@ func TestEmptyExtractedTextUsesSentinel(t *testing.T) {
 	if !errors.Is(err, ErrNoText) {
 		t.Fatalf("empty docx: %v", err)
 	}
-	_, err = cleanDOCText(" ")
+	_, err = New(FileTypeDOC).Extract(t.Context(), bytes.NewReader(docFixture(t, docCompressedPiece(t, " \r"))))
 	if !errors.Is(err, ErrNoText) {
 		t.Fatalf("empty doc: %v", err)
 	}

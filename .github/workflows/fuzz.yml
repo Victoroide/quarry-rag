@@ -27,6 +27,10 @@ jobs:
             target: FuzzResolveContext
           - package: ./internal/extractor
             target: FuzzExtractors
+          - package: ./internal/extractor
+            target: FuzzDOCFIBAndPieces
+          - package: ./internal/extractor
+            target: FuzzDOCStoryPLC
           - package: ./internal/chunker
             target: FuzzChunk
           - package: ./internal/chunker

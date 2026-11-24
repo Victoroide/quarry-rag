@@ -31,11 +31,12 @@ var (
 	ErrExtractionUnavailable = errors.New("extractor: extraction is unavailable")
 )
 
-// SandboxConfig sets the child executable, wall-clock timeout and soft memory limit.
+// SandboxConfig sets the child executable, resource limits and optional Word binary stories.
 type SandboxConfig struct {
 	Executable    string
 	Timeout       time.Duration
 	MemoryLimitMB int
+	DOCStories    DOCStories
 }
 
 // Sandbox extracts documents in a separate process with bounded input and output.
@@ -43,6 +44,7 @@ type Sandbox struct {
 	executable    string
 	timeout       time.Duration
 	memoryLimitMB int
+	docStories    DOCStories
 }
 
 // NewSandbox defaults to the current executable and checks its availability.
@@ -56,6 +58,9 @@ func NewSandbox(cfg SandboxConfig) (*Sandbox, error) {
 	if cfg.Timeout < time.Millisecond || cfg.Timeout > 10*time.Minute || cfg.MemoryLimitMB < 64 || cfg.MemoryLimitMB > 8192 {
 		return nil, fmt.Errorf("%w: invalid extraction limits", ErrExtractionUnavailable)
 	}
+	if !cfg.DOCStories.valid() {
+		return nil, fmt.Errorf("%w: invalid DOC stories", ErrExtractionUnavailable)
+	}
 	if cfg.Executable == "" {
 		var err error
 		cfg.Executable, err = os.Executable()
@@ -67,19 +72,36 @@ func NewSandbox(cfg SandboxConfig) (*Sandbox, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrExtractionUnavailable, err)
 	}
-	return &Sandbox{executable: path, timeout: cfg.Timeout, memoryLimitMB: cfg.MemoryLimitMB}, nil
+	return &Sandbox{executable: path, timeout: cfg.Timeout, memoryLimitMB: cfg.MemoryLimitMB, docStories: cfg.DOCStories}, nil
 }
 
 type childHeader struct {
-	Type      FileType `json:"type"`
-	TimeoutMS int64    `json:"timeout_ms"`
-	MaxStack  int      `json:"max_stack"`
+	Type       FileType   `json:"type"`
+	TimeoutMS  int64      `json:"timeout_ms"`
+	MaxStack   int        `json:"max_stack"`
+	DOCStories DOCStories `json:"doc_stories,omitempty"`
 }
 
 type childResponse struct {
-	Text  *string `json:"text,omitempty"`
-	Error string  `json:"error,omitempty"`
+	Text      *string        `json:"text,omitempty"`
+	Error     string         `json:"error,omitempty"`
+	ErrorKind childErrorKind `json:"error_kind,omitempty"`
 }
+
+type childErrorKind string
+
+const (
+	childErrorEOF         childErrorKind = "unexpected_eof"
+	childErrorContentSize childErrorKind = "content_too_large"
+)
+
+type childExtractionError struct {
+	message string
+	cause   error
+}
+
+func (e childExtractionError) Error() string { return e.message }
+func (e childExtractionError) Unwrap() error { return e.cause }
 
 // Extract runs one child process, terminating it on cancellation or exceeded limits.
 func (s *Sandbox) Extract(ctx context.Context, ft FileType, data []byte) (string, error) {
@@ -88,7 +110,11 @@ func (s *Sandbox) Extract(ctx context.Context, ft FileType, data []byte) (string
 	}
 	childCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	header, err := json.Marshal(childHeader{Type: ft, TimeoutMS: s.timeout.Milliseconds(), MaxStack: childMaxStack})
+	request := childHeader{Type: ft, TimeoutMS: s.timeout.Milliseconds(), MaxStack: childMaxStack}
+	if ft == FileTypeDOC {
+		request.DOCStories = s.docStories
+	}
+	header, err := json.Marshal(request)
 	if err != nil {
 		return "", fmt.Errorf("%w: header: %w", ErrExtractionFailed, err)
 	}
@@ -123,10 +149,23 @@ func (s *Sandbox) Extract(ctx context.Context, ft FileType, data []byte) (string
 		return "", ErrExtractionFailed
 	}
 	if response.Error != "" {
-		return "", errors.New(response.Error)
+		switch response.ErrorKind {
+		case childErrorEOF:
+			return "", childExtractionError{response.Error, io.ErrUnexpectedEOF}
+		case childErrorContentSize:
+			return "", childExtractionError{response.Error, ErrContentTooLarge}
+		default:
+			return "", errors.New(response.Error)
+		}
 	}
 	if response.Text == nil {
 		return "", ErrExtractionFailed
+	}
+	if err := childCtx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", ErrExtractionTimeout
+		}
+		return "", err
 	}
 	return *response.Text, nil
 }
@@ -161,6 +200,9 @@ func RunChild(stdin io.Reader, stdout io.Writer) int {
 	if decodeErr := json.Unmarshal(line, &header); decodeErr != nil || header.TimeoutMS < 1 || header.TimeoutMS > (10*time.Minute).Milliseconds() || header.MaxStack < 1 || header.MaxStack > childMaxStack {
 		return writeChildResponse(stdout, "", errors.New("extractor: invalid extraction header"))
 	}
+	if !header.DOCStories.valid() || (header.Type != FileTypeDOC && header.DOCStories != 0) {
+		return writeChildResponse(stdout, "", errors.New("extractor: invalid DOC stories"))
+	}
 	debug.SetMaxStack(header.MaxStack)
 	// Prefer terminating the parser if the kernel must reclaim memory.
 	_ = os.WriteFile("/proc/self/oom_score_adj", []byte("1000"), 0o600)
@@ -178,7 +220,7 @@ func RunChild(stdin io.Reader, stdout io.Writer) int {
 	if hook != nil {
 		text, err = hook()
 	} else {
-		text, err = New(header.Type).Extract(ctx, bytes.NewReader(data))
+		text, err = NewWithDOCStories(header.Type, header.DOCStories).Extract(ctx, bytes.NewReader(data))
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return 1
@@ -190,6 +232,12 @@ func writeChildResponse(stdout io.Writer, text string, err error) int {
 	response := childResponse{Text: &text}
 	if err != nil {
 		response.Text, response.Error = nil, err.Error()
+		switch {
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			response.ErrorKind = childErrorEOF
+		case errors.Is(err, ErrContentTooLarge):
+			response.ErrorKind = childErrorContentSize
+		}
 	}
 	if encodeErr := json.NewEncoder(stdout).Encode(response); encodeErr != nil {
 		return 1

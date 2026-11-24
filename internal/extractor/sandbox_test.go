@@ -1,15 +1,20 @@
 package extractor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+const docReadTestExecutable = "quarry-doc-reader"
 
 func TestMain(m *testing.M) {
 	childHooks = map[FileType]func() (string, error){
@@ -18,9 +23,88 @@ func TestMain(m *testing.M) {
 		"huge":  func() (string, error) { return strings.Repeat("x", 9<<20), nil },
 	}
 	if len(os.Args) == 2 && os.Args[1] == ChildArg && os.Getenv(ChildEnv) == "1" {
+		if filepath.Base(os.Args[0]) == docReadTestExecutable {
+			signal := filepath.Join(filepath.Dir(os.Args[0]), "reading")
+			os.Exit(RunChild(&signaledDOCReader{reader: bufio.NewReader(os.Stdin), signal: signal}, os.Stdout))
+		}
 		os.Exit(RunChild(os.Stdin, os.Stdout))
 	}
 	os.Exit(m.Run())
+}
+
+type signaledDOCReader struct {
+	reader *bufio.Reader
+	signal string
+	header bool
+}
+
+func (r *signaledDOCReader) Read(data []byte) (int, error) {
+	if !r.header {
+		r.header = true
+		header, err := r.reader.ReadSlice('\n')
+		return copy(data, header), err
+	}
+	if err := os.WriteFile(r.signal, nil, 0o600); err != nil {
+		return 0, err
+	}
+	time.Sleep(time.Minute) // The caller cancels while the child is reading the source.
+	return r.reader.Read(data)
+}
+
+func TestSandboxDOCCancelsDuringSourceRead(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "reading")
+	shim := filepath.Join(dir, docReadTestExecutable)
+	if linkErr := os.Symlink(self, shim); linkErr != nil {
+		t.Fatal(linkErr)
+	}
+	sb, err := NewSandbox(SandboxConfig{Executable: shim, Timeout: 15 * time.Second, DOCStories: mustDOCStories(t, "footnotes")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := docFixture(t, docCompressedPiece(t, "Body\r"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type extraction struct {
+		text string
+		err  error
+	}
+	done := make(chan extraction, 1)
+	go func() {
+		text, err := sb.Extract(ctx, FileTypeDOC, source)
+		done <- extraction{text, err}
+	}()
+	limit := time.NewTimer(8 * time.Second)
+	defer limit.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case result := <-done:
+			t.Fatalf("child returned before cancellation: %+v", result)
+		case <-limit.C:
+			t.Fatal("child did not begin reading DOC source")
+		case <-tick.C:
+			if _, err := os.Stat(ready); err == nil {
+				cancel()
+				select {
+				case result := <-done:
+					if result.text != "" || !errors.Is(result.err, context.Canceled) {
+						t.Fatalf("canceled child returned %+v", result)
+					}
+				case <-limit.C:
+					t.Fatal("canceled child did not exit")
+				}
+				return
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+		}
+	}
 }
 
 func sandboxPDF(pages string) []byte {
@@ -149,6 +233,20 @@ func TestRunChildRejectsInvalidInput(t *testing.T) {
 		var out bytes.Buffer
 		if code := RunChild(strings.NewReader(input), &out); code == 0 && !strings.Contains(out.String(), `"error"`) {
 			t.Fatalf("invalid input accepted: code=%d output=%s", code, &out)
+		}
+	}
+	for _, tc := range []struct {
+		header string
+		source []byte
+	}{
+		{`{"type":"doc","timeout_ms":1000,"max_stack":67108864,"doc_stories":32}` + "\n", docFixture(t, docCompressedPiece(t, "Body\r"))},
+		{`{"type":"pdf","timeout_ms":1000,"max_stack":67108864,"doc_stories":1}` + "\n", sandboxPDF("")},
+	} {
+		var out bytes.Buffer
+		code := RunChild(bytes.NewReader(append([]byte(tc.header), tc.source...)), &out)
+		var response childResponse
+		if err := json.Unmarshal(out.Bytes(), &response); err != nil || code != 0 || response.Error != "extractor: invalid DOC stories" || response.Text != nil {
+			t.Fatalf("invalid story mask: code=%d response=%s decode=%v", code, &out, err)
 		}
 	}
 }
