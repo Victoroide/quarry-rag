@@ -85,7 +85,8 @@ type QueryContext struct {
 	FilterDocType string
 	AnswerMode    domain.AnswerMode
 	// EvidenceVisibility checks vector candidates against current stored chunks.
-	EvidenceVisibility domain.EvidenceVisibility
+	EvidenceVisibility   domain.EvidenceVisibility
+	untaggedIncarnations map[string]string
 	// HostedVisibilityRefill enables strict chunk checks and bounded hosted recovery.
 	HostedVisibilityRefill        bool
 	HostedVisibilityExtraRequests int

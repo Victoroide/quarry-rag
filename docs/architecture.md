@@ -96,10 +96,10 @@ sequenceDiagram
     alt Retryable failure
         Worker->>Postgres: Reschedule with backoff and last_error
     else Permanent or exhausted failure
+        Worker->>Pinecone: Remove partial vectors under the current lease
         Worker->>Postgres: Record failed and last_error, then remove job
-        Worker->>Pinecone: Remove partial vectors
     end
-    Note over Worker,Pinecone: Deletion clears vectors again after removing the row, and late writes compensate on failed completion
+    Note over Worker,Pinecone: Stale workers stop issuing mutations when a claim or completion check rejects ownership
 ```
 
 ### Ingestion Stages
@@ -112,9 +112,9 @@ sequenceDiagram
    - Injects `doc_type`, and `collection` when non-empty, into individual chunk metadata; document labels are stored at acceptance.
    - Upserts vectors into Pinecone only under the default namespace (`""`), with `doc_id` metadata identifying each document.
    - Splits each vector upsert under the configured record and byte limits. Metadata above 40,960 serialized JSON bytes per record is rejected before writing.
-   - Retries transient vector index failures with a per-attempt `PINECONE_TIMEOUT` and full-jitter exponential backoff from 200 ms, capped at 5 seconds. Writes and deletions use up to `PINECONE_MAX_ATTEMPTS` attempts; queries use at most three. Parent cancellation stops retries.
-   - After writing, the sample probe searches with the last embedded chunk, filtered to the document and limited to ten results. The LSN probe uses one result without values or metadata and compares the indexed watermark with the largest receipt from the original batches. Both start immediately and back off from 200 ms to 2 s within the configured wait. Each wait holds its worker. Expiry allows completion and logs a warning. Cancellation and lease loss end the attempt. An LSN write retried after a timeout, lost response or gateway error leaves no receipt, because the failed request can still be applied later, so the attempt records `unknown`. Throttled and unconnected requests retry normally.
-4. **Transactional completion**: The worker replaces chunk metadata and, for the PostgreSQL vector backend, embeddings, then commits completion and the index visibility observation together. Document status and the current claim token guard the transaction. Chunk, vector and fingerprint writes run before the job row is locked, so lease renewals continue during slow persistence; the final lock re-tests the lease against the database clock. Document content, metadata, preview and fingerprint already exist before acceptance returns.
+   - See [Pinecone request limits and retries](deployment.md#pinecone-vector-index).
+   - The sample probe searches with the last embedded chunk, filtered to the document and limited to ten results. It checks the write-time incarnation and matches the attempt for tagged writes. The LSN probe compares the indexed watermark with the largest receipt from the original batches. Both start immediately and back off from 200 ms to 2 s within the configured wait. Each wait holds its worker. Expiry allows completion and logs a warning. Cancellation and lease loss end the attempt.
+4. **Transactional completion**: The worker replaces chunk metadata and, for the PostgreSQL vector backend, embeddings, then commits completion and the index visibility observation together. Document incarnation, status and the current claim token guard the transaction. Chunk, vector and fingerprint writes run before the job row is locked, so lease renewals continue during slow persistence; the final lock re-tests the lease against the database clock. Document content, metadata, preview and fingerprint already exist before acceptance returns.
 
 Before chunking, documents with recognizable HTML markup have comments, script and style content removed. Block elements become paragraph breaks, line-break elements become newlines, remaining tags are removed, and HTML entities are decoded. Plain text without markup retains comparison operators and literal entities.
 
@@ -177,7 +177,7 @@ sequenceDiagram
         Pinecone-->>Retrieval: Scored chunks
     end
     Retrieval->>Retrieval: filterChunksByAllowedDocIDs (tenant allowlist enforcement)
-    Retrieval->>Retrieval: Remove chunks of unavailable documents using PostgreSQL
+    Retrieval->>Metadata: Check current chunks in PostgreSQL
 
     opt Reranking enabled
         Handler->>Rerank: Run(QueryContext)
@@ -208,7 +208,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
 1. **DecomposeStage**: Logs the query byte length and first 12 hexadecimal SHA-256 digits without the query text. Sets the sub-query count from multi-need surface signals (comparison keywords, conjunctions, aggregation markers). Makes no database or generation calls.
 2. **RoutingStage**:
    - An empty allowlist skips embedding and retrieval. Otherwise, embeds the incoming query once with the configured embedding provider. Explicit `global` skips the routing probe.
-   - Automatic routing and explicit `local` probe the top five candidates within the request's collection, allowlist and document type. Entity matching uses the stored previews of visible candidates.
+   - Automatic routing and explicit `local` probe the top five candidates within the request's collection, allowlist and document type. It checks the candidates against current completed chunks and reads their eligible previews in the same PostgreSQL statement.
    - Evaluates whether to route to `LOCAL` or `GLOBAL` retrieval according to [`ROUTING_POLICY`](configuration.md#environment-variables):
      - Explicit `global` selects `GLOBAL`. Explicit `local` selects `LOCAL` when a visible candidate exists, regardless of score or sub-query count.
      - If the similarity probe fails or no visible candidate remains, `GLOBAL` retrieval is selected without discarding the query embedding.
@@ -219,7 +219,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
    - Queries the configured vector backend using the embedding produced during routing.
    - Searches apply `filter_doc_type`, `collection` and `allowed_document_ids` in the default namespace before top-K selection. Legacy and explicit `LOCAL` search the routed document and fetch a scope-wide supplement if fewer than three chunks return. Automatic evidence routing fetches the larger of five hits or top-K from the original scope, and routes from only the first five. `GLOBAL` verifies every hit of that search in score order before applying top-K. `LOCAL` searches the target even at small limits, using each spelling of the document ID the vector store returned for it, and fills sparse results from the verified scope hits with target chunks first. Allowlists above 10000 IDs require one sequential query per group.
    - Retains the allowlist post-filter before synthesis as defense in depth. A nil allowlist allows all documents; an empty allowlist denies all documents.
-   - Checks document visibility in PostgreSQL after the allowlist filter. Automatic evidence routing verifies the hit's document, chunk index and text against current completed rows and reads probe previews in the same statement snapshot. It checks candidates again before reranking, generation and each JSON or SSE release. Lookup failures stop the query. Pinecone deployments can enable [hosted visibility refill](#hosted-visibility-refill).
+   - Applies the [current-evidence check](api.md#post-query) after the allowlist filter and before merging candidates. It checks candidates again before reranking, generation and each JSON or SSE release. Lookup failures stop the query. Pinecone deployments can enable [hosted visibility refill](#hosted-visibility-refill).
 4. **RerankStage**: Applies optional [reranking](api.md#post-query) before context selection.
 5. **SynthesisStage**:
    - When [`MIN_RELEVANCE_SCORE`](configuration.md#environment-variables) is positive, drops chunks below it before adaptive trimming. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).
@@ -269,6 +269,12 @@ has no refill path.
 
 ---
 
+### Worker vector mutations
+
+Startup cleanup, upserts and terminal cleanup validate the processing document and live lease before each physical mutation. The worker records a claim in PostgreSQL, releases its connection during the provider call, then checkpoints the outcome. PostgreSQL calculates expiry from its own clock and the remaining call budget. A lost reply, partial acknowledgment or expired claim records uncertainty that survives subsequent successes. Tagged worker attempts use separate physical targets. Completion publishes the winning target with the chunk metadata. Any unresolved mutation on a shared untagged target prevents completion. pgvector writes commit with the chunk metadata in PostgreSQL.
+
+New untagged Pinecone and memory vectors store their claimed incarnation for retrieval. Completion records when those vectors are required to carry it. Untagged records use logical chunk IDs as physical keys, and cleanup targets them by document ID and the absence of tagged ownership.
+
 ## Data Model
 
 Embedded SQL migrations define the relational schema and apply in numeric order at service startup. The diagram shows the core service metadata tables and columns. See the [grant catalog](grant-catalog.md) for authorization storage. The optional vector table is described below.
@@ -282,7 +288,7 @@ Embedded SQL migrations define the relational schema and apply in numeric order 
 
 - **`documents`**: Stores primary document records, full content, status lifecycle (`processing`, `completed`, `failed`), extracted prefix preview, file metadata, object storage references, document labels, and a non-null `collection TEXT` defaulting to `''` with an index on `(collection, id)`. For private uploads, `fingerprint` incorporates the document UUID so equal content has different digests across identities.
 - **`chunks`**: Stores segmented text blocks and approximate token counts linked to parent documents via cascading foreign keys.
-- **`ingest_jobs`**: Stores pending or running work, attempt counts, lease ownership and expiry, retry scheduling, and the latest error. Deleting a document cascades to its job.
+- **`ingest_jobs`**: Stores pending or running work, attempt counts, lease ownership and expiry, retry scheduling, and the latest error. Each claim assigns a new lease token, including when shutdown or a failed-job requeue allows reuse of an attempt number. Deleting a document cascades to its job.
 - **`document_fingerprints`**: Maps collection-scoped SHA-256 content fingerprints to document UUIDs accepted under the `collection` policy.
 
 ---
@@ -351,8 +357,8 @@ search results in PostgreSQL order, including its collation for tied chunk IDs.
 
 - An advisory transaction lock serializes PostgreSQL admission across replicas. When acceptance needs a slot, PostgreSQL checks capacity and commits the document change and pending job together. See [queue admission and retries](api.md#queue-admission-and-retries) for the HTTP behavior.
 - [`INGEST_WORKERS`](configuration.md#environment-variables) sets worker loops per process. Each loop claims due jobs with `FOR UPDATE SKIP LOCKED` and renews its lease every `INGEST_LEASE / 3`. Polling discovers persisted work even when a notification is missed or another replica accepts it.
-- Expired leases are reclaimed. Every attempt first removes existing vectors for the document. Retryable failures use exponential backoff from 5 seconds to 5 minutes plus up to 1 second of jitter. Processing failures that are permanent or exhaust attempts remove partial vectors under the live lease before recording `failed` and `last_error`. Jobs exhausted through expired leases are failed during claiming; their remaining vectors stay hidden by document status and are removed before any requeued attempt.
-- Deletion cascades to the job. Completion requires both a processing document and its owned lease; if deletion wins, the worker removes any late vectors.
+- Expired leases are reclaimed. Every hosted attempt runs cleanup for its own target before writing. Retryable failures use exponential backoff from 5 seconds to 5 minutes plus up to 1 second of jitter. Processing failures that are permanent or exhaust attempts remove partial vectors under the live lease before recording `failed` and `last_error`. Jobs exhausted through expired leases are failed during claiming. Their remaining vectors stay hidden by document status.
+- Deletion cascades to the job. Completion requires both a processing document and its current lease. See [worker vector mutations](#worker-vector-mutations).
 
 ### Graceful Shutdown Sequence
 

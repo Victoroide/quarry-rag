@@ -65,7 +65,7 @@ func TestVisibilityLookupFailureFailsClosed(t *testing.T) {
 	qc := &QueryContext{QueryEmbedding: []float32{1, 0}, RetrievalMode: "GLOBAL"}
 	err := NewRetrievalStageWithVisibility(visibilityRetriever(t), vis).Run(t.Context(), qc)
 	require.ErrorIs(t, err, lookupErr)
-	require.ErrorContains(t, err, "retrieval_stage: visibility:")
+	require.ErrorContains(t, err, "retriever: visibility:")
 	require.Empty(t, qc.RetrievedChunks)
 	require.Zero(t, qc.TopScore)
 }

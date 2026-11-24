@@ -169,10 +169,13 @@ func TestHostedRefillWithPostgreSQLVisibility(t *testing.T) {
 			}
 			amb := llm.NewAmbassador(cfg)
 			amb.SetClient(llm.NewFakeConverser())
+			expected := live
+			require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT incarnation::text FROM documents WHERE id=$1`, live.Chunk.DocumentID).
+				Scan(&expected.ObservedIncarnation))
 			reranks := 0
 			checkRerank := refillReranker(func(hits []domain.ScoredChunk) {
 				reranks++
-				require.Equal(t, []domain.ScoredChunk{live}, hits)
+				require.Equal(t, []domain.ScoredChunk{expected}, hits)
 			})
 			ret := retriever.NewRetriever(tracing.WrapVectorStore(idx, "pinecone"), emb, .7, 10)
 			h := handler.QueryHandler(ret, amb, cfg, c.Pool, handler.WithReranker(checkRerank))

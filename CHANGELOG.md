@@ -53,6 +53,7 @@ Notable changes are grouped by release.
 
 ### Fixed
 
+- Ingestion checks the current document incarnation and lease before vector mutations. Queries validate the document lifetime before using search hits for routing or evidence.
 - Failed-document retries respect the persisted ingestion queue limit.
 - The API reference distinguishes JSON responses from streamed query answers and explains how callers recognize stream completion or interruption.
 - Deployment prerequisites now follow the selected vector store, model providers and optional AWS integrations. Offline setup documents the database, embedding dimensions and multipart parser behavior.

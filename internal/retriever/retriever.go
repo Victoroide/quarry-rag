@@ -144,6 +144,12 @@ func NewRetriever(vs domain.VectorStore, emb domain.EmbeddingProvider, threshold
 	return r
 }
 
+// ObservesVectorIncarnation reports whether hits carry their own SQL observation.
+func (r *Retriever) ObservesVectorIncarnation() bool {
+	store, ok := r.vectorStore.(domain.VectorIncarnationReader)
+	return ok && store.ObservesVectorIncarnation()
+}
+
 // Result holds the retrieval output.
 type Result struct {
 	Chunks   []domain.ScoredChunk
@@ -172,7 +178,12 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, mode RetrievalMo
 // embedding the same text twice (once in routing, once here).
 // LOCAL searches localDocID first and tops up sparse results from filter.
 func (r *Retriever) RetrieveWithEmbedding(ctx context.Context, embedding []float32, mode RetrievalMode, localDocID string, topK int, filter domain.VectorFilter) (*Result, error) {
-	return r.retrieveWithEmbedding(ctx, embedding, mode, localDocID, nil, topK, filter, true)
+	return r.retrieveWithEmbedding(ctx, embedding, mode, localDocID, nil, topK, filter, true, nil)
+}
+
+// RetrieveWithVisibility checks candidate evidence before merging and trimming hits.
+func (r *Retriever) RetrieveWithVisibility(ctx context.Context, embedding []float32, mode RetrievalMode, localDocID string, topK int, filter domain.VectorFilter, visible func(context.Context, []domain.ScoredChunk) ([]domain.ScoredChunk, error)) (*Result, error) {
+	return r.retrieveWithEmbedding(ctx, embedding, mode, localDocID, nil, topK, filter, true, visible)
 }
 
 // RetrieveEvidenceLocal searches only the selected document. localKeys lists
@@ -180,7 +191,7 @@ func (r *Retriever) RetrieveWithEmbedding(ctx context.Context, embedding []float
 // differ from the canonical localDocID; empty means localDocID alone. The caller
 // can fill sparse results from the previously fetched scope after visibility checks.
 func (r *Retriever) RetrieveEvidenceLocal(ctx context.Context, embedding []float32, localDocID string, localKeys []string, topK int, filter domain.VectorFilter) (*Result, error) {
-	return r.retrieveWithEmbedding(ctx, embedding, RetrievalModeLocal, localDocID, localKeys, topK, filter, false)
+	return r.retrieveWithEmbedding(ctx, embedding, RetrievalModeLocal, localDocID, localKeys, topK, filter, false, nil)
 }
 
 // ChunkLimit applies the retriever default when no explicit limit was supplied.
@@ -191,31 +202,40 @@ func (r *Retriever) ChunkLimit(topK int) int {
 	return r.topK
 }
 
-func (r *Retriever) retrieveWithEmbedding(ctx context.Context, embedding []float32, mode RetrievalMode, localDocID string, localKeys []string, topK int, filter domain.VectorFilter, topUp bool) (*Result, error) {
+func (r *Retriever) retrieveWithEmbedding(ctx context.Context, embedding []float32, mode RetrievalMode, localDocID string, localKeys []string, topK int, filter domain.VectorFilter, topUp bool, visible func(context.Context, []domain.ScoredChunk) ([]domain.ScoredChunk, error)) (*Result, error) {
 	topK = r.ChunkLimit(topK)
 	if filter.MatchesNothing() {
 		return &Result{Mode: mode}, nil
 	}
 	mode, queryFilter := retrievalScopeWithKeys(mode, localDocID, localKeys, filter)
-	chunks, exact, err := r.queryFiltered(ctx, embedding, topK, queryFilter)
+	chunks, exact, err := r.queryFiltered(ctx, embedding, topK, queryFilter, visible != nil)
 	if err != nil {
 		return nil, fmt.Errorf("retriever: query: %w", err)
 	}
-	if topUp && mode == RetrievalModeLocal && len(chunks) < minLocalChunks {
-		extra, scopeExact, err := r.queryFiltered(ctx, embedding, topK, filter)
-		if err != nil {
-			return nil, fmt.Errorf("retriever: top up: %w", err)
+	toppedUp := topUp && mode == RetrievalModeLocal && len(chunks) < minLocalChunks
+	if toppedUp {
+		extra, scopeExact, topUpErr := r.queryFiltered(ctx, embedding, topK, filter, visible != nil)
+		if topUpErr != nil {
+			return nil, fmt.Errorf("retriever: top up: %w", topUpErr)
 		}
 		exact = exact && scopeExact
 		if exact {
 			// The broader scope includes the local document and already has the database's top K in order.
 			chunks = extra
 		} else {
-			chunks = mergeChunks(chunks, extra)
+			chunks = slices.Concat(chunks, extra)
 		}
 	}
-
+	if visible != nil {
+		chunks, err = visible(ctx, chunks)
+		if err != nil {
+			return nil, fmt.Errorf("retriever: visibility: %w", err)
+		}
+	}
 	if !exact {
+		if toppedUp || visible != nil {
+			chunks = mergeChunks(chunks)
+		}
 		sort.Slice(chunks, func(i, j int) bool { return chunks[i].Score > chunks[j].Score })
 	}
 
@@ -422,9 +442,19 @@ func (r *Retriever) DetermineEvidenceRoute(cfg RoutingConfig, signals QuerySigna
 // EmbedQuery embeds the query and optionally probes the authorized scope.
 func (r *Retriever) EmbedQuery(ctx context.Context, query string, filter domain.VectorFilter, probeK int) (embedding []float32, candidates []domain.ScoredChunk, probeFailed bool, err error) {
 	return r.embedQuery(ctx, query, filter, probeK, func(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
-		chunks, _, err := r.queryFiltered(ctx, embedding, topK, filter)
+		chunks, _, err := r.queryFiltered(ctx, embedding, topK, filter, false)
 		return chunks, err
 	})
+}
+
+// EmbedQueryWithVisibility preserves candidates until their stored lifetimes can be checked.
+func (r *Retriever) EmbedQueryWithVisibility(ctx context.Context, query string, filter domain.VectorFilter, probeK int) (embedding []float32, candidates []domain.ScoredChunk, probeFailed bool, err error) {
+	embedding, candidates, probeFailed, err = r.embedQuery(ctx, query, filter, probeK, func(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+		chunks, _, searchErr := r.queryFiltered(ctx, embedding, topK, filter, true)
+		return chunks, searchErr
+	})
+	sortVisibilityHits(candidates)
+	return embedding, candidates, probeFailed, err
 }
 
 // EmbedQueryForVisibilityRefill preserves candidate versions across hosted
@@ -465,12 +495,16 @@ func (r *Retriever) embed(ctx context.Context, text string) ([]float32, error) {
 	return r.embedder.Embed(ctx, text)
 }
 
-func (r *Retriever) queryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
+func (r *Retriever) queryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter, preservePartitions bool) ([]domain.ScoredChunk, bool, error) {
 	if filter.MatchesNothing() {
 		return []domain.ScoredChunk{}, false, nil
 	}
 	if store, ok := r.vectorStore.(domain.FilteredVectorStoreWithExactness); ok {
 		return store.QueryFilteredWithExactness(ctx, embedding, topK, filter)
+	}
+	if store, ok := r.vectorStore.(domain.VectorCandidateStore); ok && preservePartitions {
+		chunks, err := store.QueryCandidates(ctx, embedding, topK, filter)
+		return chunks, false, err
 	}
 	if store, ok := r.vectorStore.(domain.FilteredVectorStore); ok {
 		chunks, err := store.QueryFiltered(ctx, embedding, topK, filter)

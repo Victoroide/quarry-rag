@@ -29,7 +29,11 @@ func TestGeneratedEvaluationProofUsesFinalExcerpts(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close(context.Background())) })
 	require.NoError(t, db.RunMigrations(t.Context()))
-	ch := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(docID), Text: atlas.Text}
+	// The vector adapter returns the collection and document type that ingestion admitted.
+	ch := domain.Chunk{
+		ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(docID), Text: atlas.Text,
+		Metadata: map[string]any{"collection": collection, "doc_type": domain.DefaultDocType},
+	}
 	receipt := uuid.NewString()
 	admit := func(spec evaluation.Document) domain.AcceptResult {
 		result, acceptErr := db.AcceptDocument(t.Context(), domain.AcceptRequest{
