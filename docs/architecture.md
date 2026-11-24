@@ -247,6 +247,10 @@ including original hits that became visible during the repeat. Only then does
 the service keep the highest verified score per public chunk ID and trim to
 the requested count. Equal scores are ordered by chunk ID.
 
+Automatic evidence routing reuses its scoped search even when refill is
+enabled. Automatic `LOCAL` keeps target evidence first and shares the refill
+allowance between the target search and a sparse fill from the original scope.
+
 `LOCAL` bases its three-chunk top-up rule on visible local chunks and uses the
 original authorized filters for that top-up. Each partition and transport
 attempt counts against the additional request allowance for the wider search

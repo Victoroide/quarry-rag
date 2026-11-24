@@ -70,6 +70,16 @@ func TestEvidenceVisibilityMatchesCurrentChunkAndScope(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, candidates[1:], got)
 
+	// Aliases match the stored UUID and keep the vector store's spelling, which a
+	// byte-for-byte metadata filter needs to find the same document again.
+	for _, spelling := range []string{"urn:uuid:" + string(candidates[1].Chunk.DocumentID), strings.ToUpper(string(candidates[1].Chunk.DocumentID))} {
+		alias := candidates[1]
+		alias.Chunk.DocumentID = domain.DocumentID(spelling)
+		got, err = visibility.VisibleEvidence(ctx, []domain.ScoredChunk{alias})
+		require.NoError(t, err)
+		require.Equal(t, []domain.ScoredChunk{alias}, got)
+	}
+
 	visibility.Collection = ""
 	got, err = visibility.VisibleEvidence(ctx, candidates)
 	require.NoError(t, err)

@@ -72,17 +72,97 @@ func (r *Retriever) RetrieveVisibleWithEmbedding(ctx context.Context, embedding 
 		}
 		chunks = mergeChunks(batch.visible)
 	}
-	slices.SortFunc(chunks, func(a, b domain.ScoredChunk) int {
-		if rank := cmp.Compare(b.Score, a.Score); rank != 0 {
-			return rank
-		}
-		return cmp.Compare(a.Chunk.ID, b.Chunk.ID)
-	})
+	sortVisibilityHits(chunks)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	search.record(ctx, len(chunks))
 	return retrievalResult(ctx, mode, chunks, topK), nil
+}
+
+// RoutedProbe holds the original scope search and the optional routed target.
+type RoutedProbe struct {
+	Candidates []domain.ScoredChunk
+	SearchK    int
+	Target     string
+	TargetKeys []string
+}
+
+// RetrieveVisibleFromProbe reuses the evidence route's scoped search and shares
+// one refill allowance between that search and any selected target search.
+func (r *Retriever) RetrieveVisibleFromProbe(ctx context.Context, embedding []float32, probe RoutedProbe, topK int, filter domain.VectorFilter, budget int, verify func(context.Context, []domain.ScoredChunk, domain.VectorFilter) ([]domain.ScoredChunk, bool, error)) (*Result, error) {
+	store, ok := r.vectorStore.(domain.VisibilityRefillStore)
+	if !ok {
+		return nil, errors.New("retriever: vector store does not support visibility refill")
+	}
+	topK = r.ChunkLimit(topK)
+	search := visibilitySearch{store: store, embedding: embedding, verify: verify, topK: topK, budget: budget}
+	mode := RetrievalModeGlobal
+	var local []domain.ScoredChunk
+	if probe.Target != "" {
+		var targetFilter domain.VectorFilter
+		mode, targetFilter = retrievalScopeWithKeys(RetrievalModeLocal, probe.Target, probe.TargetKeys, filter)
+		if mode == RetrievalModeLocal {
+			var err error
+			local, err = search.retrieveRoutedTarget(ctx, targetFilter)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			probe.Target = ""
+		}
+	}
+	visible, removed, err := search.check(ctx, probe.Candidates, filter)
+	if err != nil {
+		return nil, err
+	}
+	chunks := SelectRoutedChunks(slices.Concat(local, visible), probe.Target, topK)
+	if removed && len(chunks) < topK && routedScopeCanFill(chunks, probe.Target, topK) {
+		search.topK = probe.SearchK
+		batch, err := search.recover(ctx, visibilityBatch{candidates: probe.Candidates, visible: visible}, true, filter)
+		if err != nil {
+			return nil, err
+		}
+		sortVisibilityHits(batch.visible)
+		chunks = SelectRoutedChunks(slices.Concat(local, batch.visible), probe.Target, topK)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	search.topK = topK
+	search.record(ctx, len(chunks))
+	return retrievalResult(ctx, mode, chunks, topK), nil
+}
+
+func (s *visibilitySearch) retrieveRoutedTarget(ctx context.Context, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	raw, err := s.store.QueryCandidates(ctx, s.embedding, s.topK, filter)
+	if err != nil {
+		return nil, fmt.Errorf("retriever: query: %w", err)
+	}
+	visible, removed, err := s.check(ctx, raw, filter)
+	if err != nil {
+		return nil, err
+	}
+	batch, err := s.recover(ctx, visibilityBatch{candidates: raw, visible: visible}, removed, filter)
+	if err != nil {
+		return nil, err
+	}
+	sortVisibilityHits(batch.visible)
+	return batch.visible, nil
+}
+
+func routedScopeCanFill(chunks []domain.ScoredChunk, target string, limit int) bool {
+	minimum := min(minLocalChunks, limit)
+	return target == "" || len(chunks) < minimum || string(chunks[minimum-1].Chunk.DocumentID) != target
+}
+
+func sortVisibilityHits(chunks []domain.ScoredChunk) {
+	slices.SortStableFunc(chunks, func(a, b domain.ScoredChunk) int {
+		if rank := cmp.Compare(b.Score, a.Score); rank != 0 {
+			return rank
+		}
+		return cmp.Compare(a.Chunk.ID, b.Chunk.ID)
+	})
 }
 
 func (s *visibilitySearch) topUpVisible(ctx context.Context, local visibilityBatch, localDocID string, baseline bool, filter domain.VectorFilter) (visibilityBatch, error) {

@@ -4,6 +4,7 @@ package retriever
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -195,10 +196,7 @@ func (r *Retriever) retrieveWithEmbedding(ctx context.Context, embedding []float
 	if filter.MatchesNothing() {
 		return &Result{Mode: mode}, nil
 	}
-	mode, queryFilter := retrievalScope(mode, localDocID, filter)
-	if mode == RetrievalModeLocal && len(localKeys) != 0 {
-		queryFilter.DocumentIDs = localKeys
-	}
+	mode, queryFilter := retrievalScopeWithKeys(mode, localDocID, localKeys, filter)
 	chunks, exact, err := r.queryFiltered(ctx, embedding, topK, queryFilter)
 	if err != nil {
 		return nil, fmt.Errorf("retriever: query: %w", err)
@@ -232,6 +230,36 @@ func retrievalScope(mode RetrievalMode, localDocID string, filter domain.VectorF
 		filter.DocumentIDs = []string{localDocID}
 	}
 	return mode, filter
+}
+
+func retrievalScopeWithKeys(mode RetrievalMode, localDocID string, localKeys []string, filter domain.VectorFilter) (RetrievalMode, domain.VectorFilter) {
+	mode, filter = retrievalScope(mode, localDocID, filter)
+	if mode == RetrievalModeLocal && len(localKeys) != 0 {
+		filter.DocumentIDs = localKeys
+	}
+	return mode, filter
+}
+
+// SelectRoutedChunks deduplicates verified evidence before applying the limit.
+// With a target, it keeps that document first and fills only a sparse result.
+func SelectRoutedChunks(verified []domain.ScoredChunk, target string, limit int) []domain.ScoredChunk {
+	seen := make(map[domain.ChunkID]struct{}, len(verified))
+	var primary, fill []domain.ScoredChunk
+	for _, sc := range verified {
+		if _, duplicate := seen[sc.Chunk.ID]; duplicate {
+			continue
+		}
+		seen[sc.Chunk.ID] = struct{}{}
+		if target == "" || string(sc.Chunk.DocumentID) == target {
+			primary = append(primary, sc)
+		} else {
+			fill = append(fill, sc)
+		}
+	}
+	if len(primary) != 0 && len(primary) < min(minLocalChunks, limit) {
+		primary = append(primary, fill...)
+	}
+	return primary[:min(len(primary), limit)]
 }
 
 func mergeChunks(batches ...[]domain.ScoredChunk) []domain.ScoredChunk {
@@ -393,6 +421,25 @@ func (r *Retriever) DetermineEvidenceRoute(cfg RoutingConfig, signals QuerySigna
 
 // EmbedQuery embeds the query and optionally probes the authorized scope.
 func (r *Retriever) EmbedQuery(ctx context.Context, query string, filter domain.VectorFilter, probeK int) (embedding []float32, candidates []domain.ScoredChunk, probeFailed bool, err error) {
+	return r.embedQuery(ctx, query, filter, probeK, func(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+		chunks, _, err := r.queryFiltered(ctx, embedding, topK, filter)
+		return chunks, err
+	})
+}
+
+// EmbedQueryForVisibilityRefill preserves candidate versions across hosted
+// partitions so the scoped search can be reused after authoritative checks.
+func (r *Retriever) EmbedQueryForVisibilityRefill(ctx context.Context, query string, filter domain.VectorFilter, probeK int) (embedding []float32, candidates []domain.ScoredChunk, probeFailed bool, err error) {
+	store, ok := r.vectorStore.(domain.VisibilityRefillStore)
+	if !ok {
+		return nil, nil, false, errors.New("retriever: vector store does not support visibility refill")
+	}
+	embedding, candidates, probeFailed, err = r.embedQuery(ctx, query, filter, probeK, store.QueryCandidates)
+	sortVisibilityHits(candidates)
+	return embedding, candidates, probeFailed, err
+}
+
+func (r *Retriever) embedQuery(ctx context.Context, query string, filter domain.VectorFilter, probeK int, search func(context.Context, []float32, int, domain.VectorFilter) ([]domain.ScoredChunk, error)) (embedding []float32, candidates []domain.ScoredChunk, probeFailed bool, err error) {
 	if filter.MatchesNothing() {
 		return nil, nil, false, nil
 	}
@@ -403,7 +450,7 @@ func (r *Retriever) EmbedQuery(ctx context.Context, query string, filter domain.
 	if probeK <= 0 {
 		return embedding, nil, false, nil
 	}
-	candidates, _, err = r.queryFiltered(ctx, embedding, probeK, filter)
+	candidates, err = search(ctx, embedding, probeK, filter)
 	if err != nil {
 		slog.WarnContext(ctx, "routing probe failed", "mode", RetrievalModeGlobal, "error", err)
 		return embedding, nil, true, nil
