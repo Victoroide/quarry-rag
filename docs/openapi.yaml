@@ -464,7 +464,7 @@ components:
           type: string
     MultipartIngestRequest:
       type: object
-      description: 'See [multipart ingestion](api.md#variant-b-multipart-form-upload) and [Word binary extraction](api.md#word-binary-extraction).'
+      description: 'See [multipart ingestion](api.md#variant-b-multipart-form-upload), [DOCX story selection](api.md#docx-story-selection) and [Word binary extraction](api.md#word-binary-extraction).'
       additionalProperties: true
       required: [file]
       properties:

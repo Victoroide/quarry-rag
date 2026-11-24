@@ -57,7 +57,8 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	}
 	if deps.Config.ExtractIsolation {
 		sb, err := extractor.NewSandbox(extractor.SandboxConfig{
-			Timeout: deps.Config.ExtractTimeout, MemoryLimitMB: deps.Config.ExtractMemoryLimitMB, DOCStories: deps.Config.DOCStories,
+			Timeout: deps.Config.ExtractTimeout, MemoryLimitMB: deps.Config.ExtractMemoryLimitMB,
+			DOCStories: deps.Config.DOCStories, DOCXStories: deps.Config.DOCXStories,
 		})
 		if err != nil {
 			slog.Error("initialize document extraction", "error", err)
@@ -67,9 +68,10 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		} else {
 			ingestOpts = append(ingestOpts, handler.WithExtractor(tracing.WrapExtract(sb.Extract)))
 		}
-	} else if stories := deps.Config.DOCStories; stories != 0 {
+	} else {
+		docStories, docxStories := deps.Config.DOCStories, deps.Config.DOCXStories
 		ingestOpts = append(ingestOpts, handler.WithExtractor(tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
-			return extractor.NewWithDOCStories(ft, stories).Extract(ctx, bytes.NewReader(data))
+			return extractor.NewWithStories(ft, docStories, docxStories).Extract(ctx, bytes.NewReader(data))
 		})))
 	}
 	probes := deps.Probes

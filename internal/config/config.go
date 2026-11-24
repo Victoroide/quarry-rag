@@ -104,6 +104,7 @@ type Config struct {
 	ExtractMemoryLimitMB     int
 	ExtractQueueTimeout      time.Duration
 	DOCStories               extractor.DOCStories
+	DOCXStories              extractor.DOCXStories
 	MaxAllowedDocumentIDs    int
 	RequireDocumentAllowlist bool
 
@@ -251,6 +252,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.DOCStories, err = extractor.ParseDOCStories(os.Getenv("DOC_STORIES")); err != nil {
 		return nil, fmt.Errorf("config: DOC_STORIES: %w", err)
+	}
+	if cfg.DOCXStories, err = extractor.ParseDOCXStories(os.Getenv("DOCX_STORIES")); err != nil {
+		return nil, fmt.Errorf("config: DOCX_STORIES: %w", err)
 	}
 
 	if cfg.RequireDocumentAllowlist, err = envBoolOrDefault("REQUIRE_DOCUMENT_ALLOWLIST", false); err != nil {
