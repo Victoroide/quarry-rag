@@ -233,9 +233,7 @@ DOCX extraction supports body text, text boxes, footnotes and endnotes in
 transitional and strict Open XML documents. Headers, footers and comments are
 not extracted. All extracted parts share the 1,000,000-byte text limit.
 
-DOC extraction supports the main document text in Word 97–2003 binary documents;
-headers, footers, footnotes and comments are not extracted. Word 6/95 documents
-and encrypted files return 422.
+See [Word binary extraction](#word-binary-extraction) for `.doc` support.
 
 Multipart uploads follow the same [document identity rules](#document-identity),
 using extracted text or the [original PDF bytes for OCR](#image-only-pdf-ocr).
@@ -288,6 +286,28 @@ curl -X POST localhost:8081/ingest \
   -F "doc_type=research" \
   -F 'metadata={"author":"research-team"}'
 ```
+
+#### Word binary extraction
+
+`.doc` extraction supports the Word 97–2003 format and its Word 2007 binary
+revision. Word 6/95 and encrypted documents
+return 422. By default, extraction returns body text. Optional stories selected
+through [`DOC_STORIES`](configuration.md#environment-variables) appear in
+labeled sections after the body. Empty stories are omitted. Repeated headers
+and footers appear once per section label. Comments require explicit opt-in.
+All selected text and section headings share the extraction limit. Separator
+stories, text boxes, comment author metadata, and field instructions are omitted.
+Selecting stories also requires a recognized document version and consistent
+story indexes, so a document accepted with the default profile can return 422.
+
+Changes to `DOC_STORIES` apply to subsequent uploads. Existing documents continue
+to serve their indexed text. If the extracted text is identical after a profile
+change, the upload follows the existing [identity rules](#document-identity).
+If the text changes, an upload using the old UUID returns 409. Use a new UUID
+for explicitly addressed reingestion. For uploads that omit `document_id`, see
+[document identity](#document-identity). Keep the existing document and source
+until the desired replacement has completed, then delete the old UUID if it is
+no longer needed.
 
 #### Image-only PDF OCR
 

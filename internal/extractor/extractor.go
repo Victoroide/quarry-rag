@@ -44,13 +44,18 @@ func DetectFileType(filename string) (FileType, error) {
 
 // New returns the correct Extractor for the given FileType.
 func New(ft FileType) Extractor {
+	return NewWithDOCStories(ft, 0)
+}
+
+// NewWithDOCStories configures optional stories when extracting Word binary files.
+func NewWithDOCStories(ft FileType, stories DOCStories) Extractor {
 	switch ft {
 	case FileTypePDF:
 		return &pdfExtractor{}
 	case FileTypeDOCX:
 		return &docxExtractor{}
 	case FileTypeDOC:
-		return &docExtractor{}
+		return &docExtractor{stories: stories}
 	case FileTypeText:
 		return &textExtractor{}
 	default:

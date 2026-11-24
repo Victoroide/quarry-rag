@@ -14,6 +14,7 @@ type cfbStream struct {
 type cfbOptions struct {
 	declaredSize *uint32
 	cyclic       bool
+	embedded     []cfbStream
 }
 
 func buildCFB(t testing.TB, streams []cfbStream, opts cfbOptions) []byte {
@@ -24,9 +25,16 @@ func buildCFB(t testing.TB, streams []cfbStream, opts cfbOptions) []byte {
 		end        = uint32(0xFFFFFFFE)
 		fat        = uint32(0xFFFFFFFD)
 	)
-	if len(streams) == 0 || len(streams) > 3 {
-		t.Fatal("a directory sector requires one to three streams")
+	if len(streams) == 0 {
+		t.Fatal("a directory requires a root stream")
 	}
+	rootCount := len(streams)
+	entries := rootCount + 1
+	if len(opts.embedded) != 0 {
+		streams = append(append([]cfbStream{}, streams...), opts.embedded...)
+		entries = len(streams) + 2 // Root and embedded storage.
+	}
+	directorySectors := (entries + 3) / 4
 	sectors := make([]int, len(streams))
 	dataSectors := 0
 	for i, stream := range streams {
@@ -34,13 +42,13 @@ func buildCFB(t testing.TB, streams []cfbStream, opts cfbOptions) []byte {
 		dataSectors += sectors[i]
 	}
 	fatSectors := 1
-	for fatSectors*128 < 1+dataSectors+fatSectors {
+	for fatSectors*128 < directorySectors+dataSectors+fatSectors {
 		fatSectors++
 	}
 	if fatSectors > 109 {
 		t.Fatal("streams exceed the header FAT capacity")
 	}
-	data := make([]byte, (2+fatSectors+dataSectors)*sectorSize)
+	data := make([]byte, (1+directorySectors+fatSectors+dataSectors)*sectorSize)
 	binary.LittleEndian.PutUint64(data, 0xE11AB1A1E011CFD0)
 	binary.LittleEndian.PutUint16(data[24:], 0x003E)
 	binary.LittleEndian.PutUint16(data[26:], 3)
@@ -69,8 +77,14 @@ func buildCFB(t testing.TB, streams []cfbStream, opts cfbOptions) []byte {
 	for i := range fatSectors {
 		setFAT(i, fat)
 	}
-	setFAT(fatSectors, end)
-	directory := data[(1+fatSectors)*sectorSize : (2+fatSectors)*sectorSize]
+	for i := range directorySectors {
+		next := uint32(fatSectors + i + 1)
+		if i+1 == directorySectors {
+			next = end
+		}
+		setFAT(fatSectors+i, next)
+	}
+	directory := data[(1+fatSectors)*sectorSize : (1+fatSectors+directorySectors)*sectorSize]
 	writeEntry := func(index int, name string, kind byte, start, size uint32) {
 		entry := directory[index*128 : (index+1)*128]
 		encoded := utf16.Encode([]rune(name))
@@ -93,8 +107,12 @@ func buildCFB(t testing.TB, streams []cfbStream, opts cfbOptions) []byte {
 	}
 	writeEntry(0, "Root Entry", 5, end, 0)
 	binary.LittleEndian.PutUint32(directory[76:], 1)
-	start := fatSectors + 1
+	start := fatSectors + directorySectors
 	for i, stream := range streams {
+		entry := i + 1
+		if i >= rootCount {
+			entry++ // Skip the embedded storage.
+		}
 		streamSize := len(stream.data)
 		if streamSize > 7<<20 {
 			t.Fatal("stream exceeds the header FAT capacity")
@@ -104,22 +122,31 @@ func buildCFB(t testing.TB, streams []cfbStream, opts cfbOptions) []byte {
 		if opts.declaredSize != nil {
 			size = *opts.declaredSize
 		}
-		writeEntry(i+1, stream.name, 2, uint32(start), size)
-		if i+1 < len(streams) {
-			binary.LittleEndian.PutUint32(directory[(i+1)*128+72:], uint32(i+2))
+		writeEntry(entry, stream.name, 2, docFixtureSize(t, start), size)
+		if i+1 < len(streams) && i+1 != rootCount {
+			binary.LittleEndian.PutUint32(directory[entry*128+72:], uint32(entry+1))
 		}
 		copy(data[(start+1)*sectorSize:], stream.data)
 		for j := range sectors[i] {
-			next := uint32(start + j + 1)
+			next := docFixtureSize(t, start+j+1)
 			if j+1 == sectors[i] {
 				next = end
 			}
 			if opts.cyclic {
-				next = uint32(start + j)
+				next = docFixtureSize(t, start+j)
 			}
 			setFAT(start+j, next)
 		}
 		start += sectors[i]
+	}
+	if len(opts.embedded) != 0 {
+		storage := rootCount + 1
+		writeEntry(storage, "Embedded document", 1, end, 0)
+		binary.LittleEndian.PutUint32(directory[storage*128+76:], docFixtureSize(t, storage+1))
+		binary.LittleEndian.PutUint32(directory[128+72:], docFixtureSize(t, storage))
+		if rootCount > 1 {
+			binary.LittleEndian.PutUint32(directory[storage*128+72:], 2)
+		}
 	}
 	return data
 }

@@ -363,7 +363,7 @@ func TestDOCChecksUnselectedCharacterRanges(t *testing.T) {
 			table = appendDOCFixturePLC(t, word, table, 3, 0, 2, 0)
 			tc.mutate(word, table)
 			data := buildCFB(t, []cfbStream{{name: "WordDocument", data: word}, {name: "0Table", data: table}}, cfbOptions{})
-			got, err := New(FileTypeDOC).Extract(t.Context(), bytes.NewReader(data))
+			got, err := NewWithDOCStories(FileTypeDOC, mustDOCStories(t, "footnotes")).Extract(t.Context(), bytes.NewReader(data))
 			if got != "" || !errors.Is(err, errDOCCorrupt) || errors.Is(err, io.ErrUnexpectedEOF) != tc.unexpectedEOF {
 				t.Fatalf("got %q, %v", got, err)
 			}
@@ -378,7 +378,7 @@ func FuzzDOCFIBAndPieces(f *testing.F) {
 	f.Add(word, table)
 	f.Add(word[:0x50], table[:7])
 	f.Fuzz(func(t *testing.T, word, table []byte) {
-		fib, err := readDOCFIB(word)
+		fib, err := readDOCFIB(word, true)
 		if err != nil {
 			return
 		}
@@ -390,7 +390,7 @@ func FuzzDOCFIBAndPieces(f *testing.F) {
 		if err != nil {
 			return
 		}
-		pieces, err := newDOCPieces(t.Context(), word[:fib.wordEnd], plc, fib.piecesEnd)
+		pieces, err := newDOCPieces(t.Context(), word, plc, fib)
 		if err != nil {
 			return
 		}
