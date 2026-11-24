@@ -1,30 +1,42 @@
 {
   "Width": 840,
-  "Height": 940,
+  "Height": 1000,
   "Nodes": {
     "documents": {
       "X": 16,
-      "Y": 108,
+      "Y": 82,
       "W": 352,
-      "H": 534
+      "H": 452
+    },
+    "document_deletions": {
+      "X": 16,
+      "Y": 562,
+      "W": 352,
+      "H": 352
     },
     "chunks": {
       "X": 472,
       "Y": 108,
       "W": 352,
-      "H": 222
+      "H": 196
     },
     "document_fingerprints": {
       "X": 472,
       "Y": 386,
       "W": 352,
-      "H": 144
+      "H": 128
     },
     "ingest_jobs": {
       "X": 472,
       "Y": 578,
       "W": 352,
-      "H": 300
+      "H": 246
+    },
+    "document_deletion_activation": {
+      "X": 472,
+      "Y": 840,
+      "W": 352,
+      "H": 98
     }
   },
   "Groups": []

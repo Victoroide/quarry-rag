@@ -126,27 +126,31 @@ func architecture() diagram {
 
 func dataModel() diagram {
 	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", MaxW: 840, MaxH: 1000,
-		Description: "Data model. documents contains id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at, completed_at, collection, text_source and content_dedup. chunks contains id, document_id, chunk_index, text, token_count and created_at. document_fingerprints contains fingerprint, document_id and created_at. ingest_jobs contains document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at and updated_at. Each child references documents.id with cascading deletion. A document has zero or more chunks and fingerprints and at most one ingestion job. PK denotes primary key and FK denotes foreign key; SQL types appear beside every column. Only documents with the collection policy appear in document_fingerprints."}
+		Description: "Data model. The chunks, document_fingerprints and ingest_jobs tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column."}
 	d.Nodes = []node{
 		{ID: "documents", Title: "documents", Columns: []column{
-			{"id", "UUID", "PK", ""}, {"content", "TEXT", "", ""}, {"metadata", "JSONB", "", ""}, {"status", "TEXT", "", ""}, {"chunk_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"file_name", "TEXT", "", ""}, {"file_type", "TEXT", "", ""}, {"s3_key", "TEXT", "", ""}, {"content_preview", "TEXT", "", ""}, {"doc_type", "TEXT", "", ""}, {"fingerprint", "TEXT", "", ""}, {"last_error", "TEXT", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"completed_at", "TIMESTAMPTZ", "", ""}, {"collection", "TEXT", "", ""}, {"text_source", "TEXT", "", ""}, {"content_dedup", "TEXT", "", ""}}},
+			{"id", "UUID", "PK", ""}, {"content", "TEXT", "", ""}, {"metadata", "JSONB", "", ""}, {"status", "TEXT", "", ""}, {"chunk_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"file_name", "TEXT", "", ""}, {"file_type", "TEXT", "", ""}, {"s3_key", "TEXT", "", ""}, {"content_preview", "TEXT", "", ""}, {"doc_type", "TEXT", "", ""}, {"fingerprint", "TEXT", "", ""}, {"last_error", "TEXT", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"completed_at", "TIMESTAMPTZ", "", ""}, {"collection", "TEXT", "", ""}, {"text_source", "TEXT", "", ""}, {"content_dedup", "TEXT", "", ""},
+			{"incarnation", "UUID", "", ""}}},
 		{ID: "chunks", Title: "chunks", Columns: []column{{"id", "UUID", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"chunk_index", "INTEGER", "", ""}, {"text", "TEXT", "", ""}, {"token_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_fingerprints", Title: "document_fingerprints", Columns: []column{{"fingerprint", "TEXT", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"created_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "document_deletions", Title: "document_deletions", Columns: []column{
+			{"document_id", "UUID", "PK", ""}, {"incarnation", "UUID", "", ""}, {"kind", "TEXT", "", ""}, {"source_key", "TEXT", "", ""}, {"source_bucket", "TEXT", "", ""}, {"vector_mode", "TEXT", "", ""}, {"vector_index", "TEXT", "", ""}, {"vector_namespace", "TEXT", "", ""}, {"memory_owner", "UUID", "", ""}, {"step", "INTEGER", "", ""}, {"held", "BOOLEAN", "", ""}, {"finalized", "BOOLEAN", "", ""}, {"claim", "UUID", "", ""}, {"claim_until", "TIMESTAMPTZ", "", ""}}},
+		{ID: "document_deletion_activation", Title: "document_deletion_activation", Columns: []column{{"singleton", "BOOLEAN", "PK", ""}, {"activated_at", "TIMESTAMPTZ", "", ""}}},
 	}
 	for _, v := range []struct {
 		id, to, card  string
 		x, sourceY, y float64
 	}{
-		{"documents-chunks", "chunks", "0..n", 428, 162, 200},
-		{"documents-fingerprints", "document_fingerprints", "0..n", 416, 174, 478},
-		{"documents-jobs", "ingest_jobs", "0..1", 404, 186, 644},
+		{"documents-chunks", "chunks", "0..n", 428, 136, 194},
+		{"documents-fingerprints", "document_fingerprints", "0..n", 416, 148, 472},
+		{"documents-jobs", "ingest_jobs", "0..1", 404, 160, 644},
 	} {
 		l := &label{Text: v.card, X: 464, Y: v.y - 14, Size: edgeLabelSize, Kind: "muted", Owner: v.id}
 		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {472, v.y}}})
 	}
 	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs"})
-	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one · Parent → child; cascading delete.", X: 16, Y: 918, Size: sublabelSize, Kind: "muted"}}
+	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one · Arrows show cascading delete.", X: 16, Y: 978, Size: sublabelSize, Kind: "muted"}}
 	return d
 }
 
@@ -232,7 +236,7 @@ func sceneLabels(d diagram) []label {
 			labels = append(labels, label{Text: line, X: n.Box.X + 16, Y: n.Box.Y + 41 + float64(i)*20, Size: sublabelSize, Owner: n.ID, Kind: "muted"})
 		}
 		for i, c := range n.Columns {
-			y := n.Box.Y + 72 + float64(i)*26
+			y := n.Box.Y + 72 + float64(i)*20
 			if c.Key != "" {
 				labels = append(labels, label{Text: c.Key, X: n.Box.X + 12, Y: y, Size: edgeLabelSize, Owner: n.ID, Kind: "accent"})
 			}
