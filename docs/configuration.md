@@ -76,6 +76,7 @@ The table below lists the environment variables recognized by the service:
 | `QUERY_CONCURRENCY` | integer | `32` | 1 to 1024 | Maximum concurrent queries per handler instance. |
 | `QUERY_QUEUE_TIMEOUT` | duration | `2s` | 0s to 60s | Maximum wait for query admission; zero rejects immediately when all slots are occupied. |
 | `QUERY_ANSWER_POLICY` | string | `both` | `both`, `evidence_only` | Deployment policy for [query answer modes](api.md#evidence-only-queries). |
+| `EVALUATION_COLLECTION_PREFIX` | string | empty | 1–40 lowercase ASCII letters, digits or hyphens, starting with a letter or digit | Enables the [staging fixture routes and query diagnostic](development.md#evidence-evaluation) for a dedicated collection prefix. |
 | `QUERY_TIMEOUT` | duration | `60s` | 5s to 10m | Total query budget after admission. Earlier caller deadlines take precedence. |
 | `REQUIRE_DOCUMENT_ALLOWLIST` | boolean | `false` | Boolean | Require a non-null `allowed_document_ids` field on every query; an empty list is accepted and skips embedding and search. |
 | `RERANK_MODEL_ARN` | string | `""` | Empty, or an `arn:` value without whitespace or control characters | Enables [reranking before synthesis](api.md#post-query); empty disables it. Ignored in offline fake mode. See [Bedrock permissions](deployment.md#bedrock-reranking). |
@@ -283,8 +284,17 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `009_content_dedup.sql` | Stores the upload's policy on the document referenced by each job, defaults existing rows to `collection`, and prevents private documents from registering shared fingerprints. |
 | `010_document_deletions.sql` | Adds a nullable incarnation column with a random UUID default for future inserts, an empty deletion receipt table and a singleton with a null activation timestamp. It leaves existing rows in place. |
 | `011_grant_catalog.sql` | Installs the [operator grant catalog](grant-catalog.md) with an empty policy at revision zero. |
+| `012_index_visibility.sql` | Adds index visibility observations to documents and a lease token to ingestion jobs. |
+| `017_evaluation_fixtures.sql` | Adds durable receipts and UUID reservations for the [opt-in evaluation fixtures](development.md#evidence-evaluation). |
+| `018_evaluation_vector_identity.sql` | Binds new fixture receipts to their vector store and permits reservations for durably retired submissions. |
+| `019_evaluation_fixture_guards.sql` | Moves the reservation checks used by ordinary admission, leasing and removal into owner-defined predicates, so a restricted serving login needs no access to the receipt table. |
 
-The service can roll back to the previous binary with migration 010 and its checksum still recorded. This release does not activate qualified deletion or create receipts during ordinary use.
+The service can roll back to the previous binary with migration 010 and its
+checksum still recorded. After applying migration 019, follow the
+[serving-role upgrade procedure](grant-catalog.md#upgrade-an-existing-serving-role)
+for restricted logins. For deployments with evaluation fixtures, follow the
+[fixture upgrade and rollback order](development.md#evidence-evaluation).
+See [document deletion](api.md#delete-documentsdoc_id) for fixture reservations.
 
 The optional vector schema is initialized separately after base migrations, under the same advisory lock; see the [vector data model](architecture.md#postgresql-vector-schema).
 

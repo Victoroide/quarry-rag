@@ -88,10 +88,11 @@ func run() error {
 	// in local QA without Bedrock/Pinecone/S3 cost. Postgres is still the
 	// metadata store. Never enable FAKE MODE in production.
 	var (
-		emb         domain.EmbeddingProvider
-		vectorStore domain.VectorStore
-		amb         *llm.Ambassador
-		s3Client    *s3store.Client
+		emb                   domain.EmbeddingProvider
+		vectorStore           domain.VectorStore
+		amb                   *llm.Ambassador
+		s3Client              *s3store.Client
+		fixtureVectorIdentity string
 	)
 
 	if cfg.FakeMode {
@@ -111,6 +112,7 @@ func run() error {
 				return fmt.Errorf("startup: postgres vectors: %w", vectorErr)
 			}
 			vectorStore = pgVectors
+			fixtureVectorIdentity = "postgres"
 		} else {
 			pcClient, pcErr := pcstore.NewPineconeClient(startupCtx, cfg)
 			if pcErr != nil {
@@ -122,6 +124,7 @@ func run() error {
 				}
 			}()
 			vectorStore = pcstore.NewDriver(pcClient)
+			fixtureVectorIdentity = pcClient.FixtureVectorIdentity()
 		}
 
 		selectedEmb, embErr := newEmbeddingProvider(startupCtx, cfg)
@@ -221,7 +224,7 @@ func run() error {
 		}
 		textDetector = detector
 	}
-	w := worker.New(pgClient, ingestStages, vecDeleter, worker.Options{Metrics: serviceMetrics, Workers: cfg.IngestWorkers, MaxAttempts: cfg.IngestMaxAttempts, Lease: cfg.IngestLease, JobTimeout: cfg.IngestJobTimeout, PollInterval: cfg.IngestPollInterval, Owner: hostname + "-" + uuid.NewString(), OCR: textDetector})
+	w := worker.New(pgClient, ingestStages, vecDeleter, worker.Options{FixtureVectorIdentity: fixtureVectorIdentity, Metrics: serviceMetrics, Workers: cfg.IngestWorkers, MaxAttempts: cfg.IngestMaxAttempts, Lease: cfg.IngestLease, JobTimeout: cfg.IngestJobTimeout, PollInterval: cfg.IngestPollInterval, Owner: hostname + "-" + uuid.NewString(), OCR: textDetector})
 	w.Start(ctx)
 	defer func() {
 		shutdownCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
@@ -234,18 +237,19 @@ func run() error {
 	// Build HTTP router.
 	probes := handler.NewProbes(vectorStore, pgClient, s3Client, cfg.HealthCacheTTL)
 	router := api.NewRouter(&api.RouterDeps{
-		VectorStore:    vectorStore,
-		ChunkStore:     pgClient,
-		Retriever:      ret,
-		Ambassador:     amb,
-		Config:         cfg,
-		Worker:         w,
-		S3Client:       s3Client,
-		PineconeDriver: vecDeleter,
-		PGPool:         pgClient.Pool,
-		Probes:         probes,
-		Metrics:        serviceMetrics,
-		Reranker:       reranker,
+		FixtureVectorIdentity: fixtureVectorIdentity,
+		VectorStore:           vectorStore,
+		ChunkStore:            pgClient,
+		Retriever:             ret,
+		Ambassador:            amb,
+		Config:                cfg,
+		Worker:                w,
+		S3Client:              s3Client,
+		PineconeDriver:        vecDeleter,
+		PGPool:                pgClient.Pool,
+		Probes:                probes,
+		Metrics:               serviceMetrics,
+		Reranker:              reranker,
 	})
 
 	srv := &http.Server{

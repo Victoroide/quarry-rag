@@ -757,6 +757,10 @@ Deletion continues after the caller disconnects, with a separate 60-second deadl
 
 `X-Document-Incarnation` and `release_held` are reserved. An upgraded endpoint returns `412 Precondition Failed` when either is present in a well-formed request, including empty values and `release_held=false`. During a mixed rollout, older endpoints may ignore these selectors. Keep the originally observed incarnation on every attempt of an incarnation-qualified operation and send it only to an endpoint that enforces the qualifier. An ID-only DELETE addresses the document currently stored under `doc_id`.
 
+An active [evaluation fixture](development.md#evidence-evaluation) returns
+`412 Precondition Failed` before removing any data. Use the receipt-qualified
+fixture endpoint for these IDs.
+
 Deletion proceeds in this order.
 
 1. Removes the legacy Pinecone document namespace (`doc_id`) when present.

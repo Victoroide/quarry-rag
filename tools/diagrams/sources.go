@@ -30,15 +30,15 @@ var directoryDescriptions = map[string]string{
 	"internal/credential": "Token files and JWT parsing",
 	"internal/domain":     "Shared types and interfaces", "internal/embedder": "Titan V2 and offline embeddings", "internal/extractor": "File parsing and process isolation", "internal/llm": "Answer routing and Converse",
 	"internal/embeddinginput": "Model input profiles",
+	"internal/evaluation":     "Versioned corpus and evidence labels",
 	"internal/ocr":            "Asynchronous PDF text detection",
 	"internal/logctx":         "Request log attributes", "internal/metrics": "Prometheus text metrics", "internal/pipeline": "Ingestion and query stages", "internal/retriever": "LOCAL and GLOBAL retrieval",
 	"internal/store": "Storage adapters", "internal/store/memory": "Offline vector index", "internal/store/pinecone": "Hosted vector index", "internal/store/postgres": "Documents, chunks and durable jobs", "internal/store/s3": "Original files and signed downloads",
 	"internal/subjectauth": "Delegated access token verification",
 	"internal/testutil":    "Test support", "internal/testutil/docxtest": "Word package fixtures", "internal/testutil/pgtest": "Disposable database containers",
 	"internal/textutil": "Unicode normalization", "internal/wordprocessingml": "Word schema identifiers", "internal/worker": "Leased ingestion and retry handling",
-	"scripts": "Operational commands", "scripts/cleanup": "Delete selected documents", "scripts/grant-catalog": "Import tenant grants", "scripts/langeval": "Answer language and latency checks", "scripts/reconcile": "Find and remove orphan vectors", "scripts/simulate": "Exercise the service API", "scripts/validate": "Check retrieval behavior",
-	"scripts/fuzz": "Discover and exercise Go fuzz targets",
-	"test":         "Service test suites", "test/integration": "Database and API integration", "test/smoke": "Opt-in live service checks", "test/unit": "Package behavior checks",
+	"scripts": "Operational commands", "scripts/cleanup": "Delete selected documents", "scripts/evidenceeval": "Scoped evidence and visibility checks", "scripts/fuzz": "Discover and exercise Go fuzz targets", "scripts/grant-catalog": "Import tenant grants", "scripts/langeval": "Answer language and latency checks", "scripts/reconcile": "Find and remove orphan vectors", "scripts/simulate": "Exercise the service API", "scripts/validate": "Check retrieval behavior",
+	"test": "Service test suites", "test/integration": "Database and API integration", "test/smoke": "Opt-in live service checks", "test/unit": "Package behavior checks",
 	"tools": "Documentation support", "tools/diagrams": "Vector image sources and checks", "tools/diagrams/fonts": "Bundled typefaces and license",
 }
 

@@ -473,6 +473,28 @@ func TestOpenAPIDocumentIncarnationSelectors(t *testing.T) {
 	require.Contains(t, openAPIObject(t, operation["responses"]), "412")
 }
 
+func TestOpenAPIEvaluationFixtureRecoveryContract(t *testing.T) {
+	doc := readOpenAPI(t)
+	paths := openAPIObject(t, doc["paths"])
+	post := openAPIObject(t, openAPIObject(t, paths["/evaluation/fixtures"])["post"])
+	body := openAPIObject(t, post["requestBody"])
+	content := openAPIObject(t, openAPIObject(t, body["content"])["application/json"])
+	fixture := resolveOpenAPIObject(t, doc, content["schema"])
+	require.Contains(t, fixture, "allOf")
+	require.Contains(t, openAPIObject(t, post["responses"]), "413")
+	parts := fixture["allOf"].([]any)
+	require.Contains(t, parts, map[string]any{"$ref": "#/components/schemas/IngestRequest"})
+	require.Contains(t, parts, map[string]any{"required": []any{"document_id", "collection"}})
+	path := openAPIObject(t, paths["/evaluation/fixtures/{doc_id}"])
+	for _, response := range []struct{ method, code string }{{"get", "409"}, {"delete", "409"}, {"delete", "412"}} {
+		op := openAPIObject(t, path[response.method])
+		responses := openAPIObject(t, op["responses"])
+		headers := openAPIObject(t, resolveOpenAPIObject(t, doc, responses[response.code])["headers"])
+		require.Contains(t, headers, "X-Quarry-Evaluation-State")
+		require.Contains(t, headers, "X-Document-Incarnation")
+	}
+}
+
 func checkOpenAPIContent(t *testing.T, object map[string]any, name string) {
 	t.Helper()
 	content := openAPIObject(t, object["content"])

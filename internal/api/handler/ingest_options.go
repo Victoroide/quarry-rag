@@ -8,11 +8,21 @@ import (
 )
 
 type ingestOptions struct {
-	maxPending   int
-	extract      func(context.Context, extractor.FileType, []byte) (string, error)
-	limiter      *extractor.Limiter
-	ocr          bool
-	contentDedup domain.ContentDedup
+	maxPending            int
+	extract               func(context.Context, extractor.FileType, []byte) (string, error)
+	limiter               *extractor.Limiter
+	ocr                   bool
+	contentDedup          domain.ContentDedup
+	fixturePrefix         string
+	fixtureVectorIdentity string
+}
+
+// WithEvaluationFixtures enables receipt-qualified admission for one staging prefix.
+func WithEvaluationFixtures(prefix, vectorIdentity string) IngestOption {
+	return func(opts *ingestOptions) {
+		opts.fixturePrefix = prefix
+		opts.fixtureVectorIdentity = vectorIdentity
+	}
 }
 
 // WithOCR enables deferred text detection for image-only PDF uploads.

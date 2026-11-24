@@ -52,6 +52,23 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 		return result, err
 	}
+	if req.EvaluationReceipt != "" {
+		if req.EvaluationVectorIdentity == "" {
+			return result, errors.New("evaluation fixture vector store is unspecified")
+		}
+		if lockErr := lockFixtureDocument(ctx, tx, string(req.Document.ID)); lockErr != nil {
+			return result, lockErr
+		}
+		var reserved bool
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM evaluation_fixtures WHERE document_id=$1)`, string(req.Document.ID)).Scan(&reserved)
+		if err != nil {
+			return result, err
+		}
+		if reserved {
+			result.Outcome = domain.AcceptConflict
+			return result, nil
+		}
+	}
 	var id, state string
 	if req.CallerSupplied {
 		var fingerprint *string
@@ -59,6 +76,10 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 		var policy domain.ContentDedup
 		err = tx.QueryRow(ctx, `SELECT status,fingerprint,content,collection,content_dedup FROM documents WHERE id=$1 FOR UPDATE`, string(req.Document.ID)).Scan(&state, &fingerprint, &content, &collection, &policy)
 		if err == nil {
+			if req.EvaluationReceipt != "" {
+				result.Outcome = domain.AcceptConflict
+				return result, nil
+			}
 			if fingerprint == nil {
 				legacy := chunker.ScopedFingerprint(collection, content)
 				fingerprint = &legacy
@@ -130,9 +151,21 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 		preview = preview[:120]
 	}
 	fingerprint := identityFingerprint(req.ContentDedup, req.Document.ID, req.Fingerprint)
-	_, err = tx.Exec(ctx, `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,file_name,file_type,s3_key,doc_type,status,fingerprint,collection,content_dedup) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9,$10,$11)`, string(req.Document.ID), req.Document.Content, string(preview), encoded, req.Document.FileName, req.Document.FileType, req.Document.S3Key, metadata["doc_type"], fingerprint, req.Collection, req.ContentDedup)
+	insert := `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,file_name,file_type,s3_key,doc_type,status,fingerprint,collection,content_dedup) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9,$10,$11)`
+	args := []any{string(req.Document.ID), req.Document.Content, string(preview), encoded, req.Document.FileName, req.Document.FileType, req.Document.S3Key, metadata["doc_type"], fingerprint, req.Collection, req.ContentDedup}
+	if req.EvaluationReceipt == "" {
+		_, err = tx.Exec(ctx, insert, args...)
+	} else {
+		err = tx.QueryRow(ctx, insert+` RETURNING incarnation::text`, args...).Scan(&result.Incarnation)
+	}
 	if err != nil {
 		return result, err
+	}
+	if req.EvaluationReceipt != "" {
+		if _, err = tx.Exec(ctx, `INSERT INTO evaluation_fixtures(document_id, receipt, incarnation, active_document_id, vector_identity)
+			VALUES($1,$2,$3,$1,$4)`, string(req.Document.ID), req.EvaluationReceipt, result.Incarnation, req.EvaluationVectorIdentity); err != nil {
+			return result, err
+		}
 	}
 	if req.Document.TextSource == "ocr_pending" {
 		if _, err = tx.Exec(ctx, `UPDATE documents SET text_source='ocr_pending' WHERE id=$1`, string(req.Document.ID)); err != nil {
@@ -155,13 +188,50 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 	return result, tx.Commit(ctx)
 }
 
-// ClaimJob leases ready work, reclaiming expired leases and recording exhaustion.
+const claimJobPrefix = `UPDATE ingest_jobs j SET state='running',attempts=j.attempts+1,lease_owner=$1,lease_until=NOW()+make_interval(secs=>$2),lease_token=gen_random_uuid(),updated_at=NOW()
+   WHERE j.document_id=(SELECT ready.document_id FROM ingest_jobs ready
+   WHERE ((ready.state='pending' AND ready.next_attempt_at<=NOW()) OR (ready.state='running' AND ready.lease_until<NOW()))
+   AND `
+
+const claimJobSuffix = `
+   ORDER BY ready.next_attempt_at,ready.created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+   RETURNING j.document_id::text,j.attempts,j.lease_token::text`
+
+// The reservation predicate is owner-defined, so a serving login needs no
+// privilege on the receipt table to lease ordinary work.
+const claimGuardedJob = claimJobPrefix + `evaluation_fixture_claimable(ready.document_id, $3::text)` + claimJobSuffix
+
+const claimBeforeFixtureMigration = claimJobPrefix + `to_regclass('evaluation_fixtures') IS NULL` + claimJobSuffix
+
+// ClaimJob leases ordinary work on both current and pre-fixture schemas.
 func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration, maxAttempts int) (*domain.Job, error) {
+	return c.claimGuarded(ctx, owner, lease, maxAttempts, nil)
+}
+
+// ClaimJobForFixtureStore permits fixture jobs only for their reserved vector store.
+func (c *Client) ClaimJobForFixtureStore(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity string) (*domain.Job, error) {
+	if vectorIdentity == "" {
+		return c.ClaimJob(ctx, owner, lease, maxAttempts)
+	}
+	return c.claimGuarded(ctx, owner, lease, maxAttempts, &vectorIdentity)
+}
+
+func (c *Client) claimGuarded(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity *string) (*domain.Job, error) {
+	job, err := c.claimJob(ctx, owner, maxAttempts, claimGuardedJob, owner, lease.Seconds(), vectorIdentity)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42883" {
+		// A mixed rollout can run this binary before the fixture migration. The
+		// fallback only claims while the reservation table is absent.
+		return c.claimJob(ctx, owner, maxAttempts, claimBeforeFixtureMigration, owner, lease.Seconds())
+	}
+	return job, err
+}
+
+func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, statement string, args ...any) (*domain.Job, error) {
 	for range 10 {
 		j := &domain.Job{LeaseOwner: owner}
 		var id string
-		err := c.Pool.QueryRow(ctx, `UPDATE ingest_jobs j SET state='running',attempts=j.attempts+1,lease_owner=$1,lease_until=NOW()+make_interval(secs=>$2),lease_token=gen_random_uuid(),updated_at=NOW()
-   WHERE j.document_id=(SELECT document_id FROM ingest_jobs WHERE (state='pending' AND next_attempt_at<=NOW()) OR (state='running' AND lease_until<NOW()) ORDER BY next_attempt_at,created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING j.document_id::text,j.attempts,j.lease_token::text`, owner, lease.Seconds()).Scan(&id, &j.Attempts, &j.LeaseToken)
+		err := c.Pool.QueryRow(ctx, statement, args...).Scan(&id, &j.Attempts, &j.LeaseToken)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}

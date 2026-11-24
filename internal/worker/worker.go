@@ -25,6 +25,7 @@ import (
 
 // Options bounds parallel processing, retries, and lease lifetimes.
 type Options struct {
+	FixtureVectorIdentity           string
 	Workers, MaxAttempts            int
 	Lease, JobTimeout, PollInterval time.Duration
 	Owner                           string
@@ -110,7 +111,7 @@ func (w *Worker) loop(ctx context.Context) {
 				return
 			default:
 			}
-			job, err := w.store.ClaimJob(ctx, w.opts.Owner, w.opts.Lease, w.opts.MaxAttempts)
+			job, err := w.claim(ctx)
 			if err != nil {
 				slog.ErrorContext(ctx, "claim ingestion job", "error", err)
 				break
@@ -129,6 +130,13 @@ func (w *Worker) loop(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (w *Worker) claim(ctx context.Context) (*domain.Job, error) {
+	if store, ok := w.store.(domain.FixtureJobStore); ok {
+		return store.ClaimJobForFixtureStore(ctx, w.opts.Owner, w.opts.Lease, w.opts.MaxAttempts, w.opts.FixtureVectorIdentity)
+	}
+	return w.store.ClaimJob(ctx, w.opts.Owner, w.opts.Lease, w.opts.MaxAttempts)
 }
 
 // Shutdown waits for current jobs to finish.

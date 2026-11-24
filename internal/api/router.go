@@ -23,18 +23,21 @@ import (
 
 // RouterDeps groups the dependencies required to construct the HTTP router.
 type RouterDeps struct {
-	VectorStore    domain.VectorStore
-	ChunkStore     domain.ChunkStore
-	Retriever      *retriever.Retriever
-	Ambassador     *llm.Ambassador
-	Config         *config.Config
-	Worker         *worker.Worker
-	S3Client       *s3store.Client
-	PineconeDriver domain.VectorDeleter
-	PGPool         *pgxpool.Pool
-	Probes         *handler.Probes
-	Metrics        *metrics.Service
-	Reranker       retriever.Reranker
+	// FixtureVectorIdentity names the durable vector store that evaluation
+	// fixture receipts bind to. Empty disables fixture admission.
+	FixtureVectorIdentity string
+	VectorStore           domain.VectorStore
+	ChunkStore            domain.ChunkStore
+	Retriever             *retriever.Retriever
+	Ambassador            *llm.Ambassador
+	Config                *config.Config
+	Worker                *worker.Worker
+	S3Client              *s3store.Client
+	PineconeDriver        domain.VectorDeleter
+	PGPool                *pgxpool.Pool
+	Probes                *handler.Probes
+	Metrics               *metrics.Service
+	Reranker              retriever.Reranker
 }
 
 // NewRouter wires all HTTP routes, handlers, and middleware.
@@ -91,5 +94,17 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	mux.HandleFunc("GET /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DocumentStatusHandler(deps.ChunkStore)))
 	mux.HandleFunc("GET /documents/{doc_id}/file", middleware.RequireServiceTokens(tokens, handler.FileHandler(deps.ChunkStore, deps.S3Client)))
 	mux.HandleFunc("DELETE /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DeleteHandler(deps.ChunkStore, deps.PineconeDriver, deps.S3Client)))
+	// Offline fake mode keeps vectors in process memory. A receipt bound to a
+	// store that disappears on restart could never be proved clean again.
+	fixtureStore := deps.FixtureVectorIdentity
+	if deps.Config.FakeMode {
+		fixtureStore = ""
+	}
+	mux.HandleFunc("POST /evaluation/fixtures", middleware.RequireServiceTokens(tokens, handler.EvaluationFixtureIngestHandler(deps.Worker, deps.ChunkStore,
+		handler.WithEvaluationFixtures(deps.Config.EvaluationCollectionPrefix, fixtureStore),
+		handler.WithMaxPending(deps.Config.WorkerQueueSize), handler.WithContentDedup(deps.Config.IngestContentDedup))))
+	mux.HandleFunc("GET /evaluation/fixtures/{doc_id}", middleware.RequireServiceTokens(tokens, handler.EvaluationFixtureStatusHandler(deps.ChunkStore, deps.Config.EvaluationCollectionPrefix)))
+	mux.HandleFunc("DELETE /evaluation/fixtures/{doc_id}", middleware.RequireServiceTokens(tokens, handler.EvaluationFixtureDeleteHandler(deps.ChunkStore, deps.PineconeDriver,
+		handler.EvaluationFixtureOptions{Prefix: deps.Config.EvaluationCollectionPrefix, VectorIdentity: fixtureStore, LocalVectors: deps.Config.VectorStore == "postgres" && !deps.Config.FakeMode})))
 	return middleware.RequestID(middleware.Metrics(middleware.Tracing(middleware.Logging(middleware.Recovery(mux)), deps.Config.Tracing.CaptureContent), deps.Metrics))
 }

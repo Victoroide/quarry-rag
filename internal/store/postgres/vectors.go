@@ -582,7 +582,7 @@ func (s *VectorStore) DeleteByDocID(ctx context.Context, docID string) error {
 	if err != nil {
 		return fmt.Errorf("postgres: invalid document ID: %w", err)
 	}
-	_, err = s.client.Pool.Exec(ctx, `DELETE FROM chunk_vectors WHERE document_id=$1`, parsed.String())
+	_, err = s.client.execRemoval(ctx, `DELETE FROM chunk_vectors WHERE document_id=$1`, parsed.String())
 	return err
 }
 

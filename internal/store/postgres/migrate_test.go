@@ -464,6 +464,22 @@ func TestMigrationFilesAreDiscoveredInOrder(t *testing.T) {
 	require.Equal(t, "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a", migrations[0].checksum)
 }
 
+func TestEvaluationMigrationInventory(t *testing.T) {
+	migrations, err := loadMigrations(migrationFiles)
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(migrations))
+	for _, migration := range migrations {
+		names = append(names, migration.name)
+	}
+	require.Subset(t, names, []string{
+		"012_index_visibility.sql",
+		"017_evaluation_fixtures.sql",
+		"018_evaluation_vector_identity.sql",
+		"019_evaluation_fixture_guards.sql",
+	})
+}
+
 func TestInvalidMigrationFilesAreRejected(t *testing.T) {
 	for _, names := range [][]string{
 		{"001_first.sql", "001_duplicate.sql"},

@@ -89,6 +89,9 @@ func architecture() diagram {
 	add("synth", "SynthesisStage", "Grounded answer")
 	add("converse", "Bedrock Converse", "Answer synthesis")
 	add("tracing", "Trace export", "OpenTelemetry · OTLP", "LangSmith (optional)")
+	add("evaluation", "Evaluation fixtures", "POST /", "GET /{doc_id}", "DELETE /{doc_id}")
+	d.Nodes[len(d.Nodes)-1].Prefix = "/evaluation/fixtures"
+	d.Description += " Opt-in fixture handlers accept, inspect and delete receipt-qualified documents."
 	e := func(id, from, to string, points ...point) {
 		d.Edges = append(d.Edges, edge{ID: id, From: from, To: to, Points: points})
 	}
@@ -100,7 +103,8 @@ func architecture() diagram {
 	e("router-query", "router", "query", point{316, 180}, point{316, 228}, point{524, 228}, point{524, 260})
 	e("ingest-sandbox", "ingest", "sandbox", point{200, 288}, point{224, 288})
 	e("ingest-s3", "ingest", "s3", point{108, 316}, point{108, 452})
-	e("ingest-postgres", "ingest", "postgres", point{160, 316}, point{160, 336}, point{260, 336}, point{260, 452})
+	e("ingest-postgres", "ingest", "postgres", point{200, 300}, point{212, 300}, point{212, 468}, point{224, 468})
+	e("evaluation-postgres", "evaluation", "postgres", point{316, 442}, point{316, 452})
 	e("postgres-job", "postgres", "job", point{260, 508}, point{260, 528}, point{108, 528}, point{108, 548})
 	e("job-worker", "job", "worker", point{200, 576}, point{224, 576})
 	e("worker-postgres", "worker", "postgres", point{316, 548}, point{316, 508})
@@ -137,20 +141,24 @@ func dataModel() diagram {
 		{ID: "document_deletions", Title: "document_deletions", Columns: []column{
 			{"document_id", "UUID", "PK", ""}, {"incarnation", "UUID", "", ""}, {"kind", "TEXT", "", ""}, {"source_key", "TEXT", "", ""}, {"source_bucket", "TEXT", "", ""}, {"vector_mode", "TEXT", "", ""}, {"vector_index", "TEXT", "", ""}, {"vector_namespace", "TEXT", "", ""}, {"memory_owner", "UUID", "", ""}, {"step", "INTEGER", "", ""}, {"held", "BOOLEAN", "", ""}, {"finalized", "BOOLEAN", "", ""}, {"claim", "UUID", "", ""}, {"claim_until", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_deletion_activation", Title: "document_deletion_activation", Columns: []column{{"singleton", "BOOLEAN", "PK", ""}, {"activated_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "evaluation_fixtures", Title: "evaluation_fixtures", Columns: []column{
+			{"document_id", "UUID", "PK", ""}, {"receipt", "UUID", "", ""}, {"incarnation", "UUID", "", ""}, {"active_document_id", "UUID", "FK", "documents.id"}, {"vector_identity", "TEXT", "", ""}}},
 	}
+	d.Description += " The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes."
 	for _, v := range []struct {
 		id, to, card  string
 		x, sourceY, y float64
 	}{
-		{"documents-chunks", "chunks", "0..n", 428, 136, 194},
-		{"documents-fingerprints", "document_fingerprints", "0..n", 416, 148, 472},
-		{"documents-jobs", "ingest_jobs", "0..1", 404, 160, 616},
+		{"documents-chunks", "chunks", "0..n", 428, 136, 168},
+		{"documents-fingerprints", "document_fingerprints", "0..n", 416, 148, 354},
+		{"documents-jobs", "ingest_jobs", "0..1", 404, 160, 466},
+		{"documents-evaluation", "evaluation_fixtures", "0..1", 392, 172, 796},
 	} {
 		l := &label{Text: v.card, X: 464, Y: v.y - 14, Size: edgeLabelSize, Kind: "muted", Owner: v.id}
 		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {472, v.y}}})
 	}
-	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs"})
-	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one · Arrows show cascading delete.", X: 16, Y: 978, Size: sublabelSize, Kind: "muted"}}
+	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs", "documents-evaluation"})
+	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 978, Size: sublabelSize, Kind: "muted"}}
 	return d
 }
 
@@ -215,7 +223,8 @@ func sceneLabels(d diagram) []label {
 	}
 	for _, n := range d.Nodes {
 		if d.Name == "repository-layout" {
-			title := label{Text: n.Title, X: n.Box.X + 12, Y: n.Box.Y + 21, Size: titleSize, Bold: true, Owner: n.ID}
+			baseline := n.Box.Y + min(21, n.Box.H-7)
+			title := label{Text: n.Title, X: n.Box.X + 12, Y: baseline, Size: titleSize, Bold: true, Owner: n.ID}
 			labels = append(labels, title)
 			width := 0.0
 			if f != nil {

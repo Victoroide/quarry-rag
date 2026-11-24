@@ -82,6 +82,8 @@ GRANT USAGE ON SCHEMA public TO quarry_service, quarry_operator, quarry_auditor;
 GRANT SELECT ON public.schema_migrations TO quarry_service;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.documents, public.chunks,
   public.ingest_jobs, public.document_fingerprints TO quarry_service;
+GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
+  public.evaluation_fixture_reserved(uuid) TO quarry_service;
 GRANT SELECT (revision) ON public.grant_catalog_policy_revision TO quarry_operator;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_source_snapshot(uuid) TO quarry_operator;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_import_batch(text, boolean) TO quarry_operator;
@@ -115,6 +117,23 @@ authenticated PostgreSQL session login, revision, batch UUID, payload digest
 and timestamp. Deleting an assigned document records the login and deleted
 identity alongside the resulting revision. Keep the audit and backups
 restricted and retain the audit, including import receipts, with the catalog.
+
+The serving login needs no privilege on the `evaluation_fixtures` receipts. The
+[staging evaluation guide](development.md#evidence-evaluation) lists the one
+receipt grant that applies only to a deployment that enables fixtures.
+
+### Upgrade an existing serving role
+
+After the schema owner applies migration `019_evaluation_fixture_guards.sql`,
+grant the serving login execution on both functions before starting upgraded
+processes. Ordinary admission, job leasing and removal use these functions
+even when evaluation fixtures are disabled. Substitute the deployed schema and
+serving role names as needed.
+
+```sql
+GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
+  public.evaluation_fixture_reserved(uuid) TO quarry_service;
+```
 
 ## Prepare a batch
 

@@ -16,3 +16,9 @@ type EvidenceVisibility interface {
 	// from the same snapshot as the evidence check.
 	VisibleEvidenceWithPreviews(ctx context.Context, candidates []ScoredChunk, probeIDs []string) ([]ScoredChunk, map[string]string, error)
 }
+
+// EvaluationEvidenceVisibility checks the ownership of the entire fixture
+// scope and the currency of selected evidence in one storage snapshot.
+type EvaluationEvidenceVisibility interface {
+	VerifyEvaluationEvidence(ctx context.Context, receipt string, allowed []string, selected []ScoredChunk) (bool, error)
+}

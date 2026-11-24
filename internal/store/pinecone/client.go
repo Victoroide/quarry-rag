@@ -3,6 +3,7 @@ package pinecone
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,17 +30,18 @@ const (
 // Client wraps the official Pinecone Go SDK.
 // All namespaces share one connection.
 type Client struct {
-	client      *pinecone.Client
-	cfg         *config.Config
-	defaultConn indexConn
-	dial        func(namespace string) (indexConn, error)
-	batchSize   int
-	timeout     time.Duration
-	maxAttempts int
-	dims        int
-	visibility  *visibilityPlane
-	closeOnce   sync.Once
-	closeErr    error
+	client                *pinecone.Client
+	cfg                   *config.Config
+	defaultConn           indexConn
+	dial                  func(namespace string) (indexConn, error)
+	batchSize             int
+	timeout               time.Duration
+	maxAttempts           int
+	dims                  int
+	visibility            *visibilityPlane
+	closeOnce             sync.Once
+	closeErr              error
+	fixtureVectorIdentity string
 }
 
 // NewPineconeClient creates a new Pinecone client and connects to the index.
@@ -77,6 +79,8 @@ func newPineconeClient(ctx context.Context, cfg *config.Config, pc *pinecone.Cli
 	}
 	p := newClient(pc, cfg, defaultConn)
 	p.visibility = visibility
+	// Fixture writes use the default namespace of the resolved index.
+	p.fixtureVectorIdentity = fmt.Sprintf("pinecone:%x", sha256.Sum256([]byte(cfg.PineconeIndexName+"\x00"+idx.Host)))
 	slog.InfoContext(ctx, "pinecone connected", "index", cfg.PineconeIndexName, "host", idx.Host, "dimensions", *idx.Dimension)
 	return p, nil
 }
@@ -90,6 +94,9 @@ func newClient(pc *pinecone.Client, cfg *config.Config, root *pinecone.IndexConn
 		},
 	}
 }
+
+// FixtureVectorIdentity identifies the concrete default index used for fixtures.
+func (p *Client) FixtureVectorIdentity() string { return p.fixtureVectorIdentity }
 
 func (p *Client) conn(namespace string) (indexConn, func(), error) {
 	if namespace == "" {
