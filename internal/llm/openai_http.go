@@ -39,7 +39,7 @@ func NewOpenAIHTTPClient(base, key string) (*OpenAIHTTPClient, error) {
 	if strings.ContainsFunc(key, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 		return nil, errors.New("openai: invalid API key")
 	}
-	return &OpenAIHTTPClient{base: strings.TrimRight(base, "/"), key: key, client: &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &OpenAIHTTPClient{base: normalizeOpenAIBase(base), key: key, client: &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 // Post sends a JSON request; the caller must close the successful response body.

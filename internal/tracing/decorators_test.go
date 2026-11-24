@@ -265,3 +265,50 @@ func TestVectorDecoratorPreservesTransactionalWrites(t *testing.T) {
 	_, ok = WrapVectorStore(memory.NewFakeVectorStore(), "memory").(interface{ TransactionalVectors() })
 	require.False(t, ok, "memory writes must still use the persist stage")
 }
+
+type fixtureCountingConverser struct{ fixtureModelConverser }
+
+func (fixtureCountingConverser) AWSRegion() string { return "us-east-1" }
+
+func (fixtureCountingConverser) CountTokensWithMaxAttempts(_ context.Context, model, _ string, _ []brtypes.Message, _ int) (llm.CountResult, error) {
+	if model != "fixture-model" {
+		return llm.CountResult{}, errors.New("unexpected model")
+	}
+	return llm.CountResult{InputTokens: 42, Attempts: 1, Method: llm.CountMethodBedrockCountTokens}, nil
+}
+
+func TestModelDecoratorsPreserveTokenCounting(t *testing.T) {
+	plain := WrapConverser(fixtureConverser{}, "offline", "default-model")
+	_, ok := plain.(llm.AttemptTokenCounter)
+	require.False(t, ok)
+
+	for _, capture := range []bool{false, true} {
+		t.Run(fmt.Sprint(capture), func(t *testing.T) {
+			recorder := recordSpans(t)
+			ctx, parent := otel.Tracer("test").Start(WithContentCapture(t.Context(), capture), "query.synthesis")
+			converser := WrapConverser(fixtureCountingConverser{}, "aws.bedrock", "fixture-model")
+			counter, ok := converser.(llm.AttemptTokenCounter)
+			require.True(t, ok)
+			regioner, ok := converser.(llm.RegionProvider)
+			require.True(t, ok)
+			require.Equal(t, "us-east-1", regioner.AWSRegion())
+			messages := []brtypes.Message{{Role: brtypes.ConversationRoleUser, Content: []brtypes.ContentBlock{&brtypes.ContentBlockMemberText{Value: "fixture-question"}}}}
+			res, err := counter.CountTokensWithMaxAttempts(ctx, "fixture-model", "fixture-system", messages, 3)
+			require.NoError(t, err)
+			require.Equal(t, 42, res.InputTokens)
+			parent.End()
+			spans := recorder.Ended()
+			require.Len(t, spans, 2)
+			require.Equal(t, "count_tokens fixture-model", spans[0].Name())
+			attrs := spanAttrs(spans[0])
+			require.NotContains(t, attrs, "gen_ai.usage.input_tokens")
+			require.EqualValues(t, 42, attrs["quarry.synthesis.count_input_tokens"].AsInt64())
+			if !capture {
+				for _, attr := range spans[0].Attributes() {
+					require.NotContains(t, attr.Value.String(), "fixture-question")
+					require.NotContains(t, attr.Value.String(), "fixture-system")
+				}
+			}
+		})
+	}
+}

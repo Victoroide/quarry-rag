@@ -12,6 +12,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/embedder"
 	"github.com/Victoroide/quarry-rag/internal/llm"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestOpenAITracingMetadataAndPrivacy(t *testing.T) {
@@ -32,12 +33,19 @@ func TestOpenAITracingMetadataAndPrivacy(t *testing.T) {
 					_, _ = fmt.Fprint(w, `{"choices":[{"index":0,"message":{"content":"private-answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`)
 				}))
 				defer server.Close()
-				cfg := &config.Config{OpenAIBaseURL: server.URL, OpenAIAPIKey: "private-key", OpenAIChatModel: "chat", OpenAIEmbeddingModel: "embed", EmbeddingDimensions: 1, EmbedConcurrency: 1, EmbedTimeout: time.Second}
+				cfg := &config.Config{OpenAIBaseURL: server.URL, OpenAIAPIKey: "private-key", OpenAIChatModel: "gpt-4o-2024-08-06", OpenAIEmbeddingModel: "embed", EmbeddingDimensions: 1, EmbedConcurrency: 1, EmbedTimeout: time.Second}
 				client, err := llm.NewOpenAIClient(cfg)
 				require.NoError(t, err)
 				generator := WrapGenerator(client, "openai")
+				counter, ok := generator.(llm.OpenAIRequestCounter)
+				require.True(t, ok)
 				ctx := WithContentCapture(t.Context(), capture)
-				request := llm.Request{Model: "chat", System: "private-system", Messages: []llm.Message{{Role: "user", Content: []llm.Content{{Text: "private-question"}}}}}
+				request := llm.Request{Model: "gpt-4o-2024-08-06", System: "private-system", Messages: []llm.Message{{Role: "user", Content: []llm.Content{{Text: "private-question"}}}}}
+				countRes, err := counter.CountRequestInput(ctx, request)
+				require.NoError(t, err)
+				require.Positive(t, countRes.InputTokens)
+				_, err = counter.CountRequestInput(ctx, request)
+				require.NoError(t, err)
 				if stream {
 					_, err = generator.Stream(ctx, request, func(string) error { return nil })
 				} else {
@@ -49,8 +57,14 @@ func TestOpenAITracingMetadataAndPrivacy(t *testing.T) {
 				_, err = WrapEmbedder(emb, "openai", "embed").Embed(ctx, "private-document")
 				require.NoError(t, err)
 				spans := recorder.Ended()
-				require.Len(t, spans, 2)
-				for _, span := range spans {
+				require.Len(t, spans, 4)
+				for _, span := range spans[:2] {
+					require.Equal(t, trace.SpanKindInternal, span.SpanKind())
+					attrs := spanAttrs(span)
+					require.NotContains(t, attrs, "gen_ai.usage.input_tokens")
+					require.EqualValues(t, countRes.InputTokens, attrs["quarry.synthesis.count_input_tokens"].AsInt64())
+				}
+				for _, span := range spans[2:] {
 					attrs := spanAttrs(span)
 					require.Equal(t, "openai", attrs["gen_ai.system"].AsString())
 					require.Equal(t, "openai", attrs["gen_ai.provider.name"].AsString())
@@ -63,10 +77,10 @@ func TestOpenAITracingMetadataAndPrivacy(t *testing.T) {
 				}
 				if capture {
 					t.Run("embedding", func(t *testing.T) {
-						require.Equal(t, "private-document", spanAttrs(spans[1])["input.value"].AsString())
+						require.Equal(t, "private-document", spanAttrs(spans[3])["input.value"].AsString())
 					})
 					t.Run("chat", func(t *testing.T) {
-						chat := spanAttrs(spans[0])
+						chat := spanAttrs(spans[2])
 						require.Equal(t, "system", chat["gen_ai.prompt.0.role"].AsString())
 						require.Equal(t, "private-system", chat["gen_ai.prompt.0.content"].AsString())
 						require.Equal(t, "user", chat["gen_ai.prompt.1.role"].AsString())
@@ -76,9 +90,9 @@ func TestOpenAITracingMetadataAndPrivacy(t *testing.T) {
 					})
 				}
 				if stream {
-					require.True(t, spanAttrs(spans[0])["gen_ai.request.streaming"].AsBool())
+					require.True(t, spanAttrs(spans[2])["gen_ai.request.streaming"].AsBool())
 				} else {
-					require.EqualValues(t, 7, spanAttrs(spans[0])["gen_ai.usage.input_tokens"].AsInt64())
+					require.EqualValues(t, 7, spanAttrs(spans[2])["gen_ai.usage.input_tokens"].AsInt64())
 				}
 			})
 		}

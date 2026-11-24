@@ -30,6 +30,11 @@ func NewOpenAIClient(cfg *config.Config) (*OpenAIClient, error) {
 	return &OpenAIClient{transport, cfg.OpenAIChatModel}, nil
 }
 
+// OpenAIDeployment identifies the endpoint and model used by this generator.
+func (c *OpenAIClient) OpenAIDeployment() (base, model string) {
+	return c.http.base, c.model
+}
+
 type openAIMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -107,6 +112,22 @@ func (r openAIResponse) usage() *Usage {
 }
 
 func (r openAIResponse) hasError() bool { return len(r.Error) > 0 && string(r.Error) != "null" }
+
+// CountRequestInput counts serialized chat completion input tokens using an explicitly matched local tokenizer.
+func (c *OpenAIClient) CountRequestInput(ctx context.Context, r Request) (CountResult, error) {
+	if err := ctx.Err(); err != nil {
+		return CountResult{}, err
+	}
+	model := r.Model
+	if model == "" {
+		model = c.model
+	}
+	tokens, method, err := countOpenAIChatTokens(ctx, model, r)
+	if err != nil {
+		return CountResult{}, err
+	}
+	return CountResult{InputTokens: tokens, Method: method}, nil
+}
 
 // Generate returns one completion and its usage, without transport retries.
 func (c *OpenAIClient) Generate(ctx context.Context, r Request) (*Response, error) {

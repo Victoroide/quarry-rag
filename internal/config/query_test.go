@@ -55,6 +55,34 @@ func TestQueryAnswerPolicyConfiguration(t *testing.T) {
 	_, err = Load()
 	require.ErrorContains(t, err, "QUERY_ANSWER_POLICY")
 }
+
+func TestSynthesisInputProfileConfiguration(t *testing.T) {
+	awsConfigEnvironment(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, "", cfg.SynthesisInputProfile)
+
+	t.Setenv("SYNTHESIS_INPUT_PROFILE", "strict")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.Equal(t, "strict", cfg.SynthesisInputProfile)
+
+	for _, bad := range []string{"best_effort", "STRICT", "true", "on"} {
+		t.Run("invalid/"+bad, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("SYNTHESIS_INPUT_PROFILE", bad)
+			_, err := Load()
+			require.ErrorContains(t, err, "SYNTHESIS_INPUT_PROFILE")
+		})
+	}
+
+	t.Run("fake mode rejects strict", func(t *testing.T) {
+		queryConfigEnvironment(t)
+		t.Setenv("SYNTHESIS_INPUT_PROFILE", "strict")
+		_, err := Load()
+		require.ErrorContains(t, err, "SYNTHESIS_INPUT_PROFILE")
+	})
+}
 func TestQueryConfigRejectsInvalidBounds(t *testing.T) {
 	for _, tc := range []struct{ key, value string }{
 		{"QUERY_TIMEOUT", "4s"}, {"QUERY_TIMEOUT", "601s"}, {"QUERY_TIMEOUT", "bad"}, {"SYNTHESIS_TIMEOUT", "0s"}, {"SYNTHESIS_TIMEOUT", "60s"}, {"SYNTHESIS_TIMEOUT", "bad"},

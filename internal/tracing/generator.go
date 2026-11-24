@@ -15,9 +15,53 @@ type generator struct {
 	provider string
 }
 
+type countingGenerator struct {
+	*generator
+	counter llm.RequestCounter
+}
+
 // WrapGenerator traces provider-neutral synthesis with optional content capture.
 func WrapGenerator(inner llm.Generator, provider string) llm.Generator {
-	return &generator{inner, provider}
+	g := &generator{inner, provider}
+	if rc, ok := inner.(llm.RequestCounter); ok {
+		counting := &countingGenerator{g, rc}
+		if deployment, ok := inner.(llm.OpenAIRequestCounter); ok {
+			return &deploymentCountingGenerator{counting, deployment}
+		}
+		return counting
+	}
+	return g
+}
+
+type deploymentCountingGenerator struct {
+	*countingGenerator
+	deployment llm.OpenAIRequestCounter
+}
+
+func (g *deploymentCountingGenerator) OpenAIDeployment() (base, model string) {
+	return g.deployment.OpenAIDeployment()
+}
+
+func (g *countingGenerator) CountRequestInput(ctx context.Context, r llm.Request) (llm.CountResult, error) {
+	ctx, span := start(ctx, "count_tokens "+r.Model, "tool", trace.SpanKindInternal,
+		attribute.String("quarry.synthesis.count_provider", g.provider))
+	defer span.End()
+	res, err := g.counter.CountRequestInput(ctx, r)
+	recordInputCount(span, res, err)
+	return res, err
+}
+
+func recordInputCount(span trace.Span, res llm.CountResult, err error) {
+	RecordError(span, err)
+	if span.IsRecording() {
+		span.SetAttributes(attribute.Int("quarry.synthesis.count_attempts", res.Attempts))
+		if err == nil {
+			span.SetAttributes(
+				attribute.Int("quarry.synthesis.count_input_tokens", res.InputTokens),
+				attribute.String("quarry.synthesis.count_method", string(res.Method)),
+			)
+		}
+	}
 }
 
 func (g *generator) Generate(ctx context.Context, r llm.Request) (*llm.Response, error) {

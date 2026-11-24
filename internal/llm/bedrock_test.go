@@ -3,16 +3,21 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/stretchr/testify/require"
 )
 
@@ -75,4 +80,54 @@ func TestFakeConverserReadsGuardContent(t *testing.T) {
 	output, err := NewFakeConverser().ConverseWithModelAndSystem(context.Background(), "offline", "", messages, .2, 1024)
 	require.NoError(t, err)
 	require.Equal(t, "[FAKE MODE]\n\n- guarded question\n- guarded evidence\n- closing instruction", ExtractText(output))
+}
+
+func TestBedrockEvidenceCheckedRequestsAreNotReplayableBelowTheCheck(t *testing.T) {
+	messages := []brtypes.Message{{Role: brtypes.ConversationRoleUser, Content: []brtypes.ContentBlock{&brtypes.ContentBlockMemberText{Value: "evidence"}}}}
+	operations := map[string]func(*Client, context.Context) error{
+		"count": func(c *Client, ctx context.Context) error {
+			_, err := c.CountTokensWithMaxAttempts(ctx, "selected", "", messages, 3)
+			return err
+		},
+		"converse": func(c *Client, ctx context.Context) error {
+			_, err := c.ConverseWithModelAndSystem(ctx, "selected", "", messages, .2, 0)
+			return err
+		},
+		"stream": func(c *Client, ctx context.Context) error {
+			_, err := c.ConverseStreamWithModelAndSystem(ctx, "selected", "", messages, .2, 0, func(string) error { return nil })
+			return err
+		},
+	}
+	for name, call := range operations {
+		for _, guarded := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s guarded=%t", name, guarded), func(t *testing.T) {
+				var seen, replayable bool
+				transport := smithyhttp.ClientDoFunc(func(r *http.Request) (*http.Response, error) {
+					seen, replayable = true, r.GetBody != nil
+					return nil, errors.New("stop")
+				})
+				reopenable := middleware.FinalizeMiddlewareFunc("reopenable", func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+					if request, ok := in.Request.(*smithyhttp.Request); ok {
+						request.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
+					}
+					return next.HandleFinalize(ctx, in)
+				})
+				rt := bedrockruntime.NewFromConfig(aws.Config{
+					Region: "us-east-1", Credentials: credentials.NewStaticCredentialsProvider("synthetic-key", "synthetic-secret", ""),
+					HTTPClient: transport, Retryer: func() aws.Retryer { return aws.NopRetryer{} },
+				}, func(o *bedrockruntime.Options) {
+					o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+						return stack.Finalize.Add(reopenable, middleware.After)
+					})
+				})
+				ctx := t.Context()
+				if guarded {
+					ctx = domain.WithEvidenceCheck(ctx, func(context.Context) error { return nil })
+				}
+				_ = call(&Client{rt: rt, maxToks: DefaultMaxTokens}, ctx)
+				require.True(t, seen, "the request never reached the transport")
+				require.Equal(t, !guarded, replayable)
+			})
+		}
+	}
 }
