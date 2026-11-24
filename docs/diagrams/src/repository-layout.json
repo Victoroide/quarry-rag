@@ -1,6 +1,6 @@
 {
   "Width": 840,
-  "Height": 920,
+  "Height": 960,
   "Nodes": {
     "internal": {
       "X": 28,
@@ -140,21 +140,33 @@
       "W": 344,
       "H": 28
     },
-    "internal/testutil/pgtest": {
+    "internal/testutil/docxtest": {
       "X": 76,
       "Y": 768,
       "W": 320,
       "H": 28
     },
+    "internal/testutil/pgtest": {
+      "X": 76,
+      "Y": 796,
+      "W": 320,
+      "H": 28
+    },
     "internal/textutil": {
       "X": 52,
-      "Y": 796,
+      "Y": 824,
+      "W": 344,
+      "H": 28
+    },
+    "internal/wordprocessingml": {
+      "X": 52,
+      "Y": 880,
       "W": 344,
       "H": 28
     },
     "internal/worker": {
       "X": 52,
-      "Y": 852,
+      "Y": 908,
       "W": 344,
       "H": 28
     },
@@ -274,7 +286,7 @@
     },
     "internal/tracing": {
       "X": 52,
-      "Y": 824,
+      "Y": 852,
       "W": 344,
       "H": 28
     },
@@ -304,7 +316,7 @@
         "X": 16,
         "Y": 88,
         "W": 392,
-        "H": 800
+        "H": 856
       }
     },
     {

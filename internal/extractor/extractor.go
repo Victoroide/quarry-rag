@@ -53,7 +53,7 @@ func NewWithDOCStories(ft FileType, stories DOCStories) Extractor {
 	case FileTypePDF:
 		return &pdfExtractor{}
 	case FileTypeDOCX:
-		return &docxExtractor{}
+		return NewDOCX(0)
 	case FileTypeDOC:
 		return &docExtractor{stories: stories}
 	case FileTypeText:

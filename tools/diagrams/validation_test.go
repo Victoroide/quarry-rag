@@ -663,8 +663,14 @@ func TestCanvasFitsLastContent(t *testing.T) {
 				t.Error("data-model legend and canvas must follow the last table")
 			}
 		}
-		if d.Name == "repository-layout" && d.H != 920 {
-			t.Error("repository canvas height")
+		if d.Name == "repository-layout" {
+			bottom := 0.0
+			for _, group := range d.Groups {
+				bottom = math.Max(bottom, group.Box.Y+group.Box.H)
+			}
+			if d.H != bottom+16 {
+				t.Error("repository canvas must leave a 16-unit inset below the last group")
+			}
 		}
 		for _, l := range sceneLabels(d) {
 			if l.Owner == "" && (l.Text == d.Title || l.Y == 56) && l.X != 16 {

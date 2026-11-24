@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/testutil/docxtest"
 )
 
 func TestSniffDetectsTypesWithoutExtension(t *testing.T) {
@@ -20,8 +21,8 @@ func TestSniffDetectsTypesWithoutExtension(t *testing.T) {
 		{"pdf", []byte("%PDF-1.7\n"), FileTypePDF},
 		{"pdf prefix", append(bytes.Repeat([]byte{0}, 100), []byte("%PDF-1.7")...), FileTypePDF},
 		{"docx", docxPartsBytes(t, map[string]string{"word/document.xml": "document"}), FileTypeDOCX},
-		{"relationship", docxPartsBytes(t, map[string]string{"_rels/.rels": `<Relationships><Relationship Type="office/officeDocument" Target="custom/main.xml"/></Relationships>`, "custom/main.xml": "document"}), FileTypeDOCX},
-		{"relationship missing part", docxPartsBytes(t, map[string]string{"_rels/.rels": `<Relationships><Relationship Type="office/officeDocument" Target="word/document.xml"/></Relationships>`}), FileTypeDOCX},
+		{"relationship", docxPartsBytes(t, map[string]string{"_rels/.rels": docxtest.Relationships(docxtest.Relationship(testDOCXOfficeNS, "officeDocument", "main", "custom/main.xml")), "custom/main.xml": "document"}), FileTypeDOCX},
+		{"relationship missing part", docxPartsBytes(t, map[string]string{"_rels/.rels": docxtest.Relationships(docxtest.Relationship(testDOCXOfficeNS, "officeDocument", "main", "word/document.xml"))}), FileTypeDOCX},
 		{"doc", buildCFB(t, []cfbStream{{name: "WordDocument", data: []byte("document")}}, cfbOptions{}), FileTypeDOC},
 		{"utf8", []byte("Plain text 世界 🌍"), FileTypeText},
 		{"utf8 sample boundary", []byte(strings.Repeat("x", 8191) + "世界"), FileTypeText},
