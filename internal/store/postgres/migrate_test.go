@@ -47,7 +47,7 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	read := func() snapshot {
 		var s snapshot
 		require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_relation_filenode('documents'), jsonb_build_array(
-			to_jsonb(d)-'incarnation', to_jsonb(ch), to_jsonb(f), to_jsonb(j))::text
+			to_jsonb(d)-'incarnation'-'grant_catalog_assigned', to_jsonb(ch), to_jsonb(f), to_jsonb(j))::text
 			FROM documents d JOIN chunks ch ON ch.document_id=d.id
 			JOIN document_fingerprints f ON f.document_id=d.id JOIN ingest_jobs j ON j.document_id=d.id
 			WHERE d.id=$1 AND j.state='running' AND j.lease_until > clock_timestamp()`, id).Scan(&s.filenode, &s.rows))

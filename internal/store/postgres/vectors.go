@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -25,17 +26,26 @@ var (
 	_ domain.TransactionalVectorStore = (*VectorStore)(nil)
 )
 
-// NewVectorStore initializes the optional schema under the migration advisory lock.
+// NewVectorStore validates or initializes the optional schema under the migration advisory lock.
 // The client must have applied its base migrations before calling this function.
 func NewVectorStore(ctx context.Context, client *Client, dimensions int) (*VectorStore, error) {
-	if dimensions < 1 || dimensions > 2000 {
-		return nil, fmt.Errorf("postgres: vector dimensions must be between 1 and 2000")
+	validDimensions, err := ValidateVectorDimensions(dimensions)
+	if err != nil {
+		return nil, err
 	}
 	if err := client.initVectors(ctx, dimensions); err != nil {
 		return nil, fmt.Errorf("postgres: initialize vectors: %w", err)
 	}
-	client.vectorDimensions.Store(int32(dimensions))
+	client.vectorDimensions.Store(validDimensions)
 	return &VectorStore{client: client, dimensions: dimensions}, nil
+}
+
+// ValidateVectorDimensions returns the bounded dimension supported by the pgvector index.
+func ValidateVectorDimensions(dimensions int) (int32, error) {
+	if dimensions < 1 || dimensions > 2000 {
+		return 0, fmt.Errorf("postgres: vector dimensions must be between 1 and 2000")
+	}
+	return int32(dimensions), nil
 }
 
 func (c *Client) initVectors(ctx context.Context, dimensions int) error {
@@ -53,12 +63,46 @@ func (c *Client) initVectors(ctx context.Context, dimensions int) error {
 	if _, err = tx.Exec(ctx, `SET LOCAL lock_timeout = '15s'`); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
-		return err
+	if extensionErr := ensureVectorExtension(ctx, tx); extensionErr != nil {
+		return extensionErr
 	}
+	var exists bool
+	if relationErr := tx.QueryRow(ctx, `SELECT to_regclass(format('%I.chunk_vectors', current_schema())) IS NOT NULL`).Scan(&exists); relationErr != nil {
+		return relationErr
+	}
+	if !exists {
+		if createErr := createVectorTable(ctx, tx, dimensions); createErr != nil {
+			return createErr
+		}
+	}
+	var storedDimensions int
+	var vectorType bool
+	if dimensionErr := tx.QueryRow(ctx, `SELECT atttypmod, atttypid=to_regtype('vector')
+		FROM pg_attribute WHERE attrelid=to_regclass(format('%I.chunk_vectors',current_schema()))
+		AND attname='embedding' AND NOT attisdropped`).Scan(&storedDimensions, &vectorType); dimensionErr != nil {
+		return dimensionErr
+	}
+	if !vectorType || storedDimensions != dimensions {
+		return fmt.Errorf("embedding dimension mismatch: existing %d, configured %d", storedDimensions, dimensions)
+	}
+	if indexErr := ensureVectorIndexes(ctx, tx); indexErr != nil {
+		return indexErr
+	}
+	return tx.Commit(ctx)
+}
+
+func ensureVectorExtension(ctx context.Context, tx pgx.Tx) error {
+	const versionQuery = `SELECT extversion FROM pg_extension WHERE extname='vector'`
 	var version string
-	if versionErr := tx.QueryRow(ctx, `SELECT extversion FROM pg_extension WHERE extname='vector'`).Scan(&version); versionErr != nil {
-		return versionErr
+	err := tx.QueryRow(ctx, versionQuery).Scan(&version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, err = tx.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+			return err
+		}
+		err = tx.QueryRow(ctx, versionQuery).Scan(&version)
+	}
+	if err != nil {
+		return err
 	}
 	parts := strings.Split(version, ".")
 	if len(parts) < 2 {
@@ -69,7 +113,11 @@ func (c *Client) initVectors(ctx context.Context, dimensions int) error {
 	if majorErr != nil || minorErr != nil || major < 0 || (major == 0 && minor < 8) {
 		return fmt.Errorf("pgvector 0.8 or later is required")
 	}
-	schema := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS chunk_vectors (
+	return nil
+}
+
+func createVectorTable(ctx context.Context, tx pgx.Tx, dimensions int) error {
+	schema := fmt.Sprintf(`CREATE TABLE chunk_vectors (
   chunk_id TEXT PRIMARY KEY,
   document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   chunk_index INTEGER NOT NULL,
@@ -81,23 +129,42 @@ func (c *Client) initVectors(ctx context.Context, dimensions int) error {
   token_count INTEGER NOT NULL,
   embedding vector(%d) NOT NULL
  )`, dimensions)
-	if _, err = tx.Exec(ctx, schema); err != nil {
+	_, err := tx.Exec(ctx, schema)
+	return err
+}
+
+func ensureVectorIndexes(ctx context.Context, tx pgx.Tx) error {
+	const check = `WITH expected(index_name, access_method, column_name, operator_class) AS (
+		VALUES ('idx_chunk_vectors_embedding','hnsw','embedding','vector_cosine_ops'),
+		       ('idx_chunk_vectors_document_id','btree','document_id','uuid_ops'),
+		       ('idx_chunk_vectors_collection','btree','collection','text_ops')
+	)
+	SELECT count(*) = (SELECT count(*) FROM expected)
+	FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid
+	JOIN pg_am am ON am.oid=idx.relam
+	JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=i.indkey[0]
+	JOIN pg_opclass op ON op.oid=i.indclass[0]
+	JOIN expected e ON (idx.relname,am.amname,a.attname,op.opcname) =
+		(e.index_name,e.access_method,e.column_name,e.operator_class)
+	WHERE i.indrelid=to_regclass(format('%I.chunk_vectors',current_schema()))
+	  AND i.indisvalid AND i.indisready AND i.indislive AND i.indnatts=1
+	  AND i.indpred IS NULL AND i.indexprs IS NULL`
+	var prepared bool
+	if err := tx.QueryRow(ctx, check).Scan(&prepared); err != nil || prepared {
 		return err
 	}
-	var storedDimensions int
-	var vectorType bool
-	if dimensionErr := tx.QueryRow(ctx, `SELECT atttypmod,atttypid='vector'::regtype FROM pg_attribute WHERE attrelid='chunk_vectors'::regclass AND attname='embedding' AND NOT attisdropped`).Scan(&storedDimensions, &vectorType); dimensionErr != nil {
-		return dimensionErr
-	}
-	if !vectorType || storedDimensions != dimensions {
-		return fmt.Errorf("embedding dimension mismatch: existing %d, configured %d", storedDimensions, dimensions)
-	}
-	if _, err = tx.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_chunk_vectors_embedding ON chunk_vectors USING hnsw (embedding vector_cosine_ops);
+	if _, err := tx.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_chunk_vectors_embedding ON chunk_vectors USING hnsw (embedding vector_cosine_ops);
  CREATE INDEX IF NOT EXISTS idx_chunk_vectors_document_id ON chunk_vectors(document_id);
  CREATE INDEX IF NOT EXISTS idx_chunk_vectors_collection ON chunk_vectors(collection)`); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.QueryRow(ctx, check).Scan(&prepared); err != nil {
+		return err
+	}
+	if !prepared {
+		return fmt.Errorf("vector indexes do not match the required schema")
+	}
+	return nil
 }
 
 // TransactionalVectors marks vectors persisted by CompleteJob instead of PersistStage.

@@ -185,6 +185,9 @@ func parseSQL(sql string) (sqlSchema, error) {
 	create := regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\(`)
 	for _, loc := range create.FindAllStringSubmatchIndex(sql, -1) {
 		table := sql[loc[2]:loc[3]]
+		if strings.HasPrefix(table, "grant_catalog_") {
+			continue
+		}
 		start := loc[1]
 		depth := 1
 		end := start
@@ -251,6 +254,10 @@ func parseSQL(sql string) (sqlSchema, error) {
 				c, err := parseColumn(add[1])
 				if err != nil {
 					return nil, err
+				}
+				// Grant storage belongs to the operator reference.
+				if strings.HasPrefix(c.Name, "grant_catalog_") {
+					continue
 				}
 				cols[c.Name] = c
 			} else {
