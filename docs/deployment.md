@@ -328,7 +328,10 @@ retry layer.
 - For Bedrock chat, grant `bedrock:InvokeModel` for the models selected by the
   synthesis policy from `BEDROCK_PRIMARY_MODEL` and `BEDROCK_FALLBACK_MODEL`.
   Streamed answers also require `bedrock:InvokeModelWithResponseStream` for those
-  models. For a geographic inference profile, including the default fallback,
+  models. When [`SYNTHESIS_INPUT_PROFILE`](configuration.md#environment-variables)`=strict`,
+  also grant `bedrock:CountTokens` for the foundation models selected for
+  [strict synthesis](configuration.md#strict-synthesis-budgets). For a
+  geographic inference profile, including the default fallback,
   grant the applicable invoke actions on the profile ARN in the source Region
   and on the foundation model ARN in the source Region and every destination
   Region for that source Region.
@@ -353,6 +356,8 @@ Both compatible clients use the same `OPENAI_BASE_URL` and optional
 set the model name for each selected compatible provider.
 
 Chat sends JSON to `/chat/completions` with `max_tokens` and `temperature`.
+See [strict synthesis budgets](configuration.md#strict-synthesis-budgets) for
+deployment matching.
 Embeddings send JSON to `/embeddings` and request float encoding. Both paths are
 relative to the configured API base. Set `EMBEDDING_DIMENSIONS` to the model's
 output size.

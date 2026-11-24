@@ -80,6 +80,8 @@ The table below lists the environment variables recognized by the service:
 | `SERVICE_TOKENS` | comma-separated strings | `""` | No whitespace or control characters within a token after trimming | Additional secrets accepted in `X-Service-Token` for rotation; see [Service Token Rotation](deployment.md#service-token-rotation). Tokens are trimmed, empty entries are dropped and duplicates are removed across both variables. Startup warns with only the count of tokens shorter than 32 bytes; use secrets of at least 32 bytes. An empty combined list leaves routes open only in offline mode. |
 | `SHUTDOWN_DRAIN_DELAY` | duration | `5s` | 0s to 60s | Delay after readiness starts returning draining, before HTTP shutdown. A second termination signal skips the remaining delay. |
 | `SYNTHESIS_CONTEXT_TOKENS` | integer | `2400` | 256 to 100000 | Maximum sum of estimated tokens in sanitized excerpt bodies. Generated answers also include prompt instructions, the question and markers. |
+| `SYNTHESIS_INPUT_PROFILE` | string | `""` | `""` or `"strict"` | Enables [strict synthesis budgets](#strict-synthesis-budgets). Incompatible with `GO_RAG_FAKE_MODE=true`. |
+| `SYNTHESIS_OPENAI_DEPLOYMENT` | string | `""` | `chatml-v1\|<model-revision>\|<base-address>` | Explicit deployment match for strict OpenAI-compatible synthesis. |
 | `SYNTHESIS_MODEL` | string | `"fallback"` | `"primary"`, `"fallback"`, or `"hybrid"` | Bedrock model routing policy for query answer synthesis: `"fallback"` uses Llama 4 Maverick, `"primary"` uses Nova Micro, and `"hybrid"` dynamically selects between models based on query complexity. |
 | `SYNTHESIS_RELATIVE_SCORE_FLOOR` | float64 | `0.55` | 0 to 1, finite | Minimum candidate score relative to the best retrieved score. |
 | `SYNTHESIS_TIMEOUT` | duration | `45s` | Positive and below `QUERY_TIMEOUT` | Synthesis call budget, including SDK retries with Bedrock. |
@@ -164,6 +166,45 @@ explain when a submission resolves to an existing document instead of queuing
 new work. Before cutover, check that replacement chunk IDs and vectors are
 present and that queries with citations resolve to the rebuilt chunk indices.
 Copying stored chunks to another vector backend preserves their geometry.
+
+## Strict synthesis budgets
+
+With `SYNTHESIS_INPUT_PROFILE=strict`, startup checks every reachable synthesis
+model. With the setting empty, queries use the existing excerpt estimate.
+
+For Bedrock, choose an exact model or inference profile ID and source Region
+from the table. Startup sends one synthetic Converse-form `CountTokens`
+request to the regional Bedrock Runtime endpoint for each distinct reachable
+model. The request includes text guardrail blocks when configured. The
+configured deployment must accept that shape and return a valid count before
+the server starts. Custom runtime endpoints are unsupported. Strict mode
+requires replacing the default fallback model. See [Bedrock IAM
+permissions](deployment.md#aws-bedrock-models).
+
+| Bedrock model or inference profile ID | Context window | Source Regions for startup validation | Inference routing |
+|---|---:|---|---|
+| `amazon.nova-micro-v1:0` | 128,000 | `us-east-1`, `eu-west-2`, `ap-southeast-2` | In-Region |
+| `us.anthropic.claude-haiku-4-5-20251001-v1:0` | 200,000 | `us-east-1`, `us-east-2`, `us-west-1`, `us-west-2`, `ca-central-1` | Geographic cross-Region |
+
+For OpenAI-compatible generation, set `SYNTHESIS_OPENAI_DEPLOYMENT` to
+`chatml-v1|<model-revision>|<base-address>` using the exact revision and
+`OPENAI_BASE_URL` with trailing slashes removed. Set this only for a deployment
+whose immutable revision uses the stated tokenizer, window and ChatML v1 text
+framing in both JSON and streaming requests. The deployment must encode roles
+and contents as ordinary text, add three framing tokens per message and three
+assistant priming tokens, and apply no additional input transformations or
+instructions. Local counting uses the pre-tokenization and merge ranks of
+tiktoken 0.14.0. Floating aliases and Bedrock guardrail settings are
+unsupported in this configuration.
+
+| Model revision | Tokenizer | Context window |
+|---|---|---:|
+| `gpt-4-0613` | `cl100k_base` | 8,192 |
+| `gpt-4o-2024-08-06` | `o200k_base` | 128,000 |
+| `gpt-4o-mini-2024-07-18` | `o200k_base` | 128,000 |
+
+See [query stages](architecture.md#query-stages) for fitting and
+[POST /query](api.md#post-query) for the response fields and statuses.
 
 ## Tracing
 

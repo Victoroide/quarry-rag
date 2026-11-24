@@ -536,6 +536,12 @@ components:
           type: integer
         context_tokens:
           type: integer
+        count_method:
+          type: string
+          enum: [bedrock_count_tokens, openai_o200k_chat, openai_cl100k_chat]
+        model_input_tokens:
+          type: integer
+          minimum: 1
         early_exit:
           type: boolean
         stage_timings_ms:
@@ -639,6 +645,12 @@ components:
           $ref: '#/components/schemas/TokenUsage'
         context_tokens:
           type: integer
+        count_method:
+          type: string
+          enum: [bedrock_count_tokens, openai_o200k_chat, openai_cl100k_chat]
+        model_input_tokens:
+          type: integer
+          minimum: 1
         stage_timings_ms:
           type: object
           additionalProperties:

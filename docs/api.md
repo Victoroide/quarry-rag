@@ -369,7 +369,9 @@ Response fields (200 OK):
 | `mode` | string | Retrieval mode executed: `"LOCAL"` or `"GLOBAL"`; automatic routing reflects only authorized, visible candidate documents |
 | `chunks_used` | int | Count of chunks from completed documents remaining after visibility, allowlist and minimum relevance filtering |
 | `context_chunks` | int | Count of chunks retained for context (optional) |
-| `context_tokens` | int | Estimated tokens in the generation prompt or selected evidence bodies (optional) |
+| `context_tokens` | int | Legacy `rune/4` estimate over assembled synthesis prompt plus system text, or selected evidence bodies (optional) |
+| `count_method` | string | Counting strategy used under strict input budgeting, such as `bedrock_count_tokens`, `openai_o200k_chat` or `openai_cl100k_chat` (optional; omitted in legacy mode) |
+| `model_input_tokens` | int | Counted input tokens for the complete serialized model request under strict input budgeting (optional; omitted in legacy mode) |
 | `early_exit` | bool | Indicates whether query execution completed early (optional) |
 | `stage_timings_ms` | map[string]int64 | Execution timings for pipeline stages in milliseconds (optional) |
 | `token_usage` | object | LLM token usage metrics (`input_tokens`, `output_tokens`, `total_tokens`) |
@@ -482,7 +484,7 @@ words incrementally.
 |---|---|---|
 | `context` | `mode`, `chunks_used`, `context_chunks`, `scored_chunks` | Once, after evidence filtering and excerpt selection |
 | `delta` | `{"text":"..."}` | Incremental answer text; concatenate `text` values in order |
-| `done` | `finish_reason`, `token_usage`, `context_tokens`, `stage_timings_ms`, optional `early_exit`, and `citations` when requested | Successful completion with timings for the completed stages |
+| `done` | `finish_reason`, `token_usage`, `context_tokens`, optional `count_method`, `model_input_tokens`, `stage_timings_ms`, optional `early_exit`, and `citations` when requested | Successful completion with timings for the completed stages |
 | `error` | `{"error":"...","message":"..."}` | A failure after the first frame; error categories and messages follow the table below |
 
 The context event uses the scored chunk fields above, including `excerpt` and `truncated`, to identify the chunks selected for context. Zero context counts are included. With `include_citations`, the `done` event always contains a citation array, including `[]` when no valid references remain. Citation checks run on the complete generated answer. Streaming preserves all text and markers as generated; checks omit out-of-range excerpt numbers and report each valid number in a marker once. The lexical check and offset definition above apply.
@@ -528,14 +530,14 @@ Error Status Codes:
 | `400 Bad Request` | `embedding_input_too_long` | The query exceeds the [embedding input profile](configuration.md#embedding-input-profiles). The service skips this check for an empty allowlist. |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `403 Forbidden` | `forbidden` | The deployed answer policy disallows generated answers |
-| `413 Payload Too Large` | `validation` | Request body exceeds the 1 MiB limit |
+| `413 Payload Too Large` | `validation` or `input_too_large` | Request body exceeds the 1 MiB limit (`validation`), or strict counting establishes that the base input or smallest excerpt exceeds the model context window after reserving output tokens (`input_too_large`) |
 | `415 Unsupported Media Type` | `validation` | Content-Type is not `application/json` |
 | `504 Gateway Timeout` | `timeout` | The query or synthesis deadline expired: `query processing timed out` |
 | `503 Service Unavailable` | `overloaded` | Query admission exceeded `QUERY_QUEUE_TIMEOUT`: `too many concurrent queries`; `Retry-After: 1` |
 | `503 Service Unavailable` | `upstream_throttled` | Upstream throttling or exhausted quota: `upstream service is busy`; `Retry-After: 2` |
-| `502 Bad Gateway` | `synthesis` | Synthesis returned no text: `answer synthesis returned no text` |
+| `502 Bad Gateway` | `synthesis` | Synthesis returned no text (`answer synthesis returned no text`) or strict counting failed or exhausted its attempts before confirming a fit (`synthesis input counting failed`) |
 | `502 Bad Gateway` | `embedding_model_limit` | The provider reports a model-window violation with an input profile enabled |
-| `500 Internal Server Error` | `pipeline` | Other pipeline failures: `query processing failed`; internal error details are recorded only in server logs |
+| `500 Internal Server Error` | `pipeline` | An unsupported strict input capability, evidence that changed before synthesis, or another pipeline failure: `query processing failed`; internal error details are recorded only in server logs |
 
 Example:
 

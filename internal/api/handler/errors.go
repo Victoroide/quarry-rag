@@ -67,6 +67,10 @@ func queryErrorResponse(err error) (code int, retry string, body APIError) {
 		return http.StatusBadGateway, "", APIError{Error: "embedding_model_limit", Message: "embedding model rejected the input length"}
 	case isUpstreamThrottled(err):
 		return http.StatusServiceUnavailable, "2", APIError{Error: "upstream_throttled", Message: "upstream service is busy"}
+	case errors.Is(err, pipeline.ErrSynthesisInputTooLarge):
+		return http.StatusRequestEntityTooLarge, "", APIError{Error: "input_too_large", Message: "synthesis input exceeds model context budget"}
+	case errors.Is(err, pipeline.ErrSynthesisCountFailed):
+		return http.StatusBadGateway, "", APIError{Error: "synthesis", Message: "synthesis input counting failed"}
 	case errors.Is(err, pipeline.ErrSynthesisEmpty):
 		return http.StatusBadGateway, "", APIError{Error: "synthesis", Message: "answer synthesis returned no text"}
 	default:

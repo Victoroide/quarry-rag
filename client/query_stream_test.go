@@ -239,3 +239,24 @@ func TestQueryStreamCanceledContextAndNilCallback(t *testing.T) {
 	require.Error(t, c.QueryStream(t.Context(), client.QueryRequest{Query: "archive"}, nil))
 	require.Error(t, c.QueryStream(t.Context(), client.QueryRequest{Query: "archive"}, func(client.Event) error { return nil }, nil))
 }
+
+func TestQueryStreamDoneDecodesStrictBudgetFields(t *testing.T) {
+	c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, err := io.WriteString(w, "event: context\ndata: {\"mode\":\"GLOBAL\",\"chunks_used\":1,\"context_chunks\":1,\"scored_chunks\":[]}\n\n"+
+			"event: delta\ndata: {\"text\":\"Ok\"}\n\n"+
+			"event: done\ndata: {\"finish_reason\":\"stop\",\"token_usage\":{\"input_tokens\":60,\"output_tokens\":2,\"total_tokens\":62},\"context_tokens\":45,\"count_method\":\"bedrock_count_tokens\",\"model_input_tokens\":60,\"stage_timings_ms\":{\"synthesis\":3}}\n\n")
+		assert.NoError(t, err)
+	})
+	var done client.QueryStreamDone
+	err := c.QueryStream(t.Context(), client.QueryRequest{Query: "archive"}, func(ev client.Event) error {
+		if ev.Type == "done" {
+			return json.Unmarshal(ev.Data, &done)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, "bedrock_count_tokens", done.CountMethod)
+	require.Equal(t, 60, done.ModelInputTokens)
+	require.Equal(t, 45, done.ContextTokens)
+}

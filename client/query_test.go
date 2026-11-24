@@ -145,3 +145,20 @@ func TestQueryCollectionEncoding(t *testing.T) {
 	require.NoError(t, json.Unmarshal(encoded, &body))
 	require.Equal(t, "café", body["collection"])
 }
+
+func TestQueryDecodesStrictBudgetFields(t *testing.T) {
+	c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, err := w.Write([]byte(`{"answer":"Ok","mode":"LOCAL","chunks_used":1,"context_chunks":1,"context_tokens":50,"count_method":"openai_o200k_chat","model_input_tokens":72,"token_usage":{"input_tokens":72,"output_tokens":4,"total_tokens":76},"scored_chunks":[]}`))
+		require.NoError(t, err)
+	})
+	got, err := c.Query(t.Context(), client.QueryRequest{Query: "archive"})
+	require.NoError(t, err)
+	require.Equal(t, "openai_o200k_chat", got.CountMethod)
+	require.Equal(t, 72, got.ModelInputTokens)
+	require.Equal(t, 50, got.ContextTokens)
+
+	raw, err := json.Marshal(client.QueryResponse{Answer: "Ok", Mode: "LOCAL", ScoredChunks: []client.ScoredChunkResponse{}})
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "count_method")
+	require.NotContains(t, string(raw), "model_input_tokens")
+}

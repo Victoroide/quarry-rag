@@ -85,6 +85,8 @@ func TestJSONContract(t *testing.T) {
 		{client.IngestResponse{}, handler.IngestResponse{}},
 		{client.QueryRequest{}, handler.QueryRequest{}},
 		{client.QueryResponse{}, handler.QueryResponse{}},
+		{client.QueryStreamContext{}, handler.QueryStreamContext{}},
+		{client.QueryStreamDone{}, handler.QueryStreamDone{}},
 		{client.ScoredChunkResponse{}, handler.ScoredChunkResponse{}},
 		{client.TokenUsage{}, domain.TokenUsage{}},
 		{client.DocumentSummary{}, domain.DocumentSummary{}},
