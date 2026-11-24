@@ -36,6 +36,7 @@ type Chunk struct {
 
 // Document represents an ingested document with metadata.
 type Document struct {
+	Incarnation    string         `json:"-"`
 	ID             DocumentID     `json:"id"`
 	Content        string         `json:"content"`
 	ContentPreview string         `json:"content_preview,omitempty"`
@@ -57,8 +58,10 @@ type TokenUsage struct {
 
 // ScoredChunk pairs a chunk with its similarity score from vector search.
 type ScoredChunk struct {
-	Chunk       Chunk    `json:"chunk"`
-	Score       float64  `json:"score"`
-	Namespace   string   `json:"namespace,omitempty"`
-	RerankScore *float64 `json:"rerank_score,omitempty"`
+	// ObservedIncarnation records the document lifetime verified by PostgreSQL.
+	ObservedIncarnation string   `json:"-"`
+	Chunk               Chunk    `json:"chunk"`
+	Score               float64  `json:"score"`
+	Namespace           string   `json:"namespace,omitempty"`
+	RerankScore         *float64 `json:"rerank_score,omitempty"`
 }

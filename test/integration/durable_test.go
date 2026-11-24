@@ -237,17 +237,18 @@ func (s durablePartialWriteStage) Run(ctx context.Context, ic *pipeline.IngestCo
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	if err := s.vectors.Upsert(ctx, "", []domain.Chunk{{ID: "late", DocumentID: ic.DocumentID, Text: "late partial write", Embedding: []float32{1}}}); err != nil {
-		return err
-	}
-	return errors.New("transient partial write")
+	return ic.MutateVectors(ctx, func(ctx context.Context) error {
+		return domain.DispatchVectorMutation(ctx, false, func(ctx context.Context) error {
+			return s.vectors.Upsert(ctx, "", []domain.Chunk{{ID: "late", DocumentID: ic.DocumentID, Text: "late write", Embedding: []float32{1}}})
+		})
+	})
 }
-func TestDeleteDuringPartialWriteFailureRemovesVectors(t *testing.T) {
+func TestDeleteBeforeVectorClaimPreventsLateWrite(t *testing.T) {
 	c := durableDatabase(t)
 	v := memory.NewFakeVectorStore()
 	stage := durablePartialWriteStage{v, make(chan struct{}), make(chan struct{})}
 	w := worker.New(c, []pipeline.Stage{stage}, v, worker.Options{Workers: 1, Owner: "partial", Lease: time.Minute, PollInterval: time.Millisecond})
-	rec := durableSubmit(t, w, c, `{"content":"Remove partial output even when persistence fails."}`)
+	rec := durableSubmit(t, w, c, `{"content":"Delete before the worker requests a vector write."}`)
 	require.Equal(t, 202, rec.Code)
 	var response handler.IngestResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))

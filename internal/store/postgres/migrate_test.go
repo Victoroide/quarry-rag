@@ -40,13 +40,14 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	req := jobsRequest("preserved source content")
 	key := "objects/preserved.txt"
 	req.Document.S3Key = &key
-	result, err := c.AcceptDocument(ctx, req)
+	id := req.Document.ID
+	// Seed the SQL shape used by an executable before the additive migrations.
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id,content,s3_key,fingerprint) VALUES($1,$2,$3,$4)`,
+		id, req.Document.Content, key, req.Fingerprint)
 	require.NoError(t, err)
-	require.Equal(t, domain.AcceptAccepted, result.Outcome)
-	id := string(result.DocumentID)
-	// The pre-migration binary claimed work without a lease token.
-	job := domain.Job{Document: req.Document, LeaseOwner: "schema-upgrade", Attempts: 1, Incarnation: id}
-	_, err = c.Pool.Exec(ctx, `UPDATE ingest_jobs SET state='running',attempts=$2,lease_owner=$3,lease_until=NOW()+interval '1 minute' WHERE document_id=$1`, id, job.Attempts, job.LeaseOwner)
+	require.NoError(t, c.StoreFingerprint(ctx, req.Fingerprint, string(id)))
+	_, err = c.Pool.Exec(ctx, `INSERT INTO ingest_jobs(document_id,state,attempts,lease_owner,lease_until)
+		VALUES($1,'running',1,'schema-upgrade',clock_timestamp()+interval '1 minute')`, id)
 	require.NoError(t, err)
 	chunkID := uuid.NewString()
 	_, err = c.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,'preserved chunk',2)`, chunkID, id)
@@ -59,8 +60,9 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	read := func() snapshot {
 		var s snapshot
 		require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_relation_filenode('documents'), jsonb_build_array(
-			to_jsonb(d)-'incarnation'-'grant_catalog_assigned'-'index_visibility'-'index_visibility_observed_at',
-			to_jsonb(ch), to_jsonb(f), to_jsonb(j)-'lease_token'-'pdf_required'-'pdf_claim_attempt')::text
+			to_jsonb(d)-ARRAY['incarnation','grant_catalog_assigned','index_visibility','index_visibility_observed_at','scoped_vectors','vector_attempt','vector_incarnation_required',
+				'vector_mutation_deletes','vector_delete_uncertain','vector_mutation_pending','vector_mutation_uncertain',
+				'vector_mutation_claim','vector_mutation_until'], to_jsonb(ch), to_jsonb(f), to_jsonb(j)-ARRAY['lease_token','pdf_required','pdf_claim_attempt'])::text
 			FROM documents d JOIN chunks ch ON ch.document_id=d.id
 			JOIN document_fingerprints f ON f.document_id=d.id JOIN ingest_jobs j ON j.document_id=d.id
 			WHERE d.id=$1 AND j.state='running' AND j.lease_until > clock_timestamp()`, id).Scan(&s.filenode, &s.rows))
@@ -77,21 +79,33 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	var stored *string
 	require.NoError(t, restarted.Pool.QueryRow(ctx, `SELECT incarnation::text FROM documents WHERE id=$1`, id).Scan(&stored))
 	require.Nil(t, stored)
-	requireHistoricalIncarnation(t, restarted.WithDocumentIncarnations(), id)
-	summary, err := restarted.GetDocumentSummary(ctx, job.Document.ID)
+	requireHistoricalIncarnation(t, restarted.WithDocumentIncarnations(), string(id))
+	summary, err := restarted.GetDocumentSummary(ctx, id)
 	require.NoError(t, err)
 	require.Equal(t, domain.VisibilityUnknown, summary.IndexVisibility)
 	require.Nil(t, summary.IndexVisibilityObservedAt)
 
-	owned, err := restarted.HeartbeatJob(ctx, job, time.Minute)
+	// The old worker's heartbeat still works with the vector mutation migration in place.
+	tag, err := restarted.Pool.Exec(ctx, `UPDATE ingest_jobs SET lease_until=now()+interval '1 minute'
+		WHERE document_id=$1 AND lease_owner='schema-upgrade' AND attempts=1 AND state='running' AND lease_until>now()`, id)
 	require.NoError(t, err)
-	require.True(t, owned)
-	completed, err := restarted.CompleteJob(ctx, job, []domain.Chunk{{ID: domain.ChunkID(chunkID), Text: "preserved chunk", TokenCount: 2}}, domain.IndexObservation{})
+	require.EqualValues(t, 1, tag.RowsAffected())
+	// The upgraded worker can reclaim the original job after its old lease expires.
+	_, err = restarted.Pool.Exec(ctx, `UPDATE ingest_jobs SET lease_until=clock_timestamp() WHERE document_id=$1`, id)
+	require.NoError(t, err)
+	job, err := restarted.ClaimJob(ctx, "schema-upgrade", time.Minute, 5)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, string(id), job.Incarnation)
+	require.False(t, job.ScopedVectors)
+	require.Equal(t, 2, job.Attempts)
+
+	completed, err := restarted.CompleteJob(ctx, *job, []domain.Chunk{{ID: domain.ChunkID(chunkID), Text: "preserved chunk", TokenCount: 2}}, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, completed)
-	effective := id
+	effective := string(id)
 	for range 2 {
-		require.NoError(t, restarted.DeleteDocument(ctx, result.DocumentID))
+		require.NoError(t, restarted.DeleteDocument(ctx, id))
 		result, err := restarted.AcceptDocument(ctx, req)
 		require.NoError(t, err)
 		require.Equal(t, domain.AcceptAccepted, result.Outcome)
@@ -100,7 +114,7 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 		_, err = uuid.Parse(next)
 		require.NoError(t, err)
 		require.NotEqual(t, effective, next)
-		require.NotEqual(t, id, next)
+		require.NotEqual(t, string(id), next)
 		effective = next
 	}
 	requireInactiveDeletionSchema(t, restarted)

@@ -56,6 +56,9 @@ type Worker struct {
 
 // New constructs a durable ingestion processor.
 func New(store domain.JobStore, stages []pipeline.Stage, vectors domain.VectorDeleter, opts Options) *Worker {
+	if _, transactional := vectors.(domain.TransactionalVectorStore); transactional {
+		vectors = nil
+	}
 	if opts.Metrics == nil {
 		opts.Metrics = metrics.Default
 	}
@@ -217,27 +220,30 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 	ic.DocType = job.DocType
 	ic.Collection = job.Collection
 	ic.Stopping = w.stop
+	if job.ScopedVectors {
+		ic.VectorRevision = job.Incarnation
+		ic.VectorAttempt = job.LeaseToken
+	}
+	if guard, ok := w.store.(domain.JobVectorGuard); ok {
+		ic.MutateVectors = func(ctx context.Context, mutate func(context.Context) error) error {
+			return guard.MutateJobVectors(ctx, job, mutate)
+		}
+	}
 	err := w.run(ctx, job, ic)
 	tracing.RecordError(span, err)
 	if parent.Err() != nil {
 		w.release(parent, job)
 		return
 	}
-	if errors.Is(context.Cause(leaseCtx), errLeaseLost) {
-		w.compensateDeleted(parent, job)
+	if err == nil || errors.Is(err, domain.ErrJobNotOwned) || errors.Is(context.Cause(leaseCtx), errLeaseLost) {
 		return
 	}
-	if err == nil {
-		return
-	}
-	w.compensateDeleted(parent, job)
 	if permanent(err) || job.Attempts >= w.opts.MaxAttempts {
 		confirmCtx, confirmCancel := context.WithTimeout(leaseCtx, 5*time.Second)
 		owned, confirmErr := w.store.HeartbeatJob(confirmCtx, job, w.opts.Lease)
 		confirmCancel()
 		if confirmErr != nil || !owned {
 			w.logStateError(job, confirmErr)
-			w.compensateDeleted(parent, job)
 			return
 		}
 		w.deleteVectors(leaseCtx, job)
@@ -246,7 +252,6 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 			return
 		}
 		if errors.Is(context.Cause(leaseCtx), errLeaseLost) {
-			w.compensateDeleted(parent, job)
 			return
 		}
 		stateCtx, stateCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
@@ -260,9 +265,6 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		}
 		failErr := w.store.FailJob(stateCtx, job, message)
 		w.recordOutcome(parent, job, "failed", failErr)
-		if errors.Is(failErr, domain.ErrJobNotOwned) {
-			w.compensateDeleted(parent, job)
-		}
 		return
 	}
 	stateCtx, stateCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
@@ -303,7 +305,7 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 		return contextErr
 	}
 	if w.vectors != nil {
-		if err = w.vectors.DeleteByDocID(ctx, string(job.Document.ID)); err != nil {
+		if err = w.removeJobVectors(ctx, job); err != nil {
 			return fmt.Errorf("remove previous vectors: %w", err)
 		}
 	}
@@ -314,9 +316,7 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 	if err != nil {
 		return err
 	}
-	if !ok {
-		w.compensateDeleted(ctx, job)
-	} else {
+	if ok {
 		w.opts.Metrics.IngestJobs.WithLabelValues("completed").Inc()
 		trace.SpanFromContext(ctx).SetAttributes(attribute.String("quarry.job.result", "completed"))
 	}
@@ -330,15 +330,22 @@ func (w *Worker) extractText(ctx context.Context, job domain.Job, ic *pipeline.I
 	if job.Document.S3Key == nil || *job.Document.S3Key == "" {
 		return domain.Permanent(errors.New("ocr: original document is missing"))
 	}
-	text, err := w.opts.OCR.Extract(ctx, *job.Document.S3Key)
-	if err != nil {
-		return err
-	}
 	store, ok := w.store.(interface {
 		StoreOCRText(context.Context, domain.Job, string) error
 	})
 	if !ok {
 		return errors.New("ocr: detected text storage is unavailable")
+	}
+	owned, err := w.store.HeartbeatJob(ctx, job, w.opts.Lease)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return domain.ErrJobNotOwned
+	}
+	text, err := w.opts.OCR.Extract(ctx, *job.Document.S3Key)
+	if err != nil {
+		return err
 	}
 	if err := store.StoreOCRText(ctx, job, text); err != nil {
 		return err
@@ -353,28 +360,38 @@ func permanent(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "ValidationException"
 }
-func (w *Worker) compensateDeleted(ctx context.Context, job domain.Job) {
-	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	exists, err := w.store.DocumentExists(checkCtx, job.Document.ID)
-	if err != nil {
-		w.logStateError(job, err)
-		return
-	}
-	if !exists {
-		w.compensate(ctx, job)
-	}
-}
-func (w *Worker) compensate(ctx context.Context, job domain.Job) {
-	w.deleteVectors(context.WithoutCancel(ctx), job)
-}
 func (w *Worker) deleteVectors(ctx context.Context, job domain.Job) {
 	if w.vectors == nil {
 		return
 	}
 	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	w.logStateError(job, w.vectors.DeleteByDocID(cleanupCtx, string(job.Document.ID)))
+	w.logStateError(job, w.removeJobVectors(cleanupCtx, job))
+}
+
+func (w *Worker) removeJobVectors(ctx context.Context, job domain.Job) error {
+	remove := func(ctx context.Context) error {
+		if job.ScopedVectors {
+			vectors, ok := w.vectors.(domain.AttemptVectorDeleter)
+			if !ok {
+				return errors.New("revision vector cleanup is unavailable")
+			}
+			return vectors.DeleteByAttempt(ctx, string(job.Document.ID), job.Incarnation, job.LeaseToken)
+		}
+		return w.vectors.DeleteByDocID(ctx, string(job.Document.ID))
+	}
+	if guard, ok := w.store.(domain.JobVectorGuard); ok {
+		return guard.MutateJobVectors(ctx, job, func(ctx context.Context) error {
+			if store, managed := w.vectors.(domain.VectorDispatchStore); managed && store.ManagesVectorDispatch() {
+				return remove(ctx)
+			}
+			return domain.DispatchVectorMutation(ctx, true, remove)
+		})
+	}
+	if job.ScopedVectors {
+		return errors.New("job vector guard is unavailable")
+	}
+	return remove(ctx)
 }
 
 func (w *Worker) logStateError(job domain.Job, err error) {

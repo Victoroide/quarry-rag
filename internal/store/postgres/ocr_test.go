@@ -84,11 +84,14 @@ func TestOCRTextRejectsLeaseExpiredWhileWaitingForDocument(t *testing.T) {
 	require.NoError(t, err)
 	_, err = lock.Exec(t.Context(), `SELECT id FROM documents WHERE id=$1 FOR UPDATE`, string(id))
 	require.NoError(t, err)
+	var blocker int32
+	require.NoError(t, lock.QueryRow(t.Context(), `SELECT pg_backend_pid()`).Scan(&blocker))
 	done := make(chan error, 1)
 	go func() { done <- c.StoreOCRText(t.Context(), *j, "late text") }()
 	require.Eventually(t, func() bool {
 		var waiting bool
-		queryErr := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT d.id::text FROM documents d JOIN ingest_jobs j%')`).Scan(&waiting)
+		queryErr := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+			WHERE $1=ANY(pg_blocking_pids(pid)))`, blocker).Scan(&waiting)
 		return queryErr == nil && waiting
 	}, time.Second, time.Millisecond)
 	require.Eventually(t, func() bool {

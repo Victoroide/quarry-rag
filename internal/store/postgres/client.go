@@ -144,9 +144,9 @@ func (c *Client) GetDocument(ctx context.Context, id domain.DocumentID) (*domain
 	var docID string
 	var metadataJSON []byte
 	err := c.Pool.QueryRow(ctx,
-		`SELECT id, content, metadata, chunk_count, s3_key FROM documents WHERE id = $1`,
+		`SELECT id, content, metadata, chunk_count, s3_key, COALESCE(incarnation,id)::text FROM documents WHERE id = $1`,
 		string(id),
-	).Scan(&docID, &doc.Content, &metadataJSON, &doc.ChunkCount, &doc.S3Key)
+	).Scan(&docID, &doc.Content, &metadataJSON, &doc.ChunkCount, &doc.S3Key, &doc.Incarnation)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -204,6 +204,46 @@ func (c *Client) DeleteDocument(ctx context.Context, id domain.DocumentID) error
 		return fmt.Errorf("postgres: delete document %s: %w", id, err)
 	}
 	return nil
+}
+
+// CheckLiveVectorRemoval checks the live row before legacy external cleanup
+// and settles an expired mutation left by a failed job.
+func (c *Client) CheckLiveVectorRemoval(ctx context.Context, doc *domain.Document) error {
+	tx, err := c.beginRemoval(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var allowed, failed bool
+	err = tx.QueryRow(ctx, `SELECT scoped_vectors OR NOT vector_mutation_pending,status='failed'
+		FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2 FOR UPDATE`, doc.ID, doc.Incarnation).Scan(&allowed, &failed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrLiveVectorMutation
+	}
+	if err != nil {
+		return err
+	}
+	if !allowed && failed {
+		allowed, err = settleExpiredVectorMutation(ctx, tx, doc.ID)
+		if err != nil {
+			return err
+		}
+	}
+	if !allowed {
+		return domain.ErrLiveVectorMutation
+	}
+	return tx.Commit(ctx)
+}
+
+// RemoveLiveDocument rechecks the observed row while deleting it. It leaves its
+// job intact when an untagged worker owns a pending vector operation.
+func (c *Client) RemoveLiveDocument(ctx context.Context, doc *domain.Document) error {
+	tag, err := c.execRemoval(ctx, `DELETE FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2
+		AND (scoped_vectors OR NOT vector_mutation_pending)`, doc.ID, doc.Incarnation)
+	if err == nil && tag.RowsAffected() != 1 {
+		return domain.ErrLiveVectorMutation
+	}
+	return err
 }
 
 // CheckFingerprint checks whether a document fingerprint already exists.

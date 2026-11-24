@@ -231,7 +231,7 @@ func (c *Client) StorePDFOCR(ctx context.Context, job domain.Job, result domain.
 }
 
 func (c *Client) withPDFLease(ctx context.Context, job domain.Job, write func(pgx.Tx) error) error {
-	if job.LeaseToken == nil {
+	if job.LeaseToken == "" {
 		return domain.ErrJobNotOwned
 	}
 	tx, err := c.Pool.Begin(ctx)

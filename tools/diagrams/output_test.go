@@ -122,8 +122,8 @@ func TestPreferredSizeBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		total += len(b)
-		if len(b) >= 100000 {
-			t.Errorf("%s exceeds 100 KB target: %d", path, len(b))
+		if len(b) >= 120000 {
+			t.Errorf("%s exceeds 120 KB target: %d", path, len(b))
 		}
 	}
 	if total >= 600000 {

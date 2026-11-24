@@ -71,7 +71,7 @@ The table below lists the environment variables recognized by the service:
 | `PINECONE_API_KEY` | string | `""` | Non-empty string | API key for authenticating with Pinecone vector indices. Required when `GO_RAG_FAKE_MODE=false` and `VECTOR_STORE=pinecone`. |
 | `PINECONE_ENVIRONMENT` | string | `""` | Ignored | Has no effect and is not stored in configuration. A non-empty value adds the startup warning `PINECONE_ENVIRONMENT is ignored`. Remove it from deployment configuration. |
 | `PINECONE_INDEX_NAME` | string | `""` | Required when `GO_RAG_FAKE_MODE=false` and `VECTOR_STORE=pinecone` | Target Pinecone index, for example `quarry-rag`. There is no implicit default. Optional with PostgreSQL vectors or offline mode. |
-| `PINECONE_MAX_ATTEMPTS` | integer | `5` | 1 to 10 | Maximum vector write and deletion attempts, including the first attempt; queries use at most three attempts. |
+| `PINECONE_MAX_ATTEMPTS` | integer | `5` | 1 to 10 | See [Pinecone request limits and retries](deployment.md#pinecone-vector-index). |
 | `PINECONE_TIMEOUT` | duration | `10s` | 1s to 2m | Timeout for each vector index request attempt. |
 | `PINECONE_UPSERT_BATCH_SIZE` | integer | `100` | 1 to 1000 | Maximum records per vector upsert; each batch also has a 1.5 MiB estimated size limit. |
 | `QUERY_CONCURRENCY` | integer | `32` | 1 to 1024 | Maximum concurrent queries per handler instance. |
@@ -288,7 +288,7 @@ The local stdio command reads these variables separately from the HTTP service. 
 
 Database schema migrations are SQL files named with a three-digit version and a descriptive suffix, such as `006_add_index.sql`. Every file under `internal/store/postgres/migrations` matching `NNN_name.sql` is embedded in the binary automatically. Versions must be unique and are applied in ascending order by `internal/store/postgres/migrate.go`.
 
-On startup, the runner acquires a PostgreSQL transaction-scoped advisory lock and applies missing versions in one transaction. The `schema_migrations` table records each version, filename, SHA-256 checksum and application timestamp. Concurrent replicas wait for the lock before checking this table. Subsequent startups verify checksums and skip applied SQL, avoiding table locks on document data when no migration is pending. Never edit an applied migration; add a new numbered file instead. A checksum mismatch stops startup. Existing databases without migration history apply the original idempotent files once and record them without removing stored documents.
+On startup, the runner acquires a PostgreSQL transaction-scoped advisory lock and applies missing versions in one transaction. The standalone cleanup command uses the same runner with a 30-second migration deadline before starting cleanup. The `schema_migrations` table records each version, filename, SHA-256 checksum and application timestamp. Concurrent replicas wait for the lock before checking this table. Subsequent startups verify checksums and skip applied SQL, avoiding table locks on document data when no migration is pending. Never edit an applied migration; add a new numbered file instead. A checksum mismatch stops startup. Existing databases without migration history apply the original idempotent files once and record them without removing stored documents.
 
 Application connections default to `pool_max_conns=16` and `statement_timeout=30000` (milliseconds). Explicit settings in `DATABASE_URL` override these defaults, including `statement_timeout=0` to disable the timeout. Both URI query parameters and keyword connection strings are supported; for example, `host=localhost dbname=rag pool_max_conns=24 statement_timeout=10000` sets 24 connections and a 10-second statement timeout. The migration transaction disables statement and lock timeouts while waiting for the advisory lock, then uses a 15-second lock timeout when applying SQL. Transaction-local settings do not change application connection settings after commit or rollback.
 
@@ -308,6 +308,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `010_document_deletions.sql` | Adds a nullable incarnation column with a random UUID default for future inserts, an empty deletion receipt table and a singleton with a null activation timestamp. It leaves existing rows in place. |
 | `011_grant_catalog.sql` | Installs the [operator grant catalog](grant-catalog.md) with an empty policy at revision zero. |
 | `012_index_visibility.sql` | Adds index visibility observations to documents and a lease token to ingestion jobs. |
+| `013_vector_mutations.sql` | Records each document's vector format, published attempt and vector mutation state. |
 | `015_mixed_pdf_ocr.sql` | Records page manifests, versioned extraction provenance, and coverage. Adds a lease constraint for jobs that require a mixed-PDF worker. |
 | `017_evaluation_fixtures.sql` | Adds durable receipts and UUID reservations for the [opt-in evaluation fixtures](development.md#evidence-evaluation). |
 | `018_evaluation_vector_identity.sql` | Binds new fixture receipts to their vector store and permits reservations for durably retired submissions. |
@@ -319,6 +320,8 @@ checksum still recorded. After applying migration 019, follow the
 for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).
 See [document deletion](api.md#delete-documentsdoc_id) for fixture reservations.
+
+This release keeps production admissions on the untagged format and leaves the activation marker null. Drain in-progress worker mutations before rolling back the binary. While production data uses only the untagged format, the additive migrations and their checksums can stay in place.
 
 The optional vector schema is initialized separately after base migrations, under the same advisory lock; see the [vector data model](architecture.md#postgresql-vector-schema).
 

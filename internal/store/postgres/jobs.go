@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
@@ -216,8 +217,18 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 		preview = preview[:120]
 	}
 	fingerprint := identityFingerprint(req.ContentDedup, req.Document.ID, req.Fingerprint)
-	insert := `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,file_name,file_type,s3_key,doc_type,status,fingerprint,collection,content_dedup) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9,$10,$11)`
-	args := []any{string(req.Document.ID), req.Document.Content, string(preview), encoded, req.Document.FileName, req.Document.FileType, req.Document.S3Key, metadata["doc_type"], fingerprint, req.Collection, req.ContentDedup}
+	// A capable backend can select the tagged format only under the database mode lock.
+	scoped := false
+	if req.SupportsScopedVectors && c.vectorDimensions.Load() == 0 {
+		err = tx.QueryRow(ctx, `SELECT activated_at IS NOT NULL FROM document_deletion_activation WHERE singleton FOR SHARE`).Scan(&scoped)
+		if err != nil {
+			return result, err
+		}
+	}
+	insert := `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,
+		file_name,file_type,s3_key,doc_type,status,fingerprint,collection,content_dedup,scoped_vectors)
+		VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9,$10,$11,$12)`
+	args := []any{string(req.Document.ID), req.Document.Content, string(preview), encoded, req.Document.FileName, req.Document.FileType, req.Document.S3Key, metadata["doc_type"], fingerprint, req.Collection, req.ContentDedup, scoped}
 	if req.EvaluationReceipt == "" {
 		_, err = tx.Exec(ctx, insert, args...)
 	} else {
@@ -259,18 +270,22 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 }
 
 const claimJobPrefix = `WITH claimed AS (
-	UPDATE ingest_jobs j SET state='running',attempts=j.attempts+1,lease_owner=$1,lease_until=NOW()+make_interval(secs=>$2),
-		pdf_claim_attempt=CASE WHEN $3 THEN j.attempts+1 END,lease_token=gen_random_uuid(),updated_at=NOW()
-	WHERE j.document_id=(SELECT ready.document_id FROM ingest_jobs ready
+	UPDATE ingest_jobs j SET state='running',attempts=j.attempts+1,lease_owner=$1,lease_until=clock_timestamp()+make_interval(secs=>$2),
+		pdf_claim_attempt=CASE WHEN $3 THEN j.attempts+1 END,lease_token=gen_random_uuid(),updated_at=now()
+	FROM documents d WHERE j.document_id=d.id AND d.status='processing'
+	AND j.document_id=(SELECT ready.document_id FROM ingest_jobs ready
+		JOIN documents candidate ON candidate.id=ready.document_id AND candidate.status='processing'
 		WHERE ($3 OR NOT EXISTS(SELECT 1 FROM ingest_jobs WHERE pdf_required))
-		AND ((ready.state='pending' AND ready.next_attempt_at<=NOW()) OR (ready.state='running' AND ready.lease_until<NOW()))
+		AND ((ready.state='pending' AND ready.next_attempt_at<=(SELECT clock_timestamp()))
+			OR (ready.state='running' AND ready.lease_until<=(SELECT clock_timestamp())))
+		AND (candidate.vector_mutation_until IS NULL OR candidate.vector_mutation_until<=clock_timestamp())
 		AND `
 
 const claimJobSuffix = `
-		ORDER BY ready.next_attempt_at,ready.created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+		ORDER BY ready.next_attempt_at,ready.created_at FOR UPDATE OF ready SKIP LOCKED LIMIT 1)
 	RETURNING j.document_id,j.attempts,j.lease_token)
 	SELECT d.id::text,j.attempts,d.content,d.metadata,d.file_name,d.file_type,d.s3_key,d.doc_type,d.fingerprint,d.collection,
-		d.text_source,COALESCE(d.incarnation,d.id)::text,j.lease_token::text,p.profile,p.coverage,p.manifest
+		d.text_source,COALESCE(d.incarnation,d.id)::text,j.lease_token::text,d.scoped_vectors,p.profile,p.coverage,p.manifest
 	FROM claimed j JOIN documents d ON d.id=j.document_id
 	LEFT JOIN document_pdf_extractions p ON p.document_id=d.id`
 
@@ -319,7 +334,7 @@ func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, st
 		var coverage *domain.PDFCoverage
 		err := c.Pool.QueryRow(ctx, statement, args...).
 			Scan(&id, &j.Attempts, &j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType,
-				&j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource, &j.Incarnation, &j.LeaseToken, &profile, &coverage, &manifest)
+				&j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource, &j.Incarnation, &j.LeaseToken, &j.ScopedVectors, &profile, &coverage, &manifest)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -356,7 +371,7 @@ func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, st
 // jobClaim identifies one lease of a job by $1 document, $2 owner, $3 attempt
 // and $4 lease token. Owner and attempt numbers repeat after release or
 // replacement, so the token is part of the identity.
-const jobClaim = `document_id=$1 AND lease_owner=$2 AND attempts=$3 AND lease_token IS NOT DISTINCT FROM $4 AND state='running'`
+const jobClaim = `document_id=$1 AND lease_owner=$2 AND attempts=$3 AND lease_token=$4 AND state='running'`
 
 // jobLive also requires the database clock to be before the lease deadline.
 const jobLive = jobClaim + ` AND lease_until>clock_timestamp()`
@@ -376,24 +391,22 @@ func lockClaimedJob(ctx context.Context, tx pgx.Tx, j domain.Job) (bool, error) 
 
 // HeartbeatJob renews a live lease without reviving an expired attempt.
 func (c *Client) HeartbeatJob(ctx context.Context, j domain.Job, lease time.Duration) (bool, error) {
-	tx, err := c.Pool.Begin(ctx)
-	if err != nil {
-		return false, err
+	if j.Incarnation == "" || j.LeaseToken == "" {
+		return false, nil
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if held, lockErr := lockClaimedJob(ctx, tx, j); lockErr != nil || !held {
-		return false, lockErr
-	}
-	tag, err := tx.Exec(ctx, `UPDATE ingest_jobs SET lease_until=clock_timestamp()+make_interval(secs=>$5),updated_at=NOW() WHERE `+jobLive, string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken, lease.Seconds())
-	if err != nil || tag.RowsAffected() != 1 {
-		return false, err
-	}
-	return true, tx.Commit(ctx)
+	tag, err := c.Pool.Exec(ctx, `WITH owned AS MATERIALIZED (
+		SELECT j.document_id,j.lease_until FROM ingest_jobs j JOIN documents d ON d.id=j.document_id
+		WHERE j.document_id=$1 AND j.lease_owner=$2 AND j.attempts=$3 AND j.lease_token=$4 AND j.state='running'
+			AND COALESCE(d.incarnation,d.id)=$5 AND d.status='processing' FOR UPDATE OF j
+	) UPDATE ingest_jobs j SET lease_until=clock_timestamp()+make_interval(secs=>$6),updated_at=now()
+		FROM owned WHERE j.document_id=owned.document_id AND owned.lease_until>clock_timestamp()`,
+		j.Document.ID, j.LeaseOwner, j.Attempts, j.LeaseToken, j.Incarnation, lease.Seconds())
+	return tag.RowsAffected() == 1, err
 }
 
 // CompleteJob commits chunks and completion only while the document and lease remain valid.
 func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.Chunk, observation domain.IndexObservation) (bool, error) {
-	if j.LeaseToken == nil && observation.Visibility != "" {
+	if j.Incarnation == "" || j.LeaseToken == "" {
 		return false, nil
 	}
 	tx, err := c.Pool.Begin(ctx)
@@ -404,7 +417,11 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	var policy domain.ContentDedup
 	var fingerprint *string
 	var collection string
-	err = tx.QueryRow(ctx, `SELECT content_dedup,fingerprint,collection FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2 AND status='processing' FOR UPDATE`, string(j.Document.ID), j.Incarnation).Scan(&policy, &fingerprint, &collection)
+	var safeToPublish bool
+	err = tx.QueryRow(ctx, `SELECT content_dedup,fingerprint,collection,
+		NOT vector_mutation_pending AND (scoped_vectors OR NOT vector_mutation_uncertain)
+		FROM documents WHERE id=$1 AND status='processing' AND COALESCE(incarnation,id)=$2 FOR UPDATE`,
+		j.Document.ID, j.Incarnation).Scan(&policy, &fingerprint, &collection, &safeToPublish)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -421,6 +438,9 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	}
 	if err != nil {
 		return false, err
+	}
+	if !safeToPublish {
+		return false, errors.New("vector mutation is unresolved for the publication target")
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM chunks WHERE document_id=$1`, string(j.Document.ID)); err != nil {
 		return false, err
@@ -464,8 +484,11 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 			return false, err
 		}
 	}
+	vectorIncarnationRequired := slices.ContainsFunc(chunks, func(ch domain.Chunk) bool { return ch.VectorIncarnation != "" })
 	if _, err = tx.Exec(ctx, `UPDATE documents SET status='completed',chunk_count=$2,completed_at=statement_timestamp(),updated_at=statement_timestamp(),last_error=NULL,
-        index_visibility=NULLIF($3,''),index_visibility_observed_at=CASE WHEN $3='transactional' THEN statement_timestamp() ELSE $4 END WHERE id=$1`, string(j.Document.ID), len(chunks), observation.Visibility, observation.ObservedAt); err != nil {
+        index_visibility=NULLIF($3,''),index_visibility_observed_at=CASE WHEN $3='transactional' THEN statement_timestamp() ELSE $4 END,
+        vector_attempt=CASE WHEN scoped_vectors THEN $5::uuid ELSE NULL END,vector_incarnation_required=$6
+        WHERE id=$1`, j.Document.ID, len(chunks), observation.Visibility, observation.ObservedAt, j.LeaseToken, vectorIncarnationRequired); err != nil {
 		return false, err
 	}
 	// Persistence can outlast the lease, and a renewal may have extended it.
@@ -497,24 +520,10 @@ func (c *Client) changeJob(ctx context.Context, j domain.Job, query string, args
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	var id string
-	err = tx.QueryRow(ctx, `SELECT id::text FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2 FOR UPDATE`, string(j.Document.ID), j.Incarnation).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.ErrJobNotOwned
+	if lockErr := lockLiveJob(ctx, tx, j); lockErr != nil {
+		return lockErr
 	}
-	if err != nil {
-		return err
-	}
-	// Lock the claim before the guarded statement so that its lease check runs
-	// after any wait for another transaction's lock on the row.
-	if held, lockErr := lockClaimedJob(ctx, tx, j); lockErr != nil || !held {
-		if lockErr != nil {
-			return lockErr
-		}
-		return domain.ErrJobNotOwned
-	}
-	params := []any{id, j.LeaseOwner, j.Attempts, j.LeaseToken}
-	params = append(params, args...)
+	params := append([]any{j.Document.ID}, args...)
 	tag, err := tx.Exec(ctx, query, params...)
 	if err != nil {
 		return err
@@ -526,13 +535,16 @@ func (c *Client) changeJob(ctx context.Context, j domain.Job, query string, args
 		state := "processing"
 		if args == nil {
 			state = "failed"
+			if _, settleErr := settleExpiredVectorMutation(ctx, tx, j.Document.ID); settleErr != nil {
+				return settleErr
+			}
 			if j.PDF != nil {
-				if _, err = tx.Exec(ctx, `UPDATE document_pdf_extractions SET coverage='failed' WHERE document_id=$1 AND coverage='pending'`, id); err != nil {
+				if _, err = tx.Exec(ctx, `UPDATE document_pdf_extractions SET coverage='failed' WHERE document_id=$1 AND coverage='pending'`, j.Document.ID); err != nil {
 					return err
 				}
 			}
 		}
-		_, err = tx.Exec(ctx, `UPDATE documents SET status=$2,last_error=$3,updated_at=NOW() WHERE id=$1`, id, state, jobError(*message))
+		_, err = tx.Exec(ctx, `UPDATE documents SET status=$2,last_error=$3,updated_at=NOW() WHERE id=$1`, j.Document.ID, state, jobError(*message))
 		if err != nil {
 			return err
 		}
@@ -542,17 +554,46 @@ func (c *Client) changeJob(ctx context.Context, j domain.Job, query string, args
 
 // RetryJob reschedules an owned attempt and records its latest failure.
 func (c *Client) RetryJob(ctx context.Context, j domain.Job, delay time.Duration, message string) error {
-	return c.changeJob(ctx, j, `UPDATE ingest_jobs SET state='pending',lease_owner=NULL,lease_until=NULL,lease_token=NULL,next_attempt_at=NOW()+make_interval(secs=>$5),last_error=$6,updated_at=NOW() WHERE `+jobLive, []any{delay.Seconds(), jobError(message)}, &message)
+	return c.changeJob(ctx, j, `UPDATE ingest_jobs SET state='pending',lease_owner=NULL,lease_until=NULL,lease_token=NULL,
+		next_attempt_at=clock_timestamp()+make_interval(secs=>$2),last_error=$3,updated_at=now()
+		WHERE document_id=$1 AND lease_until>clock_timestamp()`, []any{delay.Seconds(), jobError(message)}, &message)
 }
 
 // FailJob records a terminal failure and removes the owned work.
 func (c *Client) FailJob(ctx context.Context, j domain.Job, message string) error {
-	return c.changeJob(ctx, j, `DELETE FROM ingest_jobs WHERE `+jobLive, nil, &message)
+	return c.changeJob(ctx, j, `DELETE FROM ingest_jobs WHERE document_id=$1 AND lease_until>clock_timestamp()`, nil, &message)
 }
 
 // ReleaseJob returns interrupted work without consuming an attempt.
 func (c *Client) ReleaseJob(ctx context.Context, j domain.Job) error {
-	return c.changeJob(ctx, j, `UPDATE ingest_jobs SET state='pending',lease_owner=NULL,lease_until=NULL,lease_token=NULL,next_attempt_at=NOW(),attempts=GREATEST(attempts-1,0),updated_at=NOW() WHERE `+jobClaim, nil, nil)
+	return c.changeJob(ctx, j, `UPDATE ingest_jobs SET state='pending',lease_owner=NULL,lease_until=NULL,lease_token=NULL,
+		next_attempt_at=clock_timestamp(),attempts=GREATEST(attempts-1,0),updated_at=now()
+		WHERE document_id=$1 AND lease_until>clock_timestamp()`, nil, nil)
+}
+
+// lockLiveJob locks the document before the job and compares lease time after acquiring both.
+func lockLiveJob(ctx context.Context, tx pgx.Tx, job domain.Job) error {
+	if job.Incarnation == "" || job.LeaseToken == "" {
+		return domain.ErrJobNotOwned
+	}
+	var id string
+	err := tx.QueryRow(ctx, `SELECT id::text FROM documents WHERE id=$1 AND status='processing'
+		AND COALESCE(incarnation,id)=$2 FOR UPDATE`, job.Document.ID, job.Incarnation).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrJobNotOwned
+	}
+	if err != nil {
+		return err
+	}
+	var live bool
+	err = tx.QueryRow(ctx, `WITH owned AS MATERIALIZED (
+		SELECT lease_until FROM ingest_jobs WHERE document_id=$1 AND lease_owner=$2
+			AND attempts=$3 AND lease_token=$4 AND state='running' FOR UPDATE
+	) SELECT lease_until>clock_timestamp() FROM owned`, id, job.LeaseOwner, job.Attempts, job.LeaseToken).Scan(&live)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !live) {
+		return domain.ErrJobNotOwned
+	}
+	return err
 }
 
 // DocumentExists reports whether deletion has removed a document.
@@ -569,20 +610,16 @@ func (c *Client) StoreOCRText(ctx context.Context, j domain.Job, text string) er
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	var id string
-	err = tx.QueryRow(ctx, `SELECT d.id::text FROM documents d JOIN ingest_jobs j ON j.document_id=d.id WHERE d.id=$1 AND d.status='processing' AND COALESCE(d.incarnation,d.id)=$5 AND j.lease_owner=$2 AND j.attempts=$3 AND j.lease_token IS NOT DISTINCT FROM $4 AND j.state='running' AND j.lease_until>clock_timestamp() FOR UPDATE OF d,j`, string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken, j.Incarnation).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.ErrJobNotOwned
-	}
-	if err != nil {
-		return err
+	if lockErr := lockLiveJob(ctx, tx, j); lockErr != nil {
+		return lockErr
 	}
 	preview := []rune(text)
 	if len(preview) > 120 {
 		preview = preview[:120]
 	}
 	// Recheck the lease after any wait for the document and job row locks.
-	tag, err := tx.Exec(ctx, `UPDATE documents d SET content=$2,content_preview=$3,text_source='ocr',updated_at=NOW() WHERE d.id=$1 AND EXISTS(SELECT 1 FROM ingest_jobs j WHERE j.document_id=d.id AND j.lease_owner=$4 AND j.attempts=$5 AND j.lease_token IS NOT DISTINCT FROM $6 AND j.state='running' AND j.lease_until>clock_timestamp())`, id, text, string(preview), j.LeaseOwner, j.Attempts, j.LeaseToken)
+	tag, err := tx.Exec(ctx, `UPDATE documents d SET content=$2,content_preview=$3,text_source='ocr',updated_at=NOW() WHERE d.id=$1
+		AND EXISTS(SELECT 1 FROM ingest_jobs j WHERE j.document_id=d.id AND j.lease_until>clock_timestamp())`, j.Document.ID, text, string(preview))
 	if err != nil {
 		return err
 	}

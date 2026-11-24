@@ -67,6 +67,13 @@ func discardRemovalConnection(ctx context.Context, conn *pgxpool.Conn) {
 	_ = conn.Hijack().Close(closeCtx)
 }
 
+func (c *Client) beginRemoval(ctx context.Context) (pgx.Tx, error) {
+	if removal, ok := ctx.Value(removalKey{}).(removalConnection); ok && removal.client == c {
+		return removal.conn.Begin(ctx)
+	}
+	return c.Pool.Begin(ctx)
+}
+
 func (c *Client) execRemoval(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 	if removal, ok := ctx.Value(removalKey{}).(removalConnection); ok && removal.client == c {
 		return removal.conn.Exec(ctx, query, args...)
