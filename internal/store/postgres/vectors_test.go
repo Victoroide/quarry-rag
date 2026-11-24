@@ -53,12 +53,21 @@ func TestVectorSchemaRejectsOlderExtension(t *testing.T) {
 
 func seedSearchVectors(t *testing.T, c *Client, near, far int) {
 	t.Helper()
-	id := domain.DocumentID(uuid.NewString())
-	require.NoError(t, c.InsertDocument(t.Context(), domain.Document{ID: id}))
-	require.NoError(t, c.UpdateDocumentStatus(t.Context(), id, "completed"))
+	reportID := domain.DocumentID(uuid.NewString())
+	noteID := domain.DocumentID(uuid.NewString())
+	for _, doc := range []struct {
+		id      domain.DocumentID
+		docType string
+	}{
+		{reportID, "report"},
+		{noteID, "note"},
+	} {
+		require.NoError(t, c.InsertDocument(t.Context(), domain.Document{ID: doc.id, Metadata: map[string]any{"doc_type": doc.docType}}))
+		require.NoError(t, c.UpdateDocumentStatus(t.Context(), doc.id, "completed"))
+	}
 	_, err := c.Pool.Exec(t.Context(), `INSERT INTO chunk_vectors(chunk_id,document_id,chunk_index,doc_type,text,token_count,embedding)
- SELECT 'near-'||i,$1::uuid,i,'report','synthetic',1,('['||(1+i*0.001)||',0.01,0]')::vector FROM generate_series(1,$2::int) i
- UNION ALL SELECT 'far-'||i,$1::uuid,i,'note','synthetic',1,('[-1,'||(i*0.001)||',0]')::vector FROM generate_series(1,$3::int) i`, string(id), near, far)
+ SELECT 'near-'||i,$1::uuid,i,'report','synthetic',1,('['||(1+i*0.001)||',0.01,0]')::vector FROM generate_series(1,$3::int) i
+ UNION ALL SELECT 'far-'||i,$2::uuid,i,'note','synthetic',1,('[-1,'||(i*0.001)||',0]')::vector FROM generate_series(1,$4::int) i`, string(reportID), string(noteID), near, far)
 	require.NoError(t, err)
 	_, err = c.Pool.Exec(t.Context(), `ANALYZE chunk_vectors`)
 	require.NoError(t, err)
@@ -67,7 +76,7 @@ func seedSearchVectors(t *testing.T, c *Client, near, far int) {
 func TestVectorSearchCanUseHNSW(t *testing.T) {
 	c, _ := vectorDatabase(t)
 	seedSearchVectors(t, c, 2000, 0)
-	query, args, ok := searchSQL("[1,0,0]", 10, domain.VectorFilter{})
+	query, args, ok := searchSQL("[1,0,0]", 10, domain.VectorFilter{}, false)
 	require.True(t, ok)
 	tx, err := c.Pool.Begin(t.Context())
 	require.NoError(t, err)
@@ -120,10 +129,23 @@ func TestVectorFiltersAndCompletedVisibility(t *testing.T) {
 		{ID: "wanted", DocumentID: domain.DocumentID(ids[2]), Index: 2, Text: "Synthetic reference.", TokenCount: 3, Embedding: []float32{0, 1, 0}, Metadata: map[string]any{"doc_type": "report", "collection": "a", "kind": "paragraph", "quality": "high"}},
 		{ID: "processing", DocumentID: domain.DocumentID(ids[3]), Embedding: []float32{1, 0, 0}, Metadata: map[string]any{"doc_type": "report", "collection": "a"}},
 	}
-	for i, id := range ids {
-		require.NoError(t, c.InsertDocument(t.Context(), domain.Document{ID: domain.DocumentID(id)}))
-		if i != 3 {
-			require.NoError(t, c.UpdateDocumentStatus(t.Context(), domain.DocumentID(id), "completed"))
+	docSpecs := []struct {
+		id         string
+		docType    string
+		collection string
+		completed  bool
+	}{
+		{ids[0], "report", "b", true},
+		{ids[1], "note", "a", true},
+		{ids[2], "report", "a", true},
+		{ids[3], "report", "a", false},
+	}
+	for _, spec := range docSpecs {
+		require.NoError(t, c.InsertDocument(t.Context(), domain.Document{ID: domain.DocumentID(spec.id), Metadata: map[string]any{"doc_type": spec.docType}}))
+		_, err := c.Pool.Exec(t.Context(), `UPDATE documents SET collection=$2 WHERE id=$1`, spec.id, spec.collection)
+		require.NoError(t, err)
+		if spec.completed {
+			require.NoError(t, c.UpdateDocumentStatus(t.Context(), domain.DocumentID(spec.id), "completed"))
 		}
 	}
 	require.NoError(t, v.Upsert(t.Context(), "", chunks))

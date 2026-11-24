@@ -38,6 +38,12 @@ type VisibilityRefillStore interface {
 	QueryFilteredBudgeted(ctx context.Context, embedding []float32, topK int, filter VectorFilter, budget int) ([]ScoredChunk, int, error)
 }
 
+// FilteredVectorStoreWithExactness also reports whether a search used exact ranking.
+type FilteredVectorStoreWithExactness interface {
+	FilteredVectorStore
+	QueryFilteredWithExactness(ctx context.Context, embedding []float32, topK int, filter VectorFilter) ([]ScoredChunk, bool, error)
+}
+
 // DocumentPreviewer loads previews for the supplied document IDs only.
 type DocumentPreviewer interface {
 	DocumentPreviews(ctx context.Context, ids []string) (map[string]string, error)

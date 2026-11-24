@@ -99,6 +99,21 @@ func (s *vectorStore) QueryFiltered(ctx context.Context, embedding []float32, to
 	})
 }
 
+func (s *vectorStore) QueryFilteredWithExactness(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
+	store, ok := s.filtered.(domain.FilteredVectorStoreWithExactness)
+	if !ok {
+		results, err := s.QueryFiltered(ctx, embedding, topK, filter)
+		return results, false, err
+	}
+	var exact bool
+	results, err := s.query(ctx, topK, func(ctx context.Context) ([]domain.ScoredChunk, error) {
+		chunks, usedExact, queryErr := store.QueryFilteredWithExactness(ctx, embedding, topK, filter)
+		exact = usedExact
+		return chunks, queryErr
+	})
+	return results, exact, err
+}
+
 func (s *vectorStore) DeleteByDocID(ctx context.Context, docID string) error {
 	ctx, span := s.begin(ctx, "delete", "tool")
 	defer span.End()

@@ -51,7 +51,8 @@ type Config struct {
 
 	DatabaseURL string
 
-	VectorStore string
+	VectorStore           string
+	PGVectorExactScopeMax int
 
 	WorkerQueueSize         int
 	EmbedConcurrency        int
@@ -197,6 +198,7 @@ func Load() (*Config, error) {
 		{"INGEST_WORKERS", &cfg.IngestWorkers, 2}, {"INGEST_MAX_ATTEMPTS", &cfg.IngestMaxAttempts, 5},
 		{"EXTRACT_CONCURRENCY", &cfg.ExtractConcurrency, 2}, {"EXTRACT_MEMORY_LIMIT_MB", &cfg.ExtractMemoryLimitMB, 512},
 		{"MAX_ALLOWED_DOCUMENT_IDS", &cfg.MaxAllowedDocumentIDs, 25000},
+		{"PGVECTOR_EXACT_SCOPE_MAX", &cfg.PGVectorExactScopeMax, 0},
 		{"AWS_MAX_ATTEMPTS", &cfg.AWSMaxAttempts, 4},
 		{"QUERY_CONCURRENCY", &cfg.QueryConcurrency, 32},
 	} {
@@ -350,6 +352,9 @@ func (c *Config) validate() error {
 	}
 	if c.VectorStore != "" && c.VectorStore != "pinecone" && c.VectorStore != "postgres" {
 		return fmt.Errorf("config: VECTOR_STORE must be pinecone or postgres")
+	}
+	if c.PGVectorExactScopeMax < 0 || c.PGVectorExactScopeMax > 100000 {
+		return fmt.Errorf("config: PGVECTOR_EXACT_SCOPE_MAX must be between 0 and 100000")
 	}
 	type requirement struct {
 		name  string

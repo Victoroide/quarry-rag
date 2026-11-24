@@ -14,8 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const ingestAdmissionLock = int64(0x7175617272790002)
-
 // AcceptDocument atomically reserves document identity and queues ingestion.
 func (c *Client) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
 	if req.ContentDedup == "" {

@@ -113,3 +113,21 @@ func TestCollectionRequiresFilteringStore(t *testing.T) {
 	_, err := NewRetriever(legacyVectorStore{}, nil, .7, 10).RetrieveWithEmbedding(t.Context(), []float32{1, 0}, RetrievalModeGlobal, "", 10, domain.VectorFilter{Collection: "archive"})
 	require.ErrorContains(t, err, "collection filtering")
 }
+
+func TestLocalTopUpPreservesDefaultScoreTieOrder(t *testing.T) {
+	chunk := func(id string, docID string, score float64) domain.ScoredChunk {
+		return domain.ScoredChunk{
+			Chunk: domain.Chunk{ID: domain.ChunkID(id), DocumentID: domain.DocumentID(docID)},
+			Score: score,
+		}
+	}
+	store := &localSequenceStore{results: [][]domain.ScoredChunk{
+		{chunk("003", "doc-local", 0.9)},
+		{chunk("001", "doc-other", 0.9), chunk("002", "doc-other", 0.9), chunk("003", "doc-local", 0.9)},
+	}}
+	result, err := NewRetriever(store, nil, .7, 2).RetrieveWithEmbedding(t.Context(), []float32{1, 0}, RetrievalModeLocal, "doc-local", 2, domain.VectorFilter{})
+	require.NoError(t, err)
+	require.Equal(t, RetrievalModeLocal, result.Mode)
+	require.Len(t, result.Chunks, 2)
+	require.Equal(t, []domain.ChunkID{"003", "001"}, []domain.ChunkID{result.Chunks[0].Chunk.ID, result.Chunks[1].Chunk.ID})
+}
