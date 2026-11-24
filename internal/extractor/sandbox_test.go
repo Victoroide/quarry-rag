@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/testutil"
 	"github.com/Victoroide/quarry-rag/internal/testutil/docxtest"
 	"github.com/stretchr/testify/require"
 )
@@ -172,6 +174,22 @@ func TestSandboxUsesDOCXStoryProfile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxExtractsPDFPages(t *testing.T) {
+	sb, err := NewSandbox(SandboxConfig{Timeout: 5 * time.Second, MemoryLimitMB: 512, DOCStories: mustDOCStories(t, "footnotes")})
+	require.NoError(t, err)
+	pages, err := sb.ExtractPDFPages(t.Context(), sandboxPDF(""))
+	if err != nil || len(pages) != 1 || pages[0].Number != 1 || pages.Text() != "Archive operating hours." {
+		t.Fatalf("PDF pages: %+v, %v", pages, err)
+	}
+}
+
+func TestSandboxNormalizesPDFBeforeClassifyingPage(t *testing.T) {
+	data := testutil.PDFWithPageStreams(`BT /F1 12 Tf (ab) Tj ET BT ET BT ET BT ET BT ET BT ET BT /F1 12 Tf (cd) Tj ET`)
+	pages, err := uploadSandbox(t, 5*time.Second).ExtractPDFPages(t.Context(), data)
+	require.NoError(t, err)
+	require.Equal(t, domain.PDFPages{{Number: 1, Evidence: domain.PDFSparse, Text: "ab\n\ncd"}}, pages)
 }
 
 func TestSandboxSurvivesParserStackOverflow(t *testing.T) {
