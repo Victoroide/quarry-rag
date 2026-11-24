@@ -54,10 +54,13 @@ func TestEvidenceVisibilityMatchesUTF8BytesOnLatin1Database(t *testing.T) {
 }
 
 func TestEvidenceVisibilityMatchesCurrentChunkAndScope(t *testing.T) {
-	c, _ := listingDatabase(t)
+	c := jobsDatabase(t)
 	ctx := t.Context()
-	_, err := c.Pool.Exec(ctx, `UPDATE documents SET status='completed', doc_type='report',
-		collection=CASE WHEN id=$1 THEN 'archive' ELSE '' END, metadata='{"title":"Shared title"}'`, listingFirstID)
+	archiveIncarnation := uuid.NewString()
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id, content, status, doc_type, collection, incarnation, metadata) VALUES
+		($1, 'private text', 'completed', 'report', 'archive', $3, '{"title":"Shared title"}'),
+		($2, 'private text', 'completed', 'report', '', NULL, '{"title":"Shared title"}')`,
+		listingFirstID, listingSecondID, archiveIncarnation)
 	require.NoError(t, err)
 	chunks := []domain.Chunk{
 		{ID: domain.ChunkID(strings.ReplaceAll(uuid.NewString(), "-", "")), DocumentID: listingFirstID, Index: 4, Text: "Shared text.", Metadata: map[string]any{"doc_type": "report"}},
@@ -65,10 +68,13 @@ func TestEvidenceVisibilityMatchesCurrentChunkAndScope(t *testing.T) {
 	}
 	require.NoError(t, c.InsertChunks(ctx, chunks))
 	candidates := []domain.ScoredChunk{{Chunk: chunks[1], Score: .99}, {Chunk: chunks[0], Score: .9}}
+	expected := []domain.ScoredChunk{candidates[0], candidates[1]}
+	expected[0].ObservedIncarnation = listingSecondID
+	expected[1].ObservedIncarnation = archiveIncarnation
 	visibility := Visibility{Pool: c.Pool, Collection: "archive", DocType: "report"}
 	got, err := visibility.VisibleEvidence(ctx, candidates)
 	require.NoError(t, err)
-	require.Equal(t, candidates[1:], got)
+	require.Equal(t, expected[1:], got)
 
 	// Aliases match the stored UUID and keep the vector store's spelling, which a
 	// byte-for-byte metadata filter needs to find the same document again.
@@ -77,13 +83,15 @@ func TestEvidenceVisibilityMatchesCurrentChunkAndScope(t *testing.T) {
 		alias.Chunk.DocumentID = domain.DocumentID(spelling)
 		got, err = visibility.VisibleEvidence(ctx, []domain.ScoredChunk{alias})
 		require.NoError(t, err)
-		require.Equal(t, []domain.ScoredChunk{alias}, got)
+		aliased := alias
+		aliased.ObservedIncarnation = archiveIncarnation
+		require.Equal(t, []domain.ScoredChunk{aliased}, got)
 	}
 
 	visibility.Collection = ""
 	got, err = visibility.VisibleEvidence(ctx, candidates)
 	require.NoError(t, err)
-	require.Equal(t, candidates, got)
+	require.Equal(t, expected, got)
 	visibility.Collection = "archive"
 
 	_, err = c.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, listingFirstID)
@@ -104,6 +112,8 @@ func TestEvidenceVisibilityMatchesCurrentChunkAndScope(t *testing.T) {
 	got, err = visibility.VisibleEvidence(ctx, []domain.ScoredChunk{{Chunk: replacement}})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
+	require.NotEmpty(t, got[0].ObservedIncarnation)
+	require.NotEqual(t, archiveIncarnation, got[0].ObservedIncarnation)
 
 	_, err = c.Pool.Exec(ctx, `ALTER TABLE chunks RENAME TO unavailable_chunks`)
 	require.NoError(t, err)

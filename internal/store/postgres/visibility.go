@@ -21,6 +21,39 @@ type Visibility struct {
 	DocType    string
 }
 
+// ObserveUntaggedIncarnations reads a consistent view of the SQL identities
+// for historical untagged vectors, returning the connection before vector I/O.
+func (v Visibility) ObserveUntaggedIncarnations(ctx context.Context, allowedIDs []string) (map[string]string, error) {
+	incarnations := make(map[string]string)
+	if allowedIDs != nil {
+		allowedIDs = canonicalDocumentIDs(allowedIDs)
+		if len(allowedIDs) == 0 {
+			return incarnations, nil
+		}
+	}
+	rows, err := v.Pool.Query(ctx, `
+SELECT id::text, COALESCE(incarnation,id)::text
+FROM documents
+WHERE NOT scoped_vectors AND NOT vector_incarnation_required
+  AND ($1='' OR collection=$1) AND ($2='' OR doc_type=$2)
+  AND ($3::uuid[] IS NULL OR id=ANY($3::uuid[]))`, v.Collection, v.DocType, allowedIDs)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: observe untagged incarnations: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, incarnation string
+		if err := rows.Scan(&id, &incarnation); err != nil {
+			return nil, fmt.Errorf("postgres: scan untagged incarnation: %w", err)
+		}
+		incarnations[id] = incarnation
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: observe untagged incarnations: %w", err)
+	}
+	return incarnations, nil
+}
+
 // VisibleEvidence checks that vector hits match current completed chunks and
 // reads the current document category.
 // Chunk IDs are deterministic and can recur when a document ID is reused.
@@ -47,6 +80,10 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 	docIDs := make([]string, 0, len(candidates))
 	indices := make([]int64, 0, len(candidates))
 	digests := make([]string, 0, len(candidates))
+	revisions := make([]string, 0, len(candidates))
+	observed := make([]string, 0, len(candidates))
+	attempts := make([]string, 0, len(candidates))
+	vectorIncarnations := make([]string, 0, len(candidates))
 	input := make([]domain.ScoredChunk, 0, len(candidates))
 	for _, candidate := range candidates {
 		ch := candidate.Chunk
@@ -55,9 +92,29 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 		if chunkErr != nil || docErr != nil {
 			continue
 		}
+		var revision string
+		if value, tagged := ch.Metadata[domain.VectorRevisionKey]; tagged {
+			var valid bool
+			revision, valid = value.(string)
+			if !valid || revision == "" {
+				continue
+			}
+		}
+		var attempt string
+		if value, hasAttempt := ch.Metadata[domain.VectorAttemptKey]; hasAttempt {
+			var valid bool
+			attempt, valid = value.(string)
+			if revision == "" || !valid || attempt == "" {
+				continue
+			}
+		}
 		digest := sha256.Sum256([]byte(ch.Text))
 		chunkIDs, docIDs = append(chunkIDs, chunkID.String()), append(docIDs, docID.String())
 		indices, digests = append(indices, int64(ch.Index)), append(digests, hex.EncodeToString(digest[:]))
+		revisions = append(revisions, revision)
+		observed = append(observed, candidate.ObservedIncarnation)
+		attempts = append(attempts, attempt)
+		vectorIncarnations = append(vectorIncarnations, ch.VectorIncarnation)
 		input = append(input, candidate)
 	}
 	var previews map[string]string
@@ -82,13 +139,20 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 	}
 
 	rows, err := source.Query(ctx, `
-SELECT hit.ord, d.doc_type, CASE WHEN d.id=ANY($7::uuid[]) THEN d.content_preview END
-FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[]) WITH ORDINALITY AS hit(chunk_id, doc_id, idx, hash, ord)
+SELECT hit.ord, d.doc_type, COALESCE(d.incarnation,d.id)::text,
+       CASE WHEN d.id=ANY($11::uuid[]) THEN d.content_preview END
+FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[])
+	WITH ORDINALITY AS hit(chunk_id, doc_id, idx, hash, revision, incarnation, attempt, vector_incarnation, ord)
 JOIN chunks c ON c.id=hit.chunk_id AND c.document_id=hit.doc_id AND c.chunk_index=hit.idx
 JOIN documents d ON d.id=c.document_id AND d.status='completed'
-WHERE ($5='' OR d.collection=$5) AND ($6='' OR d.doc_type=$6)
+WHERE ($9='' OR d.collection=$9) AND ($10='' OR d.doc_type=$10)
+  AND (hit.incarnation='' OR hit.incarnation=COALESCE(d.incarnation,d.id)::text)
+  AND ((hit.vector_incarnation='' AND NOT d.vector_incarnation_required)
+       OR hit.vector_incarnation=COALESCE(d.incarnation,d.id)::text)
+  AND (CASE WHEN d.scoped_vectors THEN COALESCE(d.incarnation,d.id)::text ELSE '' END)=hit.revision
+  AND COALESCE(d.vector_attempt::text,'')=hit.attempt
   AND encode(digest(convert_to(c.text, 'UTF8'), 'sha256'), 'hex')=hit.hash
-ORDER BY hit.ord`, chunkIDs, docIDs, indices, digests, v.Collection, v.DocType, previewIDs)
+ORDER BY hit.ord`, chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("postgres: visible evidence: %w", err)
 	}
@@ -96,15 +160,16 @@ ORDER BY hit.ord`, chunkIDs, docIDs, indices, digests, v.Collection, v.DocType, 
 	visible := make([]domain.ScoredChunk, 0, len(input))
 	for rows.Next() {
 		var ord int
-		var docType string
+		var docType, incarnation string
 		var preview *string
-		if err := rows.Scan(&ord, &docType, &preview); err != nil {
+		if err := rows.Scan(&ord, &docType, &incarnation, &preview); err != nil {
 			return nil, nil, fmt.Errorf("postgres: scan visible evidence: %w", err)
 		}
 		if preview != nil {
 			previews[docIDs[ord-1]] = *preview
 		}
 		candidate := input[ord-1]
+		candidate.ObservedIncarnation = incarnation
 		if candidate.Chunk.Metadata["doc_type"] != docType {
 			metadata := make(map[string]any, len(candidate.Chunk.Metadata)+1)
 			maps.Copy(metadata, candidate.Chunk.Metadata)

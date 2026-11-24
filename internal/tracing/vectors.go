@@ -176,13 +176,18 @@ func (s *vectorStore) QueryAllNamespaces(ctx context.Context, embedding []float3
 	})
 }
 
+func (s *vectorStore) ObservesVectorIncarnation() bool {
+	reader, ok := s.VectorStore.(domain.VectorIncarnationReader)
+	return ok && reader.ObservesVectorIncarnation()
+}
+
 func (s *vectorStore) QueryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
 	return s.query(ctx, topK, func(ctx context.Context) ([]domain.ScoredChunk, error) {
 		return s.filtered.QueryFiltered(ctx, embedding, topK, filter)
 	})
 }
 
-func (s *vectorStore) QueryFilteredWithExactness(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
+func (s *transactionalVectorStore) QueryFilteredWithExactness(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
 	store, ok := s.filtered.(domain.FilteredVectorStoreWithExactness)
 	if !ok {
 		results, err := s.QueryFiltered(ctx, embedding, topK, filter)

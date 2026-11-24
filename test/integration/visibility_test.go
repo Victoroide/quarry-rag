@@ -91,7 +91,11 @@ func TestOrphanVectorsAreNotCited(t *testing.T) {
 		{completed, "Completed policy lasts three years."}, {failed, "Failed policy is confidential."},
 		{processing, "Unfinished policy is confidential."}, {missing, "Orphan policy is confidential."},
 	} {
-		require.NoError(t, vs.Upsert(t.Context(), "", []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(row.id), Text: row.text, Embedding: vector}}))
+		chunks := []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(row.id), Text: row.text, Embedding: vector}}
+		if row.id != missing {
+			require.NoError(t, client.InsertChunks(t.Context(), chunks))
+		}
+		require.NoError(t, vs.Upsert(t.Context(), "", chunks))
 	}
 	cfg := &config.Config{BedrockFallbackModel: "fallback"}
 	amb := llm.NewAmbassador(cfg)

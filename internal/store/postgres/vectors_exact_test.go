@@ -88,7 +88,8 @@ func exhaustiveQuerySnapshot(t *testing.T, tx pgx.Tx, embedding []float32, dims,
 		args = append(args, topK)
 		limitClause = fmt.Sprintf(" LIMIT $%d", len(args))
 	}
-	sql := fmt.Sprintf(`SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-(v.embedding <=> $1::text::vector) AS score
+	sql := fmt.Sprintf(`SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-(v.embedding <=> $1::text::vector) AS score,
+ COALESCE(d.incarnation,d.id)::text
  FROM chunk_vectors v JOIN documents d ON d.id=v.document_id
  WHERE %s
  ORDER BY (v.embedding <=> $1::text::vector) ASC, v.chunk_id ASC%s`, where.String(), limitClause)
@@ -105,6 +106,7 @@ func requireExactScoredParity(t *testing.T, want, got []domain.ScoredChunk) {
 	for i := range want {
 		require.Equal(t, want[i].Chunk, got[i].Chunk, "chunk mismatch at position %d", i)
 		require.InDelta(t, want[i].Score, got[i].Score, 1e-12, "score mismatch at position %d", i)
+		require.Equal(t, want[i].ObservedIncarnation, got[i].ObservedIncarnation, "incarnation mismatch at position %d", i)
 	}
 }
 

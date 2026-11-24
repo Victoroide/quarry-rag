@@ -315,6 +315,9 @@ func (s *VectorStore) QueryAllNamespaces(ctx context.Context, embedding []float3
 	return s.QueryFiltered(ctx, embedding, topK, domain.VectorFilter{DocType: docType})
 }
 
+// ObservesVectorIncarnation reports that search reads incarnation with score.
+func (*VectorStore) ObservesVectorIncarnation() bool { return true }
+
 // QueryFiltered applies collection, type and ID constraints before ranking completed documents.
 func (s *VectorStore) QueryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
 	chunks, _, err := s.QueryFilteredDetailed(ctx, embedding, topK, filter)
@@ -407,7 +410,7 @@ func scanScoredChunks(ctx context.Context, tx pgx.Tx, query string, args ...any)
 		var sc domain.ScoredChunk
 		var docType, collection string
 		var kind, quality *string
-		if scanErr := rows.Scan(&sc.Chunk.ID, &sc.Chunk.DocumentID, &sc.Chunk.Index, &docType, &collection, &sc.Chunk.Text, &kind, &quality, &sc.Chunk.TokenCount, &sc.Score); scanErr != nil {
+		if scanErr := rows.Scan(&sc.Chunk.ID, &sc.Chunk.DocumentID, &sc.Chunk.Index, &docType, &collection, &sc.Chunk.Text, &kind, &quality, &sc.Chunk.TokenCount, &sc.Score, &sc.ObservedIncarnation); scanErr != nil {
 			return nil, scanErr
 		}
 		sc.Chunk.Metadata = map[string]any{"doc_type": docType}
@@ -491,17 +494,18 @@ func exactSQL(literal string, topK, scopeLimit int, filter domain.VectorFilter) 
 		limitClause = fmt.Sprintf(" LIMIT $%d", len(args))
 	}
 	query = fmt.Sprintf(`WITH candidates AS MATERIALIZED (
- SELECT v.chunk_id,v.embedding <=> $1::text::vector AS distance
+ SELECT v.chunk_id,v.embedding <=> $1::text::vector AS distance,
+        COALESCE(d.incarnation,d.id)::text AS observed_incarnation
  FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'
  WHERE TRUE%s
  LIMIT $%d
 ),
 ranked AS (
- SELECT chunk_id,distance
+ SELECT chunk_id,distance,observed_incarnation
  FROM candidates
  ORDER BY distance,chunk_id%s
 )
-SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-r.distance
+SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-r.distance,r.observed_incarnation
 FROM ranked r JOIN chunk_vectors v ON v.chunk_id=r.chunk_id
 ORDER BY r.distance,v.chunk_id`, predicates, scopeArg, limitClause)
 	return query, args, true
@@ -512,13 +516,14 @@ func searchSQL(literal string, topK int, filter domain.VectorFilter, matchDocume
 	if !ok {
 		return "", nil, false
 	}
-	query = `SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.embedding <=> $1::text::vector AS distance
+	query = `SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.embedding <=> $1::text::vector AS distance,
+ COALESCE(d.incarnation,d.id)::text AS observed_incarnation
  FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed' WHERE TRUE` + predicates
 	if topK > 0 {
 		args = append(args, topK)
 		query += fmt.Sprintf(" ORDER BY distance LIMIT $%d", len(args))
 	}
-	query = `SELECT chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,1-distance
+	query = `SELECT chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,1-distance,observed_incarnation
  FROM (` + query + `) s ORDER BY distance,chunk_id`
 	return query, args, true
 }

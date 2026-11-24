@@ -9,12 +9,15 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
+	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embedder"
 	"github.com/Victoroide/quarry-rag/internal/llm"
+	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
@@ -89,28 +92,82 @@ func TestEvidenceQueryUsesCurrentCategoryAfterDocumentReuse(t *testing.T) {
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	id := uuid.NewString()
 	ch := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(id), Index: 2,
-		Text: "Fold the paper.", Metadata: map[string]any{"collection": "archive", "doc_type": "old-category"}}
+		Text: "Fold the paper.", Embedding: []float32{1, 0, 0}, Metadata: map[string]any{"collection": "archive", "doc_type": "old-category"}}
 	insertEvidenceDocument(t, db, ch, "archive", "old-category")
-	_, err := db.Pool.Exec(t.Context(), `DELETE FROM documents WHERE id=$1`, id)
-	require.NoError(t, err)
-	insertEvidenceDocument(t, db, ch, "archive", "new-category")
-	store := pcstore.NewTestDriver(func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+	retired := evidenceMatch(t, ch)
+	result := retired
+	var upserted *pinecone.Vector
+	store := pcstore.NewTestDriverWithUpsert(func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
 		require.NotContains(t, req.MetadataFilter.AsMap(), "doc_type")
-		return evidenceMatch(t, ch), nil
+		require.NotContains(t, req.MetadataFilter.AsMap(), domain.VectorIncarnationKey)
+		return result, nil
+	}, func(_ context.Context, vectors []*pinecone.Vector) (uint32, error) {
+		require.Len(t, vectors, 1)
+		upserted = vectors[0]
+		return 1, nil
 	})
 	cfg := &config.Config{MaxChunksPerQuery: 10}
 	query := handler.QueryHandler(retriever.NewRetriever(store, evidenceEmbedder{}, .7, 10), nil, cfg, db.Pool)
 	body := `{"query":"Archive?","answer_mode":"evidence","mode":"global","collection":"archive","allowed_document_ids":["` + id + `"]}`
+	t.Run("historical record", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		serveEvidenceQuery(t, query, rec, "application/json", body)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), `"finish_reason":"evidence_only"`)
+		require.Contains(t, rec.Body.String(), `"doc_type":"old-category"`)
+	})
+	ctx := t.Context()
+	require.NoError(t, db.DeleteDocument(ctx, ch.DocumentID))
+	admission, err := db.AcceptDocument(ctx, domain.AcceptRequest{
+		Document: domain.Document{ID: ch.DocumentID, Content: ch.Text}, CallerSupplied: true,
+		Collection: "archive", DocType: "old-category", Fingerprint: chunker.ScopedFingerprint("archive", ch.Text), MaxPending: 2,
+	})
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, admission.Outcome)
+	job, err := db.ClaimJob(ctx, "worker", time.Minute, 3)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.False(t, job.ScopedVectors)
+	ic := pipeline.NewIngestContext(ch.DocumentID, ch.Text, nil)
+	ic.Collection, ic.DocType = job.Collection, job.DocType
+	ic.Chunks = []domain.Chunk{ch}
+	ic.MutateVectors = func(ctx context.Context, call func(context.Context) error) error {
+		return db.MutateJobVectors(ctx, *job, call)
+	}
+	require.NoError(t, pipeline.NewPersistStage(store).Run(ctx, ic))
+	published, err := db.CompleteJob(ctx, *job, ic.Chunks, ic.IndexObservation)
+	require.NoError(t, err)
+	require.True(t, published)
+	require.NotNil(t, upserted)
+	require.Equal(t, string(ch.ID), upserted.Id)
+	fields := upserted.Metadata.AsMap()
+	require.NotContains(t, fields, domain.VectorRevisionKey)
+	require.NotContains(t, fields, domain.VectorAttemptKey)
+	_, err = db.Pool.Exec(ctx, `UPDATE documents SET doc_type='new-category' WHERE id=$1`, id)
+	require.NoError(t, err)
+	current := &pinecone.QueryVectorsResponse{Matches: []*pinecone.ScoredVector{{Vector: upserted, Score: 1}}}
 	for _, accept := range []string{"application/json", "text/event-stream"} {
-		t.Run(accept, func(t *testing.T) {
+		t.Run(accept+"/retired record", func(t *testing.T) {
+			result = retired
+			rec := httptest.NewRecorder()
+			serveEvidenceQuery(t, query, rec, accept, body)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), `"finish_reason":"no_evidence"`)
+			require.NotContains(t, rec.Body.String(), ch.Text)
+		})
+		t.Run(accept+"/current record", func(t *testing.T) {
+			result = current
 			rec := httptest.NewRecorder()
 			serveEvidenceQuery(t, query, rec, accept, body)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			require.Contains(t, rec.Body.String(), `"finish_reason":"evidence_only"`)
 			require.NotContains(t, rec.Body.String(), "old-category")
 			require.Contains(t, rec.Body.String(), `"doc_type":"new-category"`)
+			require.NotContains(t, rec.Body.String(), job.Incarnation)
+			require.NotContains(t, rec.Body.String(), domain.VectorIncarnationKey)
 		})
 	}
+	require.Equal(t, job.Incarnation, fields[domain.VectorIncarnationKey])
 	t.Run("category changes before completion", func(t *testing.T) {
 		rec := &evidenceRecorder{ResponseRecorder: httptest.NewRecorder(), onFlush: func() {
 			_, err := db.Pool.Exec(t.Context(), `UPDATE documents SET doc_type='later-category' WHERE id=$1`, id)
@@ -167,15 +224,18 @@ func TestEvidenceQueryChecksNamedEntityRouteAfterDocumentReuse(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires a Docker daemon")
 	}
+	const originalPreview = "Cedar Archive accepts paper records."
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	for _, accept := range []string{"application/json", "text/event-stream"} {
 		for _, tc := range []struct {
 			name, mode, newPreview string
+			replace                bool
 			wantError              bool
 		}{
-			{"unchanged preview", "auto", "Cedar Archive accepts paper records.", false},
-			{"changed mode", "auto", "Maple Museum accepts paper records.", true},
-			{"changed local document", "local", "Maple Museum accepts paper records.", true},
+			{name: "unchanged document", mode: "auto"},
+			{name: "replacement with unchanged preview", mode: "auto", newPreview: originalPreview, replace: true, wantError: true},
+			{name: "changed mode", mode: "auto", newPreview: "Maple Museum accepts paper records.", wantError: true},
+			{name: "changed local document", mode: "local", newPreview: "Maple Museum accepts paper records.", wantError: true},
 		} {
 			t.Run(accept+"/"+tc.name, func(t *testing.T) {
 				id := uuid.NewString()
@@ -188,7 +248,7 @@ func TestEvidenceQueryChecksNamedEntityRouteAfterDocumentReuse(t *testing.T) {
 					require.NoError(t, err)
 					require.NoError(t, db.InsertChunks(ctx, []domain.Chunk{ch}))
 				}
-				insertWithPreview(t.Context(), "Cedar Archive accepts paper records.")
+				insertWithPreview(t.Context(), originalPreview)
 				probe := evidenceMatch(t, ch)
 				probe.Matches[0].Score = 0
 				if tc.mode == "local" {
@@ -208,9 +268,14 @@ func TestEvidenceQueryChecksNamedEntityRouteAfterDocumentReuse(t *testing.T) {
 						return probe, nil
 					case 2:
 						require.Equal(t, map[string]any{"$in": []any{id}}, req.MetadataFilter.AsMap()["doc_id"])
-						_, err := db.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, id)
-						require.NoError(t, err)
-						insertWithPreview(ctx, tc.newPreview)
+						if tc.replace {
+							_, err := db.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, id)
+							require.NoError(t, err)
+							insertWithPreview(ctx, tc.newPreview)
+						} else if tc.newPreview != "" {
+							_, err := db.Pool.Exec(ctx, `UPDATE documents SET content_preview=$2 WHERE id=$1`, id, tc.newPreview)
+							require.NoError(t, err)
+						}
 					}
 					result := evidenceMatch(t, ch)
 					result.Matches[0].Score = 0

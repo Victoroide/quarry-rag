@@ -436,6 +436,13 @@ window returns 409 until this later expiry and an explicit UUID retry.
 ### POST /query
 
 Executes vector similarity search and returns a grounded answer or selected excerpts.
+Before routing or selecting evidence, PostgreSQL checks each hit against the
+current completed document, caller scope, chunk identity and text. New Pinecone
+and memory vectors carry the document incarnation at write time. Historical untagged
+hits must match the document incarnation observed in PostgreSQL before searching.
+pgvector reads the incarnation with the score. The service rechecks the accepted
+incarnations before releasing evidence. Responses identify chunks by their
+logical IDs.
 
 - **Method**: `POST`
 - **Path**: `/query`
@@ -546,10 +553,8 @@ citations are omitted. Excerpts can contain misleading claims, markup, links
 or instructions. Render them as escaped plain text and treat them as
 untrusted data when passing them to downstream models.
 
-The service checks candidate chunks against current completed PostgreSQL
-records and reads the current document category. Before sending JSON or each
-successful SSE frame, it rechecks the retrieval and routing candidates and
-their categories. It recomputes routes that used document previews from the
+Before sending JSON or each successful SSE frame, the service
+rechecks the retrieval and routing candidates and their document categories. It recomputes routes that used document previews from the
 same PostgreSQL snapshot as the release check. A scope change detected before
 the response starts returns a pipeline error. After streaming starts, the
 service terminates the stream with an error. Previously delivered evidence
@@ -831,10 +836,12 @@ fixture endpoint for these IDs.
 Deletion proceeds in this order.
 
 1. Removes the legacy Pinecone document namespace (`doc_id`) when present.
-2. Deletes vector entries in the Pinecone default namespace where metadata `doc_id` matches.
+2. Deletes untagged vector entries in the Pinecone default namespace where metadata `doc_id` matches.
 3. Deletes the original uploaded file from S3 if an `s3_key` exists.
 4. Deletes the document record from PostgreSQL (cascading foreign keys remove rows in `chunks` and `document_fingerprints`).
-5. Repeats the vector deletion by document ID after the PostgreSQL removal.
+5. Repeats the untagged vector deletion by document ID after the PostgreSQL removal.
+
+If an untagged worker mutation is pending when PostgreSQL checks the live document, removal returns an error and retains the row for retry.
 
 A vector or object-store failure before PostgreSQL removal returns `500 Internal Server Error` with the document record still present. A failure in the final vector sweep also returns `500`, after the record has been removed. While the UUID is absent, a subsequent ID-only DELETE returns `404` without retrying the sweep. If the UUID has been reused, the request targets the replacement.
 

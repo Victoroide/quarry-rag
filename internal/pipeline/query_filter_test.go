@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/stretchr/testify/require"
 )
 
 func sc(docID string, score float64) domain.ScoredChunk {
@@ -53,5 +54,28 @@ func TestFilterChunksByAllowedDocIDs_PreservesOrder(t *testing.T) {
 	got := filterChunksByAllowedDocIDs(in, []string{"c", "a"})
 	if len(got) != 2 || string(got[0].Chunk.DocumentID) != "a" || string(got[1].Chunk.DocumentID) != "c" {
 		t.Fatalf("expected score order [a,c], got %v", docIDs(got))
+	}
+}
+
+// An admitted chunk carries its collection and document type back from the
+// vector store; a hit without them cannot be placed in the requested scope.
+func TestEvidenceScopeRequiresAdmittedCollectionMetadata(t *testing.T) {
+	filter := domain.VectorFilter{Collection: "archive", DocType: domain.DefaultDocType}
+	hit := func(metadata map[string]any) domain.ScoredChunk {
+		return domain.ScoredChunk{Chunk: domain.Chunk{ID: "c", DocumentID: "d", Text: "t", Metadata: metadata}, Score: .9}
+	}
+	for _, tc := range []struct {
+		name     string
+		metadata map[string]any
+		kept     int
+	}{
+		{"no metadata", nil, 0},
+		{"admitted", map[string]any{"collection": "archive", "doc_type": domain.DefaultDocType}, 1},
+		{"foreign collection", map[string]any{"collection": "other", "doc_type": domain.DefaultDocType}, 0},
+		{"foreign type", map[string]any{"collection": "archive", "doc_type": "report"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Len(t, filterEvidenceScope(filter, []domain.ScoredChunk{hit(tc.metadata)}), tc.kept)
+		})
 	}
 }
