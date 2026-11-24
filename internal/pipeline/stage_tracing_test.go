@@ -130,3 +130,24 @@ func TestPanickingStageEndsErrorSpan(t *testing.T) {
 	require.Len(t, recorder.Ended(), 1)
 	require.Equal(t, codes.Error, recorder.Ended()[0].Status().Code)
 }
+
+func TestQueryStageSpansRecordStrictInputCounts(t *testing.T) {
+	recorder := pipelineRecorder(t)
+	ctx, parent := otel.Tracer("test").Start(t.Context(), "request")
+	defer parent.End()
+	qc := &QueryContext{
+		OriginalQuery:    "fixture-question",
+		ContextChunks:    1,
+		ContextTokens:    12,
+		CountMethod:      "bedrock_count_tokens",
+		ModelInputTokens: 48,
+		FinishReason:     "stop",
+	}
+	_, err := RunRetrievalPipeline(ctx, qc, []QueryStage{metricQueryStage{StageSynthesis, func(*QueryContext) error { return nil }}})
+	require.NoError(t, err)
+	spans := recorder.Ended()
+	require.Len(t, spans, 1)
+	attrs := tracingAttributes(spans[0])
+	require.Equal(t, "bedrock_count_tokens", attrs["quarry.synthesis.count_method"].AsString())
+	require.EqualValues(t, 48, attrs["quarry.synthesis.model_input_tokens"].AsInt64())
+}

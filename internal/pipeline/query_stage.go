@@ -210,6 +210,50 @@ func filterEvidenceScope(filter domain.VectorFilter, chunks []domain.ScoredChunk
 	return chunks
 }
 
+// checkStrictEvidence revalidates the hosted candidate scope and the current
+// rows behind the excerpts that a strict request would send.
+func (qc *QueryContext) checkStrictEvidence(ctx context.Context, excerpts []domain.ScoredChunk) error {
+	if err := qc.CheckEvidenceScope(ctx); err != nil {
+		return err
+	}
+	if qc.EvidenceVisibility == nil {
+		return nil
+	}
+	return qc.checkSynthesisEvidence(ctx, excerpts)
+}
+
+func (qc *QueryContext) checkSynthesisEvidence(ctx context.Context, excerpts []domain.ScoredChunk) error {
+	originals := make([]domain.ScoredChunk, 0, len(excerpts))
+	for _, excerpt := range excerpts {
+		i := slices.IndexFunc(qc.RetrievedChunks, func(original domain.ScoredChunk) bool {
+			return original.Chunk.ID == excerpt.Chunk.ID && original.Chunk.DocumentID == excerpt.Chunk.DocumentID &&
+				original.Chunk.Index == excerpt.Chunk.Index
+		})
+		if i < 0 {
+			return ErrEvidenceScopeChanged
+		}
+		originals = append(originals, qc.RetrievedChunks[i])
+	}
+	if len(filterEvidenceScope(qc.vectorFilter(), originals)) != len(originals) {
+		return ErrEvidenceScopeChanged
+	}
+	current, err := qc.EvidenceVisibility.VisibleEvidence(ctx, originals)
+	if err != nil {
+		return fmt.Errorf("synthesis evidence: %w", err)
+	}
+	if len(current) != len(originals) {
+		return ErrEvidenceScopeChanged
+	}
+	for i, original := range originals {
+		row := current[i].Chunk
+		if row.ID != original.Chunk.ID || row.DocumentID != original.Chunk.DocumentID ||
+			row.Index != original.Chunk.Index || row.Text != original.Chunk.Text {
+			return ErrEvidenceScopeChanged
+		}
+	}
+	return ctx.Err()
+}
+
 // CheckEvidenceScope verifies the original candidate bodies before a response
 // releases evidence or diagnostics derived from it.
 func (qc *QueryContext) CheckEvidenceScope(ctx context.Context) error {
@@ -455,7 +499,17 @@ func (s *SynthesisStage) ID() StageID { return StageSynthesis }
 // trimChunksForSynthesis budgets sanitized excerpts in candidate order.
 // A partial final excerpt needs a sentence boundary and at least 64 tokens;
 // the first excerpt is always retained, with a hard cut if necessary.
-func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor float64) (out []domain.ScoredChunk, truncated []bool) {
+func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor float64, requireEvidence bool) (out []domain.ScoredChunk, truncated []bool) {
+	if requireEvidence {
+		usable := make([]domain.ScoredChunk, 0, len(in))
+		for _, sc := range in {
+			sc.Chunk.Text = sanitizeExcerpt(sc.Chunk.Text)
+			if strings.TrimSpace(sc.Chunk.Text) != "" {
+				usable = append(usable, sc)
+			}
+		}
+		in = usable
+	}
 	if len(in) == 0 {
 		return in, nil
 	}
@@ -476,7 +530,9 @@ func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor f
 		if sc.Score < floor && len(out) > 0 {
 			continue
 		}
-		sc.Chunk.Text = sanitizeExcerpt(sc.Chunk.Text)
+		if !requireEvidence {
+			sc.Chunk.Text = sanitizeExcerpt(sc.Chunk.Text)
+		}
 		tokens := llm.EstimateTokens(sc.Chunk.Text)
 		if tokens > remaining {
 			if remaining < 64 && len(out) > 0 {
@@ -491,6 +547,9 @@ func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor f
 				body = body[:end+1]
 			} else if len(out) > 0 {
 				break
+			}
+			if requireEvidence && strings.TrimSpace(body) == "" {
+				continue
 			}
 			sc.Chunk.Text = body
 			out, truncated = append(out, sc), append(truncated, true)
@@ -530,18 +589,19 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		}
 	}
 	if len(qc.RetrievedChunks) == 0 {
-		qc.FinishReason = "no_evidence"
-		qc.FinalAnswer, qc.ContentLanguage = noEvidenceAnswer(qc.AcceptLanguage)
-		qc.ContextTokens, qc.ContextChunks = 0, 0
-		qc.TokenUsage = domain.TokenUsage{}
-		qc.EarlyExit = true
-		return streamNoEvidence(ctx, qc)
+		return finishSynthesisWithoutEvidence(ctx, qc)
 	}
 
-	chunks, truncated := trimChunksForSynthesis(qc.RetrievedChunks, s.cfg.SynthesisContextTokens, s.cfg.SynthesisRelativeScoreFloor)
+	strict := s.cfg.SynthesisInputProfile != "" && qc.AnswerMode != domain.AnswerModeEvidence
+	chunks, truncated := trimChunksForSynthesis(qc.RetrievedChunks, s.cfg.SynthesisContextTokens, s.cfg.SynthesisRelativeScoreFloor, strict)
+	if strict && len(chunks) == 0 {
+		return finishSynthesisWithoutEvidence(ctx, qc)
+	}
 	qc.ContextChunks = len(chunks)
 	qc.Truncated = truncated
 	qc.Excerpts = chunks
+	qc.CountMethod = ""
+	qc.ModelInputTokens = 0
 	if qc.AnswerMode == domain.AnswerModeEvidence {
 		qc.FinishReason = domain.FinishReasonEvidenceOnly
 		qc.FinalAnswer = ""
@@ -557,15 +617,21 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		return ctx.Err()
 	}
 
-	system, parts := buildSynthesisPrompt(qc.OriginalQuery, chunks, newBoundary())
-	if qc.IncludeCitations {
-		system += "\n" + synthesisCitationInstruction
+	var boundary string
+	switch {
+	case !strict:
+		boundary = newBoundary()
+	case s.cfg.LLMProvider == "openai":
+		boundary = newCountingBoundary()
+	default:
+		boundary = bedrockCountingBoundary(s.cfg.ServiceTokens, qc.OriginalQuery, chunks)
 	}
-	prompt := strings.Join(parts[:], "")
-	content := []llm.Content{{Text: prompt}}
-	if s.cfg.BedrockGuardrailID != "" {
-		content = guardedSynthesisContent(parts)
+	builder := synthesisPromptBuilder{
+		question: qc.OriginalQuery, includeCitations: qc.IncludeCitations,
+		boundary: boundary, guardrail: s.cfg.BedrockGuardrailID != "",
+		maxTokens: answerSynthesisMaxOutput,
 	}
+	request, system, prompt := builder.build(chunks)
 
 	tokenEst := llm.EstimateTokens(prompt) + llm.EstimateTokens(system)
 	qc.ContextTokens = tokenEst
@@ -580,12 +646,7 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		MultiNeed:     multiNeed,
 	})
 
-	messages := []llm.Message{
-		{
-			Role:    "user",
-			Content: content,
-		},
-	}
+	request.Model = modelID
 
 	// Synthesis is free-form text — never JSON. Use the plain path so
 	// the ambassador's JSON-correction retry loop is bypassed even when
@@ -596,9 +657,45 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	}
 	synthesisCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	result, err := s.converse(
-		synthesisCtx, qc, modelID, system, messages, 0.2, answerSynthesisMaxOutput,
-	)
+
+	if strict {
+		profile, err := s.ambassador.ResolveInputProfile(s.cfg, modelID)
+		if err != nil {
+			return fmt.Errorf("synthesis_stage: %w", translatePipelineCountError(err))
+		}
+		if transportErr := s.ambassador.ValidateSynthesisTransport(profile, qc.Stream != nil); transportErr != nil {
+			return fmt.Errorf("synthesis_stage: %w", translatePipelineCountError(transportErr))
+		}
+		reservedOutput, err := resolveReservedOutput(profile, answerSynthesisMaxOutput)
+		if err != nil {
+			return fmt.Errorf("synthesis_stage: %w", err)
+		}
+		inputBudget := profile.ContextWindow - reservedOutput
+		if inputBudget <= 0 {
+			return fmt.Errorf("synthesis_stage: %w: output reserve %d exceeds window %d", ErrSynthesisInputTooLarge, reservedOutput, profile.ContextWindow)
+		}
+		builder.modelID, builder.maxTokens = modelID, reservedOutput
+		if qc.EvidenceVisibility != nil || qc.HostedVisibilityRefill {
+			builder.evidenceCheck = qc.checkStrictEvidence
+		}
+		outcome, err := budgetStrictSynthesisInput(synthesisCtx, s.ambassador, s.cfg, builder, profile, inputBudget, chunks, truncated)
+		if err != nil {
+			return fmt.Errorf("synthesis_stage: %w", err)
+		}
+		qc.Excerpts = outcome.chunks
+		qc.Truncated = outcome.truncated
+		qc.ContextChunks = len(outcome.chunks)
+		qc.ContextTokens = llm.EstimateTokens(outcome.prompt) + llm.EstimateTokens(outcome.system)
+		qc.CountMethod = string(outcome.count.Method)
+		qc.ModelInputTokens = outcome.count.InputTokens
+		request = outcome.request
+		synthesisCtx = builder.disclosureContext(synthesisCtx, outcome.chunks)
+		if err := domain.CheckEvidenceBeforeSend(synthesisCtx); err != nil {
+			return fmt.Errorf("synthesis_stage: %w", err)
+		}
+	}
+
+	result, err := s.converse(synthesisCtx, qc, request)
 	if err != nil {
 		return fmt.Errorf("synthesis_stage: %w", err)
 	}

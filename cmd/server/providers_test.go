@@ -37,3 +37,42 @@ func TestOpenAIProviderWiring(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "synthetic", result.Text)
 }
+
+func TestStrictSynthesisProviderStartupValidation(t *testing.T) {
+	matched := httptest.NewServer(nil)
+	defer matched.Close()
+	unknown := httptest.NewServer(nil)
+	defer unknown.Close()
+	cfg := &config.Config{
+		LLMProvider:           "openai",
+		OpenAIBaseURL:         unknown.URL,
+		OpenAIChatModel:       "gpt-4-0613",
+		SynthesisInputProfile: "strict",
+	}
+	_, err := newSynthesisProvider(t.Context(), cfg)
+	require.ErrorIs(t, err, llm.ErrUnsupportedProfile)
+	cfg.SynthesisOpenAIDeployment = "chatml-v1|gpt-4-0613|" + matched.URL
+	_, err = newSynthesisProvider(t.Context(), cfg)
+	require.ErrorIs(t, err, llm.ErrUnsupportedProfile)
+
+	cfg.OpenAIBaseURL = matched.URL
+	amb, err := newSynthesisProvider(t.Context(), cfg)
+	require.NoError(t, err)
+	_, err = amb.ResolveInputProfile(cfg, cfg.OpenAIChatModel)
+	require.NoError(t, err)
+
+	cfg.OpenAIChatModel = "gpt-4"
+	cfg.SynthesisOpenAIDeployment = "chatml-v1|gpt-4|" + matched.URL
+	_, err = newSynthesisProvider(t.Context(), cfg)
+	require.ErrorIs(t, err, llm.ErrUnsupportedProfile)
+
+}
+
+func TestStrictSynthesisRejectsNovaProAtStartup(t *testing.T) {
+	cfg := &config.Config{
+		LLMProvider: "bedrock", AWSRegion: "us-east-1",
+		BedrockFallbackModel: "amazon.nova-pro-v1:0", SynthesisInputProfile: "strict",
+	}
+	_, err := newSynthesisProvider(t.Context(), cfg)
+	require.ErrorIs(t, err, llm.ErrUnsupportedProfile)
+}

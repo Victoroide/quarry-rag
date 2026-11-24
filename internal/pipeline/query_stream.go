@@ -25,7 +25,13 @@ func (q *QueryStream) start(ctx context.Context) error {
 	return q.Context()
 }
 
-func streamNoEvidence(ctx context.Context, qc *QueryContext) error {
+func finishSynthesisWithoutEvidence(ctx context.Context, qc *QueryContext) error {
+	qc.FinishReason = "no_evidence"
+	qc.FinalAnswer, qc.ContentLanguage = noEvidenceAnswer(qc.AcceptLanguage)
+	qc.ContextTokens, qc.ContextChunks = 0, 0
+	qc.CountMethod, qc.ModelInputTokens = "", 0
+	qc.TokenUsage = domain.TokenUsage{}
+	qc.EarlyExit = true
 	if qc.Stream == nil {
 		return nil
 	}
@@ -38,8 +44,7 @@ func streamNoEvidence(ctx context.Context, qc *QueryContext) error {
 	return qc.Stream.Delta(qc.FinalAnswer)
 }
 
-func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, model, system string, messages []llm.Message, temperature float32, maxTokens int) (*llm.Response, error) {
-	request := llm.Request{Model: model, System: system, Messages: messages, Temperature: temperature, MaxTokens: maxTokens}
+func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, request llm.Request) (*llm.Response, error) {
 	if qc.Stream != nil {
 		if err := qc.Stream.start(ctx); err != nil {
 			return nil, err
@@ -65,8 +70,10 @@ func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, model, 
 	return result, nil
 }
 
+// withProviderEvidenceCheck attaches the hosted scope check unless the caller
+// already carries a check that includes it, as strict synthesis does.
 func (qc *QueryContext) withProviderEvidenceCheck(ctx context.Context) context.Context {
-	if qc.HostedVisibilityRefill {
+	if qc.HostedVisibilityRefill && !domain.HasEvidenceCheck(ctx) {
 		return domain.WithEvidenceCheck(ctx, qc.CheckEvidenceScope)
 	}
 	return ctx

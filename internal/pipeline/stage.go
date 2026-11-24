@@ -107,15 +107,17 @@ type QueryContext struct {
 	RetrievedChunks []domain.ScoredChunk
 
 	// Populated by synthesis stage.
-	Excerpts      []domain.ScoredChunk
-	Truncated     []bool
-	Citations     []Citation
-	FinishReason  string
-	FinalAnswer   string
-	TokenUsage    domain.TokenUsage
-	ContextTokens int  // estimated prompt or selected evidence tokens
-	ContextChunks int  // chunks retained after context selection
-	EarlyExit     bool // true when the pipeline exits early
+	Excerpts         []domain.ScoredChunk
+	Truncated        []bool
+	Citations        []Citation
+	FinishReason     string
+	FinalAnswer      string
+	TokenUsage       domain.TokenUsage
+	ContextTokens    int    // estimated prompt or selected evidence tokens
+	ContextChunks    int    // chunks retained after context selection
+	CountMethod      string // counting strategy used under a strict input profile
+	ModelInputTokens int    // measured model-specific input tokens
+	EarlyExit        bool   // true when the pipeline exits early
 
 	// ContentLanguage identifies the language of the fixed no-evidence answer.
 	ContentLanguage string
@@ -243,6 +245,12 @@ func setQueryAttributes(ctx context.Context, span trace.Span, id StageID, qc *Qu
 		attribute.Int("quarry.retrieval.chunks", len(qc.RetrievedChunks)), attribute.Float64("quarry.retrieval.top_score", qc.TopScore),
 		attribute.Int("quarry.synthesis.context_chunks", qc.ContextChunks), attribute.Int("quarry.synthesis.context_tokens", qc.ContextTokens),
 		attribute.String("quarry.synthesis.finish_reason", qc.FinishReason), attribute.Bool("quarry.synthesis.early_exit", qc.EarlyExit))
+	if qc.CountMethod != "" {
+		span.SetAttributes(
+			attribute.String("quarry.synthesis.count_method", qc.CountMethod),
+			attribute.Int("quarry.synthesis.model_input_tokens", qc.ModelInputTokens),
+		)
+	}
 	if !tracing.ContentCapture(ctx) {
 		span.SetAttributes(attribute.Int("quarry.query.bytes", len(qc.OriginalQuery)), attribute.String("quarry.query.digest", queryDigest(qc.OriginalQuery)))
 		return
