@@ -15,6 +15,7 @@ type Service struct {
 	IndexVisibility *CounterVec
 	HostedRefill    *CounterVec
 	Rerank          *CounterVec
+	PGVectorSearch  *CounterVec
 }
 
 // NewService creates the fixed metric families and pending-job gauge.
@@ -34,6 +35,7 @@ func NewService(pending func() float64) *Service {
 		IndexVisibility: r.NewCounterVec("quarry_index_visibility_waits_total", "Index visibility wait outcomes.", "result"),
 		HostedRefill:    r.NewCounterVec("quarry_hosted_visibility_refill_total", "Hosted visibility refill outcomes.", "result"),
 		Rerank:          r.NewCounterVec("quarry_rerank_total", "Reranking outcomes.", "result"),
+		PGVectorSearch:  r.NewCounterVec("quarry_pgvector_search_total", "pgvector search outcomes by strategy and status.", "strategy", "status"),
 	}
 }
 

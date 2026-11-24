@@ -106,7 +106,7 @@ func run() error {
 		amb.SetClient(tracing.WrapConverser(llm.NewFakeConverser(), "offline", cfg.BedrockFallbackModel))
 	} else {
 		if cfg.VectorStore == "postgres" {
-			pgVectors, vectorErr := pgstore.NewVectorStore(startupCtx, pgClient, cfg.EmbeddingDimensions)
+			pgVectors, vectorErr := pgstore.NewVectorStore(startupCtx, pgClient, cfg.EmbeddingDimensions, pgstore.WithExactScopeMax(cfg.PGVectorExactScopeMax))
 			if vectorErr != nil {
 				return fmt.Errorf("startup: postgres vectors: %w", vectorErr)
 			}

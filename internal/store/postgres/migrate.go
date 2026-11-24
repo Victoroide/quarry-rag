@@ -17,8 +17,6 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const migrationLockID int64 = 0x7175617272790001
-
 type migration struct {
 	version  int
 	name     string

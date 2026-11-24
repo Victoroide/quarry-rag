@@ -4,40 +4,102 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strconv"
 	"strings"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+const maxExactScopeLimit = 100000
+
+// SearchStrategy identifies the execution strategy selected by pgvector search.
+type SearchStrategy string
+
+// Supported pgvector search strategies.
+const (
+	SearchStrategyExact SearchStrategy = "exact"
+	SearchStrategyHNSW  SearchStrategy = "hnsw"
+	SearchStrategyProbe SearchStrategy = "probe"
+)
+
+// SearchStatus classifies the completion state of a pgvector search.
+type SearchStatus string
+
+// Supported pgvector search outcome statuses.
+const (
+	SearchStatusOK       SearchStatus = "ok"
+	SearchStatusPartial  SearchStatus = "partial"
+	SearchStatusTimeout  SearchStatus = "timeout"
+	SearchStatusCanceled SearchStatus = "canceled"
+	SearchStatusError    SearchStatus = "error"
+)
+
+// SearchReport summarizes the strategy and completion status of a pgvector query.
+type SearchReport struct {
+	Strategy       SearchStrategy
+	Status         SearchStatus
+	ProbeAttempted bool // The count statement was attempted.
+	Probed         bool // The count statement succeeded.
+	Candidates     int  // Valid only if Probed is true.
+}
+
+// VectorOption customizes pgvector VectorStore behavior.
+type VectorOption func(*VectorStore)
+
+// WithExactScopeMax enables exact cosine search for filtered queries whose
+// matching completed chunk count does not exceed limit. Zero disables it.
+func WithExactScopeMax(limit int) VectorOption {
+	return func(s *VectorStore) { s.exactScopeMax = limit }
+}
 
 // VectorStore searches pgvector embeddings committed with document completion.
 type VectorStore struct {
-	client     *Client
-	dimensions int
+	client        *Client
+	dimensions    int
+	exactScopeMax int
 }
 
 var (
-	_ domain.VectorStore              = (*VectorStore)(nil)
-	_ domain.FilteredVectorStore      = (*VectorStore)(nil)
-	_ domain.VectorDeleter            = (*VectorStore)(nil)
-	_ domain.TransactionalVectorStore = (*VectorStore)(nil)
+	_ domain.VectorStore                      = (*VectorStore)(nil)
+	_ domain.FilteredVectorStoreWithExactness = (*VectorStore)(nil)
+	_ domain.VectorDeleter                    = (*VectorStore)(nil)
+	_ domain.TransactionalVectorStore         = (*VectorStore)(nil)
 )
 
 // NewVectorStore validates or initializes the optional schema under the migration advisory lock.
 // The client must have applied its base migrations before calling this function.
-func NewVectorStore(ctx context.Context, client *Client, dimensions int) (*VectorStore, error) {
+func NewVectorStore(ctx context.Context, client *Client, dimensions int, opts ...VectorOption) (*VectorStore, error) {
 	validDimensions, err := ValidateVectorDimensions(dimensions)
 	if err != nil {
 		return nil, err
 	}
+	vs := &VectorStore{client: client, dimensions: dimensions}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(vs)
+		}
+	}
+	if vs.exactScopeMax < 0 || vs.exactScopeMax > maxExactScopeLimit {
+		return nil, fmt.Errorf("postgres: exact scope limit must be between 0 and %d", maxExactScopeLimit)
+	}
 	if err := client.initVectors(ctx, dimensions); err != nil {
 		return nil, fmt.Errorf("postgres: initialize vectors: %w", err)
 	}
+	if vs.exactScopeMax > 0 {
+		if err := client.ensureExactScopeIndexes(ctx); err != nil {
+			return nil, fmt.Errorf("postgres: ensure exact-scope indexes: %w", err)
+		}
+	}
 	client.vectorDimensions.Store(validDimensions)
-	return &VectorStore{client: client, dimensions: dimensions}, nil
+	return vs, nil
 }
 
 // ValidateVectorDimensions returns the bounded dimension supported by the pgvector index.
@@ -255,31 +317,89 @@ func (s *VectorStore) QueryAllNamespaces(ctx context.Context, embedding []float3
 
 // QueryFiltered applies collection, type and ID constraints before ranking completed documents.
 func (s *VectorStore) QueryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	chunks, _, err := s.QueryFilteredDetailed(ctx, embedding, topK, filter)
+	return chunks, err
+}
+
+// QueryFilteredWithExactness also reports whether exact ranking selected the results.
+func (s *VectorStore) QueryFilteredWithExactness(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
+	chunks, report, err := s.QueryFilteredDetailed(ctx, embedding, topK, filter)
+	return chunks, err == nil && report.Strategy == SearchStrategyExact, err
+}
+
+// QueryFilteredDetailed executes a scoped pgvector query and reports the selected
+// search strategy and completion status. Calls rejected during input validation
+// return SearchStatusError with an empty Strategy without touching PostgreSQL;
+// impossible filters short-circuit with SearchStatusOK, an empty Strategy, and
+// Probed=false. Single-statement paths (disabled or unfiltered) inherit the
+// pool isolation level, whereas probed filtered paths use RepeatableRead for a
+// consistent candidate count and ranking snapshot.
+func (s *VectorStore) QueryFilteredDetailed(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, SearchReport, error) {
 	if topK > 10000 {
-		return nil, fmt.Errorf("postgres: topK must not exceed 10000")
+		return nil, SearchReport{Status: SearchStatusError}, fmt.Errorf("postgres: topK must not exceed 10000")
 	}
 	if filter.MatchesNothing() {
-		return []domain.ScoredChunk{}, nil
+		return []domain.ScoredChunk{}, SearchReport{Status: SearchStatusOK}, nil
 	}
 	literal, err := vectorLiteral(embedding, s.dimensions)
 	if err != nil {
-		return nil, err
+		return nil, SearchReport{Status: SearchStatusError}, err
 	}
-	query, args, ok := searchSQL(literal, topK, filter)
+	// When probing, all ranking paths must use the probe's label eligibility.
+	useProbe := s.exactScopeMax > 0 && hasScopeFilter(filter)
+	searchQuery, searchArgs, ok := searchSQL(literal, topK, filter, useProbe)
 	if !ok {
-		return []domain.ScoredChunk{}, nil
+		return []domain.ScoredChunk{}, SearchReport{Status: SearchStatusOK}, nil
 	}
-	tx, err := s.client.Pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+
+	txOpts := pgx.TxOptions{AccessMode: pgx.ReadOnly}
+	report := SearchReport{Strategy: SearchStrategyHNSW, Status: SearchStatusOK}
+	if useProbe {
+		txOpts.IsoLevel = pgx.RepeatableRead
+		report.Strategy = SearchStrategyProbe
+	}
+
+	tx, err := s.client.Pool.BeginTx(ctx, txOpts)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: query vectors: %w", err)
+		return finishVectorSearch(ctx, report, nil, err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if _, err = tx.Exec(ctx, `SET LOCAL hnsw.iterative_scan = strict_order`); err != nil {
-		return nil, fmt.Errorf("postgres: query vectors: %w", err)
+
+	if useProbe {
+		report.ProbeAttempted = true
+		probeQuery, probeArgs, _ := probeSQL(s.exactScopeMax+1, filter)
+		var candidates int
+		if err = tx.QueryRow(ctx, probeQuery, probeArgs...).Scan(&candidates); err != nil {
+			return finishVectorSearch(ctx, report, nil, err)
+		}
+		report.Probed = true
+		report.Candidates = candidates
+		if candidates <= s.exactScopeMax {
+			report.Strategy = SearchStrategyExact
+			if candidates == 0 {
+				return finishVectorSearch(ctx, report, []domain.ScoredChunk{}, nil)
+			}
+			exactQuery, exactArgs, _ := exactSQL(literal, topK, s.exactScopeMax+1, filter)
+			out, exactErr := scanScoredChunks(ctx, tx, exactQuery, exactArgs...)
+			return finishVectorSearch(ctx, report, out, exactErr)
+		}
 	}
+
+	report.Strategy = SearchStrategyHNSW
+	if _, err = tx.Exec(ctx, `SET LOCAL hnsw.iterative_scan = strict_order`); err != nil {
+		return finishVectorSearch(ctx, report, nil, err)
+	}
+	out, err := scanScoredChunks(ctx, tx, searchQuery, searchArgs...)
+	if err == nil && topK > 0 && len(out) < topK {
+		report.Status = SearchStatusPartial
+	}
+	return finishVectorSearch(ctx, report, out, err)
+}
+
+func scanScoredChunks(ctx context.Context, tx pgx.Tx, query string, args ...any) ([]domain.ScoredChunk, error) {
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: query vectors: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 	out := make([]domain.ScoredChunk, 0)
@@ -287,8 +407,8 @@ func (s *VectorStore) QueryFiltered(ctx context.Context, embedding []float32, to
 		var sc domain.ScoredChunk
 		var docType, collection string
 		var kind, quality *string
-		if err := rows.Scan(&sc.Chunk.ID, &sc.Chunk.DocumentID, &sc.Chunk.Index, &docType, &collection, &sc.Chunk.Text, &kind, &quality, &sc.Chunk.TokenCount, &sc.Score); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&sc.Chunk.ID, &sc.Chunk.DocumentID, &sc.Chunk.Index, &docType, &collection, &sc.Chunk.Text, &kind, &quality, &sc.Chunk.TokenCount, &sc.Score); scanErr != nil {
+			return nil, scanErr
 		}
 		sc.Chunk.Metadata = map[string]any{"doc_type": docType}
 		if collection != "" {
@@ -302,17 +422,29 @@ func (s *VectorStore) QueryFiltered(ctx context.Context, embedding []float32, to
 		}
 		out = append(out, sc)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func searchSQL(literal string, topK int, filter domain.VectorFilter) (query string, args []any, matches bool) {
-	args = []any{literal}
-	query = `SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.embedding <=> $1::text::vector AS distance
- FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed' WHERE TRUE`
-	for _, f := range []struct{ column, value string }{{"v.doc_type", filter.DocType}, {"v.collection", filter.Collection}} {
+func hasScopeFilter(filter domain.VectorFilter) bool {
+	return filter.DocType != "" || filter.Collection != "" || filter.DocumentIDs != nil
+}
+
+func appendFilterPredicates(args []any, filter domain.VectorFilter, matchDocumentLabels bool) (predicates string, nextArgs []any, matches bool) {
+	var b strings.Builder
+	for _, f := range []struct{ vectorCol, docCol, value string }{
+		{"v.doc_type", "d.doc_type", filter.DocType},
+		{"v.collection", "d.collection", filter.Collection},
+	} {
 		if f.value != "" {
 			args = append(args, f.value)
-			query += fmt.Sprintf(" AND %s=$%d", f.column, len(args))
+			n := len(args)
+			fmt.Fprintf(&b, " AND %s=$%d", f.vectorCol, n)
+			if matchDocumentLabels {
+				fmt.Fprintf(&b, " AND %s=$%d", f.docCol, n)
+			}
 		}
 	}
 	if filter.DocumentIDs != nil {
@@ -326,8 +458,62 @@ func searchSQL(literal string, topK int, filter domain.VectorFilter) (query stri
 			return "", nil, false
 		}
 		args = append(args, ids)
-		query += fmt.Sprintf(" AND v.document_id=ANY($%d::uuid[])", len(args))
+		fmt.Fprintf(&b, " AND v.document_id=ANY($%d::uuid[])", len(args))
 	}
+	return b.String(), args, true
+}
+
+func probeSQL(limit int, filter domain.VectorFilter) (query string, args []any, matches bool) {
+	predicates, args, ok := appendFilterPredicates(nil, filter, true)
+	if !ok {
+		return "", nil, false
+	}
+	args = append(args, limit)
+	query = fmt.Sprintf(`SELECT count(*) FROM (
+ SELECT 1
+ FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'
+ WHERE TRUE%s
+ LIMIT $%d
+) s`, predicates, len(args))
+	return query, args, true
+}
+
+func exactSQL(literal string, topK, scopeLimit int, filter domain.VectorFilter) (query string, args []any, matches bool) {
+	predicates, args, ok := appendFilterPredicates([]any{literal}, filter, true)
+	if !ok {
+		return "", nil, false
+	}
+	args = append(args, scopeLimit)
+	scopeArg := len(args)
+	limitClause := ""
+	if topK > 0 {
+		args = append(args, topK)
+		limitClause = fmt.Sprintf(" LIMIT $%d", len(args))
+	}
+	query = fmt.Sprintf(`WITH candidates AS MATERIALIZED (
+ SELECT v.chunk_id,v.embedding <=> $1::text::vector AS distance
+ FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'
+ WHERE TRUE%s
+ LIMIT $%d
+),
+ranked AS (
+ SELECT chunk_id,distance
+ FROM candidates
+ ORDER BY distance,chunk_id%s
+)
+SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-r.distance
+FROM ranked r JOIN chunk_vectors v ON v.chunk_id=r.chunk_id
+ORDER BY r.distance,v.chunk_id`, predicates, scopeArg, limitClause)
+	return query, args, true
+}
+
+func searchSQL(literal string, topK int, filter domain.VectorFilter, matchDocumentLabels bool) (query string, args []any, matches bool) {
+	predicates, args, ok := appendFilterPredicates([]any{literal}, filter, matchDocumentLabels)
+	if !ok {
+		return "", nil, false
+	}
+	query = `SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.embedding <=> $1::text::vector AS distance
+ FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed' WHERE TRUE` + predicates
 	if topK > 0 {
 		args = append(args, topK)
 		query += fmt.Sprintf(" ORDER BY distance LIMIT $%d", len(args))
@@ -335,6 +521,59 @@ func searchSQL(literal string, topK int, filter domain.VectorFilter) (query stri
 	query = `SELECT chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,1-distance
  FROM (` + query + `) s ORDER BY distance,chunk_id`
 	return query, args, true
+}
+
+func finishVectorSearch(ctx context.Context, report SearchReport, chunks []domain.ScoredChunk, err error) ([]domain.ScoredChunk, SearchReport, error) {
+	if err != nil {
+		report.Status, err = classifyAndWrapSearchError(ctx, err)
+	}
+	recordSearchTelemetry(ctx, report, len(chunks), err)
+	return chunks, report, err
+}
+
+func classifyAndWrapSearchError(ctx context.Context, err error) (SearchStatus, error) {
+	// Explicit caller cancellation or deadline takes precedence over server
+	// SQLSTATE 57014, which covers statement timeouts and administrative cancellation.
+	cause := ctx.Err()
+	if cause == nil {
+		var pgErr *pgconn.PgError
+		switch {
+		case errors.Is(err, context.Canceled):
+			cause = context.Canceled
+		case errors.Is(err, context.DeadlineExceeded), errors.As(err, &pgErr) && pgErr.Code == "57014":
+			cause = context.DeadlineExceeded
+		}
+	}
+	status := SearchStatusError
+	switch cause {
+	case context.Canceled:
+		status = SearchStatusCanceled
+	case context.DeadlineExceeded:
+		status = SearchStatusTimeout
+	}
+	if cause != nil && !errors.Is(err, cause) {
+		err = fmt.Errorf("%w: %w", cause, err)
+	}
+	return status, fmt.Errorf("postgres: query vectors: %w", err)
+}
+
+func recordSearchTelemetry(ctx context.Context, report SearchReport, results int, err error) {
+	metrics.FromContext(ctx).PGVectorSearch.WithLabelValues(string(report.Strategy), string(report.Status)).Inc()
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		attrs := []attribute.KeyValue{
+			attribute.String("quarry.vector.strategy", string(report.Strategy)),
+			attribute.String("quarry.vector.status", string(report.Status)),
+		}
+		if report.Probed {
+			attrs = append(attrs, attribute.Int("quarry.vector.scope_candidates", report.Candidates))
+		}
+		span.SetAttributes(attrs...)
+	}
+	if err != nil {
+		slog.DebugContext(ctx, "pgvector query failed", "strategy", report.Strategy, "status", report.Status, "error", err)
+		return
+	}
+	slog.DebugContext(ctx, "pgvector query completed", "strategy", report.Strategy, "status", report.Status, "results", results)
 }
 
 // DeleteByDocID removes all vectors belonging to a document.

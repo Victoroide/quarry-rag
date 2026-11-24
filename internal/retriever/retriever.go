@@ -93,22 +93,27 @@ func (r *Retriever) RetrieveWithEmbedding(ctx context.Context, embedding []float
 		return &Result{Mode: mode}, nil
 	}
 	mode, queryFilter := retrievalScope(mode, localDocID, filter)
-	chunks, err := r.queryFiltered(ctx, embedding, topK, queryFilter)
+	chunks, exact, err := r.queryFiltered(ctx, embedding, topK, queryFilter)
 	if err != nil {
 		return nil, fmt.Errorf("retriever: query: %w", err)
 	}
 	if mode == RetrievalModeLocal && len(chunks) < 3 {
-		extra, err := r.queryFiltered(ctx, embedding, topK, filter)
+		extra, scopeExact, err := r.queryFiltered(ctx, embedding, topK, filter)
 		if err != nil {
 			return nil, fmt.Errorf("retriever: top up: %w", err)
 		}
-		chunks = mergeChunks(chunks, extra)
+		exact = exact && scopeExact
+		if exact {
+			// The broader scope includes the local document and already has the database's top K in order.
+			chunks = extra
+		} else {
+			chunks = mergeChunks(chunks, extra)
+		}
 	}
 
-	// Sort by score descending.
-	sort.Slice(chunks, func(i, j int) bool {
-		return chunks[i].Score > chunks[j].Score
-	})
+	if !exact {
+		sort.Slice(chunks, func(i, j int) bool { return chunks[i].Score > chunks[j].Score })
+	}
 
 	return retrievalResult(ctx, mode, chunks, topK), nil
 }
@@ -198,7 +203,7 @@ func (r *Retriever) EmbedQuery(ctx context.Context, query string, filter domain.
 	if probeK <= 0 {
 		return embedding, nil, false, nil
 	}
-	candidates, err = r.queryFiltered(ctx, embedding, probeK, filter)
+	candidates, _, err = r.queryFiltered(ctx, embedding, probeK, filter)
 	if err != nil {
 		slog.WarnContext(ctx, "routing probe failed", "mode", RetrievalModeGlobal, "error", err)
 		return embedding, nil, true, nil
@@ -213,19 +218,23 @@ func (r *Retriever) embed(ctx context.Context, text string) ([]float32, error) {
 	return r.embedder.Embed(ctx, text)
 }
 
-func (r *Retriever) queryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+func (r *Retriever) queryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
 	if filter.MatchesNothing() {
-		return []domain.ScoredChunk{}, nil
+		return []domain.ScoredChunk{}, false, nil
+	}
+	if store, ok := r.vectorStore.(domain.FilteredVectorStoreWithExactness); ok {
+		return store.QueryFilteredWithExactness(ctx, embedding, topK, filter)
 	}
 	if store, ok := r.vectorStore.(domain.FilteredVectorStore); ok {
-		return store.QueryFiltered(ctx, embedding, topK, filter)
+		chunks, err := store.QueryFiltered(ctx, embedding, topK, filter)
+		return chunks, false, err
 	}
 	if filter.Collection != "" {
-		return nil, fmt.Errorf("retriever: vector store does not support collection filtering")
+		return nil, false, fmt.Errorf("retriever: vector store does not support collection filtering")
 	}
 	chunks, err := r.vectorStore.QueryAllNamespaces(ctx, embedding, topK, filter.DocType)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	allowed := make(map[string]struct{}, len(filter.DocumentIDs))
 	for _, id := range filter.DocumentIDs {
@@ -249,5 +258,5 @@ func (r *Retriever) queryFiltered(ctx context.Context, embedding []float32, topK
 	if len(filtered) > topK {
 		filtered = filtered[:topK]
 	}
-	return filtered, nil
+	return filtered, false, nil
 }
