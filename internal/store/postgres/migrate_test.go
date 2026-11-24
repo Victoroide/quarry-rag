@@ -14,30 +14,154 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
-func TestDocumentCollectionsUpgradePreservesIdentity(t *testing.T) {
-	client := migrationTestClient(t, startTestDatabase(t))
-	migrations, err := loadMigrations(testMigrationFiles)
+func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
+	url := startTestDatabase(t)
+	c := migrationTestClient(t, url)
+	applyMigrationPrefix(t, c, 9)
+	ctx := t.Context()
+	req := jobsRequest("preserved source content")
+	key := "objects/preserved.txt"
+	req.Document.S3Key = &key
+	result, err := c.AcceptDocument(ctx, req)
 	require.NoError(t, err)
-	_, err = client.Pool.Exec(t.Context(), `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`)
+	require.Equal(t, domain.AcceptAccepted, result.Outcome)
+	id := string(result.DocumentID)
+	job, err := c.ClaimJob(ctx, "schema-upgrade", time.Minute, 5)
 	require.NoError(t, err)
-	for _, m := range migrations {
-		if m.version > 6 {
-			continue
-		}
-		_, err = client.Pool.Exec(t.Context(), m.sql)
+	require.NotNil(t, job)
+	chunkID := uuid.NewString()
+	_, err = c.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,'preserved chunk',2)`, chunkID, id)
+	require.NoError(t, err)
+
+	type snapshot struct {
+		filenode uint32
+		rows     string
+	}
+	read := func() snapshot {
+		var s snapshot
+		require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_relation_filenode('documents'), jsonb_build_array(
+			to_jsonb(d)-'incarnation', to_jsonb(ch), to_jsonb(f), to_jsonb(j))::text
+			FROM documents d JOIN chunks ch ON ch.document_id=d.id
+			JOIN document_fingerprints f ON f.document_id=d.id JOIN ingest_jobs j ON j.document_id=d.id
+			WHERE d.id=$1 AND j.state='running' AND j.lease_until > clock_timestamp()`, id).Scan(&s.filenode, &s.rows))
+		return s
+	}
+	before := read()
+	require.NoError(t, c.RunMigrations(ctx))
+	require.Equal(t, before, read())
+	requireRecordedMigrations(t, c)
+	requireInactiveDeletionSchema(t, c)
+
+	restarted := migrationTestClient(t, url)
+	require.NoError(t, restarted.RunMigrations(ctx))
+	var stored *string
+	var effective string
+	require.NoError(t, restarted.Pool.QueryRow(ctx, `SELECT incarnation::text, COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, id).Scan(&stored, &effective))
+	require.Nil(t, stored)
+	require.Equal(t, id, effective)
+
+	owned, err := restarted.HeartbeatJob(ctx, *job, time.Minute)
+	require.NoError(t, err)
+	require.True(t, owned)
+	completed, err := restarted.CompleteJob(ctx, *job, []domain.Chunk{{ID: domain.ChunkID(chunkID), Text: "preserved chunk", TokenCount: 2}})
+	require.NoError(t, err)
+	require.True(t, completed)
+	for range 2 {
+		require.NoError(t, restarted.DeleteDocument(ctx, result.DocumentID))
+		result, err := restarted.AcceptDocument(ctx, req)
 		require.NoError(t, err)
-		_, err = client.Pool.Exec(t.Context(), `INSERT INTO schema_migrations(version,name,checksum) VALUES($1,$2,$3)`, m.version, m.name, m.checksum)
+		require.Equal(t, domain.AcceptAccepted, result.Outcome)
+		var next string
+		require.NoError(t, restarted.Pool.QueryRow(ctx, `SELECT incarnation::text FROM documents WHERE id=$1`, id).Scan(&next))
+		_, err = uuid.Parse(next)
+		require.NoError(t, err)
+		require.NotEqual(t, effective, next)
+		require.NotEqual(t, id, next)
+		effective = next
+	}
+	requireInactiveDeletionSchema(t, restarted)
+}
+
+func TestDeletionMigrationRetriesAfterLockTimeout(t *testing.T) {
+	c := migrationTestClient(t, startTestDatabase(t))
+	applyMigrationPrefix(t, c, 9)
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+	defer cancel()
+	tx, err := c.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	_, err = tx.Exec(ctx, `LOCK TABLE documents IN ACCESS SHARE MODE`)
+	require.NoError(t, err)
+	start := time.Now()
+	err = c.RunMigrations(ctx)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "55P03", pgErr.Code)
+	require.Less(t, time.Since(start), 20*time.Second)
+	var columns, tables, history int
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM information_schema.columns WHERE table_name='documents' AND column_name='incarnation'),
+		(SELECT count(*) FROM information_schema.tables WHERE table_name IN ('document_deletions','document_deletion_activation')),
+		(SELECT count(*) FROM schema_migrations)`).Scan(&columns, &tables, &history))
+	require.Zero(t, columns)
+	require.Zero(t, tables)
+	require.Equal(t, 9, history)
+	require.NoError(t, tx.Rollback(ctx))
+	require.NoError(t, c.RunMigrations(ctx))
+	requireRecordedMigrations(t, c)
+	requireInactiveDeletionSchema(t, c)
+}
+
+func TestDeletionReceiptStorageIsIndependentOfDocument(t *testing.T) {
+	c := migrationTestClient(t, startTestDatabase(t))
+	ctx := t.Context()
+	require.NoError(t, c.RunMigrations(ctx))
+	id, incarnation, owner := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id,content) VALUES($1,'source content')`, id)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO document_deletions(document_id,incarnation,kind,source_key,source_bucket,vector_mode,memory_owner,step,held,claim,claim_until)
+		VALUES($1,$2,'legacy_reservation','original.txt','stored-files','memory',$3,1,TRUE,$3,now()+interval '1 minute')`, id, incarnation, owner)
+	require.NoError(t, err)
+	require.NoError(t, c.DeleteDocument(ctx, domain.DocumentID(id)))
+	var retained bool
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT incarnation=$2 AND kind='legacy_reservation' AND source_key='original.txt'
+		AND source_bucket='stored-files' AND vector_mode='memory' AND memory_owner=$3 AND step=1
+		AND held AND NOT finalized AND claim=$3 AND claim_until>now() FROM document_deletions WHERE document_id=$1`, id, incarnation, owner).Scan(&retained))
+	require.True(t, retained)
+	for _, kind := range []string{"qualified_intent", "quarantine"} {
+		_, err = c.Pool.Exec(ctx, `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode,vector_index,vector_namespace)
+			VALUES($1,$2,$3,'revision','original-index','original-namespace')`, uuid.NewString(), incarnation, kind)
 		require.NoError(t, err)
 	}
+	_, err = c.Pool.Exec(ctx, `INSERT INTO document_deletion_activation(singleton) VALUES (FALSE)`)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "23514", pgErr.Code)
+}
+
+func requireInactiveDeletionSchema(t *testing.T, c *Client) {
+	t.Helper()
+	var receipts, markers, active int
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM document_deletions), count(*), count(activated_at) FROM document_deletion_activation`).Scan(&receipts, &markers, &active))
+	require.Zero(t, receipts)
+	require.Equal(t, 1, markers)
+	require.Zero(t, active)
+}
+
+func TestDocumentCollectionsUpgradePreservesIdentity(t *testing.T) {
+	client := migrationTestClient(t, startTestDatabase(t))
+	applyMigrationPrefix(t, client, 6)
 	const content = "Existing default collection content"
 	const id = "00000000-0000-4000-8000-000000000005"
 	fingerprint := chunker.Fingerprint(content)
-	_, err = client.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,status,fingerprint) VALUES($1,$2,'completed',$3)`, id, content, fingerprint)
+	_, err := client.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,status,fingerprint) VALUES($1,$2,'completed',$3)`, id, content, fingerprint)
 	require.NoError(t, err)
 	_, err = client.Pool.Exec(t.Context(), `INSERT INTO document_fingerprints(fingerprint,document_id) VALUES($1,$2)`, fingerprint, id)
 	require.NoError(t, err)
@@ -70,6 +194,24 @@ func TestDocumentCollectionsUpgradePreservesIdentity(t *testing.T) {
 	require.NoError(t, client.Pool.QueryRow(t.Context(), `SELECT indexdef FROM pg_indexes WHERE tablename='documents' AND indexname='idx_documents_collection_id'`).Scan(&index))
 	require.Contains(t, index, "(collection, id)")
 	require.NoError(t, client.RunMigrations(t.Context()))
+}
+
+func applyMigrationPrefix(t *testing.T, client *Client, through int) {
+	t.Helper()
+	migrations, err := loadMigrations(testMigrationFiles)
+	require.NoError(t, err)
+	ctx := t.Context()
+	_, err = client.Pool.Exec(ctx, `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`)
+	require.NoError(t, err)
+	for _, m := range migrations {
+		if m.version > through {
+			break
+		}
+		_, err = client.Pool.Exec(ctx, m.sql)
+		require.NoError(t, err)
+		_, err = client.Pool.Exec(ctx, `INSERT INTO schema_migrations(version,name,checksum) VALUES($1,$2,$3)`, m.version, m.name, m.checksum)
+		require.NoError(t, err)
+	}
 }
 
 //go:embed migrations/*.sql

@@ -583,7 +583,7 @@ func TestDataModelRowsAndPorts(t *testing.T) {
 		for j, c := range child.Columns {
 			if c.Reference == "documents.id" {
 				found = true
-				if math.Abs(e.Points[len(e.Points)-1][1]-(child.Box.Y+66+float64(j)*26)) > .5 {
+				if math.Abs(e.Points[len(e.Points)-1][1]-(child.Box.Y+66+float64(j)*20)) > .5 {
 					t.Errorf("%s must point to its child FK row", e.ID)
 				}
 			}
@@ -598,7 +598,7 @@ func TestDataModelRowsAndPorts(t *testing.T) {
 			for _, l := range sceneLabels(d) {
 				if l.Owner == n.ID && l.Text == c.Name {
 					found = true
-					if math.Abs(l.Y-(n.Box.Y+72+float64(i)*26)) > .5 {
+					if math.Abs(l.Y-(n.Box.Y+72+float64(i)*20)) > .5 {
 						t.Errorf("%s.%s row spacing", n.ID, c.Name)
 					}
 				}

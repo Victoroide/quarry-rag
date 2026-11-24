@@ -239,7 +239,7 @@ The base relational schema is defined across embedded SQL migrations applied in 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.svg">
-  <img alt="Data model. documents contains id, content, metadata, status, chunk_count, created_at, file_name, file_type, s3_key, content_preview, doc_type, fingerprint, last_error, updated_at, completed_at, collection, text_source and content_dedup. chunks contains id, document_id, chunk_index, text, token_count and created_at. document_fingerprints contains fingerprint, document_id and created_at. ingest_jobs contains document_id, state, attempts, lease_owner, lease_until, next_attempt_at, last_error, created_at and updated_at. Each child references documents.id with cascading deletion. A document has zero or more chunks and fingerprints and at most one ingestion job. PK denotes primary key and FK denotes foreign key; SQL types appear beside every column. Only documents with the collection policy appear in document_fingerprints." src="diagrams/database-schema-light.svg">
+  <img alt="Data model. The chunks, document_fingerprints and ingest_jobs tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column." src="diagrams/database-schema-light.svg">
 </picture>
 
 ### Table Definitions
