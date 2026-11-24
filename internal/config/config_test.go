@@ -390,3 +390,56 @@ func TestLoadVectorStoreSelection(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadPGVectorExactScopeMax(t *testing.T) {
+	awsConfigEnvironment(t)
+	t.Setenv("PGVECTOR_EXACT_SCOPE_MAX", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PGVectorExactScopeMax != 0 {
+		t.Fatalf("expected default PGVECTOR_EXACT_SCOPE_MAX=0, got %d", cfg.PGVectorExactScopeMax)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{"zero", "0", 0},
+		{"positive", "250", 250},
+		{"upper bound", "100000", 100000},
+	} {
+		t.Run("valid/"+tc.name, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("PGVECTOR_EXACT_SCOPE_MAX", tc.value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.PGVectorExactScopeMax != tc.want {
+				t.Fatalf("PGVectorExactScopeMax = %d, want %d", cfg.PGVectorExactScopeMax, tc.want)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"negative", "-1"},
+		{"above bound", "100001"},
+		{"float", "10.5"},
+		{"malformed", "invalid"},
+		{"overflow", "99999999999999999999999"},
+	} {
+		t.Run("invalid/"+tc.name, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv("PGVECTOR_EXACT_SCOPE_MAX", tc.value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PGVECTOR_EXACT_SCOPE_MAX") {
+				t.Fatalf("expected PGVECTOR_EXACT_SCOPE_MAX error, got %v", err)
+			}
+		})
+	}
+}

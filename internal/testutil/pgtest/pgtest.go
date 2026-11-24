@@ -22,16 +22,16 @@ func Start(t testing.TB) string {
 }
 
 // StartVector runs PostgreSQL with pgvector available for extension creation.
-func StartVector(t testing.TB) string {
-	return start(t, vectorImage)
+func StartVector(t testing.TB, opts ...testcontainers.ContainerCustomizer) string {
+	return start(t, vectorImage, opts...)
 }
 
-func start(t testing.TB, containerImage string) string {
+func start(t testing.TB, containerImage string, opts ...testcontainers.ContainerCustomizer) string {
 	t.Helper()
 	ctx := context.Background()
 	// The image opens its port for a temporary server during initialization,
 	// so readiness also waits for the second startup log line.
-	container, err := postgres.Run(ctx, containerImage,
+	options := []testcontainers.ContainerCustomizer{
 		postgres.WithDatabase("rag"),
 		postgres.WithUsername("rag"),
 		postgres.WithPassword("rag"),
@@ -39,7 +39,8 @@ func start(t testing.TB, containerImage string) string {
 			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 			wait.ForListeningPort("5432/tcp"),
 		),
-	)
+	}
+	container, err := postgres.Run(ctx, containerImage, append(options, opts...)...)
 	if err != nil {
 		t.Fatalf("start postgres container: %v", err)
 	}
