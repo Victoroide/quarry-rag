@@ -82,6 +82,10 @@ The table below lists the environment variables recognized by the service:
 | `REQUIRE_DOCUMENT_ALLOWLIST` | boolean | `false` | Boolean | Require a non-null `allowed_document_ids` field on every query; an empty list is accepted and skips embedding and search. |
 | `RERANK_MODEL_ARN` | string | `""` | Empty, or an `arn:` value without whitespace or control characters | Enables [reranking before synthesis](api.md#post-query); empty disables it. Ignored in offline fake mode. See [Bedrock permissions](deployment.md#bedrock-reranking). |
 | `RERANK_TIMEOUT` | duration | `5s` | 1s to 60s | Reranking call budget, including SDK retries and paginated results; earlier query or caller deadlines take precedence. |
+| `ROUTING_EMBEDDING_REVISION` | string | `""` | Immutable revision label up to 256 bytes with no spaces or control characters | Identifies the deployed OpenAI-compatible embedding revision for [profile matching](routing-calibration.md). |
+| `ROUTING_MARGIN` | float64 | calibrated profile margin | 0 to 1, finite | Minimum score lead used for `evidence` routing. Overrides the matching profile when set. Ignored under `legacy`. |
+| `ROUTING_POLICY` | string | `"legacy"` | `legacy` or `evidence` | Automatic query routing policy; see [RoutingStage](architecture.md#query-stages). `legacy` preserves single-document threshold and structural heuristics; `evidence` requires calibration matching the active embedding profile and defaults conservatively to `GLOBAL` when missing or mismatched. |
+| `ROUTING_PROFILE_FILE` | string | `""` | Existing regular JSON file up to 1 MiB | Optional [calibration profile set](routing-calibration.md) for `ROUTING_POLICY=evidence`. Ignored under `legacy`. |
 | `S3_BUCKET` | string | `""` | Explicit bucket name | S3 bucket for original uploads. Empty disables source file storage with a startup warning. Startup checks bucket access within 10 seconds; a 403 or 404 prevents startup, while transient errors produce a warning and startup continues. |
 | `S3_EXPECTED_BUCKET_OWNER` | string | `""` | Empty or exactly 12 ASCII digits | Optional AWS account ID expected to own the bucket. Sent with uploads, deletions and bucket checks; omitted from presigned downloads. |
 | `SERVER_PORT` | string | `"8081"` | 1 to 65535 | TCP port on which the HTTP server listens. |
@@ -344,6 +348,12 @@ Metrics use Prometheus text format:
   optional search failed without hitting that limit, and `underfill` means
   visibility filtering left fewer than the requested number of chunks after
   recovery. A retrieval may have multiple outcomes.
+- `quarry_query_route_reason_total{policy,mode,reason}` counts each routed query using
+  its active routing policy (`legacy` or `evidence`), effective mode, and bounded
+  route reason (`empty_scope`, `explicit_global`, `explicit_local`, `probe_failed`,
+  `empty_probe`, `missing_calibration`, `multi_need`, `ambiguous_entities`,
+  `negated_entity`, `named_entity`, `ambiguous_margin`, `score_threshold`,
+  `strong_lead`, `low_score`).
 - `quarry_rerank_total{result}` counts optional reranking attempts: `reranked` for
   success and `fallback` for errors, invalid results or an expired `RERANK_TIMEOUT`.
   Disabled reranking, empty candidate lists and queries canceled or timed out during
