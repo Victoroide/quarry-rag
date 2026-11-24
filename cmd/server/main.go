@@ -95,6 +95,9 @@ func run() error {
 	)
 
 	if cfg.FakeMode {
+		if profileErr := llm.ValidateSynthesisProfile(cfg); profileErr != nil {
+			return fmt.Errorf("startup: synthesis profile: %w", profileErr)
+		}
 		logger.Warn("FAKE MODE ACTIVE: deterministic in-memory vector store, embedder, and LLM. No AWS/Pinecone/S3 calls will be made.")
 		mem := memstore.NewFakeVectorStore()
 		vectorStore = mem

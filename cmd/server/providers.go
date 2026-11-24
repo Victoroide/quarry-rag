@@ -18,6 +18,9 @@ func newEmbeddingProvider(ctx context.Context, cfg *config.Config) (domain.Embed
 }
 
 func newSynthesisProvider(ctx context.Context, cfg *config.Config) (*llm.Ambassador, error) {
+	if err := llm.ValidateSynthesisProfile(cfg); err != nil {
+		return nil, err
+	}
 	amb := llm.NewAmbassador(cfg)
 	if cfg.LLMProvider == "openai" {
 		client, err := llm.NewOpenAIClient(cfg)
@@ -28,6 +31,9 @@ func newSynthesisProvider(ctx context.Context, cfg *config.Config) (*llm.Ambassa
 	} else {
 		client, err := llm.NewClient(ctx, cfg)
 		if err != nil {
+			return nil, err
+		}
+		if err := client.VerifySynthesisDeployment(ctx, cfg); err != nil {
 			return nil, err
 		}
 		amb.SetClient(tracing.WrapConverser(client, "aws.bedrock", cfg.BedrockFallbackModel))
