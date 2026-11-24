@@ -593,9 +593,9 @@ func assertDocumentAccess(t *testing.T, c *Client, id, principal string, read, d
 	require.Equal(t, owner, actualOwner)
 }
 
-func grantRoleClient(t *testing.T, url, setRole string) *Client {
+func grantRoleClient(t *testing.T, databaseURL, setRole string) *Client {
 	t.Helper()
-	c, err := NewClient(t.Context(), url, func(cfg *pgxpool.Config) {
+	c, err := NewClient(t.Context(), databaseURL, func(cfg *pgxpool.Config) {
 		cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 			_, err := conn.Exec(ctx, setRole)
 			return err

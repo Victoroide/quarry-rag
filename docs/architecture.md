@@ -235,7 +235,7 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
 
 ## Data Model
 
-The base relational schema is defined across embedded SQL migrations applied in numeric order at service startup. The data-model diagram shows this base schema only; the optional vector table is described below.
+Embedded SQL migrations define the relational schema and apply in numeric order at service startup. The diagram shows the core service metadata tables and columns. See the [grant catalog](grant-catalog.md) for authorization storage. The optional vector table is described below.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.svg">

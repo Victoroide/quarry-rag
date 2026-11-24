@@ -230,6 +230,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `008_document_text_source.sql` | Adds `text_source` to documents with the default `parser`, including existing rows; see [image-only PDF OCR](api.md#image-only-pdf-ocr). |
 | `009_content_dedup.sql` | Stores the upload's policy on the document referenced by each job, defaults existing rows to `collection`, and prevents private documents from registering shared fingerprints. |
 | `010_document_deletions.sql` | Adds a nullable incarnation column with a random UUID default for future inserts, an empty deletion receipt table and a singleton with a null activation timestamp. It leaves existing rows in place. |
+| `011_grant_catalog.sql` | Installs the [operator grant catalog](grant-catalog.md) with an empty policy at revision zero. |
 
 The service can roll back to the previous binary with migration 010 and its checksum still recorded. This release does not activate qualified deletion or create receipts during ordinary use.
 

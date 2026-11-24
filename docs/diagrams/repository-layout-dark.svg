@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 920" role="img" fill="#e6edf3">
 <title>Repository layout</title>
-<desc>Repository layout, from the directory listing to depth three. client/ Go client for the HTTP API. cmd/ Executable entry points. cmd/quarry-mcp/ Local MCP server over stdio. cmd/server/ Wiring and graceful shutdown. docs/ Service documentation. docs/diagrams/ Architecture, schema and layout. docs/diagrams/src/ Diagram placement sources. internal/ Private service packages. internal/api/ HTTP router. internal/api/handler/ Request handlers. internal/api/middleware/ Authentication, logs and metrics. internal/awsconf/ AWS credentials and retry policy. internal/chunker/ Text windows and fingerprints. internal/cleanup/ Document deletion across stores. internal/config/ Configuration and validation. internal/domain/ Shared types and interfaces. internal/embedder/ Titan V2 and offline embeddings. internal/embeddinginput/ Model input profiles. internal/extractor/ File parsing and process isolation. internal/llm/ Answer routing and Converse. internal/logctx/ Request log attributes. internal/metrics/ Prometheus text metrics. internal/ocr/ Asynchronous PDF text detection. internal/pipeline/ Ingestion and query stages. internal/retriever/ LOCAL and GLOBAL retrieval. internal/store/ Storage adapters. internal/store/memory/ Offline vector index. internal/store/pinecone/ Hosted vector index. internal/store/postgres/ Documents, chunks and durable jobs. internal/store/s3/ Original files and signed downloads. internal/testutil/ Test support. internal/testutil/pgtest/ Disposable database containers. internal/textutil/ Unicode normalization. internal/tracing/ OpenTelemetry export and span helpers. internal/worker/ Leased ingestion and retry handling. scripts/ Operational commands. scripts/cleanup/ Delete selected documents. scripts/langeval/ Answer language and latency checks. scripts/reconcile/ Find and remove orphan vectors. scripts/simulate/ Exercise the service API. scripts/validate/ Check retrieval behavior. test/ Service test suites. test/integration/ Database and API integration. test/smoke/ Opt-in live service checks. test/unit/ Package behavior checks. tools/ Documentation support. tools/diagrams/ Vector image sources and checks. tools/diagrams/fonts/ Bundled typefaces and license. The highlight follows cmd/server, internal/api, internal/pipeline, internal/retriever, internal/llm and internal/store.</desc>
+<desc>Repository layout, from the directory listing to depth three. client/ Go client for the HTTP API. cmd/ Executable entry points. cmd/quarry-mcp/ Local MCP server over stdio. cmd/server/ Wiring and graceful shutdown. docs/ Service documentation. docs/diagrams/ Architecture, schema and layout. docs/diagrams/src/ Diagram placement sources. internal/ Private service packages. internal/api/ HTTP router. internal/api/handler/ Request handlers. internal/api/middleware/ Authentication, logs and metrics. internal/awsconf/ AWS credentials and retry policy. internal/chunker/ Text windows and fingerprints. internal/cleanup/ Document deletion across stores. internal/config/ Configuration and validation. internal/domain/ Shared types and interfaces. internal/embedder/ Titan V2 and offline embeddings. internal/embeddinginput/ Model input profiles. internal/extractor/ File parsing and process isolation. internal/llm/ Answer routing and Converse. internal/logctx/ Request log attributes. internal/metrics/ Prometheus text metrics. internal/ocr/ Asynchronous PDF text detection. internal/pipeline/ Ingestion and query stages. internal/retriever/ LOCAL and GLOBAL retrieval. internal/store/ Storage adapters. internal/store/memory/ Offline vector index. internal/store/pinecone/ Hosted vector index. internal/store/postgres/ Documents, chunks and durable jobs. internal/store/s3/ Original files and signed downloads. internal/testutil/ Test support. internal/testutil/pgtest/ Disposable database containers. internal/textutil/ Unicode normalization. internal/tracing/ OpenTelemetry export and span helpers. internal/worker/ Leased ingestion and retry handling. scripts/ Operational commands. scripts/cleanup/ Delete selected documents. scripts/grant-catalog/ Import tenant grants. scripts/langeval/ Answer language and latency checks. scripts/reconcile/ Find and remove orphan vectors. scripts/simulate/ Exercise the service API. scripts/validate/ Check retrieval behavior. test/ Service test suites. test/integration/ Database and API integration. test/smoke/ Opt-in live service checks. test/unit/ Package behavior checks. tools/ Documentation support. tools/diagrams/ Vector image sources and checks. tools/diagrams/fonts/ Bundled typefaces and license. The highlight follows cmd/server, internal/api, internal/pipeline, internal/retriever, internal/llm and internal/store.</desc>
 <style>@keyframes n3{0%{opacity:0}1.818%{opacity:0}5.455%{opacity:1}12.727%{opacity:1}16.364%{opacity:0}100%{opacity:0}}@keyframes n8{0%{opacity:0}12.727%{opacity:0}16.364%{opacity:1}23.636%{opacity:1}27.273%{opacity:0}100%{opacity:0}}@keyframes n19{0%{opacity:0}45.455%{opacity:0}49.091%{opacity:1}56.364%{opacity:1}60%{opacity:0}100%{opacity:0}}@keyframes n23{0%{opacity:0}23.636%{opacity:0}27.273%{opacity:1}34.545%{opacity:1}38.182%{opacity:0}100%{opacity:0}}@keyframes n24{0%{opacity:0}34.545%{opacity:0}38.182%{opacity:1}45.455%{opacity:1}49.091%{opacity:0}100%{opacity:0}}@keyframes n25{0%{opacity:0}56.364%{opacity:0}60%{opacity:1}67.273%{opacity:1}70.909%{opacity:0}100%{opacity:0}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
 <defs>
 <path id="r2c" d="M63 175L105 -102L206 -102L130 175L63 175"/>
@@ -99,7 +99,7 @@
 <rect class="group" x="432" y="88" width="392" height="48" rx="14"/>
 <rect class="group" x="432" y="152" width="392" height="112" rx="14"/>
 <rect class="group" x="432" y="280" width="392" height="112" rx="14"/>
-<rect class="group" x="432" y="408" width="392" height="208" rx="14"/>
+<rect class="group" x="432" y="408" width="392" height="212" rx="14"/>
 <rect class="group" x="432" y="632" width="392" height="144" rx="14"/>
 <rect class="group" x="432" y="792" width="392" height="112" rx="14"/>
 </g>
@@ -176,6 +176,8 @@
 </g>
 <g fill="#1c3a5e">
 <rect class="hit" x="53" y="601" width="342" height="26" rx="9" opacity="0" style="animation:n25 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
+</g>
+<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
@@ -1516,7 +1518,7 @@
 <use href="#r64" x="9818"/>
 <use href="#r73" x="10430"/>
 </g>
-<g transform="translate(480 469) scale(0.014)">
+<g transform="translate(480 465) scale(0.014)">
 <use href="#s63"/>
 <use href="#s6c" x="583"/>
 <use href="#s65" x="844"/>
@@ -1526,7 +1528,7 @@
 <use href="#s70" x="3234"/>
 <use href="#s2f" x="3858"/>
 </g>
-<g fill="#9198a1" transform="translate(550.707 469) scale(0.012)">
+<g fill="#9198a1" transform="translate(550.707 465) scale(0.012)">
 <use href="#r44"/>
 <use href="#r65" x="722"/>
 <use href="#r6c" x="1305"/>
@@ -1551,7 +1553,43 @@
 <use href="#r74" x="12057"/>
 <use href="#r73" x="12384"/>
 </g>
-<g transform="translate(480 501) scale(0.014)">
+<g transform="translate(480 493) scale(0.014)">
+<use href="#s67"/>
+<use href="#s72" x="625"/>
+<use href="#s61" x="1022"/>
+<use href="#s6e" x="1597"/>
+<use href="#s74" x="2208"/>
+<use href="#s2d" x="2562"/>
+<use href="#s63" x="3027"/>
+<use href="#s61" x="3609"/>
+<use href="#s74" x="4184"/>
+<use href="#s61" x="4537"/>
+<use href="#s6c" x="5111"/>
+<use href="#s6f" x="5373"/>
+<use href="#s67" x="5981"/>
+<use href="#s2f" x="6607"/>
+</g>
+<g fill="#9198a1" transform="translate(589.193 493) scale(0.012)">
+<use href="#r49"/>
+<use href="#r6d" x="269"/>
+<use href="#r70" x="1145"/>
+<use href="#r6f" x="1757"/>
+<use href="#r72" x="2356"/>
+<use href="#r74" x="2733"/>
+<use href="#r74" x="3341"/>
+<use href="#r65" x="3669"/>
+<use href="#r6e" x="4252"/>
+<use href="#r61" x="4842"/>
+<use href="#r6e" x="5404"/>
+<use href="#r74" x="5995"/>
+<use href="#r67" x="6603"/>
+<use href="#r72" x="7216"/>
+<use href="#r61" x="7593"/>
+<use href="#r6e" x="8154"/>
+<use href="#r74" x="8745"/>
+<use href="#r73" x="9072"/>
+</g>
+<g transform="translate(480 521) scale(0.014)">
 <use href="#s6c"/>
 <use href="#s61" x="262"/>
 <use href="#s6e" x="836"/>
@@ -1562,7 +1600,7 @@
 <use href="#s6c" x="3826"/>
 <use href="#s2f" x="4087"/>
 </g>
-<g fill="#9198a1" transform="translate(553.585 501) scale(0.012)">
+<g fill="#9198a1" transform="translate(553.585 521) scale(0.012)">
 <use href="#r41"/>
 <use href="#r6e" x="690"/>
 <use href="#r73" x="1281"/>
@@ -1594,7 +1632,7 @@
 <use href="#r6b" x="16588"/>
 <use href="#r73" x="17137"/>
 </g>
-<g transform="translate(480 533) scale(0.014)">
+<g transform="translate(480 549) scale(0.014)">
 <use href="#s72"/>
 <use href="#s65" x="397"/>
 <use href="#s63" x="988"/>
@@ -1606,7 +1644,7 @@
 <use href="#s65" x="3897"/>
 <use href="#s2f" x="4489"/>
 </g>
-<g fill="#9198a1" transform="translate(559.204 533) scale(0.012)">
+<g fill="#9198a1" transform="translate(559.204 549) scale(0.012)">
 <use href="#r46"/>
 <use href="#r69" x="590"/>
 <use href="#r6e" x="833"/>
@@ -1634,7 +1672,7 @@
 <use href="#r72" x="14481"/>
 <use href="#r73" x="14857"/>
 </g>
-<g transform="translate(480 565) scale(0.014)">
+<g transform="translate(480 577) scale(0.014)">
 <use href="#s73"/>
 <use href="#s69" x="549"/>
 <use href="#s6d" x="811"/>
@@ -1645,7 +1683,7 @@
 <use href="#s65" x="3513"/>
 <use href="#s2f" x="4104"/>
 </g>
-<g fill="#9198a1" transform="translate(554.159 565) scale(0.012)">
+<g fill="#9198a1" transform="translate(554.159 577) scale(0.012)">
 <use href="#r45"/>
 <use href="#r78" x="601"/>
 <use href="#r65" x="1147"/>
@@ -1668,7 +1706,7 @@
 <use href="#r50" x="10512"/>
 <use href="#r49" x="11150"/>
 </g>
-<g transform="translate(480 597) scale(0.014)">
+<g transform="translate(480 605) scale(0.014)">
 <use href="#s76"/>
 <use href="#s61" x="587"/>
 <use href="#s6c" x="1161"/>
@@ -1679,7 +1717,7 @@
 <use href="#s65" x="3236"/>
 <use href="#s2f" x="3827"/>
 </g>
-<g fill="#9198a1" transform="translate(550.618 597) scale(0.012)">
+<g fill="#9198a1" transform="translate(550.618 605) scale(0.012)">
 <use href="#r43"/>
 <use href="#r68" x="730"/>
 <use href="#r65" x="1322"/>
