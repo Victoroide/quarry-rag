@@ -48,3 +48,8 @@ type FilteredVectorStoreWithExactness interface {
 type DocumentPreviewer interface {
 	DocumentPreviews(ctx context.Context, ids []string) (map[string]string, error)
 }
+
+// VectorCandidateStore returns the bounded hits per partition for visibility checks.
+type VectorCandidateStore interface {
+	QueryCandidates(ctx context.Context, embedding []float32, perPartition int, filter VectorFilter) ([]ScoredChunk, error)
+}

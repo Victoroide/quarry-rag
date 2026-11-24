@@ -46,6 +46,11 @@ func (d *Driver) DeleteByDocID(ctx context.Context, docID string) error {
 	return d.client.DeleteByDocID(ctx, docID)
 }
 
+// DeleteByRevision removes only vectors for one document incarnation.
+func (d *Driver) DeleteByRevision(ctx context.Context, docID, revision string) error {
+	return d.client.DeleteByRevision(ctx, docID, revision)
+}
+
 // Ping verifies connectivity to the Pinecone index.
 func (d *Driver) Ping(ctx context.Context) error {
 	return d.client.Ping(ctx)
@@ -69,4 +74,12 @@ func (d *Driver) QueryFilteredBudgeted(ctx context.Context, embedding []float32,
 	remaining := budget
 	chunks, err := d.client.queryCandidates(ctx, embedding, topK, filter, &remaining)
 	return chunks, budget - remaining, err
+}
+
+// ManagesVectorDispatch reports that Pinecone claims every mutating RPC separately.
+func (*Driver) ManagesVectorDispatch() bool { return true }
+
+// DeleteByAttempt removes vectors written under one worker claim.
+func (d *Driver) DeleteByAttempt(ctx context.Context, docID, revision, attempt string) error {
+	return d.client.DeleteByAttempt(ctx, docID, revision, attempt)
 }

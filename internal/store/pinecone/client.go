@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,12 +29,18 @@ const (
 	maxMetadataBytes = 40 * 1024
 )
 
+// Reserve response space for IDs, scores and protocol framing.
+const cleanupPageSize = 4_000_000 / (maxMetadataBytes + 2048)
+
 // Client wraps the official Pinecone Go SDK.
 // All namespaces share one connection.
 type Client struct {
 	client                *pinecone.Client
 	cfg                   *config.Config
 	defaultConn           indexConn
+	ownershipMu           sync.Mutex
+	ownershipFilters      ownershipFilters
+	discoverOwnership     func(context.Context) (ownershipFilters, error)
 	dial                  func(namespace string) (indexConn, error)
 	batchSize             int
 	timeout               time.Duration
@@ -63,6 +71,7 @@ func newPineconeClient(ctx context.Context, cfg *config.Config, pc *pinecone.Cli
 	if validationErr := validateIndex(idx, cfg); validationErr != nil {
 		return nil, validationErr
 	}
+	dialOpts = append(dialOpts, grpc.WithStatsHandler(mutationDeliveryObserver{}), grpc.WithChainUnaryInterceptor(classifyMutationDelivery))
 	if cfg.HostedVisibilityRefill {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(queryAttemptCredentials{}))
 	}
@@ -81,8 +90,91 @@ func newPineconeClient(ctx context.Context, cfg *config.Config, pc *pinecone.Cli
 	p.visibility = visibility
 	// Fixture writes use the default namespace of the resolved index.
 	p.fixtureVectorIdentity = fmt.Sprintf("pinecone:%x", sha256.Sum256([]byte(cfg.PineconeIndexName+"\x00"+idx.Host)))
+	p.discoverOwnership = func(ctx context.Context) (ownershipFilters, error) {
+		return indexedOwnershipFields(ctx, idx, defaultConn)
+	}
 	slog.InfoContext(ctx, "pinecone connected", "index", cfg.PineconeIndexName, "host", idx.Host, "dimensions", *idx.Dimension)
 	return p, nil
+}
+
+type ownershipFilters struct {
+	document bool
+	revision bool
+	attempt  bool
+}
+
+type namespaceDescriber interface {
+	DescribeNamespace(context.Context, string) (*pinecone.NamespaceDescription, error)
+}
+
+func indexedOwnershipFields(ctx context.Context, idx *pinecone.Index, conn namespaceDescriber) (ownershipFilters, error) {
+	if idx.Spec == nil {
+		return ownershipFilters{}, nil
+	}
+	if pod := idx.Spec.Pod; pod != nil {
+		if pod.MetadataConfig == nil || pod.MetadataConfig.Indexed == nil {
+			return ownershipFilters{document: true, revision: true, attempt: true}, nil
+		}
+		fields := *pod.MetadataConfig.Indexed
+		return ownershipFilters{
+			document: slices.Contains(fields, "doc_id"),
+			revision: slices.Contains(fields, domain.VectorRevisionKey),
+			attempt:  slices.Contains(fields, domain.VectorAttemptKey),
+		}, nil
+	}
+	var schema *pinecone.MetadataSchema
+	switch {
+	case idx.Spec.Serverless != nil:
+		schema = idx.Spec.Serverless.Schema
+	case idx.Spec.BYOC != nil:
+		schema = idx.Spec.BYOC.Schema
+	default:
+		return ownershipFilters{}, nil
+	}
+	ns, err := conn.DescribeNamespace(ctx, "__default__")
+	switch status.Code(err) {
+	case codes.OK:
+		if ns == nil {
+			return ownershipFilters{}, errors.New("pinecone: missing default namespace description")
+		}
+		if ns.Schema != nil {
+			schema = ns.Schema
+		}
+	case codes.NotFound:
+		// A new default namespace inherits its index's schema.
+	default:
+		return ownershipFilters{}, fmt.Errorf("pinecone: describe default namespace: %w", err)
+	}
+	if schema == nil {
+		return ownershipFilters{document: true, revision: true, attempt: true}, nil
+	}
+	return ownershipFilters{
+		document: schema.Fields["doc_id"].Filterable,
+		revision: schema.Fields[domain.VectorRevisionKey].Filterable,
+		attempt:  schema.Fields[domain.VectorAttemptKey].Filterable,
+	}, nil
+}
+
+func (p *Client) cleanupOwnership(ctx context.Context) (ownershipFilters, error) {
+	p.ownershipMu.Lock()
+	filters, discover := p.ownershipFilters, p.discoverOwnership
+	p.ownershipMu.Unlock()
+	if discover == nil {
+		return filters, nil
+	}
+
+	discoveryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	filters, err := discover(discoveryCtx)
+	if err != nil {
+		return ownershipFilters{}, err
+	}
+	p.ownershipMu.Lock()
+	defer p.ownershipMu.Unlock()
+	if p.discoverOwnership != nil {
+		p.ownershipFilters, p.discoverOwnership = filters, nil
+	}
+	return p.ownershipFilters, nil
 }
 
 func newClient(pc *pinecone.Client, cfg *config.Config, root *pinecone.IndexConnection) *Client {
@@ -128,7 +220,10 @@ func (p *Client) UpsertWithVisibility(ctx context.Context, namespace string, chu
 			"doc_id": string(c.DocumentID), "chunk_index": float64(c.Index),
 			"text": c.Text, "token_count": float64(c.TokenCount),
 		}
-		for _, key := range []string{"doc_type", "kind", "quality", "collection"} {
+		if c.VectorIncarnation != "" {
+			mdMap[domain.VectorIncarnationKey] = c.VectorIncarnation
+		}
+		for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorRevisionKey, domain.VectorAttemptKey} {
 			if value, ok := c.Metadata[key]; ok {
 				mdMap[key] = value
 			}
@@ -144,11 +239,15 @@ func (p *Client) UpsertWithVisibility(ctx context.Context, namespace string, chu
 		if err != nil {
 			return nil, fmt.Errorf("pinecone: build metadata for chunk %s: %w", c.ID, err)
 		}
-		size := 4*len(c.Embedding) + len(c.ID) + proto.Size(md) + 32
+		id, idErr := physicalVectorID(c)
+		if idErr != nil {
+			return nil, idErr
+		}
+		size := 4*len(c.Embedding) + len(id) + proto.Size(md) + 32
 		if size > maxUpsertBytes {
 			return nil, fmt.Errorf("pinecone: chunk %s exceeds the upsert byte limit", c.ID)
 		}
-		vectors = append(vectors, &pinecone.Vector{Id: string(c.ID), Values: &c.Embedding, Metadata: md})
+		vectors = append(vectors, &pinecone.Vector{Id: id, Values: &c.Embedding, Metadata: md})
 		sizes = append(sizes, size)
 	}
 	if len(vectors) == 0 {
@@ -172,9 +271,15 @@ func (p *Client) upsertGRPC(ctx context.Context, namespace string, vectors []*pi
 			size += sizes[end]
 			end++
 		}
-		if err := p.do(ctx, p.maxAttempts, func(attemptCtx context.Context) error {
-			_, upsertErr := conn.UpsertVectors(attemptCtx, vectors[start:end])
-			return upsertErr
+		if err := p.mutate(ctx, false, func(attemptCtx context.Context) error {
+			count, upsertErr := conn.UpsertVectors(attemptCtx, vectors[start:end])
+			if upsertErr != nil {
+				return upsertErr
+			}
+			if int64(count) != int64(end-start) {
+				return fmt.Errorf("pinecone: acknowledged %d of %d upserted vectors", count, end-start)
+			}
+			return nil
 		}); err != nil {
 			return fmt.Errorf("pinecone: upsert %d vectors to namespace %q: %w", end-start, namespace, err)
 		}
@@ -202,12 +307,20 @@ func (p *Client) queryNamespace(ctx context.Context, namespace string, req *pine
 		return nil, err
 	}
 	defer release()
+	res, err := p.queryMatches(ctx, conn, req, budget)
+	if err != nil {
+		return nil, fmt.Errorf("pinecone: query namespace %q: %w", namespace, err)
+	}
+	return matchesToScoredChunks(res, namespace), nil
+}
+
+func (p *Client) queryMatches(ctx context.Context, conn indexConn, req *pinecone.QueryByVectorValuesRequest, budget *int) ([]*pinecone.ScoredVector, error) {
 	var res *pinecone.QueryVectorsResponse
 	attempts := p.queryAttempts()
 	if budget != nil {
 		attempts = min(attempts, *budget)
 	}
-	if err := p.do(ctx, attempts, func(attemptCtx context.Context) error {
+	err := p.do(ctx, attempts, func(attemptCtx context.Context) error {
 		if budget != nil {
 			*budget--
 			attemptCtx = singleTransportAttempt(attemptCtx)
@@ -215,13 +328,14 @@ func (p *Client) queryNamespace(ctx context.Context, namespace string, req *pine
 		var queryErr error
 		res, queryErr = conn.QueryByVectorValues(attemptCtx, req)
 		return queryErr
-	}); err != nil {
-		return nil, fmt.Errorf("pinecone: query namespace %q: %w", namespace, err)
+	})
+	if err != nil {
+		return nil, err
 	}
 	if res == nil {
 		return nil, errors.New("pinecone: missing query response")
 	}
-	return matchesToScoredChunks(res.Matches, namespace), nil
+	return res.Matches, nil
 }
 
 func (p *Client) queryAttempts() int { return min(3, p.maxAttempts) }
@@ -243,7 +357,7 @@ func (p *Client) Delete(ctx context.Context, namespace string, ids []string) err
 	defer release()
 	for start := 0; start < len(ids); start += 1000 {
 		batch := ids[start:min(start+1000, len(ids))]
-		if err := p.do(ctx, p.maxAttempts, func(attemptCtx context.Context) error {
+		if err := p.mutate(ctx, true, func(attemptCtx context.Context) error {
 			return ignoreNotFound(conn.DeleteVectorsById(attemptCtx, batch))
 		}); err != nil {
 			return fmt.Errorf("pinecone: delete %d vectors from namespace %q: %w", len(batch), namespace, err)
@@ -259,7 +373,7 @@ func (p *Client) DeleteAllVectorsInNamespace(ctx context.Context, namespace stri
 		return err
 	}
 	defer release()
-	if err := p.do(ctx, p.maxAttempts, func(attemptCtx context.Context) error {
+	if err := p.mutate(ctx, true, func(attemptCtx context.Context) error {
 		return ignoreNotFound(conn.DeleteAllVectorsInNamespace(attemptCtx))
 	}); err != nil {
 		return fmt.Errorf("pinecone: delete all vectors in namespace %q: %w", namespace, err)
@@ -268,57 +382,298 @@ func (p *Client) DeleteAllVectorsInNamespace(ctx context.Context, namespace stri
 	return nil
 }
 
-// DeleteByDocID deletes vectors from the default namespace whose doc_id matches.
+// DeleteByDocID removes untagged vectors for a document from the default namespace.
 func (p *Client) DeleteByDocID(ctx context.Context, docID string) error {
-	filter, err := structpb.NewStruct(map[string]any{"doc_id": map[string]any{"$eq": docID}})
-	if err != nil {
-		return fmt.Errorf("pinecone: build document filter: %w", err)
-	}
-	err = p.do(ctx, p.maxAttempts, func(attemptCtx context.Context) error {
-		return ignoreNotFound(p.defaultConn.DeleteVectorsByFilter(attemptCtx, filter))
-	})
-	switch status.Code(err) {
-	case codes.InvalidArgument, codes.Unimplemented, codes.FailedPrecondition:
-		err = p.deleteByDocIDs(ctx, filter)
-	}
-	if err != nil {
-		return fmt.Errorf("pinecone: delete vectors by doc_id %s: %w", docID, err)
-	}
-	slog.DebugContext(ctx, "pinecone document vectors deleted", "document_id", docID)
-	return nil
+	return p.deleteDocumentVectors(ctx, vectorTarget{document: docID})
 }
 
-func (p *Client) deleteByDocIDs(ctx context.Context, filter *structpb.Struct) error {
+// DeleteByRevision removes vectors for one incarnation from the default namespace.
+func (p *Client) DeleteByRevision(ctx context.Context, docID, revision string) error {
+	if !validVectorIDPart(docID) || !validVectorIDPart(revision) {
+		return errors.New("pinecone: invalid document revision target")
+	}
+	return p.deleteDocumentVectors(ctx, vectorTarget{document: docID, revision: revision})
+}
+
+// DeleteByAttempt removes vectors that belong to a single claim.
+func (p *Client) DeleteByAttempt(ctx context.Context, docID, revision, attempt string) error {
+	if !validVectorIDPart(docID) || !validVectorIDPart(revision) || !validVectorIDPart(attempt) {
+		return errors.New("pinecone: invalid vector attempt target")
+	}
+	return p.deleteDocumentVectors(ctx, vectorTarget{document: docID, revision: revision, attempt: attempt})
+}
+
+type vectorTarget struct {
+	document string
+	revision string
+	attempt  string
+}
+
+func (t vectorTarget) prefix() string {
+	prefix := vectorIDPrefix(t.document, t.revision)
+	if t.attempt != "" {
+		prefix += t.attempt + "/"
+	}
+	return prefix
+}
+
+// filter builds the narrowest verified predicate and reports whether it
+// identifies the whole target without relying on physical ID validation.
+func (f ownershipFilters) filter(target vectorTarget) (*structpb.Struct, bool, error) {
+	if !f.document {
+		return nil, false, nil
+	}
+	fields := map[string]any{"doc_id": map[string]any{"$eq": target.document}}
+	var exact bool
+	if target.revision == "" {
+		exact = f.revision && f.attempt
+		if f.revision {
+			fields[domain.VectorRevisionKey] = map[string]any{"$exists": false}
+		}
+		if f.attempt {
+			fields[domain.VectorAttemptKey] = map[string]any{"$exists": false}
+		}
+	} else {
+		if f.revision {
+			fields[domain.VectorRevisionKey] = map[string]any{"$eq": target.revision}
+		}
+		if target.attempt != "" && f.attempt {
+			fields[domain.VectorAttemptKey] = map[string]any{"$eq": target.attempt}
+		}
+		exact = f.revision && (target.attempt == "" || f.attempt)
+	}
+	filter, err := structpb.NewStruct(fields)
+	return filter, exact, err
+}
+
+func (p *Client) deleteDocumentVectors(ctx context.Context, target vectorTarget) error {
+	if !validVectorIDPart(target.document) {
+		return errors.New("pinecone: invalid document cleanup target")
+	}
+	ownership, err := p.cleanupOwnership(ctx)
+	if err != nil {
+		return err
+	}
+	filter, exact, err := ownership.filter(target)
+	if err != nil {
+		return fmt.Errorf("pinecone: build cleanup filter: %w", err)
+	}
+	acknowledged := false
+	if exact {
+		filterErr := p.mutate(ctx, true, func(ctx context.Context) error {
+			return ignoreNotFound(p.defaultConn.DeleteVectorsByFilter(ctx, filter))
+		})
+		switch status.Code(filterErr) {
+		case codes.OK:
+			acknowledged = true
+		case codes.InvalidArgument, codes.Unimplemented, codes.FailedPrecondition:
+			// A provider can support metadata search without filter deletion.
+		default:
+			return filterErr
+		}
+	}
+	if lister, ok := p.defaultConn.(vectorIDLister); ok && target.revision != "" {
+		err := p.deleteRevisionByList(ctx, lister, target, acknowledged)
+		if !errors.Is(err, errVectorListingUnsupported) {
+			return err
+		}
+	}
+	if filter == nil {
+		return errors.New("pinecone: cannot verify cleanup ownership without an indexed doc_id or prefix listing")
+	}
+	return p.deleteByDocumentMatches(ctx, filter, target, acknowledged)
+}
+
+var errVectorListingUnsupported = errors.New("pinecone: vector listing unsupported")
+
+type vectorIDLister interface {
+	ListVectors(context.Context, *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error)
+}
+
+func vectorIDPrefix(docID, revision string) string { return docID + "/" + revision + "/" }
+
+func validVectorIDPart(part string) bool { return part != "" && !strings.Contains(part, "/") }
+
+func physicalVectorID(chunk domain.Chunk) (string, error) {
+	id := string(chunk.ID)
+	value, tagged := chunk.Metadata[domain.VectorRevisionKey]
+	attemptValue, hasAttempt := chunk.Metadata[domain.VectorAttemptKey]
+	if !tagged {
+		if hasAttempt {
+			return "", errors.New("pinecone: vector attempt requires a revision")
+		}
+		return id, nil
+	}
+	revision, _ := value.(string)
+	docID := string(chunk.DocumentID)
+	if !validVectorIDPart(docID) || !validVectorIDPart(revision) || !validVectorIDPart(id) {
+		return "", errors.New("pinecone: invalid tagged vector identity")
+	}
+	target := vectorTarget{document: docID, revision: revision}
+	if hasAttempt {
+		target.attempt, _ = attemptValue.(string)
+		if !validVectorIDPart(target.attempt) {
+			return "", errors.New("pinecone: invalid vector attempt")
+		}
+	}
+	id = target.prefix() + id
+	if len(id) > 512 {
+		return "", errors.New("pinecone: tagged vector ID exceeds 512 bytes")
+	}
+	return id, nil
+}
+
+func (t vectorTarget) logicalID(physicalID string) (string, bool) {
+	if !validVectorIDPart(t.document) || !validVectorIDPart(t.revision) {
+		return "", false
+	}
+	prefix := t.prefix()
+	id, ok := strings.CutPrefix(physicalID, prefix)
+	return id, ok && validVectorIDPart(id)
+}
+
+func (p *Client) deleteRevisionByList(ctx context.Context, lister vectorIDLister, target vectorTarget, checkingCompletion bool) error {
+	prefix := target.prefix()
+	req := &pinecone.ListVectorsRequest{Prefix: &prefix, Limit: new(uint32(100))}
+	tokens := make(map[string]struct{})
+	firstPage := true
+	for {
+		var listed *pinecone.ListVectorsResponse
+		if err := p.do(ctx, min(3, p.maxAttempts), func(callCtx context.Context) error {
+			var listErr error
+			listed, listErr = lister.ListVectors(callCtx, req)
+			return listErr
+		}); err != nil {
+			if firstPage && status.Code(err) == codes.Unimplemented {
+				return errVectorListingUnsupported
+			}
+			return fmt.Errorf("list revision vectors: %w", err)
+		}
+		firstPage = false
+		if listed == nil || len(listed.VectorIds) > int(*req.Limit) {
+			return errors.New("pinecone: missing revision listing")
+		}
+		lastPage := listed.NextPaginationToken == nil || *listed.NextPaginationToken == ""
+		empty := len(listed.VectorIds) == 0 && lastPage
+		if req.PaginationToken == nil && empty {
+			return nil
+		}
+		if checkingCompletion {
+			return errors.New("pinecone: revision vectors remain visible after deletion")
+		}
+		ids := make([]string, 0, len(listed.VectorIds))
+		for _, id := range listed.VectorIds {
+			if id == nil {
+				return errors.New("pinecone: missing vector ID in revision listing")
+			}
+			suffix, qualified := strings.CutPrefix(*id, prefix)
+			if !qualified || !validListedSuffix(suffix, target.attempt == "") {
+				return errors.New("pinecone: unexpected vector ID in revision listing")
+			}
+			ids = append(ids, *id)
+		}
+		if !lastPage {
+			token := *listed.NextPaginationToken
+			if _, seen := tokens[token]; seen {
+				return errors.New("pinecone: revision listing did not advance")
+			}
+			tokens[token] = struct{}{}
+		}
+		if err := p.Delete(ctx, "", ids); err != nil {
+			return err
+		}
+		req.PaginationToken = listed.NextPaginationToken
+		if lastPage {
+			// A listing can shift after deletions. Confirm from the beginning before
+			// completing the checkpoint.
+			req.PaginationToken = nil
+			checkingCompletion = true
+		}
+	}
+}
+
+func validListedSuffix(suffix string, allowAttempt bool) bool {
+	if attempt, id, found := strings.Cut(suffix, "/"); found {
+		return allowAttempt && validVectorIDPart(attempt) && validVectorIDPart(id)
+	}
+	return validVectorIDPart(suffix)
+}
+
+func (p *Client) deleteByDocumentMatches(ctx context.Context, filter *structpb.Struct, target vectorTarget, acknowledged bool) error {
+	// Every successful full page removes new IDs. Bound the operation by its
+	// call budget even when a selective namespace contains many records.
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
 	vector := make([]float32, p.dims)
 	vector[0] = 1
-	req := &pinecone.QueryByVectorValuesRequest{Vector: vector, TopK: 1000, MetadataFilter: filter}
+	req := &pinecone.QueryByVectorValuesRequest{Vector: vector, TopK: cleanupPageSize, MetadataFilter: filter, IncludeMetadata: true}
 	deleted := make(map[string]struct{})
-	for range 10 {
-		matches, err := p.queryNamespace(ctx, "", req, nil)
+	for {
+		matches, err := p.queryMatches(ctx, p.defaultConn, req, nil)
 		if err != nil {
 			return err
 		}
 		ids := make([]string, 0, len(matches))
+		remaining := false
 		for _, match := range matches {
-			id := string(match.Chunk.ID)
-			if _, ok := deleted[id]; !ok {
+			id, belongs, verifyErr := deletionMatch(match, target)
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if !belongs {
+				continue
+			}
+			remaining = true
+			if _, seen := deleted[id]; !seen {
 				ids = append(ids, id)
+				deleted[id] = struct{}{}
 			}
 		}
+		if acknowledged && remaining {
+			return errors.New("pinecone: document vectors remain visible after deletion")
+		}
 		if len(ids) == 0 {
+			if len(matches) >= int(req.TopK) {
+				return errors.New("pinecone: a full page of stale results obscures remaining vectors")
+			}
+			if remaining {
+				return errors.New("pinecone: document vectors remain visible after deletion")
+			}
 			return nil
 		}
 		if err := p.Delete(ctx, "", ids); err != nil {
 			return err
 		}
-		for _, id := range ids {
-			deleted[id] = struct{}{}
-		}
-		if len(matches) < int(req.TopK) {
-			return nil
-		}
 	}
-	return errors.New("pinecone: document deletion did not converge after 10 rounds")
+}
+
+// deletionMatch verifies provider results before using their physical IDs.
+func deletionMatch(match *pinecone.ScoredVector, target vectorTarget) (id string, belongs bool, err error) {
+	if match == nil || match.Vector == nil {
+		return "", false, errors.New("pinecone: cannot verify vector identity for cleanup")
+	}
+	v := match.Vector
+	fields := v.Metadata.GetFields()
+	if !validVectorIDPart(target.document) || fields["doc_id"].GetStringValue() != target.document {
+		return "", false, errors.New("pinecone: cannot verify document identity for cleanup")
+	}
+	if value, tagged := fields[domain.VectorRevisionKey]; tagged {
+		observed := vectorTarget{document: target.document, revision: value.GetStringValue()}
+		if attempt, present := fields[domain.VectorAttemptKey]; present {
+			observed.attempt = attempt.GetStringValue()
+			if !validVectorIDPart(observed.attempt) {
+				return "", false, errors.New("pinecone: cannot verify vector attempt for cleanup")
+			}
+		}
+		if _, ok := observed.logicalID(v.Id); !ok {
+			return "", false, errors.New("pinecone: cannot verify tagged vector identity for cleanup")
+		}
+		return v.Id, target.revision == observed.revision && (target.attempt == "" || target.attempt == observed.attempt), nil
+	}
+	if _, hasAttempt := fields[domain.VectorAttemptKey]; hasAttempt || !validVectorIDPart(v.Id) {
+		return "", false, errors.New("pinecone: cannot verify untagged vector identity for cleanup")
+	}
+	return v.Id, target.revision == "", nil
 }
 
 func ignoreNotFound(err error) error {
@@ -342,6 +697,9 @@ func (p *Client) Ping(ctx context.Context) error {
 func matchesToScoredChunks(matches []*pinecone.ScoredVector, namespace string) []domain.ScoredChunk {
 	scored := make([]domain.ScoredChunk, 0, len(matches))
 	for _, m := range matches {
+		if m == nil || m.Vector == nil {
+			continue
+		}
 		chunk := domain.Chunk{
 			ID: domain.ChunkID(m.Vector.Id),
 		}
@@ -359,11 +717,33 @@ func matchesToScoredChunks(matches []*pinecone.ScoredVector, namespace string) [
 			if v, ok := fields["token_count"]; ok {
 				chunk.TokenCount = int(v.GetNumberValue())
 			}
+			if v, ok := fields[domain.VectorIncarnationKey]; ok {
+				chunk.VectorIncarnation = v.GetStringValue()
+				if chunk.VectorIncarnation == "" {
+					continue
+				}
+			}
 			chunk.Metadata = make(map[string]any)
-			for _, key := range []string{"doc_type", "kind", "quality", "collection"} {
+			for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorRevisionKey, domain.VectorAttemptKey} {
 				if v, ok := fields[key]; ok {
 					chunk.Metadata[key] = v.GetStringValue()
 				}
+			}
+			if value, tagged := fields[domain.VectorRevisionKey]; tagged {
+				target := vectorTarget{document: string(chunk.DocumentID), revision: value.GetStringValue()}
+				if attempt, present := fields[domain.VectorAttemptKey]; present {
+					target.attempt = attempt.GetStringValue()
+					if !validVectorIDPart(target.attempt) {
+						continue
+					}
+				}
+				id, ok := target.logicalID(string(chunk.ID))
+				if !ok {
+					continue
+				}
+				chunk.ID = domain.ChunkID(id)
+			} else if _, hasAttempt := fields[domain.VectorAttemptKey]; hasAttempt {
+				continue
 			}
 		}
 		scored = append(scored, domain.ScoredChunk{

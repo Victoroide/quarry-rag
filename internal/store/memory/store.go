@@ -25,14 +25,21 @@ import (
 // used by the delete handler.
 type FakeVectorStore struct {
 	mu sync.RWMutex
-	// namespace -> chunkID -> stored chunk (with embedding + metadata).
-	ns         map[string]map[string]domain.Chunk
+	// namespace -> vector key -> stored chunk (with embedding + metadata).
+	ns         map[string]map[vectorKey]domain.Chunk
 	dimensions int
+}
+
+type vectorKey struct {
+	chunkID    domain.ChunkID
+	documentID domain.DocumentID
+	revision   string
+	attempt    string
 }
 
 // NewFakeVectorStore creates an empty in-memory store.
 func NewFakeVectorStore() *FakeVectorStore {
-	return &FakeVectorStore{ns: make(map[string]map[string]domain.Chunk)}
+	return &FakeVectorStore{ns: make(map[string]map[vectorKey]domain.Chunk)}
 }
 
 // Upsert inserts or replaces chunk vectors in the namespace.
@@ -45,22 +52,22 @@ func (s *FakeVectorStore) Upsert(ctx context.Context, namespace string, chunks [
 			continue
 		}
 		if len(c.ID) > 512 {
-			return fmt.Errorf("memory: chunk ID exceeds 512 bytes")
+			return domain.RejectedVectorMutation(fmt.Errorf("memory: chunk ID exceeds 512 bytes"))
 		}
 		if err := validateMetadata(c); err != nil {
-			return err
+			return domain.RejectedVectorMutation(err)
 		}
 		if dimensions == 0 {
 			dimensions = len(c.Embedding)
 		}
 		if len(c.Embedding) != dimensions {
-			return fmt.Errorf("memory: embedding dimension %d does not match index dimension %d", len(c.Embedding), dimensions)
+			return domain.RejectedVectorMutation(fmt.Errorf("memory: embedding dimension %d does not match index dimension %d", len(c.Embedding), dimensions))
 		}
 	}
 	s.dimensions = dimensions
 	m, ok := s.ns[namespace]
 	if !ok {
-		m = make(map[string]domain.Chunk)
+		m = make(map[vectorKey]domain.Chunk)
 		s.ns[namespace] = m
 	}
 	stored := 0
@@ -73,7 +80,13 @@ func (s *FakeVectorStore) Upsert(ctx context.Context, namespace string, chunks [
 		cp := c
 		cp.Embedding = emb
 		cp.Metadata = cloneMetadata(c.Metadata)
-		m[string(c.ID)] = cp
+		key := vectorKey{chunkID: c.ID}
+		if revision, _ := c.Metadata[domain.VectorRevisionKey].(string); revision != "" {
+			key.documentID = c.DocumentID
+			key.revision = revision
+			key.attempt, _ = c.Metadata[domain.VectorAttemptKey].(string)
+		}
+		m[key] = cp
 		stored++
 	}
 	slog.DebugContext(ctx, "offline vectors upserted", "vectors", stored, "namespace", namespace, "namespaces", len(s.ns))
@@ -81,6 +94,16 @@ func (s *FakeVectorStore) Upsert(ctx context.Context, namespace string, chunks [
 }
 
 func validateMetadata(c domain.Chunk) error {
+	revision, tagged := c.Metadata[domain.VectorRevisionKey]
+	if value, _ := revision.(string); tagged && value == "" {
+		return fmt.Errorf("memory: invalid vector revision")
+	}
+	if attempt, present := c.Metadata[domain.VectorAttemptKey]; present {
+		if value, _ := attempt.(string); !tagged || value == "" {
+			return fmt.Errorf("memory: vector attempt requires a valid revision and attempt")
+		}
+	}
+
 	for key, value := range c.Metadata {
 		valid := true
 		switch v := value.(type) {
@@ -110,7 +133,10 @@ func validateMetadata(c domain.Chunk) error {
 		"doc_id": string(c.DocumentID), "chunk_index": float64(c.Index),
 		"text": c.Text, "token_count": float64(c.TokenCount),
 	}
-	for _, key := range []string{"doc_type", "kind", "quality", "collection"} {
+	if c.VectorIncarnation != "" {
+		metadata[domain.VectorIncarnationKey] = c.VectorIncarnation
+	}
+	for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorRevisionKey, domain.VectorAttemptKey} {
 		if value, ok := c.Metadata[key]; ok {
 			metadata[key] = value
 		}
@@ -194,8 +220,10 @@ func (s *FakeVectorStore) query(namespace string, embedding []float32, topK int,
 			Index:      c.Index,
 			Text:       c.Text,
 			TokenCount: c.TokenCount,
+			Metadata:   cloneMetadata(c.Metadata),
+
+			VectorIncarnation: c.VectorIncarnation,
 		}
-		out.Metadata = cloneMetadata(c.Metadata)
 		scored = append(scored, domain.ScoredChunk{
 			Chunk:     out,
 			Score:     cosine(embedding, c.Embedding),
@@ -222,14 +250,33 @@ func (s *FakeVectorStore) DeleteAllVectorsInNamespace(_ context.Context, namespa
 	return nil
 }
 
-// DeleteByDocID removes, from every namespace, all chunks whose DocumentID
-// matches docID (mirrors the Pinecone metadata-filter delete on the default ns).
+// DeleteByDocID removes untagged vectors for docID across namespaces.
 func (s *FakeVectorStore) DeleteByDocID(_ context.Context, docID string) error {
+	return s.deleteDocumentVectors(docID, "", "")
+}
+
+// DeleteByRevision removes vectors for one document incarnation.
+func (s *FakeVectorStore) DeleteByRevision(_ context.Context, docID, revision string) error {
+	if revision == "" {
+		return fmt.Errorf("memory: document revision is required")
+	}
+	return s.deleteDocumentVectors(docID, revision, "")
+}
+
+// DeleteByAttempt removes vectors belonging to one worker claim.
+func (s *FakeVectorStore) DeleteByAttempt(_ context.Context, docID, revision, attempt string) error {
+	if revision == "" || attempt == "" {
+		return fmt.Errorf("memory: revision and attempt are required")
+	}
+	return s.deleteDocumentVectors(docID, revision, attempt)
+}
+
+func (s *FakeVectorStore) deleteDocumentVectors(docID, revision, attempt string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, m := range s.ns {
 		for id, c := range m {
-			if string(c.DocumentID) == docID {
+			if string(c.DocumentID) == docID && id.revision == revision && (attempt == "" || id.attempt == attempt) {
 				delete(m, id)
 			}
 		}

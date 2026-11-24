@@ -1,12 +1,14 @@
 package pinecone
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,6 +113,32 @@ func visibilityClient(t *testing.T, server *httptest.Server) *Client {
 	require.NoError(t, err)
 	plane.http.Transport = server.Client().Transport
 	return &Client{visibility: plane, batchSize: 1, timeout: time.Second, maxAttempts: 1}
+}
+
+func TestTrackedWriteVisibilityRechecksOwnershipForEachBatch(t *testing.T) {
+	var writes atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/vectors/upsert", r.URL.Path)
+		writes.Add(1)
+		w.Header().Set("x-pinecone-request-lsn", "15")
+		_, _ = io.WriteString(w, `{"upsertedCount":1}`)
+	}))
+	t.Cleanup(server.Close)
+
+	dispatches := 0
+	ctx := domain.WithVectorDispatch(domain.TrackVectorMutation(t.Context()), func(ctx context.Context, deletes bool, rpc func(context.Context) error) error {
+		require.False(t, deletes)
+		dispatches++
+		if dispatches == 2 {
+			return domain.ErrJobNotOwned
+		}
+		return rpc(ctx)
+	})
+	probe, err := visibilityClient(t, server).UpsertWithVisibility(ctx, "", testChunks(2, 2, 10))
+	require.ErrorIs(t, err, domain.ErrJobNotOwned)
+	require.Nil(t, probe)
+	require.Equal(t, 2, dispatches)
+	require.EqualValues(t, 1, writes.Load())
 }
 
 func TestWriteVisibilityPartialUpsertDiscardsReceipts(t *testing.T) {

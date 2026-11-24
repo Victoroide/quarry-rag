@@ -77,7 +77,7 @@ func (p *Client) upsertForVisibility(ctx context.Context, namespace string, vect
 			return marshalErr
 		}
 		var header http.Header
-		if writeErr := p.do(ctx, p.maxAttempts, func(attemptCtx context.Context) error {
+		if writeErr := p.mutate(ctx, false, func(attemptCtx context.Context) error {
 			var ack struct {
 				Count int `json:"upsertedCount"`
 			}
@@ -196,15 +196,21 @@ func (p *visibilityPlane) post(ctx context.Context, path string, body []byte, re
 		if connected.Load() {
 			return nil, fmt.Errorf("%w: %w", errDeliveryUncertain, cause)
 		}
-		return nil, cause
+		return nil, domain.RejectedVectorMutation(cause)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch resp.StatusCode {
 	case http.StatusOK:
+	case http.StatusBadRequest:
+		return nil, status.Error(codes.InvalidArgument, "pinecone: HTTP data-plane request rejected")
+	case http.StatusUnauthorized:
+		return nil, status.Error(codes.Unauthenticated, "pinecone: HTTP data-plane authentication failed")
+	case http.StatusForbidden:
+		return nil, status.Error(codes.PermissionDenied, "pinecone: HTTP data-plane request forbidden")
 	case http.StatusNotFound, http.StatusGone, http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
 		return nil, errVisibilityUnconfirmed
 	case http.StatusTooManyRequests:
-		return nil, status.Error(codes.ResourceExhausted, "pinecone: HTTP data-plane request throttled")
+		return nil, domain.RejectedVectorMutation(status.Error(codes.ResourceExhausted, "pinecone: HTTP data-plane request throttled"))
 	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		// A gateway can answer for a request its origin goes on to apply.
 		return nil, fmt.Errorf("%w: %w", errDeliveryUncertain, status.Errorf(codes.Unavailable, "pinecone: HTTP data plane returned %d", resp.StatusCode))
