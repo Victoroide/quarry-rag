@@ -14,13 +14,17 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-const maxUpsertBytes = 1572864
+const (
+	maxUpsertBytes   = 1572864
+	maxMetadataBytes = 40 * 1024
+)
 
 // Client wraps the official Pinecone Go SDK.
 // All namespaces share one connection.
@@ -43,6 +47,10 @@ func NewPineconeClient(ctx context.Context, cfg *config.Config) (*Client, error)
 	if err != nil {
 		return nil, fmt.Errorf("pinecone: create client: %w", err)
 	}
+	return newPineconeClient(ctx, cfg, pc)
+}
+
+func newPineconeClient(ctx context.Context, cfg *config.Config, pc *pinecone.Client, dialOpts ...grpc.DialOption) (*Client, error) {
 	startupCtx, cancel := context.WithTimeout(ctx, cfg.PineconeTimeout)
 	defer cancel()
 	idx, err := pc.DescribeIndex(startupCtx, cfg.PineconeIndexName)
@@ -52,7 +60,10 @@ func NewPineconeClient(ctx context.Context, cfg *config.Config) (*Client, error)
 	if validationErr := validateIndex(idx, cfg); validationErr != nil {
 		return nil, validationErr
 	}
-	defaultConn, err := pc.Index(pinecone.NewIndexConnParams{Host: idx.Host})
+	if cfg.HostedVisibilityRefill {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(queryAttemptCredentials{}))
+	}
+	defaultConn, err := pc.Index(pinecone.NewIndexConnParams{Host: idx.Host}, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("pinecone: connect to default namespace: %w", err)
 	}
@@ -104,7 +115,7 @@ func (p *Client) Upsert(ctx context.Context, namespace string, chunks []domain.C
 		if err != nil {
 			return fmt.Errorf("pinecone: serialize metadata for chunk %s: %w", c.ID, err)
 		}
-		if len(encoded) > 40960 {
+		if len(encoded) > maxMetadataBytes {
 			return fmt.Errorf("%w: chunk %s (%d bytes)", ErrMetadataTooLarge, c.ID, len(encoded))
 		}
 		md, err := structpb.NewStruct(mdMap)
@@ -153,25 +164,38 @@ func (p *Client) Query(ctx context.Context, namespace string, embedding []float3
 	if docTypeFilter != "" {
 		req.MetadataFilter = &structpb.Struct{Fields: map[string]*structpb.Value{"doc_type": structpb.NewStringValue(docTypeFilter)}}
 	}
-	return p.queryNamespace(ctx, namespace, req)
+	return p.queryNamespace(ctx, namespace, req, nil)
 }
 
-func (p *Client) queryNamespace(ctx context.Context, namespace string, req *pinecone.QueryByVectorValuesRequest) ([]domain.ScoredChunk, error) {
+func (p *Client) queryNamespace(ctx context.Context, namespace string, req *pinecone.QueryByVectorValuesRequest, budget *int) ([]domain.ScoredChunk, error) {
 	conn, release, err := p.conn(namespace)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
 	var res *pinecone.QueryVectorsResponse
-	if err := p.do(ctx, min(3, p.maxAttempts), func(attemptCtx context.Context) error {
+	attempts := p.queryAttempts()
+	if budget != nil {
+		attempts = min(attempts, *budget)
+	}
+	if err := p.do(ctx, attempts, func(attemptCtx context.Context) error {
+		if budget != nil {
+			*budget--
+			attemptCtx = singleTransportAttempt(attemptCtx)
+		}
 		var queryErr error
 		res, queryErr = conn.QueryByVectorValues(attemptCtx, req)
 		return queryErr
 	}); err != nil {
 		return nil, fmt.Errorf("pinecone: query namespace %q: %w", namespace, err)
 	}
+	if res == nil {
+		return nil, errors.New("pinecone: missing query response")
+	}
 	return matchesToScoredChunks(res.Matches, namespace), nil
 }
+
+func (p *Client) queryAttempts() int { return min(3, p.maxAttempts) }
 
 // QueryAllNamespaces searches the default namespace containing corpus vectors.
 func (p *Client) QueryAllNamespaces(ctx context.Context, embedding []float32, topK int, docTypeFilter string) ([]domain.ScoredChunk, error) {
@@ -241,7 +265,7 @@ func (p *Client) deleteByDocIDs(ctx context.Context, filter *structpb.Struct) er
 	req := &pinecone.QueryByVectorValuesRequest{Vector: vector, TopK: 1000, MetadataFilter: filter}
 	deleted := make(map[string]struct{})
 	for range 10 {
-		matches, err := p.queryNamespace(ctx, "", req)
+		matches, err := p.queryNamespace(ctx, "", req, nil)
 		if err != nil {
 			return err
 		}

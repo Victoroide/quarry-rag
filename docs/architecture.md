@@ -216,9 +216,9 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
    - `LOCAL` targets the matched entity's document, or the highest-scoring visible candidate's document when no entity matches.
 3. **RetrievalStage**:
    - Queries the configured vector backend using the embedding produced during routing.
-   - Both modes query the default namespace with `filter_doc_type`, `collection` and `allowed_document_ids` applied before top-K selection. `LOCAL` narrows the document filter to the routed document. If that query returns fewer than three chunks, it makes one additional query using the original authorized scope and document-type filter; results merge by chunk ID using the highest score, then sort and trim to top-K. `GLOBAL` queries the authorized scope once without a sparse-result fallback. Allowlists above 10000 IDs require one sequential query per group.
+   - Both modes query the default namespace with `filter_doc_type`, `collection` and `allowed_document_ids` applied before top-K selection. `LOCAL` narrows the document filter to the routed document. If that query returns fewer than three chunks, it makes one additional query using the original authorized scope and document-type filter. Results merge by chunk ID using the highest score, then sort and trim to top-K. `GLOBAL` queries the authorized scope once by default. Pinecone allowlists above 10000 IDs require one sequential query per group.
    - Retains the allowlist post-filter before synthesis as defense in depth. A nil allowlist allows all documents; an empty allowlist denies all documents.
-   - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents, in the requested collection when one is set, contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query; the top score is recomputed from visible chunks.
+   - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents, in the requested collection when one is set, contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query. The top score is recomputed from visible chunks. Pinecone deployments can enable [hosted visibility refill](#hosted-visibility-refill).
 4. **RerankStage**: Applies optional [reranking](api.md#post-query) before context selection.
 5. **SynthesisStage**:
    - When [`MIN_RELEVANCE_SCORE`](configuration.md#environment-variables) is positive, drops chunks below it before adaptive trimming. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).
@@ -230,6 +230,35 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
    - With [optional Bedrock Guardrails](configuration.md#environment-variables), sends the sanitized question in a guard-content block qualified as `query` and the numbered, marked excerpts in a block qualified as `grounding_source`. The closing instruction remains in a text block. Configured policies can assess prompt attacks and contextual grounding; an intervention reports `finish_reason: "filtered"`. Without guardrails, synthesis retains its single text block. Offline mode applies no guardrail policies and reads guarded text as prompt text. Streamed answers use synchronous guardrail processing, so text is assessed before it is sent.
    - Calls the configured chat provider only for evidence-backed answers and aggregates synthesis token usage statistics. Empty text is an error; nonempty output reports whether generation stopped, reached its token or context limit, or was filtered.
    - With `include_citations`, requests numbered inline markers, removes out-of-range references from the answer and reports lexical overlap for each remaining reference. The [query contract](api.md#post-query) defines the scoring and offset rules.
+
+### Hosted visibility refill
+
+When [enabled](configuration.md#environment-variables), PostgreSQL checks
+current chunk identity, text and document scope before Pinecone hits influence
+routing or retrieval. If a retrieval search loses hits in that check, the
+service can repeat one search per query with the same filters and embedding.
+The repeat requests up to twice the original top-K, capped for Pinecone's
+metadata-bearing response size. Each partition keeps its candidate versions
+until PostgreSQL can check them. A successful repeat rechecks both batches,
+including original hits that became visible during the repeat. Only then does
+the service keep the highest verified score per public chunk ID and trim to
+the requested count. Equal scores are ordered by chunk ID.
+
+`LOCAL` bases its three-chunk top-up rule on visible local chunks and uses the
+original authorized filters for that top-up. Each partition and transport
+attempt counts against the additional request allowance for the wider search
+and for top-ups caused by visibility filtering. A search that cannot fit one
+attempt per partition is skipped. The routing probe and top-ups that would
+have run based on raw counts use their ordinary limits. The combined LOCAL
+and top-up recheck can trigger the wider search using the top-up scope if no
+wider search has already been attempted.
+
+An optional search that fails leaves the service with previously verified
+hits that still pass PostgreSQL checks. Retrieval shares the query deadline,
+and cancellation or a failed visibility check ends the query. The hosted
+recovery is bounded even when evidence remains sparse. Relevance thresholds
+apply after retrieval. pgvector already filters visibility before top-K and
+has no refill path.
 
 ---
 

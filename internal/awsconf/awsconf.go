@@ -3,9 +3,11 @@ package awsconf
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
@@ -22,6 +24,12 @@ func Load(ctx context.Context, cfg *config.Config) (aws.Config, error) {
 				o.MaxAttempts = cfg.AWSMaxAttempts
 				o.MaxBackoff = 10 * time.Second
 				o.RateLimiter = ratelimit.None
+				o.Retryables = append([]retry.IsErrorRetryable{retry.IsErrorRetryableFunc(func(err error) aws.Ternary {
+					if errors.Is(err, domain.ErrEvidenceCheck) {
+						return aws.FalseTernary
+					}
+					return aws.UnknownTernary
+				})}, o.Retryables...)
 			}), "ModelTimeoutException", "ModelNotReadyException")
 		}),
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/Victoroide/quarry-rag/internal/awsconf"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
@@ -73,7 +74,7 @@ func (c *Client) ConverseStreamWithModelAndSystem(ctx context.Context, modelID, 
 		}
 	}
 	out, err := c.rt.ConverseStream(ctx, input, func(o *bedrockruntime.Options) {
-		client := o.HTTPClient
+		client := awsconf.GuardEvidenceSends(ctx, o.HTTPClient)
 		o.HTTPClient = smithyhttp.ClientDoFunc(func(r *http.Request) (*http.Response, error) {
 			if r.Body != nil {
 				// Use Read: the SDK's closed request-body WriterTo returns EOF as a write error.
