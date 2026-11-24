@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	"errors"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"go.opentelemetry.io/otel/attribute"
@@ -26,17 +27,68 @@ func WrapVectorStore(inner domain.VectorStore, system string) domain.VectorStore
 	if _, transactional := inner.(domain.TransactionalVectorStore); transactional {
 		return &transactionalVectorStore{wrapped}
 	}
+	scoped, canDeleteRevision := inner.(domain.RevisionVectorDeleter)
+	revisions := revisionDeletes{wrapped, scoped}
 	refill, canRefill := inner.(domain.VisibilityRefillStore)
 	writer, canWrite := inner.(domain.VisibilityWriter)
-	switch {
-	case canRefill && canWrite:
-		return &hostedVisibilityStore{&visibilityRefillStore{wrapped, refill}, writer}
-	case canRefill:
-		return &visibilityRefillStore{wrapped, refill}
-	case canWrite:
-		return &visibilityWriterStore{wrapped, writer}
+	if canRefill {
+		visible := &visibilityRefillStore{wrapped, refill}
+		if canWrite {
+			hosted := &hostedVisibilityStore{visible, writer}
+			if canDeleteRevision {
+				return &hostedRevisionVectorStore{hosted, revisions}
+			}
+			return hosted
+		}
+		if canDeleteRevision {
+			return &revisionRefillVectorStore{visible, revisions}
+		}
+		return visible
+	}
+	if canWrite {
+		writable := &visibilityWriterStore{wrapped, writer}
+		if canDeleteRevision {
+			return &writableRevisionVectorStore{writable, revisions}
+		}
+		return writable
+	}
+	if canDeleteRevision {
+		return &revisionVectorStore{wrapped, revisions}
 	}
 	return wrapped
+}
+
+type revisionVectorStore struct {
+	*vectorStore
+	revisionDeletes
+}
+
+type revisionRefillVectorStore struct {
+	*visibilityRefillStore
+	revisionDeletes
+}
+
+type hostedRevisionVectorStore struct {
+	*hostedVisibilityStore
+	revisionDeletes
+}
+
+type writableRevisionVectorStore struct {
+	*visibilityWriterStore
+	revisionDeletes
+}
+
+type revisionDeletes struct {
+	store     *vectorStore
+	revisions domain.RevisionVectorDeleter
+}
+
+func (s revisionDeletes) DeleteByRevision(ctx context.Context, docID, revision string) error {
+	ctx, span := s.store.begin(ctx, "delete", "tool")
+	defer span.End()
+	err := s.revisions.DeleteByRevision(ctx, docID, revision)
+	RecordError(span, err)
+	return err
 }
 
 type transactionalVectorStore struct{ *vectorStore }
@@ -49,12 +101,6 @@ type visibilityRefillStore struct {
 }
 
 func (s *visibilityRefillStore) VisibilityRefillLimit() int { return s.refill.VisibilityRefillLimit() }
-
-func (s *visibilityRefillStore) QueryCandidates(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
-	return s.query(ctx, topK, func(ctx context.Context) ([]domain.ScoredChunk, error) {
-		return s.refill.QueryCandidates(ctx, embedding, topK, filter)
-	})
-}
 
 func (s *visibilityRefillStore) QueryFilteredBudgeted(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter, budget int) ([]domain.ScoredChunk, int, error) {
 	var used int
@@ -163,6 +209,32 @@ func (s *vectorStore) DeleteAllVectorsInNamespace(ctx context.Context, namespace
 	ctx, span := s.begin(ctx, "delete", "tool")
 	defer span.End()
 	err := s.deleter.DeleteAllVectorsInNamespace(ctx, namespace)
+	RecordError(span, err)
+	return err
+}
+
+func (s *vectorStore) QueryCandidates(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	if candidates, ok := s.VectorStore.(domain.VectorCandidateStore); ok {
+		return s.query(ctx, topK, func(ctx context.Context) ([]domain.ScoredChunk, error) {
+			return candidates.QueryCandidates(ctx, embedding, topK, filter)
+		})
+	}
+	return s.QueryFiltered(ctx, embedding, topK, filter)
+}
+
+func (s *vectorStore) ManagesVectorDispatch() bool {
+	store, ok := s.VectorStore.(domain.VectorDispatchStore)
+	return ok && store.ManagesVectorDispatch()
+}
+
+func (s revisionDeletes) DeleteByAttempt(ctx context.Context, docID, revision, attempt string) error {
+	ctx, span := s.store.begin(ctx, "delete", "tool")
+	defer span.End()
+	deleter, ok := s.revisions.(domain.AttemptVectorDeleter)
+	if !ok {
+		return errors.New("attempt vector cleanup is unavailable")
+	}
+	err := deleter.DeleteByAttempt(ctx, docID, revision, attempt)
 	RecordError(span, err)
 	return err
 }

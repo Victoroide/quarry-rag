@@ -12,6 +12,8 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // failFirstTransport fails the first request before it reaches the network.
@@ -25,6 +27,71 @@ func (f *failFirstTransport) RoundTrip(req *http.Request) (*http.Response, error
 		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
 	}
 	return f.next.RoundTrip(req)
+}
+
+func TestTrackedHTTPWriteDelivery(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		firstStatus int
+		code        codes.Code
+		uncertain   bool
+	}{
+		{name: "refused before connecting", code: codes.Unavailable},
+		{name: "throttled", firstStatus: http.StatusTooManyRequests, code: codes.ResourceExhausted},
+		{name: "gateway timeout", firstStatus: http.StatusGatewayTimeout, code: codes.Unavailable, uncertain: true},
+		{name: "unauthorized", firstStatus: http.StatusUnauthorized, code: codes.Unauthenticated},
+		{name: "partial acknowledgment", firstStatus: http.StatusOK, code: codes.Unknown, uncertain: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client, received := visibilityClientWithFirstWriteFailure(t, tt.firstStatus)
+			ctx := domain.TrackVectorMutation(t.Context())
+			chunks := testChunks(1, 2, 10)
+
+			probe, firstErr := client.UpsertWithVisibility(ctx, "", chunks)
+			require.Error(t, firstErr)
+			require.Nil(t, probe)
+			firstRequests := int32(1)
+			if tt.firstStatus == 0 {
+				firstRequests = 0
+			}
+			require.Equal(t, firstRequests, received.Load())
+
+			probe, err := client.UpsertWithVisibility(ctx, "", chunks)
+			require.NoError(t, err)
+			require.NotNil(t, probe)
+			require.Equal(t, firstRequests+1, received.Load())
+			require.Equal(t, tt.code, status.Code(firstErr))
+			require.Equal(t, tt.uncertain, domain.VectorMutationUncertain(firstErr), "first write: %v", firstErr)
+		})
+	}
+}
+
+func visibilityClientWithFirstWriteFailure(t *testing.T, firstStatus int) (*Client, *atomic.Int32) {
+	t.Helper()
+	var received atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/vectors/upsert" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if received.Add(1) == 1 && firstStatus != 0 {
+			if firstStatus == http.StatusOK {
+				_, _ = io.WriteString(w, `{"upsertedCount":0}`)
+			} else {
+				w.WriteHeader(firstStatus)
+			}
+			return
+		}
+		w.Header().Set("x-pinecone-request-lsn", "12")
+		_, _ = io.WriteString(w, `{"upsertedCount":1}`)
+	}))
+	t.Cleanup(server.Close)
+	client := visibilityClient(t, server)
+	if firstStatus == 0 {
+		client.visibility.http.Transport = &failFirstTransport{next: client.visibility.http.Transport}
+	}
+	return client, &received
 }
 
 // A write that may already have reached the index can still be applied after

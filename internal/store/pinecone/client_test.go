@@ -13,6 +13,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -66,7 +67,7 @@ func (f *fakeIndexConn) DeleteAllVectorsInNamespace(ctx context.Context) error {
 func (f *fakeIndexConn) Close() error { f.closed++; return nil }
 
 func testClient(conn *fakeIndexConn) *Client {
-	return &Client{defaultConn: conn, batchSize: 100, timeout: time.Second, maxAttempts: 5, dims: 1024}
+	return &Client{defaultConn: conn, ownershipFilters: ownershipFilters{document: true}, batchSize: 100, timeout: time.Second, maxAttempts: 5, dims: 1024}
 }
 
 func testChunks(count, dims, textBytes int) []domain.Chunk {
@@ -366,141 +367,68 @@ func TestQueryRetriesAtMostThreeTimes(t *testing.T) {
 	})
 }
 
+func legacyMatch(id string) *pinecone.ScoredVector {
+	return &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: id, Metadata: &structpb.Struct{
+		Fields: map[string]*structpb.Value{"doc_id": structpb.NewStringValue("doc")},
+	}}}
+}
+
 func TestFilterDeleteFallsBackToIDs(t *testing.T) {
 	for _, code := range []codes.Code{codes.InvalidArgument, codes.Unimplemented, codes.FailedPrecondition} {
 		t.Run(code.String(), func(t *testing.T) {
-			queries, deletes := 0, 0
-			conn := &fakeIndexConn{filterDelete: func(context.Context, *structpb.Struct) error { return status.Error(code, "unsupported") }}
-			conn.query = func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
-				queries++
-				if len(req.Vector) != 1024 || req.Vector[0] != 1 || req.TopK != 1000 || req.IncludeMetadata || req.IncludeValues {
-					t.Fatalf("unexpected query: %+v", req)
-				}
-				for _, v := range req.Vector[1:] {
-					if v != 0 {
-						t.Fatal("query is not e1")
+			calls := 0
+			conn := &fakeIndexConn{
+				filterDelete: func(context.Context, *structpb.Struct) error { return status.Error(code, "unsupported") },
+				query: func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+					calls++
+					require.EqualValues(t, cleanupPageSize, req.TopK)
+					require.True(t, req.IncludeMetadata)
+					require.False(t, req.IncludeValues)
+					require.Equal(t, map[string]any{
+						"doc_id":                 map[string]any{"$eq": "doc"},
+						domain.VectorRevisionKey: map[string]any{"$exists": false},
+						domain.VectorAttemptKey:  map[string]any{"$exists": false},
+					}, req.MetadataFilter.AsMap())
+					if calls == 1 {
+						return &pinecone.QueryVectorsResponse{Matches: []*pinecone.ScoredVector{legacyMatch("first")}}, nil
 					}
-				}
-				if req.MetadataFilter.GetFields()["doc_id"].GetStructValue().GetFields()["$eq"].GetStringValue() != "doc" {
-					t.Fatal("missing document filter")
-				}
-				res := &pinecone.QueryVectorsResponse{}
-				if queries == 1 {
-					for i := range 1000 {
-						res.Matches = append(res.Matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: fmt.Sprint(i)}})
-					}
-				}
-				return res, nil
+					return &pinecone.QueryVectorsResponse{}, nil
+				},
+				deleteIDs: func(_ context.Context, ids []string) error {
+					require.Equal(t, []string{"first"}, ids)
+					return nil
+				},
 			}
-			conn.deleteIDs = func(_ context.Context, ids []string) error {
-				deletes++
-				if len(ids) != 1000 {
-					t.Fatalf("delete contains %d ids", len(ids))
-				}
-				return nil
-			}
-			if err := testClient(conn).DeleteByDocID(t.Context(), "doc"); err != nil {
-				t.Fatal(err)
-			}
-			if queries != 2 || deletes != 1 {
-				t.Fatalf("queries=%d deletes=%d", queries, deletes)
-			}
-		})
-	}
-}
-
-func TestFilterDeleteFallbackIsBounded(t *testing.T) {
-	queries, deletes := 0, 0
-	conn := &fakeIndexConn{filterDelete: func(context.Context, *structpb.Struct) error { return status.Error(codes.Unimplemented, "unsupported") }, query: func(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
-		queries++
-		res := &pinecone.QueryVectorsResponse{}
-		for i := range 1000 {
-			res.Matches = append(res.Matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: fmt.Sprintf("%d-%d", queries, i)}})
-		}
-		return res, nil
-	}}
-	conn.deleteIDs = func(_ context.Context, ids []string) error {
-		deletes++
-		if len(ids) != 1000 {
-			t.Fatalf("delete contains %d ids", len(ids))
-		}
-		return nil
-	}
-	if err := testClient(conn).DeleteByDocID(t.Context(), "doc"); err == nil || queries != 10 || deletes != 10 {
-		t.Fatalf("queries=%d deletes=%d error=%v", queries, deletes, err)
-	}
-}
-
-func TestFilterDeleteFallbackToleratesIndexLag(t *testing.T) {
-	for _, count := range []int{2, 1000} {
-		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			queries, deletes := 0, 0
-			deleted := make(map[string]bool)
-			conn := &fakeIndexConn{filterDelete: func(context.Context, *structpb.Struct) error { return status.Error(codes.Unimplemented, "unsupported") }}
-			conn.query = func(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
-				queries++
-				res := &pinecone.QueryVectorsResponse{}
-				for i := range count {
-					res.Matches = append(res.Matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: fmt.Sprint(i)}})
-				}
-				return res, nil
-			}
-			conn.deleteIDs = func(_ context.Context, ids []string) error {
-				deletes++
-				for _, id := range ids {
-					if deleted[id] {
-						t.Errorf("identifier %s deleted more than once", id)
-					}
-					deleted[id] = true
-				}
-				return nil
-			}
-			if err := testClient(conn).DeleteByDocID(t.Context(), "doc"); err != nil {
-				t.Fatal(err)
-			}
-			wantQueries := 1
-			if count == 1000 {
-				wantQueries = 2
-			}
-			if queries != wantQueries || deletes != 1 || len(deleted) != count {
-				t.Fatalf("queries=%d deletes=%d identifiers=%d", queries, deletes, len(deleted))
-			}
+			c := testClient(conn)
+			c.ownershipFilters = ownershipFilters{document: true, revision: true, attempt: true}
+			require.NoError(t, c.DeleteByDocID(t.Context(), "doc"))
+			require.Equal(t, 2, calls)
 		})
 	}
 }
 
 func TestFilterDeleteFallbackDeletesOnlyNewIDs(t *testing.T) {
-	queries, deletes := 0, 0
-	deleted := make(map[string]bool)
-	conn := &fakeIndexConn{filterDelete: func(context.Context, *structpb.Struct) error { return status.Error(codes.Unimplemented, "unsupported") }}
-	conn.query = func(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
-		queries++
-		start := 0
-		if queries > 1 {
-			start = 500
-		}
-		res := &pinecone.QueryVectorsResponse{}
-		for i := start; i < start+1000; i++ {
-			res.Matches = append(res.Matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: fmt.Sprint(i)}})
-		}
-		return res, nil
-	}
-	conn.deleteIDs = func(_ context.Context, ids []string) error {
-		deletes++
-		for _, id := range ids {
-			if deleted[id] {
-				t.Errorf("identifier %s deleted more than once", id)
+	queries := 0
+	var deletes [][]string
+	conn := &fakeIndexConn{
+		query: func(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+			queries++
+			switch queries {
+			case 1:
+				return &pinecone.QueryVectorsResponse{Matches: []*pinecone.ScoredVector{legacyMatch("first")}}, nil
+			case 2:
+				return &pinecone.QueryVectorsResponse{Matches: []*pinecone.ScoredVector{legacyMatch("first"), legacyMatch("second")}}, nil
+			default:
+				return &pinecone.QueryVectorsResponse{}, nil
 			}
-			deleted[id] = true
-		}
-		return nil
+		},
+		deleteIDs: func(_ context.Context, ids []string) error {
+			deletes = append(deletes, ids)
+			return nil
+		},
 	}
-	if err := testClient(conn).DeleteByDocID(t.Context(), "doc"); err != nil {
-		t.Fatal(err)
-	}
-	if queries != 3 || deletes != 2 || len(deleted) != 1500 {
-		t.Fatalf("queries=%d deletes=%d identifiers=%d", queries, deletes, len(deleted))
-	}
+	require.NoError(t, testClient(conn).DeleteByDocID(t.Context(), "doc"))
+	require.Equal(t, [][]string{{"first"}, {"second"}}, deletes)
 }
 
 func TestDeleteRetriesAndMissingVectors(t *testing.T) {
@@ -517,6 +445,7 @@ func TestDeleteRetriesAndMissingVectors(t *testing.T) {
 				}
 				return nil
 			}})
+			client.ownershipFilters = ownershipFilters{document: true, revision: true, attempt: true}
 			if err := client.DeleteByDocID(t.Context(), "doc"); err != nil || calls != 2 {
 				t.Fatalf("attempts=%d error=%v", calls, err)
 			}
