@@ -9,6 +9,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
 	"github.com/Victoroide/quarry-rag/internal/api/middleware"
+	"github.com/Victoroide/quarry-rag/internal/citationsupport"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
@@ -40,6 +41,7 @@ type RouterDeps struct {
 	Metrics               *metrics.Service
 	Reranker              retriever.Reranker
 	NoEvidenceCatalog     *pipeline.NoEvidenceCatalog
+	CitationVerifier      *citationsupport.Verifier
 }
 
 // NewRouter wires all HTTP routes, handlers, and middleware.
@@ -99,9 +101,11 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		objects = tracing.WrapObjectStore(deps.S3Client)
 	}
 	mux.HandleFunc("POST /ingest", middleware.RequireServiceTokens(tokens, handler.IngestHandler(deps.Worker, deps.ChunkStore, objects, deps.Config.MaxUploadBytes, ingestOpts...)))
-	query := handler.QueryHandler(deps.Retriever, deps.Ambassador, deps.Config, deps.PGPool,
-		handler.WithReranker(deps.Reranker), handler.WithNoEvidenceCatalog(deps.NoEvidenceCatalog))
-	mux.HandleFunc("POST /query", middleware.RequireServiceTokens(tokens, query))
+	queryOpts := []handler.QueryOption{handler.WithReranker(deps.Reranker), handler.WithNoEvidenceCatalog(deps.NoEvidenceCatalog)}
+	if deps.CitationVerifier != nil {
+		queryOpts = append(queryOpts, handler.WithCitationSupport(deps.CitationVerifier))
+	}
+	mux.HandleFunc("POST /query", middleware.RequireServiceTokens(tokens, handler.QueryHandler(deps.Retriever, deps.Ambassador, deps.Config, deps.PGPool, queryOpts...)))
 	mux.HandleFunc("GET /documents", middleware.RequireServiceTokens(tokens, handler.ListDocumentsHandler(deps.ChunkStore)))
 	mux.HandleFunc("GET /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DocumentStatusHandler(deps.ChunkStore)))
 	mux.HandleFunc("GET /documents/{doc_id}/file", middleware.RequireServiceTokens(tokens, handler.FileHandler(deps.ChunkStore, deps.S3Client)))

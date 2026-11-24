@@ -176,6 +176,8 @@ func TestOpenAPIJSONFields(t *testing.T) {
 		"QueryStreamDelta":           reflect.TypeFor[handler.QueryStreamDelta](),
 		"QueryStreamDone":            reflect.TypeFor[handler.QueryStreamDone](),
 		"CitationResponse":           reflect.TypeFor[handler.CitationResponse](),
+		"CitationSupport":            reflect.TypeFor[handler.CitationSupport](),
+		"CitationCoverage":           reflect.TypeFor[handler.CitationCoverage](),
 		"TokenUsage":                 reflect.TypeFor[domain.TokenUsage](),
 		"DocumentSummary":            reflect.TypeFor[domain.DocumentSummary](),
 		"DocumentIncarnationSummary": reflect.TypeFor[domain.DocumentIncarnationSummary](),

@@ -37,6 +37,7 @@ type QueryStreamDone struct {
 	StageTimings     map[string]int64   `json:"stage_timings_ms"`
 	EarlyExit        bool               `json:"early_exit,omitempty"`
 	Citations        []CitationResponse `json:"citations,omitzero"`
+	CitationCoverage *CitationCoverage  `json:"citation_coverage,omitempty"`
 }
 
 type queryStream struct {
@@ -143,10 +144,8 @@ func (s *queryStream) done() error {
 		EarlyExit:        s.qc.EarlyExit,
 	}
 	if s.qc.IncludeCitations {
-		done.Citations = make([]CitationResponse, 0, len(s.qc.Citations))
-		for _, c := range s.qc.Citations {
-			done.Citations = append(done.Citations, CitationResponse{Excerpt: c.Excerpt, DocID: string(c.DocumentID), ChunkIndex: c.ChunkIndex, Offset: c.Offset, Verified: c.Verified, Overlap: c.Overlap})
-		}
+		done.Citations = citationResponses(s.qc.Citations)
+		done.CitationCoverage = (*CitationCoverage)(s.qc.CitationCoverage)
 	}
 	return s.event(s.ctx, "done", done)
 }

@@ -47,6 +47,7 @@ func resolveAnswerMode(req QueryRequest, policy string) (domain.AnswerMode, int,
 type queryOptions struct {
 	reranker          retriever.Reranker
 	noEvidenceCatalog *pipeline.NoEvidenceCatalog
+	citationVerifier  pipeline.CitationVerifier
 }
 
 // QueryOption configures optional query dependencies.
@@ -60,4 +61,9 @@ func WithReranker(r retriever.Reranker) QueryOption {
 // WithNoEvidenceCatalog selects the fixed translations for queries without evidence.
 func WithNoEvidenceCatalog(catalog *pipeline.NoEvidenceCatalog) QueryOption {
 	return func(opts *queryOptions) { opts.noEvidenceCatalog = catalog }
+}
+
+// WithCitationSupport selects the verifier used for requested citations.
+func WithCitationSupport(verifier pipeline.CitationVerifier) QueryOption {
+	return func(opts *queryOptions) { opts.citationVerifier = verifier }
 }

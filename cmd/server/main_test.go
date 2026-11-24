@@ -115,6 +115,17 @@ func TestServeWaitsForActiveRequests(t *testing.T) {
 	}
 }
 
+// testBinaryCommand prepares a child process that runs one test of the current
+// test binary. The executable always comes from os.Executable, never from input.
+func testBinaryCommand(ctx context.Context, t *testing.T, test string) *exec.Cmd {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exec.CommandContext(ctx, executable, "-test.run=^"+test+"$") // #nosec G204 -- executable is the current test binary from os.Executable.
+}
+
 func TestServeSecondSignalSkipsDrain(t *testing.T) {
 	if os.Getenv("QUARRY_TEST_DRAIN_CHILD") == "1" {
 		listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -137,13 +148,9 @@ func TestServeSecondSignalSkipsDrain(t *testing.T) {
 		}
 		return
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestServeSecondSignalSkipsDrain$") // #nosec G204 -- executable is the current test binary from os.Executable.
+	cmd := testBinaryCommand(ctx, t, "TestServeSecondSignalSkipsDrain")
 	cmd.Env = append(os.Environ(), "QUARRY_TEST_DRAIN_CHILD=1")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
