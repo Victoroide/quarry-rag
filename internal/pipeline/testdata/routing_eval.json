@@ -1,0 +1,1116 @@
+{
+  "corpus_version": "routing-eval-v2",
+  "chunk_tokens": 24,
+  "chunk_overlap": 4,
+  "max_chunks": 6,
+  "local_threshold": 0.25,
+  "dev": {
+    "documents": [
+      {
+        "id": "dev-solar",
+        "collection": "dev",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Helios Grid Operations Manual. Photovoltaics and Battery Storage dispatch rules apply across daytime substations.\n\nHelios Grid maintains inverter frequency within 59.95 to 60.05 Hz during peak load transitions and records telemetry every five seconds.\n\nHelios Grid battery banks discharge up to forty megawatts when cloud transient alarms persist past ninety seconds across feeder zones.\n\nHelios Grid operators verify breaker interlocks before isolating transformer bays for scheduled preventive maintenance.",
+        "preview": "Helios Grid Operations Manual. Photovoltaics and Battery Storage dispatch rules apply across daytime substations.\n\nHelio"
+      },
+      {
+        "id": "dev-freight",
+        "collection": "dev",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Vanguard Rail Freight Schedule. Intermodal manifest rules govern container loading and dispatch clearances.\n\nVanguard Rail assigns hazardous placards and brake inspection signoffs prior to yard departure on northbound corridors.\n\nVanguard Rail weigh-in-motion sensors flag axle imbalances exceeding two metric tons before mainline switches open.\n\nVanguard Rail locomotives log wheel slip and air pressure telemetry across mountain grade crossings.",
+        "preview": "Vanguard Rail Freight Schedule. Intermodal manifest rules govern container loading and dispatch clearances.\n\nVanguard Ra"
+      },
+      {
+        "id": "dev-maritime",
+        "collection": "dev",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Pelican Harbor Pilotage Guide. Vessel berthing windows depend on tidal current tables and tug escort capacity.\n\nPelican Harbor requires dual radar watches and VHF channel twelve check-ins three nautical miles outside the breakwater.\n\nPelican Harbor crane operators suspend container lifts whenever sustained crosswinds exceed thirty-two knots.\n\nPelican Harbor ballast discharge inspections verify salinity logs before cargo hatch clearance.",
+        "preview": "Pelican Harbor Pilotage Guide. Vessel berthing windows depend on tidal current tables and tug escort capacity.\n\nPelican "
+      },
+      {
+        "id": "dev-clinical",
+        "collection": "dev",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Alder Pharmacy Cold Chain SOP. Vaccine storage refrigerators must stay between two and eight degrees Celsius.\n\nAlder Pharmacy continuous glycol probes trigger pager alerts within three minutes if door seals remain unlatched.\n\nAlder Pharmacy backup generators automatically pick up refrigeration circuits within twelve seconds of utility brownout.\n\nAlder Pharmacy staff quarantine any batch exposed above eight degrees pending stability review.",
+        "preview": "Alder Pharmacy Cold Chain SOP. Vaccine storage refrigerators must stay between two and eight degrees Celsius.\n\nAlder Pha"
+      },
+      {
+        "id": "dev-meridian-north",
+        "collection": "dev",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Meridian Depot North Quarterly Audit. Northern warehouse cold aisles recorded ninety-nine percent pallet accuracy.\n\nMeridian Depot North forklift charging bays upgraded lithium-ion thermal sensors across loading docks one through eight.\n\nMeridian Depot North outbound manifest sealing reduced transit claims by eighteen percent during winter storms.\n\nMeridian Depot North retains dock camera footage for sixty days under regional safety rules.",
+        "preview": "Meridian Depot North Quarterly Audit. Northern warehouse cold aisles recorded ninety-nine percent pallet accuracy.\n\nMeri"
+      },
+      {
+        "id": "dev-meridian-south",
+        "collection": "dev",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Meridian Depot South Quarterly Audit. Southern warehouse cross-dock lanes processed fourteen thousand pallets weekly.\n\nMeridian Depot South automated sorters recalibrated barcode scanners on conveyor lines three and four.\n\nMeridian Depot South dispatchers enforce four-hour detention limits for refrigerated carrier trailers.\n\nMeridian Depot South retains dock camera footage for ninety days under port authority contracts.",
+        "preview": "Meridian Depot South Quarterly Audit. Southern warehouse cross-dock lanes processed fourteen thousand pallets weekly.\n\nM"
+      },
+      {
+        "id": "dev-audit-a",
+        "collection": "dev",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Regional Substation Compliance Review: Alpha Sector. Transformer oil dissolved-gas sampling runs every quarter.\n\nAlpha Sector compliance teams inspect grounding meshes, surge arresters and relay trip logs after lightning events.\n\nAlpha Sector audit reports archive calibration certificates for protective relays and thermal cameras.\n\nAlpha Sector corrective actions close within thirty days of inspector signoff.",
+        "preview": "Regional Substation Compliance Review: Alpha Sector. Transformer oil dissolved-gas sampling runs every quarter.\n\nAlpha S"
+      },
+      {
+        "id": "dev-audit-b",
+        "collection": "dev",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Regional Substation Compliance Review: Beta Sector. Transformer oil dissolved-gas sampling runs every month.\n\nBeta Sector compliance teams inspect grounding meshes, surge arresters and relay trip logs after switching faults.\n\nBeta Sector audit reports archive calibration certificates for breaker timing analyzers and infrared probes.\n\nBeta Sector corrective actions close within fourteen days of inspector signoff.",
+        "preview": "Regional Substation Compliance Review: Beta Sector. Transformer oil dissolved-gas sampling runs every month.\n\nBeta Secto"
+      },
+      {
+        "id": "dev-telecom",
+        "collection": "dev",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Cobalt Fiber Backbone Manual. Optical line terminals monitor attenuation across redundant metro rings.\n\nCobalt Fiber automatic protection switching reroutes traffic in under fifty milliseconds when fiber cuts occur.\n\nCobalt Fiber splice closures undergo pressurized nitrogen leak checks before manhole sealing.\n\nCobalt Fiber maintenance windows run between midnight and four in the morning.",
+        "preview": "Cobalt Fiber Backbone Manual. Optical line terminals monitor attenuation across redundant metro rings.\n\nCobalt Fiber aut"
+      },
+      {
+        "id": "dev-hydro",
+        "collection": "dev",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Cascade Hydro Spillway Manual. Reservoir elevation gauges govern radial gate openings during spring snowmelt.\n\nCascade Hydro turbine governors balance wicket gate angles to prevent cavitation under partial load.\n\nCascade Hydro downstream sirens sound fifteen minutes before spillway discharge rates exceed five hundred cubic meters per second.\n\nCascade Hydro intake trash racks are cleared daily during storm runoff.",
+        "preview": "Cascade Hydro Spillway Manual. Reservoir elevation gauges govern radial gate openings during spring snowmelt.\n\nCascade H"
+      }
+    ],
+    "queries": [
+      {"id": "dev-s1", "slice": "single_doc", "query": "What frequency band does Helios Grid inverter operation maintain?", "required_docs": ["dev-solar"]},
+      {"id": "dev-s2", "slice": "single_doc", "query": "What are the Photovoltaics and Battery Storage dispatch rules in Helios Grid?", "required_docs": ["dev-solar"]},
+      {"id": "dev-s3", "slice": "single_doc", "query": "When do Vanguard Rail loading and dispatch clearances require brake signoffs?", "required_docs": ["dev-freight"]},
+      {"id": "dev-s4", "slice": "single_doc", "query": "What axle imbalance triggers Vanguard Rail weigh sensors?", "required_docs": ["dev-freight"]},
+      {"id": "dev-s5", "slice": "single_doc", "query": "At what wind speed do Pelican Harbor cranes suspend lifts?", "required_docs": ["dev-maritime"]},
+      {"id": "dev-s6", "slice": "single_doc", "query": "What VHF channel check-ins does Pelican Harbor require?", "required_docs": ["dev-maritime"]},
+      {"id": "dev-s7", "slice": "single_doc", "query": "What temperature range must Alder Pharmacy vaccine refrigerators maintain?", "required_docs": ["dev-clinical"]},
+      {"id": "dev-s8", "slice": "single_doc", "query": "How fast do Alder Pharmacy backup generators pick up refrigeration?", "required_docs": ["dev-clinical"]},
+      {"id": "dev-s9", "slice": "single_doc", "query": "How quickly does Cobalt Fiber protection switching reroute cut fiber?", "required_docs": ["dev-telecom"]},
+      {"id": "dev-s10", "slice": "single_doc", "query": "When do Cascade Hydro downstream sirens sound before spillway discharge?", "required_docs": ["dev-hydro"]},
+      {"id": "dev-s11", "slice": "single_doc", "query": "What inverter frequency bounds and breaker interlocks govern battery banks?", "required_docs": ["dev-solar"]},
+      {"id": "dev-s12", "slice": "single_doc", "query": "What weigh-in-motion axle imbalance and hazardous placard signoffs apply?", "required_docs": ["dev-freight"]},
+      {"id": "dev-s13", "slice": "single_doc", "query": "What vaccine refrigerator range and glycol probe alerts protect batches?", "required_docs": ["dev-clinical"]},
+      {"id": "dev-s14", "slice": "single_doc", "query": "What optical line terminal attenuation and nitrogen leak checks apply?", "required_docs": ["dev-telecom"]},
+      {"id": "dev-a1", "slice": "ambiguous", "query": "How long does Meridian Depot retain dock camera footage?", "required_docs": ["dev-meridian-north", "dev-meridian-south"]},
+      {"id": "dev-a2", "slice": "ambiguous", "query": "What did Meridian Depot quarterly audits upgrade across aisles and lanes?", "required_docs": ["dev-meridian-north", "dev-meridian-south"]},
+      {"id": "dev-a3", "slice": "ambiguous", "query": "How often does transformer oil dissolved-gas sampling run in substation compliance reviews?", "required_docs": ["dev-audit-a", "dev-audit-b"]},
+      {"id": "dev-a4", "slice": "ambiguous", "query": "Within how many days do corrective actions close in regional substation compliance reviews?", "required_docs": ["dev-audit-a", "dev-audit-b"]},
+      {"id": "dev-a5", "slice": "ambiguous", "query": "What frequency does Helios Grid keep? How fast does Cobalt Fiber reroute?", "required_docs": ["dev-solar", "dev-telecom"]},
+      {"id": "dev-a6", "slice": "ambiguous", "query": "What temperature does Alder Pharmacy keep? When do Cascade Hydro sirens sound?", "required_docs": ["dev-clinical", "dev-hydro"]},
+      {"id": "dev-a7", "slice": "ambiguous", "query": "Refrigeration limits excluding Alder Pharmacy backup rules", "required_docs": ["dev-meridian-south"]},
+      {"id": "dev-a8", "slice": "ambiguous", "query": "Vanguard Rail brake inspection; Pelican Harbor crosswind threshold", "required_docs": ["dev-freight", "dev-maritime"]},
+      {"id": "dev-a9", "slice": "ambiguous", "query": "What safety retention rules apply, not Meridian Depot North?", "required_docs": ["dev-meridian-south"]},
+      {"id": "dev-a10", "slice": "ambiguous", "query": "Substation compliance certificates archived after events", "required_docs": ["dev-audit-a", "dev-audit-b"]},
+      {"id": "dev-a11", "slice": "ambiguous", "query": "How long are dock camera footage recordings retained under safety and port contracts?", "required_docs": ["dev-meridian-north", "dev-meridian-south"]},
+      {"id": "dev-a12", "slice": "ambiguous", "query": "What grounding meshes, surge arresters and relay trip logs are inspected?", "required_docs": ["dev-audit-a", "dev-audit-b"]},
+      {"id": "dev-a13", "slice": "ambiguous", "query": "How often do transformer oil dissolved-gas sampling and inspector signoff corrective closures run?", "required_docs": ["dev-audit-a", "dev-audit-b"]},
+      {"id": "dev-a14", "slice": "ambiguous", "query": "What dock pallet sorting and trailer detention rules apply across warehouses?", "required_docs": ["dev-meridian-north", "dev-meridian-south"]}
+    ]
+  },
+  "eval": {
+    "documents": [
+      {
+        "id": "eval-aurora",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Aurora Telemetry Guide. Covers Backup and Recovery framing, heartbeat intervals and retention schedules.\n\nAurora Telemetry endpoints emit signed heartbeats every fifteen seconds over mutual TLS streams.\n\nAurora Telemetry replay buffers retain raw sensor frames for seventy-two hours before archival compression.\n\nAurora Telemetry operators inspect packet sequence gaps during daily integrity checks.",
+        "preview": "Aurora Telemetry Guide. Covers Backup and Recovery framing, heartbeat intervals and retention schedules.\n\nAurora Telemet"
+      },
+      {
+        "id": "eval-erable",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Érable Central Operations. Vault humidity controls and badge escort procedures govern archival storage.\n\nÉrable Central maintains forty-five percent relative humidity across microfilm chambers year-round.\n\nÉrable Central requires dual-custody access badges for vault room entry outside weekday shifts.\n\nÉrable Central logs environmental sensor calibrations in weekly maintenance ledgers.",
+        "preview": "Érable Central Operations. Vault humidity controls and badge escort procedures govern archival storage.\n\nÉrable Central "
+      },
+      {
+        "id": "eval-boreal",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Operational procedures and retention schedules for regional infrastructure compliance audits across all documented facilities and storage depots.\n\nBoreal Vault cold-storage keys require dual custody and offline hardware tokens for winter vault unsealing.\n\nBoreal Vault permafrost probes transmit core temperature readings every thirty minutes via satellite uplink.\n\nBoreal Vault emergency heaters engage automatically when chamber temperatures fall below minus twenty-five Celsius.",
+        "preview": "Operational procedures and retention schedules for regional infrastructure compliance audits across all documented facil"
+      },
+      {
+        "id": "eval-kestrel",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Kestrel Relay Manual. Packet queueing, jitter bounds and encryption policy for edge routers.\n\nKestrel Relay does not allow unencrypted forwarding across public peering links under any profile.\n\nKestrel Relay caps jitter buffer latency at twelve milliseconds for real-time voice trunks.\n\nKestrel Relay drops malformed GRE frames before ingress shaping queues.",
+        "preview": "Kestrel Relay Manual. Packet queueing, jitter bounds and encryption policy for edge routers.\n\nKestrel Relay does not all"
+      },
+      {
+        "id": "eval-veridian",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Veridian Lab Protocol. Mass spectrometer calibration reagents and solvent waste neutralization steps.\n\nVeridian Lab technicians verify zero-drift baselines using certified argon blanks before sample runs.\n\nVeridian Lab neutralizes acidic eluent drums to pH seven before licensed carrier pickup.\n\nVeridian Lab exhaust hoods require face velocity above one hundred feet per minute.",
+        "preview": "Veridian Lab Protocol. Mass spectrometer calibration reagents and solvent waste neutralization steps.\n\nVeridian Lab tech"
+      },
+      {
+        "id": "eval-solstice",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Solstice Grid Handbook. Commercial tariff tiers, reactive power penalties and breaker trip thresholds.\n\nSolstice Grid penalizes industrial feeders when monthly power factor falls below zero point nine two.\n\nSolstice Grid reclosers pause three seconds between first and second fault clearing cycles.\n\nSolstice Grid publishes day-ahead congestion prices every afternoon at sixteen hundred hours.",
+        "preview": "Solstice Grid Handbook. Commercial tariff tiers, reactive power penalties and breaker trip thresholds.\n\nSolstice Grid pe"
+      },
+      {
+        "id": "eval-tamarack",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Tamarack Port Rules. Berth scheduling, customs inspection holds and pilot boarding ladders.\n\nTamarack Port clears customs inspection holds within six hours after electronic manifest validation.\n\nTamarack Port limits channel transit speed to ten knots inside the inner turning basin.\n\nTamarack Port requires fender inspections before liquefied gas carriers moor at pier three.",
+        "preview": "Tamarack Port Rules. Berth scheduling, customs inspection holds and pilot boarding ladders.\n\nTamarack Port clears custom"
+      },
+      {
+        "id": "eval-horizon",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Horizon Terminal Guide. Container yard gate passes and Horizon Terminalの運用手順 for automated gantry cranes.\n\nHorizon Terminal optical gates scan chassis license plates and seal integrity at twenty kilometers per hour.\n\nHorizon Terminal stacks refrigerated containers on row four with dedicated shore power outlets.\n\nHorizon Terminal logs crane spreader twist-lock cycles for preventative structural fatigue checks.",
+        "preview": "Horizon Terminal Guide. Container yard gate passes and Horizon Terminalの運用手順 for automated gantry cranes.\n\nHorizon Termi"
+      },
+      {
+        "id": "eval-glacier",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Glacier Vault Spec. Cryogenic sample canister inventory and liquid nitrogen refill schedules.\n\nGlacier Vault manifold pressure alarms trigger at eighteen kilopascals above ambient baseline.\n\nGlacier Vault oxygen depletion monitors calibrate weekly inside basement storage corridors.\n\nGlacier Vault dewars require visual frost inspection prior to sample retrieval.",
+        "preview": "Glacier Vault Spec. Cryogenic sample canister inventory and liquid nitrogen refill schedules.\n\nGlacier Vault manifold pr"
+      },
+      {
+        "id": "eval-quarz",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Quarz Observatory Manual. Dome shutter interlocks and mirror aluminizing vacuum pump procedures.\n\nQuarz Observatory closes dome shutters immediately when relative humidity reaches eighty-five percent.\n\nQuarz Observatory cryo-coolers hold infrared detector arrays at sixty-five Kelvin.\n\nQuarz Observatory logs seeing measurements every ten minutes during clear photometric nights.",
+        "preview": "Quarz Observatory Manual. Dome shutter interlocks and mirror aluminizing vacuum pump procedures.\n\nQuarz Observatory clos"
+      },
+      {
+        "id": "eval-harbor-north",
+        "collection": "eval",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Harbor Registry North Report. Northern dock manifest archiving and customs retention schedules.\n\nHarbor Registry North preserves import manifests for seven years in immutable optical vaults.\n\nHarbor Registry North audits tugboat fuel sulfur logs on the first Monday of each month.\n\nHarbor Registry North requires bilingual crew manifests for foreign-flagged bulk carriers.",
+        "preview": "Harbor Registry North Report. Northern dock manifest archiving and customs retention schedules.\n\nHarbor Registry North p"
+      },
+      {
+        "id": "eval-harbor-south",
+        "collection": "eval",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Harbor Registry South Report. Southern dock manifest archiving and customs retention schedules.\n\nHarbor Registry South preserves export manifests for ten years in replicated cloud vaults.\n\nHarbor Registry South audits barge ballast transfer logs every Friday afternoon.\n\nHarbor Registry South requires electronic hazardous cargo declarations twenty-four hours before arrival.",
+        "preview": "Harbor Registry South Report. Southern dock manifest archiving and customs retention schedules.\n\nHarbor Registry South p"
+      },
+      {
+        "id": "eval-beacon-a",
+        "collection": "eval",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Beacon Ledger 2024 Summary. Annual treasury reconciliation and escrow reserve thresholds.\n\nBeacon Ledger 2024 mandates a twelve percent liquidity reserve across settlement clearing accounts.\n\nBeacon Ledger 2024 requires dual cryptographic signatures for wire transfers above fifty thousand dollars.\n\nBeacon Ledger 2024 closes monthly general ledger periods on the third business day.",
+        "preview": "Beacon Ledger 2024 Summary. Annual treasury reconciliation and escrow reserve thresholds.\n\nBeacon Ledger 2024 mandates a"
+      },
+      {
+        "id": "eval-beacon-b",
+        "collection": "eval",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Beacon Ledger 2025 Amendment. Updated treasury reconciliation and escrow reserve thresholds.\n\nBeacon Ledger 2025 raises the liquidity reserve requirement to fifteen percent across clearing accounts.\n\nBeacon Ledger 2025 requires hardware key attestation for wire transfers above twenty-five thousand dollars.\n\nBeacon Ledger 2025 closes monthly general ledger periods on the second business day.",
+        "preview": "Beacon Ledger 2025 Amendment. Updated treasury reconciliation and escrow reserve thresholds.\n\nBeacon Ledger 2025 raises "
+      },
+      {
+        "id": "eval-cypress",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Cypress Cooling Systems. Chilled water loop flow rates and glycol concentration targets.\n\nCypress Cooling maintains thirty-five percent propylene glycol concentration in rooftop condenser loops.\n\nCypress Cooling alarms sound if supply chilled water rises above nine degrees Celsius.\n\nCypress Cooling bypass valves balance differential pressure across server hall manifolds.",
+        "preview": "Cypress Cooling Systems. Chilled water loop flow rates and glycol concentration targets.\n\nCypress Cooling maintains thir"
+      },
+      {
+        "id": "eval-spruce",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Spruce Power Distribution. Uninterruptible power supply battery float voltages and transfer timing.\n\nSpruce Power maintains nominal bus voltage within plus or minus two percent of four hundred eighty volts.\n\nSpruce Power static transfer switches complete source failover in under four milliseconds.\n\nSpruce Power load bank testing verifies diesel synchronization every quarter.",
+        "preview": "Spruce Power Distribution. Uninterruptible power supply battery float voltages and transfer timing.\n\nSpruce Power mainta"
+      },
+      {
+        "id": "eval-policy-eu",
+        "collection": "eval",
+        "doc_type": "policy",
+        "visible": true,
+        "content": "European Retention Standard. Data erasure timelines, consent logs and regional residency controls.\n\nEuropean Retention Standard limits session log storage to ninety days unless litigation holds apply.\n\nEuropean Retention Standard mandates erasure confirmation certificates within thirty days of customer requests.\n\nEuropean Retention Standard restricts backup replication to Frankfurt and Dublin data centers.",
+        "preview": "European Retention Standard. Data erasure timelines, consent logs and regional residency controls.\n\nEuropean Retention S"
+      },
+      {
+        "id": "eval-policy-us",
+        "collection": "eval",
+        "doc_type": "policy",
+        "visible": true,
+        "content": "Federal Retention Standard. Data erasure timelines, audit logs and domestic residency controls.\n\nFederal Retention Standard requires immutable audit log storage for seven years under compliance rules.\n\nFederal Retention Standard mandates quarterly access recertification reviews within forty-five days.\n\nFederal Retention Standard restricts backup replication to Virginia and Oregon data centers.",
+        "preview": "Federal Retention Standard. Data erasure timelines, audit logs and domestic residency controls.\n\nFederal Retention Stand"
+      },
+      {
+        "id": "eval-obsidian",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Obsidian Pipeline Guide. Ingestion batch windows, dead-letter queues and schema validation rules.\n\nObsidian Pipeline retries transient webhook ingestion events up to five times with jitter.\n\nObsidian Pipeline routes malformed JSON records into partitioned dead-letter buckets.\n\nObsidian Pipeline compacts parquet partitions nightly at two UTC.",
+        "preview": "Obsidian Pipeline Guide. Ingestion batch windows, dead-letter queues and schema validation rules.\n\nObsidian Pipeline ret"
+      },
+      {
+        "id": "eval-basalt",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Basalt Pipeline Guide. Streaming batch windows, dead-letter queues and schema validation rules.\n\nBasalt Pipeline retries streaming checkpoint writes up to eight times before failing the worker.\n\nBasalt Pipeline routes schema mismatch events into quarantined review topics.\n\nBasalt Pipeline compacts iceberg tables every six hours.",
+        "preview": "Basalt Pipeline Guide. Streaming batch windows, dead-letter queues and schema validation rules.\n\nBasalt Pipeline retries"
+      },
+      {
+        "id": "eval-pacifico",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Manual de Archivo Pacífico. Reglas de seguridad y custodia para expedientes históricos digitalizados.\n\nArchivo Pacífico verifica las sumas de comprobación SHA-256 cada domingo antes de replicar cintas.\n\nArchivo Pacífico mantiene copias cifradas fuera de línea en bóvedas sísmicas certificadas.\n\nArchivo Pacífico exige doble autorización criptográfica para restaurar lotes antiguos.",
+        "preview": "Manual de Archivo Pacífico. Reglas de seguridad y custodia para expedientes históricos digitalizados.\n\nArchivo Pacífico "
+      },
+      {
+        "id": "eval-sierra-norte",
+        "collection": "eval",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Protocolo de Respaldo Norte. Ventanas de replicación y pruebas de recuperación ante desastres regionales.\n\nRespaldo Norte ejecuta instantáneas incrementales cada cuatro horas sobre arreglos redundantes.\n\nRespaldo Norte valida la restauración completa de bases de datos el primer martes de cada mes.\n\nRespaldo Norte conserva registros de auditoría durante cinco años.",
+        "preview": "Protocolo de Respaldo Norte. Ventanas de replicación y pruebas de recuperación ante desastres regionales.\n\nRespaldo Nort"
+      },
+      {
+        "id": "eval-sierra-sur",
+        "collection": "eval",
+        "doc_type": "report",
+        "visible": true,
+        "content": "Protocolo de Respaldo Sur. Ventanas de replicación y pruebas de recuperación ante desastres regionales.\n\nRespaldo Sur ejecuta instantáneas incrementales cada seis horas sobre arreglos geodistribuidos.\n\nRespaldo Sur valida la restauración completa de bases de datos el último viernes de cada mes.\n\nRespaldo Sur conserva registros de auditoría durante ocho años.",
+        "preview": "Protocolo de Respaldo Sur. Ventanas de replicación y pruebas de recuperación ante desastres regionales.\n\nRespaldo Sur ej"
+      },
+      {
+        "id": "eval-amber",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Amber Spectrometer Manual. Optical grating alignment, xenon lamp burn-in and cuvette cleaning steps.\n\nAmber Spectrometer calibrates wavelength offsets against holmium oxide glass filters at start of shift.\n\nAmber Spectrometer replaces deuterium source lamps after one thousand operating hours.\n\nAmber Spectrometer rinses quartz flow cells with HPLC-grade methanol between assays.",
+        "preview": "Amber Spectrometer Manual. Optical grating alignment, xenon lamp burn-in and cuvette cleaning steps.\n\nAmber Spectrometer"
+      },
+      {
+        "id": "eval-cobalt-turbine",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Crimson Turbine Guide. Steam governor overspeed trips, lube oil coolers and bearing vibration limits.\n\nCrimson Turbine trips mechanical overspeed bolts immediately above three thousand nine hundred revolutions per minute.\n\nCrimson Turbine maintains bearing lube oil supply temperatures at forty-five degrees Celsius.\n\nCrimson Turbine records shaft axial displacement continuously on dual eddy-current probes.",
+        "preview": "Crimson Turbine Guide. Steam governor overspeed trips, lube oil coolers and bearing vibration limits.\n\nCrimson Turbine t"
+      },
+      {
+        "id": "eval-stale-1",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": false,
+        "content": "Glacier Vault Spec. Cryogenic sample canister inventory and liquid nitrogen refill schedules. Stale revision superseded.",
+        "preview": "Glacier Vault Spec. Cryogenic sample canister inventory and liquid nitrogen refill schedules. Stale revision superseded."
+      },
+      {
+        "id": "eval-stale-2",
+        "collection": "eval",
+        "doc_type": "guide",
+        "visible": false,
+        "content": "Glacier Vault Spec. Cryogenic sample canister inventory and oxygen depletion monitors. Stale revision deleted.",
+        "preview": "Glacier Vault Spec. Cryogenic sample canister inventory and oxygen depletion monitors. Stale revision deleted."
+      },
+      {
+        "id": "eval-stale-3",
+        "collection": "eval",
+        "doc_type": "policy",
+        "visible": false,
+        "content": "Retention Standard Draft. Data erasure timelines and backup replication controls. Unpublished processing draft.",
+        "preview": "Retention Standard Draft. Data erasure timelines and backup replication controls. Unpublished processing draft."
+      },
+      {
+        "id": "eval-private-other",
+        "collection": "restricted",
+        "doc_type": "guide",
+        "visible": true,
+        "content": "Glacier Vault Spec Private Appendix. Liquid nitrogen refill schedules and cryogenic inventory.",
+        "preview": "Glacier Vault Spec Private Appendix. Liquid nitrogen refill schedules and cryogenic inventory."
+      }
+    ],
+    "pairs": [
+      {
+        "pair_id": "s-aurora",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-aurora"
+        ],
+        "a": {
+          "id": "eval-s-aurora-a",
+          "query": "What Backup and Recovery heartbeat interval does Aurora Telemetry use?"
+        },
+        "b": {
+          "id": "eval-s-aurora-b",
+          "query": "what backup and recovery heartbeat interval does aurora telemetry use？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-aurora",
+            "excerpt": "signed heartbeats every fifteen seconds"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-erable",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-erable"
+        ],
+        "a": {
+          "id": "eval-s-erable-a",
+          "query": "What humidity level does Érable Central maintain in microfilm chambers?"
+        },
+        "b": {
+          "id": "eval-s-erable-b",
+          "query": "what humidity level does erable central maintain in microfilm chambers？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-erable",
+            "excerpt": "forty-five percent relative humidity"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-boreal-late-entity",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-boreal"
+        ],
+        "a": {
+          "id": "eval-s-boreal-a",
+          "query": "What custody and token requirements apply to Boreal Vault cold-storage keys?"
+        },
+        "b": {
+          "id": "eval-s-boreal-b",
+          "query": "what custody and token requirements apply to boreal vault cold-storage keys？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-boreal",
+            "excerpt": "dual custody and offline hardware tokens"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-kestrel-negverb",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-kestrel"
+        ],
+        "a": {
+          "id": "eval-s-kestrel-a",
+          "query": "Does Kestrel Relay not allow unencrypted forwarding on public links?"
+        },
+        "b": {
+          "id": "eval-s-kestrel-b",
+          "query": "does kestrel relay not allow unencrypted forwarding on public links？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-kestrel",
+            "excerpt": "does not allow unencrypted forwarding"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-veridian",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-veridian"
+        ],
+        "a": {
+          "id": "eval-s-veridian-a",
+          "query": "To what pH does Veridian Lab neutralize acidic eluent?"
+        },
+        "b": {
+          "id": "eval-s-veridian-b",
+          "query": "to what ph does veridian lab neutralize acidic eluent？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-veridian",
+            "excerpt": "acidic eluent drums to pH seven"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-solstice",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-solstice"
+        ],
+        "a": {
+          "id": "eval-s-solstice-a",
+          "query": "At what power factor does Solstice Grid penalize industrial feeders?"
+        },
+        "b": {
+          "id": "eval-s-solstice-b",
+          "query": "at what power factor does solstice grid penalize industrial feeders？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-solstice",
+            "excerpt": "monthly power factor falls below zero point nine two"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-tamarack",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-tamarack"
+        ],
+        "a": {
+          "id": "eval-s-tamarack-a",
+          "query": "How quickly does Tamarack Port clear customs inspection holds?"
+        },
+        "b": {
+          "id": "eval-s-tamarack-b",
+          "query": "how quickly does tamarack port clear customs inspection holds？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-tamarack",
+            "excerpt": "clears customs inspection holds within six hours"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-horizon-mixed",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-horizon"
+        ],
+        "a": {
+          "id": "eval-s-horizon-a",
+          "query": "Horizon Terminalの optical gate scan speed?"
+        },
+        "b": {
+          "id": "eval-s-horizon-b",
+          "query": "horizon terminalの optical gate scan speed？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-horizon",
+            "excerpt": "twenty kilometers per hour"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-glacier-stale",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-glacier"
+        ],
+        "a": {
+          "id": "eval-s-glacier-a",
+          "query": "At what manifold pressure do Glacier Vault alarms trigger?"
+        },
+        "b": {
+          "id": "eval-s-glacier-b",
+          "query": "at what manifold pressure do glacier vault alarms trigger？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-glacier",
+            "excerpt": "eighteen kilopascals above ambient baseline"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-quarz",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-quarz"
+        ],
+        "a": {
+          "id": "eval-s-quarz-a",
+          "query": "When does Quarz Observatory close dome shutters for humidity?"
+        },
+        "b": {
+          "id": "eval-s-quarz-b",
+          "query": "when does quarz observatory close dome shutters for humidity？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-quarz",
+            "excerpt": "humidity reaches eighty-five percent"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-aurora-variant",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-aurora"
+        ],
+        "a": {
+          "id": "eval-s-auroravar-a",
+          "query": "How long do Aurora Telemetry replay buffers hold sensor frames?"
+        },
+        "b": {
+          "id": "eval-s-auroravar-b",
+          "query": "how long do aurore telemetry replay buffers hold sensor frames？"
+        },
+        "spelling_edits": [
+          {
+            "from": "aurore",
+            "to": "aurora"
+          }
+        ],
+        "required_facts": [
+          {
+            "document_id": "eval-aurora",
+            "excerpt": "seventy-two hours before archival compression"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-veridian-conj",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-veridian"
+        ],
+        "a": {
+          "id": "eval-s-verconj-a",
+          "query": "What argon blank and waste neutralization rules does Veridian Lab specify?"
+        },
+        "b": {
+          "id": "eval-s-verconj-b",
+          "query": "what argon blank and waste neutralization rules does veridian lab specify？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-veridian",
+            "excerpt": "certified argon blanks"
+          },
+          {
+            "document_id": "eval-veridian",
+            "excerpt": "acidic eluent drums to pH seven"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-pacifico-es",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-pacifico"
+        ],
+        "a": {
+          "id": "eval-s-pac-a",
+          "query": "¿Cuándo verifica Archivo Pacífico las sumas de comprobación antes de replicar cintas?"
+        },
+        "b": {
+          "id": "eval-s-pac-b",
+          "query": "¿cuando verifica archivo pacifico las sumas de comprobacion antes de replicar cintas？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-pacifico",
+            "excerpt": "cada domingo antes de replicar cintas"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-amber-no-entity",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-amber"
+        ],
+        "a": {
+          "id": "eval-s-amb-a",
+          "query": "What filter calibrates the optical grating wavelength offsets?"
+        },
+        "b": {
+          "id": "eval-s-amb-b",
+          "query": "what filter calibrates the optical grating wavelength offsets？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-amber",
+            "excerpt": "holmium oxide glass filters"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-crimson-no-entity",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-cobalt-turbine"
+        ],
+        "a": {
+          "id": "eval-s-crim-a",
+          "query": "At what overspeed revolutions per minute do steam governor mechanical bolts trip?"
+        },
+        "b": {
+          "id": "eval-s-crim-b",
+          "query": "at what overspeed revolutions per minute do steam governor mechanical bolts trip？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-cobalt-turbine",
+            "excerpt": "three thousand nine hundred revolutions per minute"
+          }
+        ]
+      },
+      {
+        "pair_id": "s-glacier-no-entity",
+        "slice": "single_doc",
+        "required_docs": [
+          "eval-glacier"
+        ],
+        "a": {
+          "id": "eval-s-glne-a",
+          "query": "What cryogenic manifold pressure triggers alarms above ambient baseline?"
+        },
+        "b": {
+          "id": "eval-s-glne-b",
+          "query": "what cryogenic manifold pressure triggers alarms above ambient baseline？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-glacier",
+            "excerpt": "eighteen kilopascals above ambient baseline"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-harbor-homonym",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-harbor-north",
+          "eval-harbor-south"
+        ],
+        "a": {
+          "id": "eval-m-harbor-a",
+          "query": "How long does Harbor Registry preserve dock manifests?"
+        },
+        "b": {
+          "id": "eval-m-harbor-b",
+          "query": "how long does harbor registry preserve dock manifests？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-harbor-north",
+            "excerpt": "import manifests for seven years"
+          },
+          {
+            "document_id": "eval-harbor-south",
+            "excerpt": "export manifests for ten years"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-beacon-exact-homonym",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-beacon-a",
+          "eval-beacon-b"
+        ],
+        "a": {
+          "id": "eval-m-beacon-a",
+          "query": "What liquidity reserve threshold does Beacon Ledger mandate?"
+        },
+        "b": {
+          "id": "eval-m-beacon-b",
+          "query": "what liquidity reserve threshold does beacon ledger mandate？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-beacon-a",
+            "excerpt": "twelve percent liquidity reserve"
+          },
+          {
+            "document_id": "eval-beacon-b",
+            "excerpt": "fifteen percent"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-two-questions-cooling-power",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-cypress",
+          "eval-spruce"
+        ],
+        "a": {
+          "id": "eval-m-cp-a",
+          "query": "What glycol target does Cypress Cooling maintain? What bus voltage does Spruce Power keep?"
+        },
+        "b": {
+          "id": "eval-m-cp-b",
+          "query": "what glycol target does cypress cooling maintain？ what bus voltage does spruce power keep？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-cypress",
+            "excerpt": "thirty-five percent propylene glycol"
+          },
+          {
+            "document_id": "eval-spruce",
+            "excerpt": "four hundred eighty volts"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-two-questions-aurora-kestrel",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-aurora",
+          "eval-kestrel"
+        ],
+        "a": {
+          "id": "eval-m-ak-a",
+          "query": "What heartbeat interval does Aurora Telemetry use? What jitter cap does Kestrel Relay enforce?"
+        },
+        "b": {
+          "id": "eval-m-ak-b",
+          "query": "what heartbeat interval does aurora telemetry use？ what jitter cap does kestrel relay enforce？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-aurora",
+            "excerpt": "signed heartbeats every fifteen seconds"
+          },
+          {
+            "document_id": "eval-kestrel",
+            "excerpt": "twelve milliseconds"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-two-questions-tamarack-quarz",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-tamarack",
+          "eval-quarz"
+        ],
+        "a": {
+          "id": "eval-m-tq-a",
+          "query": "What transit speed limits Tamarack Port? What humidity closes Quarz Observatory?"
+        },
+        "b": {
+          "id": "eval-m-tq-b",
+          "query": "what transit speed limits tamarack port？ what humidity closes quarz observatory？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-tamarack",
+            "excerpt": "ten knots inside the inner turning basin"
+          },
+          {
+            "document_id": "eval-quarz",
+            "excerpt": "humidity reaches eighty-five percent"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-retention-standards",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-policy-eu",
+          "eval-policy-us"
+        ],
+        "a": {
+          "id": "eval-m-ret-a",
+          "query": "What backup replication locations apply across retention standards?"
+        },
+        "b": {
+          "id": "eval-m-ret-b",
+          "query": "what backup replication locations apply across retention standards？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-policy-eu",
+            "excerpt": "Frankfurt and Dublin"
+          },
+          {
+            "document_id": "eval-policy-us",
+            "excerpt": "Virginia and Oregon"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-negated-obsidian",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-basalt"
+        ],
+        "a": {
+          "id": "eval-m-neg-a",
+          "query": "What checkpoint retry limit applies to streaming pipelines, not Obsidian Pipeline?"
+        },
+        "b": {
+          "id": "eval-m-neg-b",
+          "query": "what checkpoint retry limit applies to streaming pipelines, not obsidian pipeline？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-basalt",
+            "excerpt": "up to eight times"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-negated-harbor-north",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-harbor-south"
+        ],
+        "a": {
+          "id": "eval-m-neghn-a",
+          "query": "How long are dock manifests archived, excluding Harbor Registry North?"
+        },
+        "b": {
+          "id": "eval-m-neghn-b",
+          "query": "how long are dock manifests archived, excluding harbor registry north？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-harbor-south",
+            "excerpt": "export manifests for ten years"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-two-entities-solstice-veridian",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-solstice",
+          "eval-veridian"
+        ],
+        "a": {
+          "id": "eval-m-sv-a",
+          "query": "What power factor penalty applies in Solstice Grid? What hood velocity applies in Veridian Lab?"
+        },
+        "b": {
+          "id": "eval-m-sv-b",
+          "query": "what power factor penalty applies in solstice grid？ what hood velocity applies in veridian lab？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-solstice",
+            "excerpt": "power factor falls below zero point nine two"
+          },
+          {
+            "document_id": "eval-veridian",
+            "excerpt": "one hundred feet per minute"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-two-entities-erable-boreal",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-erable",
+          "eval-boreal"
+        ],
+        "a": {
+          "id": "eval-m-eb-a",
+          "query": "What badge custody does Érable Central require? What key custody does Boreal Vault require?"
+        },
+        "b": {
+          "id": "eval-m-eb-b",
+          "query": "what badge custody does erable central require？ what key custody does boreal vault require？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-erable",
+            "excerpt": "dual-custody access badges"
+          },
+          {
+            "document_id": "eval-boreal",
+            "excerpt": "dual custody and offline hardware tokens"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-pipeline-overlap",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-obsidian",
+          "eval-basalt"
+        ],
+        "a": {
+          "id": "eval-m-pipe-a",
+          "query": "What retry limits apply under the pipeline ingestion and streaming guidance?"
+        },
+        "b": {
+          "id": "eval-m-pipe-b",
+          "query": "what retry limits apply under the pipeline ingestion and streaming guidance？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-obsidian",
+            "excerpt": "up to five times"
+          },
+          {
+            "document_id": "eval-basalt",
+            "excerpt": "up to eight times"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-archive-generic-token",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-harbor-north",
+          "eval-harbor-south"
+        ],
+        "a": {
+          "id": "eval-m-arch-a",
+          "query": "What is the archival period for customs dock registry manifests?"
+        },
+        "b": {
+          "id": "eval-m-arch-b",
+          "query": "what is the archival period for customs dock registry manifests？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-harbor-north",
+            "excerpt": "import manifests for seven years"
+          },
+          {
+            "document_id": "eval-harbor-south",
+            "excerpt": "export manifests for ten years"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-sierra-respaldo-es",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-sierra-norte",
+          "eval-sierra-sur"
+        ],
+        "a": {
+          "id": "eval-m-sierra-a",
+          "query": "¿Cada cuántas horas ejecuta Protocolo de Respaldo instantáneas incrementales?"
+        },
+        "b": {
+          "id": "eval-m-sierra-b",
+          "query": "¿cada cuántas horas ejecuta protocolo de respaldo instantáneas incrementales？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-sierra-norte",
+            "excerpt": "cada cuatro horas"
+          },
+          {
+            "document_id": "eval-sierra-sur",
+            "excerpt": "cada seis horas"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-two-questions-amber-crimson",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-amber",
+          "eval-cobalt-turbine"
+        ],
+        "a": {
+          "id": "eval-m-ac-a",
+          "query": "What filter calibrates Amber Spectrometer? What RPM trips Crimson Turbine?"
+        },
+        "b": {
+          "id": "eval-m-ac-b",
+          "query": "what filter calibrates amber spectrometer？ what rpm trips crimson turbine？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-amber",
+            "excerpt": "holmium oxide glass filters"
+          },
+          {
+            "document_id": "eval-cobalt-turbine",
+            "excerpt": "three thousand nine hundred revolutions per minute"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-bilingual-pacifico-boreal",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-pacifico",
+          "eval-boreal"
+        ],
+        "a": {
+          "id": "eval-m-pb-a",
+          "query": "¿Qué autorización exige Archivo Pacífico para restaurar lotes? What custody does Boreal Vault require for cold-storage keys?"
+        },
+        "b": {
+          "id": "eval-m-pb-b",
+          "query": "¿que autorizacion exige archivo pacifico para restaurar lotes？ what custody does boreal vault require for cold-storage keys？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-pacifico",
+            "excerpt": "exige doble autorización criptográfica"
+          },
+          {
+            "document_id": "eval-boreal",
+            "excerpt": "dual custody and offline hardware tokens"
+          }
+        ]
+      },
+      {
+        "pair_id": "m-negated-amber",
+        "slice": "ambiguous",
+        "required_docs": [
+          "eval-veridian"
+        ],
+        "a": {
+          "id": "eval-m-negamb-a",
+          "query": "What argon blank does the lab use for calibration, excluding Amber Spectrometer?"
+        },
+        "b": {
+          "id": "eval-m-negamb-b",
+          "query": "what argon blank does the lab use for calibration, excluding amber spectrometer？"
+        },
+        "required_facts": [
+          {
+            "document_id": "eval-veridian",
+            "excerpt": "certified argon blanks"
+          }
+        ]
+      }
+    ],
+    "empty_probes": [
+      {"id": "empty-allowlist", "query": "Aurora Telemetry heartbeat interval", "allowed_document_ids": [], "collection": "eval"},
+      {"id": "empty-collection", "query": "Aurora Telemetry heartbeat interval", "collection": "nonexistent-collection"},
+      {"id": "all-stale-displaced", "query": "Retention Standard Draft unpublished processing", "allowed_document_ids": ["eval-stale-3"], "collection": "eval"}
+    ],
+    "verified_negative_entities": [
+      {"id": "neg-past-120", "query": "Boreal Vault", "collection": "eval"},
+      {"id": "neg-no-entity-query", "query": "What temperature alarms apply to cryogenic storage?", "collection": "eval"},
+      {"id": "neg-unrelated-entity", "query": "Zephyr Station telemetry logs", "collection": "eval"}
+    ]
+  }
+}

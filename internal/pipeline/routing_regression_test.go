@@ -216,6 +216,86 @@ func TestEvidenceRoutingExclusionPolarity(t *testing.T) {
 	}
 }
 
+func TestEvidenceRoutingExclusionSubject(t *testing.T) {
+	names := map[string]string{"a": "Maple Station.", "b": "Cedar Archive."}
+	chunks := append(routingFixtureChunks("a", 3, []float32{1, 0}), routingFixtureChunks("b", 1, []float32{.99, .1})...)
+	for _, tc := range []struct {
+		query, document string
+		reason          retriever.RouteReason
+		searches        int
+	}{
+		{"What did Cedar Archive exclude from the schedule?", "b", retriever.RouteReasonNamedEntity, 2},
+		{"What has Cedar Archive excluded from the schedule?", "b", retriever.RouteReasonNamedEntity, 2},
+		{"What has Cedar Archive already excluded from the schedule?", "b", retriever.RouteReasonNamedEntity, 2},
+		{"What did Cedar Archive omit from the schedule?", "b", retriever.RouteReasonNamedEntity, 2},
+		{"What has Cedar Archive omitted from the schedule?", "b", retriever.RouteReasonNamedEntity, 2},
+		{"What has Cedar Archive not included in the schedule?", "b", retriever.RouteReasonNamedEntity, 2},
+		{"What hasn't Cedar Archive included in the schedule?", "b", retriever.RouteReasonNamedEntity, 2},
+		{"Cedar Archive has excluded Mondays from the schedule.", "b", retriever.RouteReasonNamedEntity, 2},
+		{"For the schedule, Cedar Archive is excluded.", "a", retriever.RouteReasonNegatedEntity, 1},
+		{"For the schedule, Cedar Archive is explicitly excluded.", "a", retriever.RouteReasonNegatedEntity, 1},
+		{"For the schedule, Cedar Archive was also omitted.", "a", retriever.RouteReasonNegatedEntity, 1},
+		{"For the schedule, Cedar Archive is explicitly included.", "b", retriever.RouteReasonNamedEntity, 2},
+		{"For the schedule, Cedar Archive is not excluded.", "b", retriever.RouteReasonNamedEntity, 2},
+		{"For the schedule, Cedar Archive is explicitly not included.", "a", retriever.RouteReasonNegatedEntity, 1},
+		{"For the schedule, Cedar Archive has been excluded.", "a", retriever.RouteReasonNegatedEntity, 1},
+		{"For the schedule, Cedar Archive has already been excluded.", "a", retriever.RouteReasonNegatedEntity, 1},
+		{"For the schedule, Cedar Archive has already been formally excluded.", "a", retriever.RouteReasonNegatedEntity, 1},
+		{"For the schedule, Cedar Archive has not been excluded.", "b", retriever.RouteReasonNamedEntity, 2},
+		{"For the schedule, Cedar Archive has not been formally excluded.", "b", retriever.RouteReasonNamedEntity, 2},
+		{"For the schedule, Cedar Archive has not been included.", "a", retriever.RouteReasonNegatedEntity, 1},
+		{"Has Cedar Archive been excluded from the schedule?", "a", retriever.RouteReasonNegatedEntity, 1},
+		{"Isn't Cedar Archive excluded from the schedule?", "b", retriever.RouteReasonNamedEntity, 2},
+		{"Cedar Archive excluded from the schedule", "a", retriever.RouteReasonNegatedEntity, 1},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			qc, embeds, searches := runRoutingFixture(t, evidenceRoutingConfig(.08), names, chunks, tc.query, "", 1)
+			require.Equal(t, []string{tc.document}, candidateDocumentIDs(qc.RetrievedChunks))
+			require.Equal(t, tc.reason, qc.RouteReason)
+			require.Equal(t, 1, embeds)
+			require.Equal(t, tc.searches, searches)
+		})
+	}
+}
+
+func TestEvidenceRoutingPredicatePolarity(t *testing.T) {
+	names := map[string]string{"a": "Maple Station.", "b": "Cedar Archive."}
+	chunks := append(routingFixtureChunks("a", 3, []float32{1, 0}), routingFixtureChunks("b", 1, []float32{.99, .1})...)
+	for _, tc := range []struct {
+		query    string
+		excluded bool
+	}{
+		{"Cedar Archive is included and required.", false},
+		{"Cedar Archive is not only included but required.", false},
+		{"Cedar Archive is explicitly excluded.", true},
+		{"Cedar Archive is not only excluded but prohibited.", true},
+		{"Cedar Archive is not included.", true},
+		{"Cedar Archive is never included.", true},
+		{"Do not include Cedar Archive.", true},
+		{"Do not explicitly include Cedar Archive.", true},
+		{"Do not ever include Cedar Archive.", true},
+		{"Do not exclude Cedar Archive.", false},
+		{"Do not explicitly exclude Cedar Archive.", false},
+		{"Do not ever exclude Cedar Archive.", false},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			qc, embeds, searches := runRoutingFixture(t, evidenceRoutingConfig(.08), names, chunks, "For the schedule, "+tc.query, "", 1)
+			require.Equal(t, 1, embeds)
+			if tc.excluded {
+				require.Equal(t, []string{"a"}, candidateDocumentIDs(qc.RetrievedChunks))
+				require.Equal(t, "GLOBAL", qc.RetrievalMode)
+				require.Equal(t, retriever.RouteReasonNegatedEntity, qc.RouteReason)
+				require.Equal(t, 1, searches)
+			} else {
+				require.Equal(t, []string{"b"}, candidateDocumentIDs(qc.RetrievedChunks))
+				require.Equal(t, "LOCAL", qc.RetrievalMode)
+				require.Equal(t, retriever.RouteReasonNamedEntity, qc.RouteReason)
+				require.Equal(t, 2, searches)
+			}
+		})
+	}
+}
+
 func TestEvidenceRoutingPartialNumberedTitle(t *testing.T) {
 	names := map[string]string{"a": "Harbor Guide.", "b": "Apollo Mission 11."}
 	chunks := append(routingFixtureChunks("a", 3, []float32{1, 0}), routingFixtureChunks("b", 1, []float32{.99, .1})...)
