@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -16,6 +17,11 @@ import (
 )
 
 const maxOpenAIResponseBytes = 4 << 20
+
+const maxOpenAIErrorBytes = 8 << 10
+
+// The embeddings API can return a null code for this error.
+var embeddingWindowMessage = regexp.MustCompile(`^This model's maximum context length is [0-9]+ tokens, however you requested [0-9]+ tokens\b`)
 
 // OpenAIHTTPClient shares bounded, credential-safe HTTP transport between providers.
 type OpenAIHTTPClient struct {
@@ -38,6 +44,10 @@ func NewOpenAIHTTPClient(base, key string) (*OpenAIHTTPClient, error) {
 
 // Post sends a JSON request; the caller must close the successful response body.
 func (c *OpenAIHTTPClient) Post(ctx context.Context, path string, payload any) (*http.Response, error) {
+	return c.post(ctx, path, payload, false)
+}
+
+func (c *OpenAIHTTPClient) post(ctx context.Context, path string, payload any, embeddingErrors bool) (*http.Response, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, errors.New("openai: invalid request")
@@ -59,18 +69,55 @@ func (c *OpenAIHTTPClient) Post(ctx context.Context, path string, payload any) (
 		return nil, errors.New("openai: HTTP request failed")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_ = response.Body.Close()
-		if response.StatusCode == 429 || response.StatusCode == 503 {
-			return nil, fmt.Errorf("openai: HTTP status %d: %w", response.StatusCode, domain.ErrUpstreamThrottled)
-		}
-		return nil, fmt.Errorf("openai: HTTP status %d", response.StatusCode)
+		defer func() { _ = response.Body.Close() }()
+		return nil, openAIStatusError(ctx, response, embeddingErrors)
 	}
 	return response, nil
 }
 
+func openAIStatusError(ctx context.Context, response *http.Response, embeddingErrors bool) error {
+	code := response.StatusCode
+	if code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable {
+		return fmt.Errorf("openai: HTTP status %d: %w", code, domain.ErrUpstreamThrottled)
+	}
+	if embeddingErrors {
+		switch code {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return domain.ErrEmbeddingDenied
+		case http.StatusBadRequest:
+			body, err := io.ReadAll(io.LimitReader(response.Body, maxOpenAIErrorBytes+1))
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			var payload struct {
+				Error struct {
+					Code    string `json:"code"`
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err == nil && len(body) <= maxOpenAIErrorBytes && json.Unmarshal(body, &payload) == nil &&
+				(payload.Error.Code == "context_length_exceeded" ||
+					(payload.Error.Code == "" && payload.Error.Type == "invalid_request_error" && embeddingWindowMessage.MatchString(payload.Error.Message))) {
+				return domain.ErrEmbeddingModelLimit
+			}
+		}
+	}
+	return fmt.Errorf("openai: HTTP status %d", code)
+}
+
 // Decode reads one bounded JSON response without exposing upstream response content.
 func (c *OpenAIHTTPClient) Decode(ctx context.Context, path string, payload, result any) error {
-	response, err := c.Post(ctx, path, payload)
+	return c.decode(ctx, path, payload, result, false)
+}
+
+// DecodeEmbedding reads an embedding response and optionally classifies provider window errors.
+func (c *OpenAIHTTPClient) DecodeEmbedding(ctx context.Context, payload, result any, embeddingErrors bool) error {
+	return c.decode(ctx, "/embeddings", payload, result, embeddingErrors)
+}
+
+func (c *OpenAIHTTPClient) decode(ctx context.Context, path string, payload, result any, embeddingErrors bool) error {
+	response, err := c.post(ctx, path, payload, embeddingErrors)
 	if err != nil {
 		return err
 	}

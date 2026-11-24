@@ -137,7 +137,14 @@ paths:
                 type: string
                 description: 'Events `context` (QueryStreamContext), `delta` (QueryStreamDelta), `done` (QueryStreamDone) and `error` (APIError); see [streamed query answers](api.md#streamed-query-answers).'
         '400':
-          $ref: '#/components/responses/Error'
+          description: 'Invalid query or embedding input rejected by the local profile. See [POST /query](api.md#post-query).'
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
         '401':
           $ref: '#/components/responses/Error'
         '403':
@@ -149,7 +156,14 @@ paths:
         '500':
           $ref: '#/components/responses/Error'
         '502':
-          $ref: '#/components/responses/Error'
+          description: 'Upstream synthesis or embedding model-window failure. See [POST /query](api.md#post-query).'
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
         '503':
           $ref: '#/components/responses/RetryableError'
         '504':
