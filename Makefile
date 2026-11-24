@@ -22,6 +22,7 @@ fuzz:
 	go test -run='^$$' -fuzz='^FuzzExtractors$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
 	go test -run='^$$' -fuzz='^FuzzDOCFIBAndPieces$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
 	go test -run='^$$' -fuzz='^FuzzDOCStoryPLC$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
+	go test -run='^$$' -fuzz='^FuzzDOCXStories$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
 	go test -run='^$$' -fuzz='^FuzzChunk$$' -fuzztime="$(FUZZTIME)" ./internal/chunker
 	go test -run='^$$' -fuzz='^FuzzChunkEmbeddingProfile$$' -fuzztime="$(FUZZTIME)" ./internal/chunker
 	go test -run='^$$' -fuzz='^FuzzDecodeProfile$$' -fuzztime="$(FUZZTIME)" ./internal/embeddinginput

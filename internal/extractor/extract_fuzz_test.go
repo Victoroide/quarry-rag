@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/testutil/docxtest"
 )
 
 func FuzzExtractors(f *testing.F) {
@@ -68,7 +69,7 @@ func extractorFuzzSeeds(t testing.TB) []struct {
 		{"document.pdf", fuzzPDF(t, true)},
 		{"document.docx", docxBytes(t, xml)},
 		{"document.docx", docxPartsBytes(t, map[string]string{
-			"_rels/.rels":     `<Relationships><Relationship Type="office/officeDocument" Target="custom/main.xml"/></Relationships>`,
+			"_rels/.rels":     docxtest.Relationships(docxtest.Relationship(testDOCXOfficeNS, "officeDocument", "main", "custom/main.xml")),
 			"custom/main.xml": xml,
 		})},
 		{"document.doc", docFixture(t, docCompressedPiece(t, "Document preservation requires stable storage."))},

@@ -1,7 +1,6 @@
 package extractor
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"errors"
@@ -9,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/testutil/docxtest"
 )
 
 func docxBytes(t testing.TB, xml string) []byte {
@@ -18,21 +18,7 @@ func docxBytes(t testing.TB, xml string) []byte {
 
 func docxPartsBytes(t testing.TB, parts map[string]string) []byte {
 	t.Helper()
-	var out bytes.Buffer
-	writer := zip.NewWriter(&out)
-	for name, content := range parts {
-		file, err := writer.Create(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := file.Write([]byte(content)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return out.Bytes()
+	return docxtest.Package(t, parts)
 }
 
 func TestDOCXTextBoxKeepsSurroundingText(t *testing.T) {

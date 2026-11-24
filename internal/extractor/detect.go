@@ -21,20 +21,21 @@ var (
 
 // Sniff identifies a supported format from its content, or returns an empty type.
 func Sniff(data []byte) FileType {
-	return sniff(context.Background(), data)
+	var work uint64
+	return sniff(context.Background(), data, &work)
 }
 
-func sniff(ctx context.Context, data []byte) FileType {
+func sniff(ctx context.Context, data []byte, docxWork *uint64) FileType {
 	if bytes.Contains(data[:min(len(data), 1024)], []byte("%PDF-")) {
 		return FileTypePDF
 	}
 	if bytes.HasPrefix(data, []byte("PK\x03\x04")) {
 		zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err == nil {
-			if docxPart(zr, "word/document.xml") != nil {
+			if docxPart(zr, docxDefaultMainPart) != nil {
 				return FileTypeDOCX
 			}
-			main, err := docxRelatedMainPart(ctx, zr)
+			main, err := docxRelatedMainPart(ctx, docxPart(zr, docxPackageRelationships), docxWork)
 			if err == nil && main != "" {
 				return FileTypeDOCX
 			}
@@ -159,15 +160,42 @@ func Resolve(filename string, data []byte) (FileType, error) {
 
 // ResolveContext verifies content while preserving cancellation during package reads.
 func ResolveContext(ctx context.Context, filename string, data []byte) (FileType, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
+	ft, _, err := resolve(ctx, filename, data)
+	return ft, err
+}
+
+type docxDetectionWorkKey struct{}
+
+func docxDetectionWork(ctx context.Context) uint64 {
+	work, _ := ctx.Value(docxDetectionWorkKey{}).(uint64)
+	return work
+}
+
+func withDOCXDetectionWork(ctx context.Context, work uint64) context.Context {
+	if work == 0 {
+		return ctx
 	}
-	sniffed := sniff(ctx, data)
+	return context.WithValue(ctx, docxDetectionWorkKey{}, work)
+}
+
+// ResolveForExtraction verifies the format and returns an extraction context
+// that carries XML work already performed while identifying a renamed DOCX main part.
+func ResolveForExtraction(ctx context.Context, filename string, data []byte) (FileType, context.Context, error) {
+	ft, work, err := resolve(ctx, filename, data)
+	return ft, withDOCXDetectionWork(ctx, work), err
+}
+
+func resolve(ctx context.Context, filename string, data []byte) (FileType, uint64, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", 0, err
+	}
+	var work uint64
+	sniffed := sniff(ctx, data, &work)
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
 	}
 	if sniffed == "" {
-		return "", ErrUnsupportedType
+		return "", 0, ErrUnsupportedType
 	}
 	var extension FileType
 	switch strings.ToLower(filepath.Ext(filename)) {
@@ -181,7 +209,7 @@ func ResolveContext(ctx context.Context, filename string, data []byte) (FileType
 		extension = FileTypeText
 	}
 	if extension != "" && extension != sniffed {
-		return "", fmt.Errorf("%w: %s", ErrTypeMismatch, filename)
+		return "", 0, fmt.Errorf("%w: %s", ErrTypeMismatch, filename)
 	}
-	return sniffed, nil
+	return sniffed, work, nil
 }

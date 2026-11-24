@@ -31,6 +31,8 @@ jobs:
             target: FuzzDOCFIBAndPieces
           - package: ./internal/extractor
             target: FuzzDOCStoryPLC
+          - package: ./internal/extractor
+            target: FuzzDOCXStories
           - package: ./internal/chunker
             target: FuzzChunk
           - package: ./internal/chunker
