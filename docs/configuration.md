@@ -60,7 +60,8 @@ The table below lists the environment variables recognized by the service:
 | `MAX_UPLOAD_BYTES` | int64 | `20971520` (20 MiB) | 1 to 104857600 (100 MiB) | Maximum accepted request payload size for multipart file uploads in bytes. |
 | `METRICS_ADDR` | string | `""` (disabled) | Optional TCP listen address | Separate metrics listener. See [Metrics](deployment.md#metrics) for listener exposure guidance. |
 | `MIN_RELEVANCE_SCORE` | float64 | `0` | 0 to 1, finite | Absolute relevance floor before adaptive context selection. Zero disables this floor. |
-| `OCR_PROVIDER` | string | `none` | `none` or `textract`; `textract` requires `S3_BUCKET` | Enables [image-only PDF OCR](api.md#image-only-pdf-ocr) after the parser finds no text. Offline fake mode never calls Textract and keeps the parser-only behavior. |
+| `OCR_PDF_MODE` | string | `image_only` | `image_only` or `mixed`; `mixed` requires `OCR_PROVIDER=textract`, `EXTRACT_ISOLATION=true` and `GO_RAG_FAKE_MODE=false` | Selects [whole-document](api.md#image-only-pdf-ocr) or [page-aware](api.md#mixed-pdf-ocr) detection. Follow the [rollout procedure](deployment.md#mixed-pdf-ocr-rollout) before enabling `mixed`. |
+| `OCR_PROVIDER` | string | `none` | `none` or `textract`; `textract` requires `S3_BUCKET` | Enables PDF OCR. Offline fake mode keeps parser-only ingestion. |
 | `OCR_TIMEOUT` | duration | `10m` | Positive; below `INGEST_JOB_TIMEOUT` when OCR is enabled | Total Textract start, polling and result pagination budget per ingestion attempt. Earlier job cancellation takes precedence. |
 | `OPENAI_API_KEY` | secret string | `""` | Optional; no whitespace or control characters | Bearer credential read only from configuration. Sent only to the configured endpoint; redirects are rejected. Keep it in secret storage and out of logs. |
 | `OPENAI_BASE_URL` | string | `""` | Required when either provider is `openai`; absolute HTTP or HTTPS address without credentials, query or fragment | Explicit API base address, including its version prefix when required. Endpoint paths are appended to this address; there is no implicit public endpoint. Use HTTPS for remote endpoints. |
@@ -307,6 +308,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `010_document_deletions.sql` | Adds a nullable incarnation column with a random UUID default for future inserts, an empty deletion receipt table and a singleton with a null activation timestamp. It leaves existing rows in place. |
 | `011_grant_catalog.sql` | Installs the [operator grant catalog](grant-catalog.md) with an empty policy at revision zero. |
 | `012_index_visibility.sql` | Adds index visibility observations to documents and a lease token to ingestion jobs. |
+| `015_mixed_pdf_ocr.sql` | Records page manifests, versioned extraction provenance, and coverage. Adds a lease constraint for jobs that require a mixed-PDF worker. |
 | `017_evaluation_fixtures.sql` | Adds durable receipts and UUID reservations for the [opt-in evaluation fixtures](development.md#evidence-evaluation). |
 | `018_evaluation_vector_identity.sql` | Binds new fixture receipts to their vector store and permits reservations for durably retired submissions. |
 | `019_evaluation_fixture_guards.sql` | Moves the reservation checks used by ordinary admission, leasing and removal into owner-defined predicates, so a restricted serving login needs no access to the receipt table. |

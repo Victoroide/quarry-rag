@@ -11,6 +11,7 @@ type ingestOptions struct {
 	maxPending            int
 	extract               func(context.Context, extractor.FileType, []byte) (string, error)
 	limiter               *extractor.Limiter
+	extractPages          func(context.Context, []byte) (domain.PDFPages, error)
 	ocr                   bool
 	contentDedup          domain.ContentDedup
 	fixturePrefix         string
@@ -23,6 +24,11 @@ func WithEvaluationFixtures(prefix, vectorIdentity string) IngestOption {
 		opts.fixturePrefix = prefix
 		opts.fixtureVectorIdentity = vectorIdentity
 	}
+}
+
+// WithMixedPDFOCR enables page-aware ingestion using the isolated PDF parser.
+func WithMixedPDFOCR(extract func(context.Context, []byte) (domain.PDFPages, error)) IngestOption {
+	return func(opts *ingestOptions) { opts.extractPages = extract }
 }
 
 // WithOCR enables deferred text detection for image-only PDF uploads.

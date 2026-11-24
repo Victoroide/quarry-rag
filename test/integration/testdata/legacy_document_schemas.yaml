@@ -50,6 +50,57 @@
           format: date-time
         last_error:
           type: string
+    # Incarnation projection published at 4dadde7.
+    DocumentIncarnationList:
+      type: object
+      additionalProperties: false
+      required: [documents, count]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentIncarnationSummary'
+        count:
+          type: integer
+        next_after:
+          type: [string, 'null']
+          format: uuid
+    DocumentIncarnationSummary:
+      type: object
+      additionalProperties: false
+      required: [document_id, doc_type, collection, status, chunk_count, file_name, file_type, created_at, updated_at, completed_at, incarnation]
+      properties:
+        document_id:
+          type: string
+          format: uuid
+        doc_type:
+          type: string
+        collection:
+          type: string
+        s3_key:
+          type: string
+        status:
+          type: string
+        chunk_count:
+          type: integer
+        file_name:
+          type: [string, 'null']
+        file_type:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+        last_error:
+          type: string
+        incarnation:
+          type: string
+          format: uuid
     DocumentRef:
       type: object
       description: 'See [legacy document references](api.md#get-documents).'

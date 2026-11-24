@@ -70,8 +70,16 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			ingestOpts = append(ingestOpts, handler.WithExtractor(func(context.Context, extractor.FileType, []byte) (string, error) {
 				return "", extractor.ErrExtractionUnavailable
 			}))
+			if deps.Config.OCRPDFMode == config.OCRPDFMixed {
+				ingestOpts = append(ingestOpts, handler.WithMixedPDFOCR(func(context.Context, []byte) (domain.PDFPages, error) {
+					return nil, extractor.ErrExtractionUnavailable
+				}))
+			}
 		} else {
 			ingestOpts = append(ingestOpts, handler.WithExtractor(tracing.WrapExtract(sb.Extract)))
+			if deps.Config.OCRPDFMode == config.OCRPDFMixed {
+				ingestOpts = append(ingestOpts, handler.WithMixedPDFOCR(sb.ExtractPDFPages))
+			}
 		}
 	} else {
 		docStories, docxStories := deps.Config.DOCStories, deps.Config.DOCXStories

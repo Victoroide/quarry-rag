@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
+	"github.com/Victoroide/quarry-rag/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +30,11 @@ func (s *ocrAcceptStore) CheckFingerprint(_ context.Context, fp string) (domain.
 }
 func (s *ocrAcceptStore) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
 	_, err := s.validationAcceptStore.AcceptDocument(ctx, req)
-	return domain.AcceptResult{DocumentID: req.Document.ID, Outcome: s.outcome}, err
+	outcome := s.outcome
+	if outcome == domain.AcceptNeedsSource && req.Document.S3Key != nil {
+		outcome = domain.AcceptAccepted
+	}
+	return domain.AcceptResult{DocumentID: req.Document.ID, Outcome: outcome}, err
 }
 
 type ocrObjects struct {
@@ -60,6 +66,48 @@ func ocrUpload(t *testing.T, filename, collection string, data []byte) *http.Req
 	r.Header.Set("Content-Type", mw.FormDataContentType())
 	return r
 }
+func TestMixedPDFUploadClassifiesFreeTextAnnotations(t *testing.T) {
+	const heading = "Operations register"
+	const instruction = "Delivery requires refrigeration"
+	const annotation = "<< /Type /Annot /Subtype /FreeText /Rect [12 40 330 125] /F %d /Contents (%s) /DA (/F1 15 Tf 0 g) /Border [0 0 0] >>"
+	for _, tc := range []struct {
+		name, annotation string
+		evidence         domain.PDFPageEvidence
+		coverage         domain.PDFCoverage
+	}{
+		{name: "printable", annotation: fmt.Sprintf(annotation, 4, instruction), evidence: domain.PDFUnreadable, coverage: domain.PDFPending},
+		{name: "blank", evidence: domain.PDFBlank, coverage: domain.PDFComplete},
+		{name: "hidden", annotation: fmt.Sprintf(annotation, 6, instruction), evidence: domain.PDFBlank, coverage: domain.PDFComplete},
+		{name: "empty", annotation: fmt.Sprintf(annotation, 4, ""), evidence: domain.PDFBlank, coverage: domain.PDFComplete},
+		{name: "whitespace", annotation: fmt.Sprintf(annotation, 4, "  "), evidence: domain.PDFBlank, coverage: domain.PDFComplete},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := testutil.PDFWithPageAnnotation(tc.annotation, "BT /F1 14 Tf 20 150 Td ("+heading+") Tj ET", "")
+			s := &ocrAcceptStore{outcome: domain.AcceptNeedsSource}
+			objects := &ocrObjects{}
+			h := IngestHandler(nil, s, objects, 1<<20, WithMixedPDFOCR(func(ctx context.Context, data []byte) (domain.PDFPages, error) {
+				return extractor.ExtractPDFPages(ctx, bytes.NewReader(data))
+			}))
+			rw := httptest.NewRecorder()
+			h(rw, ocrUpload(t, "register.pdf", "archive", data))
+			require.Equal(t, http.StatusAccepted, rw.Code, rw.Body.String())
+			require.Equal(t, data, objects.data)
+			require.Len(t, s.accepted, 2)
+			req := s.accepted[1]
+			require.NotNil(t, req.PDF)
+			require.Equal(t, tc.coverage, req.PDF.Coverage)
+			require.Len(t, req.PDF.Pages, 2)
+			require.Equal(t, heading, req.PDF.Pages.Text())
+			require.Equal(t, domain.PDFPage{Number: 2, Evidence: tc.evidence}, req.PDF.Pages[1])
+			if tc.coverage == domain.PDFPending {
+				require.Empty(t, req.Document.Content)
+			} else {
+				require.Equal(t, heading, req.Document.Content)
+			}
+		})
+	}
+}
+
 func TestOCRUploadAcceptance(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
@@ -147,4 +195,98 @@ func TestPrivateOCRUploadSkipsSharedLookup(t *testing.T) {
 	require.Equal(t, chunker.ScopedFingerprint("archive", string(data)), store.accepted[0].Fingerprint)
 	require.Equal(t, data, objects.data)
 	require.False(t, objects.deleted)
+}
+
+func TestMixedPDFUploadChecksManifestBeforeObjectStorage(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		pages    domain.PDFPages
+		err      error
+		status   int
+		coverage domain.PDFCoverage
+	}{
+		{"mixed", domain.PDFPages{{Number: 1, Evidence: domain.PDFImage}, {Number: 2, Evidence: domain.PDFEmbedded, Text: "Archive operating hours"}}, nil, http.StatusAccepted, domain.PDFPending},
+		{"digital", domain.PDFPages{{Number: 1, Evidence: domain.PDFEmbedded, Text: "Archive operating hours"}, {Number: 2, Evidence: domain.PDFBlank}}, nil, http.StatusAccepted, domain.PDFComplete},
+		{"blank", domain.PDFPages{{Number: 1, Evidence: domain.PDFBlank}}, nil, http.StatusUnprocessableEntity, ""},
+		{"invalid", nil, extractor.ErrExtractionFailed, http.StatusUnprocessableEntity, ""},
+		{"missing", domain.PDFPages{{Number: 2, Evidence: domain.PDFImage}}, nil, http.StatusUnprocessableEntity, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &ocrAcceptStore{outcome: domain.AcceptNeedsSource}
+			objects := &ocrObjects{}
+			data := []byte("%PDF-1.4\nsynthetic original")
+			h := IngestHandler(nil, s, objects, 1<<20, WithMixedPDFOCR(func(context.Context, []byte) (domain.PDFPages, error) { return tc.pages, tc.err }))
+			rw := httptest.NewRecorder()
+			h(rw, ocrUpload(t, "scan.pdf", "archive", data))
+			require.Equal(t, tc.status, rw.Code, rw.Body.String())
+			if tc.coverage == "" {
+				require.Empty(t, objects.data)
+				require.Empty(t, s.accepted)
+				return
+			}
+			require.Equal(t, data, objects.data)
+			require.Len(t, s.accepted, 2)
+			require.Equal(t, tc.coverage, s.accepted[1].PDF.Coverage)
+			require.Equal(t, s.accepted[0].Fingerprint, s.accepted[1].Fingerprint)
+			require.NotEqual(t, chunker.ScopedFingerprint("archive", string(data)), s.accepted[1].Fingerprint)
+			if tc.coverage == domain.PDFPending {
+				require.Empty(t, s.accepted[1].Document.Content)
+			}
+		})
+	}
+}
+
+// legacyLookupStore reports that a clean anonymous PDF needs its historical
+// parser identity before the store can decide whether it is a duplicate.
+type legacyLookupStore struct{ ocrAcceptStore }
+
+func (s *legacyLookupStore) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
+	if req.TryLegacyPDFText {
+		s.accepted = append(s.accepted, req)
+		return domain.AcceptResult{DocumentID: req.Document.ID, Outcome: domain.AcceptNeedsPDFText}, nil
+	}
+	return s.ocrAcceptStore.AcceptDocument(ctx, req)
+}
+
+func TestMixedPDFLegacyIdentityLookupFailureStopsBeforeAdmission(t *testing.T) {
+	clean := domain.PDFPages{{Number: 1, Evidence: domain.PDFEmbedded, Text: "Archive operating hours"}}
+	data := []byte("%PDF-1.4\nsynthetic original")
+	for _, tc := range []struct {
+		name        string
+		text        string
+		err         error
+		status      int
+		stored      bool
+		fingerprint string
+	}{
+		{"extraction unavailable", "", extractor.ErrExtractionUnavailable, http.StatusServiceUnavailable, false, ""},
+		{"wrapped extraction unavailable", "", fmt.Errorf("%w: child failed", extractor.ErrExtractionUnavailable), http.StatusServiceUnavailable, false, ""},
+		{"extraction timeout", "", extractor.ErrExtractionTimeout, http.StatusUnprocessableEntity, false, ""},
+		{"canceled", "", context.Canceled, http.StatusUnprocessableEntity, false, ""},
+		{"deadline exceeded", "", context.DeadlineExceeded, http.StatusUnprocessableEntity, false, ""},
+		{"parser failure", "", extractor.ErrExtractionFailed, http.StatusUnprocessableEntity, false, ""},
+		{"conclusive no text", "", extractor.ErrNoText, http.StatusAccepted, true, ""},
+		{"wrapped no text", "", fmt.Errorf("extractor: pdf: %w", extractor.ErrNoText), http.StatusAccepted, true, ""},
+		{"readable legacy text", "Archive operating hours", nil, http.StatusAccepted, true, chunker.ScopedFingerprint("archive", "Archive operating hours")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &legacyLookupStore{ocrAcceptStore{outcome: domain.AcceptNeedsSource}}
+			objects := &ocrObjects{}
+			h := IngestHandler(nil, s, objects, 1<<20,
+				WithMixedPDFOCR(func(context.Context, []byte) (domain.PDFPages, error) { return clean, nil }),
+				WithExtractor(func(context.Context, extractor.FileType, []byte) (string, error) { return tc.text, tc.err }))
+			rw := httptest.NewRecorder()
+			h(rw, ocrUpload(t, "archive.pdf", "archive", data))
+			require.Equal(t, tc.status, rw.Code, rw.Body.String())
+			if !tc.stored {
+				require.Empty(t, objects.data, "a source object was stored before the identity was known")
+				require.Len(t, s.accepted, 1, "the document was admitted after an inconclusive identity lookup")
+				return
+			}
+			require.Equal(t, data, objects.data)
+			require.Len(t, s.accepted, 3)
+			require.Equal(t, tc.fingerprint, s.accepted[1].LegacyParserFingerprint)
+			require.Equal(t, tc.fingerprint, s.accepted[2].LegacyParserFingerprint)
+		})
+	}
 }

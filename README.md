@@ -148,13 +148,13 @@ The service reads configuration only from environment variables. [Configuration]
 
 ## Limits
 
-JSON ingestion accepts at most 1,000,000 bytes of decoded content. Its request-body cap is 8,097,152 bytes, allowing sixfold JSON escaping plus metadata overhead; queries accept a 1 MiB body. Every upload format enforces the same decoded-text limit. PDF extraction also enforces an 8 MiB decoded-stream budget. Oversized bodies return 413; parser extraction-limit failures return 422. See the [API reference](docs/api.md#image-only-pdf-ocr) for deferred OCR outcomes.
+JSON ingestion accepts at most 1,000,000 bytes of decoded content. Its request-body cap is 8,097,152 bytes, allowing sixfold JSON escaping plus metadata overhead; queries accept a 1 MiB body. Every upload format enforces the same decoded-text limit. PDF extraction also enforces an 8 MiB decoded-stream budget. Oversized bodies return 413; parser extraction-limit failures return 422. See the API reference for [image-only](docs/api.md#image-only-pdf-ocr) and [mixed PDF OCR](docs/api.md#mixed-pdf-ocr).
 
 The runtime image uses numeric UID/GID `10001:10001`. A failed automatic routing probe falls back to GLOBAL retrieval.
 
 ## Limitations
 
-- **Image-only PDFs need the optional OCR integration.** PDF extraction reads embedded text. Without [`OCR_PROVIDER=textract`](docs/configuration.md#environment-variables), image-only PDFs return 422 with `no_text`. With OCR, text detection runs during ingestion and adds [Amazon Textract cost and latency](docs/deployment.md#optional-pdf-ocr). PDFs that contain embedded text are not sent to OCR, so scanned pages in mixed documents are not extracted.
+- **Scanned PDF pages need optional OCR.** Without [`OCR_PROVIDER=textract`](docs/configuration.md#environment-variables), image-only PDFs return 422 with `no_text`. The default `image_only` mode extracts embedded text when present. Enable [mixed PDF OCR](docs/api.md#mixed-pdf-ocr) to recover scans in PDFs that also contain digital pages.
 - **PDF layout fidelity depends on the parser.** Plain-text extraction does not reconstruct table structure or guarantee reading order and spacing in complex layouts. Check extracted content when layout carries meaning.
 - **Encrypted DOC files and Word 6/95 binaries are unsupported.** The DOC reader returns 422 with `encrypted` or `unsupported_version`, and the API accepts no decryption password. Convert these documents before uploading them.
 - **Hosted-index documents can take a moment to become searchable.** Completion waits up to [`INDEX_VISIBILITY_TIMEOUT`](docs/configuration.md#environment-variables) for the hosted index to return a document's last written vector. If the wait ends first, the document completes anyway, the service logs a warning and counts it, and the document becomes searchable once the index catches up. The PostgreSQL vector store has no visibility delay after completion. After deletion, the PostgreSQL visibility check excludes the document from new answers even if vectors remain in the hosted index temporarily.

@@ -3,7 +3,39 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
+
+func TestPDFOCRMode(t *testing.T) {
+	for _, tc := range []struct{ mode, provider, fake, isolate, want string }{
+		{"", "none", "true", "true", "image_only"},
+		{"mixed", "textract", "false", "true", "mixed"},
+		{"mixed", "none", "false", "true", "OCR_PROVIDER"},
+		{"mixed", "textract", "true", "true", "GO_RAG_FAKE_MODE"},
+		{"mixed", "textract", "false", "false", "EXTRACT_ISOLATION"},
+		{"unknown", "none", "true", "true", "OCR_PDF_MODE"},
+	} {
+		t.Run(tc.mode+tc.provider+tc.fake+tc.isolate, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
+			t.Setenv("AWS_REGION", "us-east-1")
+			t.Setenv("SERVICE_TOKEN", "synthetic-service-token")
+			t.Setenv("VECTOR_STORE", "postgres")
+			t.Setenv("S3_BUCKET", "synthetic-bucket")
+			t.Setenv("OCR_PDF_MODE", tc.mode)
+			t.Setenv("OCR_PROVIDER", tc.provider)
+			t.Setenv("GO_RAG_FAKE_MODE", tc.fake)
+			t.Setenv("EXTRACT_ISOLATION", tc.isolate)
+			cfg, err := Load()
+			if tc.want == "mixed" || tc.want == "image_only" {
+				require.NoError(t, err)
+				require.Equal(t, tc.want, cfg.OCRPDFMode)
+			} else {
+				require.ErrorContains(t, err, tc.want)
+			}
+		})
+	}
+}
 
 func TestOCRConfiguration(t *testing.T) {
 	for _, tc := range []struct{ name, provider, bucket, timeout, jobTimeout, wantError string }{

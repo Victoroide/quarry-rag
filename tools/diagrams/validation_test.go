@@ -15,7 +15,8 @@ import (
 func TestMigrationParser(t *testing.T) {
 	sql := `CREATE TABLE IF NOT EXISTS parents (id UUID PRIMARY KEY, label VARCHAR(120), amount NUMERIC(10,2));
  CREATE TABLE children (id UUID PRIMARY KEY, parent_id UUID REFERENCES parents(id));
- ALTER TABLE parents ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ, ADD COLUMN old TEXT;
+ ALTER TABLE parents ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ, ADD COLUMN old TEXT,
+     ADD CONSTRAINT amount_range CHECK (amount > 0 AND amount < 100);
  DO $$ BEGIN ALTER TABLE parents ADD COLUMN active BOOLEAN; END $$;
  ALTER TABLE parents DROP COLUMN IF EXISTS old;`
 	got, err := parseSQL(sql)
@@ -576,14 +577,14 @@ func TestDataModelRowsAndPorts(t *testing.T) {
 	for i, e := range d.Edges {
 		parent := nodes[e.From]
 		child := nodes[e.To]
-		if e.From != "documents" || math.Abs(e.Points[0][1]-(parent.Box.Y+66+float64(i-1)*12)) > .5 {
+		if e.From != "documents" || math.Abs(e.Points[0][1]-(parent.Box.Y+48+float64(i)*12)) > .5 {
 			t.Errorf("%s source must lie within the id row", e.ID)
 		}
 		found := false
 		for j, c := range child.Columns {
 			if c.Reference == "documents.id" {
 				found = true
-				if math.Abs(e.Points[len(e.Points)-1][1]-(child.Box.Y+66+float64(j)*20)) > .5 {
+				if math.Abs(e.Points[len(e.Points)-1][1]-(child.Box.Y+schemaColumnBaseline(j)-6)) > .5 {
 					t.Errorf("%s must point to its child FK row", e.ID)
 				}
 			}
@@ -598,7 +599,7 @@ func TestDataModelRowsAndPorts(t *testing.T) {
 			for _, l := range sceneLabels(d) {
 				if l.Owner == n.ID && l.Text == c.Name {
 					found = true
-					if math.Abs(l.Y-(n.Box.Y+72+float64(i)*20)) > .5 {
+					if math.Abs(l.Y-(n.Box.Y+schemaColumnBaseline(i))) > .5 {
 						t.Errorf("%s.%s row spacing", n.ID, c.Name)
 					}
 				}

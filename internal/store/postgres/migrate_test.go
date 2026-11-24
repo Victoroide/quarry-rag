@@ -21,6 +21,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestEmbeddedMigrationsIncludeIndexVisibilityAndMixedPDF(t *testing.T) {
+	migrations, err := loadMigrations(migrationFiles)
+	require.NoError(t, err)
+	names := make(map[int]string, len(migrations))
+	for _, migration := range migrations {
+		names[migration.version] = migration.name
+	}
+	require.Equal(t, "012_index_visibility.sql", names[12])
+	require.Equal(t, "015_mixed_pdf_ocr.sql", names[15])
+}
+
 func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	url := startTestDatabase(t)
 	c := migrationTestClient(t, url)
@@ -34,7 +45,7 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	require.Equal(t, domain.AcceptAccepted, result.Outcome)
 	id := string(result.DocumentID)
 	// The pre-migration binary claimed work without a lease token.
-	job := domain.Job{Document: req.Document, LeaseOwner: "schema-upgrade", Attempts: 1}
+	job := domain.Job{Document: req.Document, LeaseOwner: "schema-upgrade", Attempts: 1, Incarnation: id}
 	_, err = c.Pool.Exec(ctx, `UPDATE ingest_jobs SET state='running',attempts=$2,lease_owner=$3,lease_until=NOW()+interval '1 minute' WHERE document_id=$1`, id, job.Attempts, job.LeaseOwner)
 	require.NoError(t, err)
 	chunkID := uuid.NewString()
@@ -49,7 +60,7 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 		var s snapshot
 		require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_relation_filenode('documents'), jsonb_build_array(
 			to_jsonb(d)-'incarnation'-'grant_catalog_assigned'-'index_visibility'-'index_visibility_observed_at',
-			to_jsonb(ch), to_jsonb(f), to_jsonb(j)-'lease_token')::text
+			to_jsonb(ch), to_jsonb(f), to_jsonb(j)-'lease_token'-'pdf_required'-'pdf_claim_attempt')::text
 			FROM documents d JOIN chunks ch ON ch.document_id=d.id
 			JOIN document_fingerprints f ON f.document_id=d.id JOIN ingest_jobs j ON j.document_id=d.id
 			WHERE d.id=$1 AND j.state='running' AND j.lease_until > clock_timestamp()`, id).Scan(&s.filenode, &s.rows))

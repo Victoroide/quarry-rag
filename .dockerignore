@@ -2,6 +2,7 @@ docs/
 # Documents read by the test stage.
 !docs/api.md
 !docs/deployment.md
+!docs/grant-catalog.md
 !docs/openapi.yaml
 .env
 .env.*

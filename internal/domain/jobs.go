@@ -19,6 +19,9 @@ const (
 	AcceptConflict
 	AcceptQueueFull
 	AcceptNeedsSource
+	AcceptOCRRetryRequired
+	AcceptNeedsPDFText
+	AcceptOCRRetryAfterExpiry
 )
 
 // ContentDedup controls whether uploads participate in collection-wide content matching.
@@ -42,6 +45,10 @@ type AcceptRequest struct {
 	MaxPending               int
 	EvaluationReceipt        string
 	EvaluationVectorIdentity string
+	PDF                      *PDFExtraction
+	LegacyParserFingerprint  string
+	LegacyOCRFingerprint     string
+	TryLegacyPDFText         bool
 }
 
 // AcceptResult identifies the document selected by acceptance.
@@ -56,15 +63,23 @@ type DocumentAcceptor interface {
 	AcceptDocument(context.Context, AcceptRequest) (AcceptResult, error)
 }
 
+// ExistingPDFAcceptor resolves an existing PDF without admitting a new document.
+// Anonymous requests may match only collection-wide original-byte identities.
+type ExistingPDFAcceptor interface {
+	AcceptExistingPDF(ctx context.Context, request AcceptRequest, includeLegacy bool) (AcceptResult, error)
+}
+
 // Job carries the document and the current lease identity.
 type Job struct {
-	Document   Document
-	DocType    string
-	Attempts   int
-	LeaseOwner string
-	LeaseToken *string
+	Document    Document
+	DocType     string
+	Attempts    int
+	LeaseOwner  string
+	LeaseToken  *string
+	Incarnation string
 
 	Collection string
+	PDF        *PDFExtraction
 }
 
 // JobStore coordinates durable ingestion through owned leases.

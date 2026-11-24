@@ -24,6 +24,12 @@ const (
 	QueryAnswerPolicyEvidenceOnly = "evidence_only"
 )
 
+// PDF OCR modes control which pages can trigger text detection.
+const (
+	OCRPDFImageOnly = "image_only"
+	OCRPDFMixed     = "mixed"
+)
+
 // Config holds all operational parameters for the service.
 // Every field is populated from environment variables at startup.
 type Config struct {
@@ -70,6 +76,7 @@ type Config struct {
 	MaxUploadBytes int64
 
 	OCRProvider string
+	OCRPDFMode  string
 	OCRTimeout  time.Duration
 
 	// SynthesisModel selects primary, fallback or hybrid answer routing.
@@ -190,6 +197,7 @@ func Load() (*Config, error) {
 		AWSSessionToken:           os.Getenv("AWS_SESSION_TOKEN"),
 		RerankModelARN:            os.Getenv("RERANK_MODEL_ARN"),
 		OCRProvider:               envOrDefault("OCR_PROVIDER", "none"),
+		OCRPDFMode:                envOrDefault("OCR_PDF_MODE", OCRPDFImageOnly),
 		IngestContentDedup:        domain.ContentDedup(envOrDefault("INGEST_CONTENT_DEDUP", string(domain.ContentDedupCollection))),
 		IndexVisibilityMode:       envOrDefault("INDEX_VISIBILITY_MODE", "sample"),
 	}
@@ -378,6 +386,15 @@ func (c *Config) validate() error {
 	}
 	if c.OCRProvider == "textract" && strings.TrimSpace(c.S3Bucket) == "" {
 		return fmt.Errorf("config: OCR_PROVIDER=textract requires S3_BUCKET")
+	}
+	switch c.OCRPDFMode {
+	case "", OCRPDFImageOnly:
+	case OCRPDFMixed:
+		if c.OCRProvider != "textract" || c.FakeMode || !c.ExtractIsolation {
+			return fmt.Errorf("config: OCR_PDF_MODE=mixed requires OCR_PROVIDER=textract, S3_BUCKET, EXTRACT_ISOLATION=true and GO_RAG_FAKE_MODE=false")
+		}
+	default:
+		return fmt.Errorf("config: OCR_PDF_MODE must be image_only or mixed")
 	}
 	if c.VectorStore != "" && c.VectorStore != "pinecone" && c.VectorStore != "postgres" {
 		return fmt.Errorf("config: VECTOR_STORE must be pinecone or postgres")

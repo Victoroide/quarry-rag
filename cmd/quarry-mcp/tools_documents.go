@@ -14,6 +14,7 @@ type listInput struct {
 
 	Collection             string `json:"collection,omitempty" jsonschema:"Only list documents with this collection label; empty means all collections."`
 	IncludeIndexVisibility bool   `json:"include_index_visibility,omitempty" jsonschema:"Include the index visibility observation."`
+	IncludePDFCoverage     bool   `json:"include_pdf_coverage,omitempty" jsonschema:"Include recorded mixed PDF extraction coverage."`
 }
 
 type documentInput struct {
@@ -23,6 +24,7 @@ type documentInput struct {
 type getDocumentInput struct {
 	documentInput
 	IncludeIndexVisibility bool `json:"include_index_visibility,omitempty" jsonschema:"Include the index visibility observation."`
+	IncludePDFCoverage     bool `json:"include_pdf_coverage,omitempty" jsonschema:"Include recorded mixed PDF extraction coverage."`
 }
 
 type listOutput struct {
@@ -39,7 +41,9 @@ func registerDocumentTools(s *mcp.Server, api *client.Client, cfg config) error 
 	schema.Properties["limit"].Maximum = new(float64(1000))
 	schema.Properties["limit"].Default = []byte("100")
 	addAPITool(s, &mcp.Tool{Name: "quarry_list_documents", Description: "List a page of document summaries and ingestion statuses", Annotations: readAnnotations(), InputSchema: schema}, cfg.token, func(ctx context.Context, input listInput) (listOutput, error) {
-		page, err := api.ListDocuments(ctx, client.ListOptions{Limit: input.Limit, After: input.After, Collection: input.Collection, IncludeIndexVisibility: input.IncludeIndexVisibility})
+		page, err := api.ListDocuments(ctx, client.ListOptions{
+			Limit: input.Limit, After: input.After, Collection: input.Collection, IncludePDFCoverage: input.IncludePDFCoverage, IncludeIndexVisibility: input.IncludeIndexVisibility,
+		})
 		if err != nil {
 			return listOutput{}, err
 		}
@@ -49,6 +53,12 @@ func registerDocumentTools(s *mcp.Server, api *client.Client, cfg config) error 
 		return listOutput{Documents: page.Documents, NextAfter: page.NextAfter}, nil
 	})
 	addAPITool(s, &mcp.Tool{Name: "quarry_get_document", Description: "Get a document summary and ingestion status", Annotations: readAnnotations()}, cfg.token, func(ctx context.Context, input getDocumentInput) (*client.DocumentSummary, error) {
+		if input.IncludeIndexVisibility && input.IncludePDFCoverage {
+			return api.GetDocumentWithIndexVisibilityAndPDFCoverage(ctx, input.DocumentID)
+		}
+		if input.IncludePDFCoverage {
+			return api.GetDocumentWithPDFCoverage(ctx, input.DocumentID)
+		}
 		if input.IncludeIndexVisibility {
 			return api.GetDocumentWithIndexVisibility(ctx, input.DocumentID)
 		}
