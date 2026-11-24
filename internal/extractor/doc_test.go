@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"runtime"
 	"strings"
 	"testing"
@@ -141,6 +142,7 @@ func docStreams(t testing.TB, pieces ...docPiece) (word, table []byte) {
 	}
 	binary.LittleEndian.PutUint32(table[5+4*len(pieces):], cp)
 	binary.LittleEndian.PutUint32(word[0x4C:], cp)
+	binary.LittleEndian.PutUint32(word[0x40:], docFixtureSize(t, len(word)))
 	word = append(word, make([]byte, max(0, 4096-len(word)))...)
 	return word, table
 }
@@ -287,9 +289,9 @@ func TestDOCSelectedTableAndProperties(t *testing.T) {
 func TestDOCFIBVariableCounts(t *testing.T) {
 	word, table := docStreams(t, docCompressedPiece(t, "Variable field counts."))
 	copy(word[0xA0:0xA0+93*8], word[0x9A:0x9A+93*8])
+	copy(word[0x42:0x42+22*4], word[0x40:0x40+22*4])
 	binary.LittleEndian.PutUint16(word[0x20:], 15)
 	binary.LittleEndian.PutUint16(word[0x40:], 23)
-	binary.LittleEndian.PutUint32(word[0x4E:], uint32(len("Variable field counts.")))
 	binary.LittleEndian.PutUint16(word[0x9E:], 93)
 	data := buildCFB(t, []cfbStream{{name: "WordDocument", data: word}, {name: "0Table", data: table}}, cfbOptions{})
 	got, err := New(FileTypeDOC).Extract(t.Context(), bytes.NewReader(data))
@@ -310,13 +312,99 @@ func TestDOCRejectsTableStreamLargerThanContainer(t *testing.T) {
 }
 
 func TestDOCMainStoryOnly(t *testing.T) {
-	word, table := docStreams(t, docUnicodePiece("本文"), docCompressedPiece(t, "Header and footnote text."))
-	binary.LittleEndian.PutUint32(word[0x4C:], 2)
+	const note = "Footnote text.\r\r"
+	// The first piece spans the body boundary and the final CP is a guard.
+	word, table := docStreams(t, docUnicodePiece("本文\r"+note), docCompressedPiece(t, "\r"))
+	binary.LittleEndian.PutUint32(word[0x4C:], 3)
+	binary.LittleEndian.PutUint32(word[0x50:], uint32(len(note)))
+	table = appendDOCFixturePLC(t, word, table, 3, 0, uint32(len(note)-1), 0)
 	data := buildCFB(t, []cfbStream{{name: "WordDocument", data: word}, {name: "0Table", data: table}}, cfbOptions{})
 	got, err := New(FileTypeDOC).Extract(t.Context(), bytes.NewReader(data))
 	if err != nil || got != "本文" {
 		t.Fatalf("got %q, %v", got, err)
 	}
+}
+
+func appendDOCFixturePLC(t testing.TB, word, table []byte, index int, cps ...uint32) []byte {
+	t.Helper()
+	var data []byte
+	for _, cp := range cps {
+		data = binary.LittleEndian.AppendUint32(data, cp)
+	}
+	return appendDOCFixtureTable(t, word, table, index, data)
+}
+
+func appendDOCFixtureTable(t testing.TB, word, table []byte, index int, data []byte) []byte {
+	t.Helper()
+	pair := word[0x9A+8*index:]
+	binary.LittleEndian.PutUint32(pair, docFixtureSize(t, len(table)))
+	binary.LittleEndian.PutUint32(pair[4:], docFixtureSize(t, len(data)))
+	return append(table, data...)
+}
+
+func TestDOCChecksUnselectedCharacterRanges(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		mutate        func(word, table []byte)
+		unexpectedEOF bool
+	}{
+		{"negative footnote count", func(w, _ []byte) { binary.LittleEndian.PutUint32(w[0x50:], 0xffffffff) }, false},
+		{"negative header textbox count", func(w, _ []byte) { binary.LittleEndian.PutUint32(w[0x68:], 0xffffffff) }, false},
+		{"aggregate overflow", func(w, _ []byte) { binary.LittleEndian.PutUint32(w[0x64:], 0x7fffffff) }, false},
+		{"missing final guard", func(w, _ []byte) { binary.LittleEndian.PutUint32(w[0x50:], 4) }, false},
+		{"duplicate piece CP", func(_, tb []byte) { binary.LittleEndian.PutUint32(tb[9:], 0) }, false},
+		{"short unselected piece", func(_, tb []byte) { binary.LittleEndian.PutUint32(tb[27:], 4094) }, true},
+		{"piece past logical Word stream", func(w, _ []byte) { binary.LittleEndian.PutUint32(w[0x40:], 0x805) }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			word, table := docStreams(t, docCompressedPiece(t, "Body\r"), docUnicodePiece("N\r\r\r"))
+			binary.LittleEndian.PutUint32(word[0x4C:], 5)
+			binary.LittleEndian.PutUint32(word[0x50:], 3)
+			table = appendDOCFixturePLC(t, word, table, 3, 0, 2, 0)
+			tc.mutate(word, table)
+			data := buildCFB(t, []cfbStream{{name: "WordDocument", data: word}, {name: "0Table", data: table}}, cfbOptions{})
+			got, err := New(FileTypeDOC).Extract(t.Context(), bytes.NewReader(data))
+			if got != "" || !errors.Is(err, errDOCCorrupt) || errors.Is(err, io.ErrUnexpectedEOF) != tc.unexpectedEOF {
+				t.Fatalf("got %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func FuzzDOCFIBAndPieces(f *testing.F) {
+	word, table := docStreams(f, docCompressedPiece(f, "Body\r"), docUnicodePiece("界\r\r\r"))
+	binary.LittleEndian.PutUint32(word[0x4C:], 5)
+	binary.LittleEndian.PutUint32(word[0x50:], 3)
+	f.Add(word, table)
+	f.Add(word[:0x50], table[:7])
+	f.Fuzz(func(t *testing.T, word, table []byte) {
+		fib, err := readDOCFIB(word)
+		if err != nil {
+			return
+		}
+		clx, ok := fib.tableRange(table, 33)
+		if !ok {
+			return
+		}
+		plc, err := readDOCPieceTable(clx)
+		if err != nil {
+			return
+		}
+		pieces, err := newDOCPieces(t.Context(), word[:fib.wordEnd], plc, fib.piecesEnd)
+		if err != nil {
+			return
+		}
+		var decodedBytes int
+		for _, part := range fib.parts {
+			got, err := pieces.decode(t.Context(), part, &decodedBytes)
+			if err != nil {
+				return
+			}
+			if len(got) > decodedBytes || decodedBytes > domain.MaxContentBytes {
+				t.Fatalf("decoded %d bytes with a cumulative count of %d", len(got), decodedBytes)
+			}
+		}
+	})
 }
 
 func TestDOCNoReadableText(t *testing.T) {
