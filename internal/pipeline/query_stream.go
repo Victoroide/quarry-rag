@@ -78,8 +78,8 @@ func (s *SynthesisStage) converse(ctx context.Context, qc *QueryContext, request
 	return result, nil
 }
 
-// withProviderEvidenceCheck attaches the hosted scope check unless the caller
-// already carries a check that includes it, as strict synthesis does.
+// withProviderEvidenceCheck attaches the current evidence scope check unless
+// the caller already carries a check that includes it, as strict synthesis does.
 func (qc *QueryContext) withProviderEvidenceCheck(ctx context.Context) context.Context {
 	if qc.checksCurrentEvidence() && !domain.HasEvidenceCheck(ctx) {
 		return domain.WithEvidenceCheck(ctx, qc.CheckEvidenceScope)

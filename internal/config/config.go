@@ -164,6 +164,13 @@ type Config struct {
 	EffectiveRoutingMargin    float64
 	RoutingCalibrationMatched bool
 	RoutingProfileVersion     string
+
+	CitationSupportModel           string
+	CitationSupportEndpoint        string
+	CitationSupportToken           string
+	CitationSupportCalibrationFile string
+	CitationSupportTimeout         time.Duration
+	CitationSupportMaxPairs        int
 }
 
 // Load reads configuration from environment variables, applies defaults,
@@ -333,6 +340,9 @@ func Load() (*Config, error) {
 	}
 	if err := cfg.loadEmbeddingInputProfile(os.Getenv("EMBEDDING_INPUT_PROFILE")); err != nil {
 		return nil, fmt.Errorf("config: EMBEDDING_INPUT_PROFILE: %w", err)
+	}
+	if err := cfg.loadCitationSupport(); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }

@@ -246,6 +246,16 @@ An update error stops further updates and returns a nonzero exit status; earlier
 successful updates remain applied. Metadata updates are eventually consistent,
 so allow them to propagate before relying on collection-filtered queries.
 
+### Citation Verifier Calibration
+
+Quarry ships with zero enabled language pairs. Before enabling a production profile, publish a digest-pinned evaluation with blinded native-speaker labels. Split development and held-out data by document before fitting thresholds. Freeze the verifier protocol, language identification, thresholds and evidence selection, including body truncation, before collecting held-out predictions. Use equal counts of `supported`, `contradicted`, and `insufficient` labels within each candidate reference pair. Include closely matched factual contrasts, such as different numbers or negations with otherwise identical wording, and bilingual paraphrases for cross-language profiles.
+
+The calibration file contains `model`, `blinded_native_labels`, `development_documents`, and `pairs`. Group every eligible held-out example by its reference `claim_language`, `source_language`, and `evidence_mode` (`single` or `set`). Include reference pairs without candidate `thresholds` so their misroutes can count against the profiles that issue predictions. Use opaque IDs for each underlying document, including translated or duplicate copies. Keep held-out documents disjoint across samples in the replay and from development.
+
+Each `held_out` entry has `documents`, the actual `evidence_count` from the request, an optional `label` and an optional `category`. Use `benign_contrast` and `bilingual_paraphrase` for the corresponding labeled examples. Preserve each raw verifier result in `prediction` with its predicted `claim_language`, `evidence_languages`, and `scores`, including results with incorrect language identification. Omit the prediction when the verifier returned no usable result. An unlabeled example can still have a prediction.
+
+Run `go run ./scripts/citationsupport -input /path/to/calibration.json` and publish the output with the frozen evaluation. The gate requires labels and in-profile assessments for at least half the eligible examples in the reference group. For each candidate profile, `confirmed_supported_precision` counts every supported prediction issued by that profile, including incoming language misroutes. `reference_confirmed_supported_precision` counts only those it issued on the matching reference languages and evidence mode. Both metrics count every supported prediction in their population as a trial, including unlabeled examples, and count only confirmed supports as successes. Each one-sided 95% exact lower bound must reach 0.90. The report also publishes the issuer's labeled supported count, assessed coverage and per-class recall for the qualified live policy by reference pair. Keep profiles disabled when the evidence is missing or fails qualification.
+
 ### Language Evaluation (`scripts/langeval`)
 
 Measures whether generated answers match the language of the input question (e.g., English or Spanish) across a fixed evaluation query set, recording token usage and latency:

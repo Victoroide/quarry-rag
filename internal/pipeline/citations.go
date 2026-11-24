@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Victoroide/quarry-rag/internal/citationsupport"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"golang.org/x/text/unicode/norm"
 )
@@ -21,6 +22,8 @@ type Citation struct {
 	Offset     int
 	Verified   bool
 	Overlap    float64
+	Support    *citationsupport.Assessment
+	markerByte int
 }
 
 // VerifyCitations cleans excerpt markers and checks their lexical overlap.
@@ -69,7 +72,7 @@ func verifyCitationMarkers(cleaned string, excerpts []domain.ScoredChunk) []Cita
 				overlap = math.Round(100*float64(shared)/float64(len(tokens))) / 100
 			}
 			excerpt := excerpts[number-1].Chunk
-			citations = append(citations, Citation{Excerpt: number, DocumentID: excerpt.DocumentID, ChunkIndex: excerpt.Index, Offset: runeOffset, Verified: overlap >= .3, Overlap: overlap})
+			citations = append(citations, Citation{Excerpt: number, DocumentID: excerpt.DocumentID, ChunkIndex: excerpt.Index, Offset: runeOffset, Verified: overlap >= .3, Overlap: overlap, markerByte: match[0]})
 		}
 		previous = match[1]
 	}
@@ -89,8 +92,23 @@ func citationNumbers(marker string) []int {
 }
 
 func cleanCitationMarkers(answer string, count int) string {
+	return cleanCitationMarkersInto(answer, count, nil)
+}
+
+type citationCleanup struct {
+	origins       map[int]int      // cleaned marker offset to raw marker offset
+	editedMarkers map[int]struct{} // raw offsets of rewritten or removed markers
+}
+
+func cleanCitationMarkersForAssessment(answer string, count int) (string, *citationCleanup) {
+	cleanup := &citationCleanup{origins: make(map[int]int), editedMarkers: make(map[int]struct{})}
+	return cleanCitationMarkersInto(answer, count, cleanup), cleanup
+}
+
+func cleanCitationMarkersInto(answer string, count int, cleanup *citationCleanup) string {
 	type opening struct {
 		start   int
+		source  int
 		blocked bool
 	}
 	var stack []opening
@@ -98,7 +116,7 @@ func cleanCitationMarkers(answer string, count int) string {
 	for i := range len(answer) {
 		switch answer[i] {
 		case '[':
-			stack = append(stack, opening{start: len(out)})
+			stack = append(stack, opening{start: len(out), source: i})
 			out = append(out, '[')
 		case ']':
 			out = append(out, ']')
@@ -128,13 +146,25 @@ func cleanCitationMarkers(answer string, count int) string {
 					out = strconv.AppendInt(out, int64(number), 10)
 					kept++
 				}
+				if kept > 0 {
+					out = append(out, ']')
+				}
+				if cleanup != nil {
+					if string(out[open.start:]) != answer[open.source:i+1] {
+						cleanup.editedMarkers[open.source] = struct{}{}
+					}
+					// Semantic eligibility is checked against the raw answer. Preserve
+					// the origin of raw markers even when lexical cleanup is nested.
+					if kept > 0 && !strings.ContainsAny(answer[open.source+1:i], "[]") {
+						cleanup.origins[open.start] = open.source
+					}
+				}
 				if kept == 0 {
 					if len(out) > 0 && out[len(out)-1] == ' ' {
 						out = out[:len(out)-1]
 					}
 					continue
 				}
-				out = append(out, ']')
 			}
 			// A parent that keeps a nested bracket cannot be a marker; skip rescanning it.
 			if len(stack) > 0 {
