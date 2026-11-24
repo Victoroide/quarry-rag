@@ -23,6 +23,17 @@ func (e *pdfExtractor) Type() FileType { return FileTypePDF }
 var multiBlankLine = regexp.MustCompile(`\n{3,}`)
 
 func (e *pdfExtractor) Extract(ctx context.Context, r io.Reader) (result string, err error) {
+	_, result, err = extractPDF(ctx, r, false)
+	return result, err
+}
+
+// ExtractPDFPages reports page evidence while applying the legacy parser budgets.
+func ExtractPDFPages(ctx context.Context, r io.Reader) (domain.PDFPages, error) {
+	pages, _, err := extractPDF(ctx, r, true)
+	return pages, err
+}
+
+func extractPDF(ctx context.Context, r io.Reader, pageAware bool) (pages domain.PDFPages, result string, err error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
@@ -30,63 +41,82 @@ func (e *pdfExtractor) Extract(ctx context.Context, r io.Reader) (result string,
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			result = ""
+			pages, result = nil, ""
 			err = fmt.Errorf("extractor: pdf: invalid document: %v", recovered)
 		}
 	}()
 
 	data, err := readSource(ctx, r)
 	if err != nil {
-		return "", fmt.Errorf("extractor: pdf: read: %w", err)
+		return nil, "", fmt.Errorf("extractor: pdf: read: %w", err)
 	}
 
-	reader, err := pdf.NewReader(&pdfSource{ctx: ctx, reader: bytes.NewReader(data), remaining: 64 << 20}, int64(len(data)))
+	source := &pdfSource{ctx: ctx, reader: bytes.NewReader(data), remaining: 64 << 20}
+	reader, err := pdf.NewReader(source, int64(len(data)))
 	if err != nil {
-		return "", fmt.Errorf("extractor: pdf: %w", err)
+		return nil, "", fmt.Errorf("extractor: pdf: %w", err)
 	}
 
 	var buf strings.Builder
 	numPages := reader.NumPage()
-	if numPages > 1000 {
-		return "", fmt.Errorf("extractor: pdf: maximum page count exceeded")
+	if numPages > domain.MaxPDFPages {
+		return nil, "", fmt.Errorf("extractor: pdf: maximum page count exceeded")
+	}
+	var strictPages []pdf.Page
+	if pageAware {
+		source.encrypted = !reader.Trailer().Key("Encrypt").IsNull()
+		if treeErr := readPDFPageTree(ctx, reader.Trailer().Key("Root").Key("Pages"), &strictPages, 0); treeErr != nil {
+			return nil, "", treeErr
+		}
+		pages = make(domain.PDFPages, 0, numPages)
 	}
 	decodedBudget := int64(8 << 20)
 
 	for i := 1; i <= numPages; i++ {
 		if err := ctx.Err(); err != nil {
-			return "", fmt.Errorf("extractor: pdf: %w", err)
+			return nil, "", fmt.Errorf("extractor: pdf: %w", err)
 		}
-		page := reader.Page(i)
+		var page pdf.Page
+		if pageAware {
+			page = strictPages[i-1]
+		} else {
+			page = reader.Page(i)
+		}
 		if page.V.IsNull() {
 			continue
 		}
 		// Check expanded streams before the parser allocates text and font maps.
-		if streamErr := checkPDFStream(ctx, page.V.Key("Contents"), &decodedBudget, 0); streamErr != nil {
-			return "", streamErr
+		contents := page.V.Key("Contents")
+		if streamErr := checkPDFStream(ctx, contents, &decodedBudget, 0); streamErr != nil {
+			return nil, "", streamErr
 		}
-		fonts := page.Fonts()
-		if len(fonts) > 128 {
-			return "", fmt.Errorf("extractor: pdf: maximum font count exceeded")
-		}
-		for _, name := range fonts {
-			font := page.Font(name)
-			if font.V.Key("Encoding").Key("Differences").Len() > 512 {
-				return "", fmt.Errorf("extractor: pdf: maximum font map size exceeded")
+		var text string
+		var pErr error
+		paint := pdfPaint{source: source}
+		if pageAware {
+			pErr = paint.inspectPage(ctx, page, contents, &decodedBudget)
+			text = paint.text.String()
+		} else {
+			if fontErr := checkPDFFonts(ctx, page.Resources(), &decodedBudget); fontErr != nil {
+				return nil, "", fontErr
 			}
-			if streamErr := checkPDFFontMap(ctx, font.V.Key("ToUnicode"), &decodedBudget); streamErr != nil {
-				return "", streamErr
-			}
+			text, pErr = page.GetPlainText(nil)
 		}
-		text, pErr := page.GetPlainText(nil)
 		if contextErr := ctx.Err(); contextErr != nil {
-			return "", fmt.Errorf("extractor: pdf: %w", contextErr)
+			return nil, "", fmt.Errorf("extractor: pdf: %w", contextErr)
 		}
 
 		if pErr != nil {
+			if pageAware {
+				return nil, "", fmt.Errorf("extractor: pdf: invalid page %d: %w", i, pErr)
+			}
 			continue
 		}
-		cleaned := stripControlChars(text)
-		cleaned = strings.TrimSpace(cleaned)
+		cleaned := strings.TrimSpace(stripControlChars(text))
+		if pageAware {
+			normalized := multiBlankLine.ReplaceAllString(cleaned, "\n\n")
+			pages = append(pages, domain.PDFPage{Number: i, Evidence: paint.evidence(normalized), Text: normalized})
+		}
 		if cleaned == "" {
 			continue
 		}
@@ -95,20 +125,29 @@ func (e *pdfExtractor) Extract(ctx context.Context, r io.Reader) (result string,
 			separator = 2
 		}
 		if len(cleaned) > domain.MaxContentBytes-buf.Len()-separator {
-			return "", fmt.Errorf("extractor: pdf: maximum text size exceeded: %w", ErrContentTooLarge)
+			return nil, "", fmt.Errorf("extractor: pdf: maximum text size exceeded: %w", ErrContentTooLarge)
 		}
 		if buf.Len() > 0 {
 			buf.WriteString("\n\n")
 		}
 		buf.WriteString(cleaned)
 	}
+	if pageAware {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+		if source.limitErr != nil {
+			return nil, "", source.limitErr
+		}
+		return pages, "", nil
+	}
 
 	result = multiBlankLine.ReplaceAllString(buf.String(), "\n\n")
 	result = strings.TrimSpace(result)
-	if len(result) < 10 {
-		return "", fmt.Errorf("extractor: pdf: %w", ErrNoText)
+	if len(result) < domain.MinPDFTextBytes {
+		return nil, "", fmt.Errorf("extractor: pdf: %w", ErrNoText)
 	}
-	return result, nil
+	return nil, result, nil
 }
 
 func stripControlChars(s string) string {
@@ -125,8 +164,10 @@ func stripControlChars(s string) string {
 // Stream and source budgets also bound repeated object reads in malformed files.
 type pdfSource struct {
 	ctx       context.Context
-	reader    io.ReaderAt
+	reader    *bytes.Reader
 	remaining int64
+	limitErr  error
+	encrypted bool
 }
 
 func (s *pdfSource) ReadAt(p []byte, offset int64) (int, error) {
@@ -134,7 +175,8 @@ func (s *pdfSource) ReadAt(p []byte, offset int64) (int, error) {
 		return 0, err
 	}
 	if int64(len(p)) > s.remaining {
-		return 0, fmt.Errorf("extractor: pdf: maximum source read budget exceeded")
+		s.limitErr = fmt.Errorf("extractor: pdf: maximum source read budget exceeded")
+		return 0, s.limitErr
 	}
 	s.remaining -= int64(len(p))
 	return s.reader.ReadAt(p, offset)
@@ -176,6 +218,27 @@ var (
 	fontMapCounts = regexp.MustCompile(`(\S+)\s+begin(?:bfchar|bfrange|codespacerange)\b`)
 	fontMapHex    = regexp.MustCompile(`<([[:xdigit:][:space:]]*)>`)
 )
+
+func checkPDFFonts(ctx context.Context, resources pdf.Value, budget *int64) error {
+	fonts := resources.Key("Font")
+	names := fonts.Keys()
+	if len(names) > 128 {
+		return fmt.Errorf("extractor: pdf: maximum font count exceeded")
+	}
+	for _, name := range names {
+		if err := checkPDFFont(ctx, fonts.Key(name), budget); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkPDFFont(ctx context.Context, font pdf.Value, budget *int64) error {
+	if font.Key("Encoding").Key("Differences").Len() > 512 {
+		return fmt.Errorf("extractor: pdf: maximum font map size exceeded")
+	}
+	return checkPDFFontMap(ctx, font.Key("ToUnicode"), budget)
+}
 
 // CMap declarations can request far more work than their small streams suggest.
 func checkPDFFontMap(ctx context.Context, value pdf.Value, remaining *int64) error {

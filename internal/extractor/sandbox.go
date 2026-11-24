@@ -14,6 +14,8 @@ import (
 	"runtime/debug"
 	"strconv"
 	"time"
+
+	"github.com/Victoroide/quarry-rag/internal/domain"
 )
 
 // ChildArg selects the extraction entry point in the service binary.
@@ -87,12 +89,14 @@ type childHeader struct {
 	DOCStories        DOCStories  `json:"doc_stories,omitempty"`
 	DOCXStories       DOCXStories `json:"docx_stories,omitempty"`
 	DOCXDetectionWork uint64      `json:"docx_detection_work,omitempty"`
+	PageAware         bool        `json:"page_aware,omitempty"`
 }
 
 type childResponse struct {
-	Text      *string        `json:"text,omitempty"`
-	Error     string         `json:"error,omitempty"`
-	ErrorKind childErrorKind `json:"error_kind,omitempty"`
+	Text      *string         `json:"text,omitempty"`
+	Pages     json.RawMessage `json:"pages,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	ErrorKind childErrorKind  `json:"error_kind,omitempty"`
 }
 
 type childErrorKind string
@@ -112,12 +116,36 @@ func (e childExtractionError) Unwrap() error { return e.cause }
 
 // Extract runs one child process, terminating it on cancellation or exceeded limits.
 func (s *Sandbox) Extract(ctx context.Context, ft FileType, data []byte) (string, error) {
+	response, err := s.extract(ctx, ft, data, false)
+	if err != nil {
+		return "", err
+	}
+	if response.Text == nil {
+		return "", ErrExtractionFailed
+	}
+	return *response.Text, nil
+}
+
+// ExtractPDFPages runs page inspection in the same parser sandbox as Extract.
+func (s *Sandbox) ExtractPDFPages(ctx context.Context, data []byte) (domain.PDFPages, error) {
+	response, err := s.extract(ctx, FileTypePDF, data, true)
+	if err != nil {
+		return nil, err
+	}
+	pages, err := domain.DecodePDFPages(response.Pages)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrExtractionFailed, err)
+	}
+	return pages, nil
+}
+
+func (s *Sandbox) extract(ctx context.Context, ft FileType, data []byte, pageAware bool) (childResponse, error) {
 	if len(data) > maxSourceBytes {
-		return "", fmt.Errorf("extractor: source exceeds maximum size of %d bytes", maxSourceBytes)
+		return childResponse{}, fmt.Errorf("extractor: source exceeds maximum size of %d bytes", maxSourceBytes)
 	}
 	childCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	request := childHeader{Type: ft, TimeoutMS: s.timeout.Milliseconds(), MaxStack: childMaxStack}
+	request := childHeader{Type: ft, TimeoutMS: s.timeout.Milliseconds(), MaxStack: childMaxStack, PageAware: pageAware}
 	switch ft {
 	case FileTypeDOC:
 		request.DOCStories = s.docStories
@@ -127,7 +155,7 @@ func (s *Sandbox) Extract(ctx context.Context, ft FileType, data []byte) (string
 	}
 	header, err := json.Marshal(request)
 	if err != nil {
-		return "", fmt.Errorf("%w: header: %w", ErrExtractionFailed, err)
+		return childResponse{}, fmt.Errorf("%w: header: %w", ErrExtractionFailed, err)
 	}
 	cmd := exec.CommandContext(childCtx, s.executable, ChildArg) // #nosec G204 -- executable is resolved at construction, arguments are fixed.
 	cmd.Env = []string{ChildEnv + "=1", "GOMAXPROCS=1", "GOMEMLIMIT=" + strconv.Itoa(s.memoryLimitMB) + "MiB"}
@@ -140,45 +168,42 @@ func (s *Sandbox) Extract(ctx context.Context, ft FileType, data []byte) (string
 	if err != nil || stdout.exceeded || stderr.exceeded {
 		slog.WarnContext(ctx, "document extraction child failed", "error", err, "stderr", stderr.buffer.String())
 		if stdout.exceeded || stderr.exceeded {
-			return "", ErrExtractionFailed
+			return childResponse{}, ErrExtractionFailed
 		}
 		if errors.Is(childCtx.Err(), context.DeadlineExceeded) {
-			return "", ErrExtractionTimeout
+			return childResponse{}, ErrExtractionTimeout
 		}
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return childResponse{}, ctx.Err()
 		}
 		var pathErr *os.PathError
 		var execErr *exec.Error
 		if errors.As(err, &pathErr) || errors.As(err, &execErr) {
-			return "", ErrExtractionUnavailable
+			return childResponse{}, ErrExtractionUnavailable
 		}
-		return "", ErrExtractionFailed
+		return childResponse{}, ErrExtractionFailed
 	}
 	var response childResponse
 	if err := json.Unmarshal(stdout.buffer.Bytes(), &response); err != nil {
-		return "", ErrExtractionFailed
+		return childResponse{}, ErrExtractionFailed
 	}
 	if response.Error != "" {
 		switch response.ErrorKind {
 		case childErrorEOF:
-			return "", childExtractionError{response.Error, io.ErrUnexpectedEOF}
+			return childResponse{}, childExtractionError{response.Error, io.ErrUnexpectedEOF}
 		case childErrorContentSize:
-			return "", childExtractionError{response.Error, ErrContentTooLarge}
+			return childResponse{}, childExtractionError{response.Error, ErrContentTooLarge}
 		default:
-			return "", errors.New(response.Error)
+			return childResponse{}, errors.New(response.Error)
 		}
-	}
-	if response.Text == nil {
-		return "", ErrExtractionFailed
 	}
 	if err := childCtx.Err(); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return "", ErrExtractionTimeout
+			return childResponse{}, ErrExtractionTimeout
 		}
-		return "", err
+		return childResponse{}, err
 	}
-	return *response.Text, nil
+	return response, nil
 }
 
 type cappedBuffer struct {
@@ -225,11 +250,17 @@ func RunChild(stdin io.Reader, stdout io.Writer) int {
 	if hook == nil && header.Type != FileTypePDF && header.Type != FileTypeDOCX && header.Type != FileTypeDOC {
 		return writeChildResponse(stdout, "", errors.New("extractor: unsupported file type"))
 	}
+	if header.PageAware && header.Type != FileTypePDF {
+		return writeChildResponse(stdout, "", errors.New("extractor: page inspection requires a PDF"))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(header.TimeoutMS)*time.Millisecond)
 	defer cancel()
 	data, err := readSource(ctx, reader)
 	if err != nil {
 		return writeChildResponse(stdout, "", err)
+	}
+	if header.PageAware {
+		return runPDFPages(ctx, stdout, data)
 	}
 	var text string
 	switch {
@@ -246,6 +277,24 @@ func RunChild(stdin io.Reader, stdout io.Writer) int {
 		return 1
 	}
 	return writeChildResponse(stdout, text, err)
+}
+
+func runPDFPages(ctx context.Context, stdout io.Writer, data []byte) int {
+	pages, err := ExtractPDFPages(ctx, bytes.NewReader(data))
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return 1
+	}
+	if err != nil {
+		return writeChildResponse(stdout, "", err)
+	}
+	encoded, err := json.Marshal(pages)
+	if err != nil {
+		return 1
+	}
+	if err = json.NewEncoder(stdout).Encode(childResponse{Pages: encoded}); err != nil {
+		return 1
+	}
+	return 0
 }
 
 func writeChildResponse(stdout io.Writer, text string, err error) int {
