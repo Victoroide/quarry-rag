@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -387,10 +388,16 @@ func TestEvidencePolicyRoutingWithStaleHostedHitsAndPreviewErrors(t *testing.T) 
 		"doc_id": visibleID, "chunk_index": float64(1), "text": visibleChunk.Text, "collection": "archive", "doc_type": "guide",
 	})
 	require.NoError(t, err)
+	mdMalformed, err := structpb.NewStruct(map[string]any{
+		"doc_id": "not-a-uuid", "chunk_index": float64(0), "text": "Malformed hosted hit.", "collection": "archive", "doc_type": "guide",
+	})
+	require.NoError(t, err)
+	malformedChunkID := uuid.NewString()
 
 	store := pcstore.NewTestDriver(func(_ context.Context, _ *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
 		return &pinecone.QueryVectorsResponse{
 			Matches: []*pinecone.ScoredVector{
+				{Vector: &pinecone.Vector{Id: malformedChunkID, Metadata: mdMalformed}, Score: 1},
 				{Vector: &pinecone.Vector{Id: string(staleChunk.ID), Metadata: mdStale}, Score: 0.99},
 				{Vector: &pinecone.Vector{Id: string(visibleChunk.ID), Metadata: mdVisible}, Score: 0.85},
 			},
@@ -429,30 +436,33 @@ func TestEvidencePolicyRoutingWithStaleHostedHitsAndPreviewErrors(t *testing.T) 
 			require.Contains(t, generated.Body.String(), visibleID)
 			require.NotContains(t, generated.Body.String(), staleID)
 			require.NotContains(t, generated.Body.String(), staleChunk.Text)
+			require.NotContains(t, generated.Body.String(), "Malformed hosted hit.")
 		})
 	}
 
-	t.Run("stale hits displace the visible document from the probe", func(t *testing.T) {
-		var searchLimits []uint32
-		displacing := pcstore.NewTestDriver(func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
-			searchLimits = append(searchLimits, req.TopK)
-			require.Equal(t, map[string]any{"collection": map[string]any{"$eq": "archive"}}, req.MetadataFilter.AsMap())
-			matches := make([]*pinecone.ScoredVector, 0, 6)
-			for range 5 {
-				matches = append(matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: uuid.NewString(), Metadata: mdStale}, Score: 0.99})
-			}
-			matches = append(matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: string(visibleChunk.ID), Metadata: mdVisible}, Score: 0.85})
-			return &pinecone.QueryVectorsResponse{Matches: matches[:min(int(req.TopK), len(matches))]}, nil
+	for _, staleCount := range []int{4, 5} {
+		t.Run("stale hits in the probe "+strconv.Itoa(staleCount), func(t *testing.T) {
+			var searchLimits []uint32
+			displacing := pcstore.NewTestDriver(func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+				searchLimits = append(searchLimits, req.TopK)
+				require.Equal(t, map[string]any{"collection": map[string]any{"$eq": "archive"}}, req.MetadataFilter.AsMap())
+				matches := make([]*pinecone.ScoredVector, 0, 6)
+				for range staleCount {
+					matches = append(matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: uuid.NewString(), Metadata: mdStale}, Score: 0.99})
+				}
+				matches = append(matches, &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: string(visibleChunk.ID), Metadata: mdVisible}, Score: 0.85})
+				return &pinecone.QueryVectorsResponse{Matches: matches[:min(int(req.TopK), len(matches))]}, nil
+			})
+			displacedQuery := handler.QueryHandler(retriever.NewRetriever(displacing, evidenceEmbedder{}, 0.70, 10), amb, cfg, db.Pool)
+			displaced := httptest.NewRecorder()
+			serveEvidenceQuery(t, displacedQuery, displaced, "application/json", `{"query":"Archive?","collection":"archive"}`)
+			require.Equal(t, http.StatusOK, displaced.Code, displaced.Body.String())
+			require.Contains(t, displaced.Body.String(), `"mode":"GLOBAL"`)
+			require.Contains(t, displaced.Body.String(), visibleID)
+			require.NotContains(t, displaced.Body.String(), staleID)
+			require.Equal(t, []uint32{10}, searchLimits)
 		})
-		displacedQuery := handler.QueryHandler(retriever.NewRetriever(displacing, evidenceEmbedder{}, 0.70, 10), amb, cfg, db.Pool)
-		displaced := httptest.NewRecorder()
-		serveEvidenceQuery(t, displacedQuery, displaced, "application/json", `{"query":"Archive?","collection":"archive"}`)
-		require.Equal(t, http.StatusOK, displaced.Code, displaced.Body.String())
-		require.Contains(t, displaced.Body.String(), `"mode":"GLOBAL"`)
-		require.Contains(t, displaced.Body.String(), visibleID)
-		require.NotContains(t, displaced.Body.String(), staleID)
-		require.Equal(t, []uint32{5, 10}, searchLimits)
-	})
+	}
 
 	t.Run("scope changes after the context frame", func(t *testing.T) {
 		stream := &evidenceRecorder{

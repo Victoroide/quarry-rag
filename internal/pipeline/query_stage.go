@@ -126,7 +126,7 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 	qc.TopScore, qc.SkipRetrieval = 0, false
 	qc.previewRouting = nil
 	qc.previewNegativeMatch = false
-	qc.scopedSearch, qc.scopedSearchReady = nil, false
+	qc.scopedSearch, qc.scopedSearchK = nil, 0
 	qc.probeSaturated, qc.probeCutoff = false, nil
 	qc.localDocumentKeys = nil
 	policy := s.cfg.Policy
@@ -158,7 +158,11 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 	if qc.evidenceAutoRouting() {
 		searchK = max(probeK, s.ret.ChunkLimit(qc.MaxChunks))
 	}
-	embedding, candidates, probeFailed, err := s.ret.EmbedQuery(ctx, qc.OriginalQuery, filter, searchK)
+	embedQuery := s.ret.EmbedQuery
+	if qc.evidenceAutoRouting() && qc.HostedVisibilityRefill {
+		embedQuery = s.ret.EmbedQueryForVisibilityRefill
+	}
+	embedding, candidates, probeFailed, err := embedQuery(ctx, qc.OriginalQuery, filter, searchK)
 	if err != nil {
 		return fmt.Errorf("routing_stage: %w", err)
 	}
@@ -172,11 +176,12 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 	}
 	var providerKeys documentKeys
 	if qc.evidenceAutoRouting() {
-		providerKeys = providerDocumentKeys(candidates)
+		rawProbe := candidates[:min(len(candidates), probeK)]
 		candidates = canonicalEvidenceIDs(candidates)
-		qc.scopedSearch, qc.scopedSearchReady = candidates, true
+		qc.scopedSearch, qc.scopedSearchK = candidates, searchK
 		qc.probeSaturated = len(candidates) >= probeK && len(filter.DocumentIDs) != 1
-		candidates = candidates[:min(len(candidates), probeK)]
+		candidates = candidates[:len(rawProbe)]
+		providerKeys = providerDocumentKeys(rawProbe, candidates)
 	}
 	var previews map[string]string
 	if qc.EvidenceVisibility != nil && (qc.evidenceAutoRouting() || qc.HostedVisibilityRefill && s.previews != nil) {
@@ -369,21 +374,20 @@ func candidateDocumentIDs(chunks []domain.ScoredChunk) []string {
 	return ids
 }
 
-// documentKeys records the document keys the vector store returned for each
-// canonical chunk. A metadata filter compares keys byte for byte, so a targeted
-// search must use the spelling the store holds, not the canonical UUID.
-type documentKeys map[domain.ChunkID][]string
+type chunkDocument struct {
+	chunkID    domain.ChunkID
+	documentID domain.DocumentID
+}
 
-func providerDocumentKeys(chunks []domain.ScoredChunk) documentKeys {
-	keys := make(documentKeys, len(chunks))
-	for _, sc := range chunks {
-		id := sc.Chunk.ID
-		if parsed, err := uuid.Parse(string(id)); err == nil {
-			id = domain.ChunkID(parsed.String())
-		}
-		if key := string(sc.Chunk.DocumentID); !slices.Contains(keys[id], key) {
-			keys[id] = append(keys[id], key)
-		}
+// documentKeys retains the byte-for-byte store keys by canonical chunk and
+// document so stale attributions cannot add another document to a target search.
+type documentKeys map[chunkDocument][]string
+
+func providerDocumentKeys(raw, canonical []domain.ScoredChunk) documentKeys {
+	keys := make(documentKeys, len(raw))
+	for i, sc := range canonical {
+		identity := chunkDocument{chunkID: sc.Chunk.ID, documentID: sc.Chunk.DocumentID}
+		keys[identity] = append(keys[identity], string(raw[i].Chunk.DocumentID))
 	}
 	return keys
 }
@@ -396,7 +400,8 @@ func (k documentKeys) spellings(verified []domain.ScoredChunk, target string) []
 		if string(sc.Chunk.DocumentID) != target {
 			continue
 		}
-		for _, key := range k[sc.Chunk.ID] {
+		identity := chunkDocument{chunkID: sc.Chunk.ID, documentID: sc.Chunk.DocumentID}
+		for _, key := range k[identity] {
 			if !slices.Contains(spellings, key) {
 				spellings = append(spellings, key)
 			}
@@ -406,6 +411,22 @@ func (k documentKeys) spellings(verified []domain.ScoredChunk, target string) []
 		return []string{target}
 	}
 	return spellings
+}
+
+// canonicalDocumentIDs spells every UUID in an allowlist canonically. A nil
+// allowlist stays nil, so it keeps meaning no restriction.
+func canonicalDocumentIDs(ids []string) []string {
+	if ids == nil {
+		return nil
+	}
+	canonical := make([]string, len(ids))
+	for i, raw := range ids {
+		canonical[i] = raw
+		if id, err := uuid.Parse(raw); err == nil {
+			canonical[i] = id.String()
+		}
+	}
+	return canonical
 }
 
 // canonicalEvidenceIDs makes UUID aliases comparable within automatic evidence
@@ -661,14 +682,35 @@ func (qc *QueryContext) verifyHostedEvidence(ctx context.Context, chunks []domai
 	return visible, len(visible) < len(chunks), err
 }
 
+// verifyRoutedHostedEvidence applies the logical scope to canonical IDs on both
+// sides. A provider filter keeps the spellings under which the store holds its
+// keys, so rows that an earlier check already canonicalized must still satisfy
+// the same filter when a fallback checks them again.
+func (qc *QueryContext) verifyRoutedHostedEvidence(ctx context.Context, chunks []domain.ScoredChunk, scope domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
+	scope.DocumentIDs = canonicalDocumentIDs(scope.DocumentIDs)
+	return qc.verifyHostedEvidence(ctx, canonicalEvidenceIDs(chunks), scope)
+}
+
 func (s *RetrievalStage) retrieveRoutedEvidence(ctx context.Context, qc *QueryContext, mode retriever.RetrievalMode, filter domain.VectorFilter) (*retriever.Result, error) {
+	if qc.HostedVisibilityRefill {
+		if qc.scopedSearchK == 0 {
+			return s.ret.RetrieveVisibleWithEmbedding(ctx, qc.QueryEmbedding, mode, qc.LocalDocumentID, qc.MaxChunks, filter, qc.HostedVisibilityExtraRequests, qc.verifyRoutedHostedEvidence)
+		}
+		probe := retriever.RoutedProbe{Candidates: qc.scopedSearch, SearchK: qc.scopedSearchK, Target: qc.LocalDocumentID, TargetKeys: qc.localDocumentKeys}
+		result, err := s.ret.RetrieveVisibleFromProbe(ctx, qc.QueryEmbedding, probe, qc.MaxChunks, filter, qc.HostedVisibilityExtraRequests, qc.verifyRoutedHostedEvidence)
+		if err == nil && result.Mode == retriever.RetrievalModeLocal && len(result.Chunks) == 0 {
+			return nil, ErrEvidenceScopeChanged
+		}
+		return result, err
+	}
+
 	var result *retriever.Result
 	var err error
 	local := mode == retriever.RetrievalModeLocal
 	switch {
 	case local:
 		result, err = s.ret.RetrieveEvidenceLocal(ctx, qc.QueryEmbedding, qc.LocalDocumentID, qc.localDocumentKeys, qc.MaxChunks, filter)
-	case qc.scopedSearchReady:
+	case qc.scopedSearchK > 0:
 		result = &retriever.Result{Mode: mode, Chunks: qc.scopedSearch}
 	default:
 		result, err = s.ret.RetrieveWithEmbedding(ctx, qc.QueryEmbedding, mode, qc.LocalDocumentID, qc.MaxChunks, filter)
@@ -677,7 +719,7 @@ func (s *RetrievalStage) retrieveRoutedEvidence(ctx context.Context, qc *QueryCo
 		return nil, err
 	}
 	input := result.Chunks
-	if local || !qc.scopedSearchReady {
+	if local || qc.scopedSearchK == 0 {
 		input = canonicalEvidenceIDs(input)
 	}
 	if local {
@@ -687,52 +729,13 @@ func (s *RetrievalStage) retrieveRoutedEvidence(ctx context.Context, qc *QueryCo
 	if err != nil {
 		return nil, fmt.Errorf("visibility: %w", err)
 	}
-	chunks = uniqueEvidenceChunks(chunks)
-	if qc.scopedSearchReady && !local {
-		// The cached search is verified in score order before K applies, so a
-		// stale or aliased leading hit cannot hide a current chunk fetched with it.
-		chunks = chunks[:min(len(chunks), s.ret.ChunkLimit(qc.MaxChunks))]
+	// Apply K after verification and deduplication so the cache can retain a
+	// current chunk that ranked behind a stale or aliased hit.
+	result.Chunks = retriever.SelectRoutedChunks(chunks, qc.LocalDocumentID, s.ret.ChunkLimit(qc.MaxChunks))
+	if local && len(result.Chunks) == 0 {
+		return nil, ErrEvidenceScopeChanged
 	}
-	if local {
-		chunks = selectLocalEvidence(chunks, qc.LocalDocumentID, s.ret.ChunkLimit(qc.MaxChunks))
-		if len(chunks) == 0 {
-			return nil, ErrEvidenceScopeChanged
-		}
-	}
-	result.Chunks = chunks
 	return result, nil
-}
-
-func uniqueEvidenceChunks(chunks []domain.ScoredChunk) []domain.ScoredChunk {
-	seen := make(map[domain.ChunkID]struct{}, len(chunks))
-	unique := make([]domain.ScoredChunk, 0, len(chunks))
-	for _, sc := range chunks {
-		if _, duplicate := seen[sc.Chunk.ID]; duplicate {
-			continue
-		}
-		seen[sc.Chunk.ID] = struct{}{}
-		unique = append(unique, sc)
-	}
-	return unique
-}
-
-// selectLocalEvidence keeps target chunks ahead of any scope-wide fill.
-func selectLocalEvidence(chunks []domain.ScoredChunk, target string, limit int) []domain.ScoredChunk {
-	var primary, fill []domain.ScoredChunk
-	for _, sc := range chunks {
-		if string(sc.Chunk.DocumentID) == target {
-			primary = append(primary, sc)
-		} else {
-			fill = append(fill, sc)
-		}
-	}
-	if len(primary) == 0 {
-		return nil
-	}
-	if len(primary) < min(3, limit) {
-		primary = append(primary, fill...)
-	}
-	return primary[:min(len(primary), limit)]
 }
 
 // filterChunksByAllowedDocIDs restricts chunks to a caller-supplied document-id

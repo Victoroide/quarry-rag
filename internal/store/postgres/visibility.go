@@ -24,6 +24,8 @@ type Visibility struct {
 // VisibleEvidence checks that vector hits match current completed chunks and
 // reads the current document category.
 // Chunk IDs are deterministic and can recur when a document ID is reused.
+// Document and chunk IDs are matched as UUIDs but returned exactly as the
+// vector store spelled them, because metadata filters compare keys byte for byte.
 func (v Visibility) VisibleEvidence(ctx context.Context, candidates []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
 	visible, _, err := v.VisibleEvidenceWithPreviews(ctx, candidates, nil)
 	return visible, err
@@ -40,6 +42,7 @@ type evidenceQueryer interface {
 }
 
 func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer, candidates []domain.ScoredChunk, probeIDs []string) ([]domain.ScoredChunk, map[string]string, error) {
+	probeIDs = canonicalDocumentIDs(probeIDs)
 	chunkIDs := make([]string, 0, len(candidates))
 	docIDs := make([]string, 0, len(candidates))
 	indices := make([]int64, 0, len(candidates))
@@ -141,20 +144,7 @@ WHERE d.id=ANY($1::uuid[]) AND f.receipt=$2 AND d.collection=$3
 // VisibleDocumentIDs returns the visible documents among the supplied IDs.
 func (v Visibility) VisibleDocumentIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
 	visible := make(map[string]struct{})
-	seen := make(map[string]struct{}, len(ids))
-	queryIDs := make([]string, 0, len(ids))
-	for _, id := range ids {
-		parsed, err := uuid.Parse(id)
-		if err != nil {
-			continue
-		}
-		canonical := parsed.String()
-		if _, exists := seen[canonical]; exists {
-			continue
-		}
-		seen[canonical] = struct{}{}
-		queryIDs = append(queryIDs, canonical)
-	}
+	queryIDs := canonicalDocumentIDs(ids)
 	if len(queryIDs) == 0 {
 		return visible, nil
 	}
@@ -181,4 +171,22 @@ func (v Visibility) VisibleDocumentIDs(ctx context.Context, ids []string) (map[s
 		return nil, fmt.Errorf("postgres: visible documents: %w", err)
 	}
 	return visible, nil
+}
+
+func canonicalDocumentIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	queryIDs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parsed, err := uuid.Parse(id)
+		if err != nil {
+			continue
+		}
+		canonical := parsed.String()
+		if _, exists := seen[canonical]; exists {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		queryIDs = append(queryIDs, canonical)
+	}
+	return queryIDs
 }

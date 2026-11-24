@@ -102,7 +102,7 @@ type QueryContext struct {
 	previewRouting       *previewRouting
 	previewNegativeMatch bool
 	scopedSearch         []domain.ScoredChunk
-	scopedSearchReady    bool
+	scopedSearchK        int
 	localDocumentKeys    []string
 	probeSaturated       bool
 	probeCutoff          *float64
