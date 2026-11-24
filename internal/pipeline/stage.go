@@ -77,6 +77,9 @@ type QueryContext struct {
 	AnswerMode    domain.AnswerMode
 	// EvidenceVisibility checks vector candidates against current stored chunks.
 	EvidenceVisibility domain.EvidenceVisibility
+	// HostedVisibilityRefill enables strict chunk checks and bounded hosted recovery.
+	HostedVisibilityRefill        bool
+	HostedVisibilityExtraRequests int
 	// IncludeCitations asks synthesis for inline citation markers and verifies them.
 	IncludeCitations bool
 	// AllowedDocumentIDs, when non-nil, restricts retrieved chunks to this

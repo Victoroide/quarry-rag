@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
@@ -27,6 +28,26 @@ type indexConn interface {
 }
 
 var _ indexConn = (*pinecone.IndexConnection)(nil)
+
+type queryAttemptKey struct{}
+
+func singleTransportAttempt(ctx context.Context) context.Context {
+	return context.WithValue(ctx, queryAttemptKey{}, new(atomic.Bool))
+}
+
+// gRPC can transparently retry a stream even with configured retries disabled.
+// Its transport asks for per-RPC metadata before sending each stream. Refuse
+// a second stream for the same budgeted attempt and let the caller count retries.
+type queryAttemptCredentials struct{}
+
+func (queryAttemptCredentials) GetRequestMetadata(ctx context.Context, _ ...string) (map[string]string, error) {
+	if sent, ok := ctx.Value(queryAttemptKey{}).(*atomic.Bool); ok && sent.Swap(true) {
+		return nil, status.Error(codes.Unavailable, "pinecone: retry requires another query attempt")
+	}
+	return nil, nil
+}
+
+func (queryAttemptCredentials) RequireTransportSecurity() bool { return true }
 
 func (p *Client) do(ctx context.Context, attempts int, op func(context.Context) error) error {
 	if attempts < 1 {

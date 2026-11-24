@@ -61,6 +61,12 @@ func (c *OpenAIHTTPClient) post(ctx context.Context, path string, payload any, e
 	if c.key != "" {
 		request.Header.Set("Authorization", "Bearer "+c.key)
 	}
+	if scopeErr := domain.CheckEvidenceBeforeSend(ctx); scopeErr != nil {
+		return nil, scopeErr
+	}
+	if domain.HasEvidenceCheck(ctx) {
+		request.GetBody = nil
+	}
 	response, err := c.client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {

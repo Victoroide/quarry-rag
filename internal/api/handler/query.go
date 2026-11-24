@@ -182,6 +182,8 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			previews := pgstore.Previews{Pool: pool, Collection: req.Collection, DocType: req.FilterDocType}
 			routing = pipeline.NewRoutingStageWithScope(ret, visibility, previews)
 			qc.EvidenceVisibility = visibility
+			qc.HostedVisibilityRefill = cfg.HostedVisibilityRefill && ret.SupportsVisibilityRefill()
+			qc.HostedVisibilityExtraRequests = cfg.HostedVisibilityExtraRequests
 		}
 		stages := []pipeline.QueryStage{
 			pipeline.NewDecomposeStage(),

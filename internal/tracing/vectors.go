@@ -26,12 +26,38 @@ func WrapVectorStore(inner domain.VectorStore, system string) domain.VectorStore
 	if _, transactional := inner.(domain.TransactionalVectorStore); transactional {
 		return &transactionalVectorStore{wrapped}
 	}
+	if refill, ok := inner.(domain.VisibilityRefillStore); ok {
+		return &visibilityRefillStore{wrapped, refill}
+	}
 	return wrapped
 }
 
 type transactionalVectorStore struct{ *vectorStore }
 
 func (*transactionalVectorStore) TransactionalVectors() {}
+
+type visibilityRefillStore struct {
+	*vectorStore
+	refill domain.VisibilityRefillStore
+}
+
+func (s *visibilityRefillStore) VisibilityRefillLimit() int { return s.refill.VisibilityRefillLimit() }
+
+func (s *visibilityRefillStore) QueryCandidates(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	return s.query(ctx, topK, func(ctx context.Context) ([]domain.ScoredChunk, error) {
+		return s.refill.QueryCandidates(ctx, embedding, topK, filter)
+	})
+}
+
+func (s *visibilityRefillStore) QueryFilteredBudgeted(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter, budget int) ([]domain.ScoredChunk, int, error) {
+	var used int
+	chunks, err := s.query(ctx, topK, func(ctx context.Context) ([]domain.ScoredChunk, error) {
+		chunks, attempts, err := s.refill.QueryFilteredBudgeted(ctx, embedding, topK, filter, budget)
+		used = attempts
+		return chunks, err
+	})
+	return chunks, used, err
+}
 
 func (s *vectorStore) begin(ctx context.Context, operation, kind string) (context.Context, trace.Span) {
 	return start(ctx, "vector."+operation, kind, trace.SpanKindClient, attribute.String("db.system.name", s.system), attribute.String("db.operation.name", operation))

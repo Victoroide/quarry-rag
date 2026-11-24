@@ -37,6 +37,8 @@ The table below lists the environment variables recognized by the service:
 | `HTTP_READ_TIMEOUT` | duration | `60s` | 5s to 30m | Maximum time to read a complete HTTP request, including the body. |
 | `HTTP_WRITE_TIMEOUT` | duration | `QUERY_TIMEOUT + 15s` | Greater than `QUERY_TIMEOUT` | Response write deadline; defaults to 75s with the default query budget. |
 | `INDEX_VISIBILITY_TIMEOUT` | duration | `30s` | 0s to 5m; less than `INGEST_JOB_TIMEOUT` | Pinecone only: maximum wait after vector writes for search to return the document's last embedded chunk; zero disables waiting. Timeout logs a warning and allows completion. |
+| `HOSTED_VISIBILITY_REFILL` | bool | `false` | Boolean | Enable [visibility refill](architecture.md#hosted-visibility-refill) for Pinecone queries. |
+| `HOSTED_VISIBILITY_EXTRA_REQUESTS` | integer | `1` | Non-negative | Maximum additional Pinecone requests per enabled query. Zero keeps the current-chunk checks and allows no additional requests. |
 | `INGEST_CONTENT_DEDUP` | string | `collection` | `collection` or `off` | Selects the [document identity policy](api.md#document-identity) for new uploads. See [rollout and rollback](deployment.md#content-deduplication-rollout). |
 | `INGEST_JOB_TIMEOUT` | duration | `15m` | 1m to 2h; greater than lease | Maximum processing time per attempt. |
 | `INGEST_LEASE` | duration | `2m` | 30s to 30m | Lease duration, renewed every third of this interval. |
@@ -258,6 +260,12 @@ Metrics use Prometheus text format:
   database; do not sum it across replicas.
 - `quarry_query_mode_total{mode}` counts each routed query once using its effective
   `LOCAL` or `GLOBAL` mode, including queries that subsequently fail synthesis.
+- `quarry_hosted_visibility_refill_total{result}` counts each applicable outcome
+  once per completed retrieval. `budget_exhausted` means the request allowance
+  prevented an optional partition or retry attempt, `upstream_error` means an
+  optional search failed without hitting that limit, and `underfill` means
+  visibility filtering left fewer than the requested number of chunks after
+  recovery. A retrieval may have multiple outcomes.
 - `quarry_rerank_total{result}` counts optional reranking attempts: `reranked` for
   success and `fallback` for errors, invalid results or an expired `RERANK_TIMEOUT`.
   Disabled reranking, empty candidate lists and queries canceled or timed out during

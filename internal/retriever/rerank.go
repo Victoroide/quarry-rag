@@ -63,7 +63,14 @@ func (r *BedrockReranker) Rerank(ctx context.Context, question string, chunks []
 	tokens := make(map[string]bool)
 	count := 0
 	for {
-		page, err := r.client.Rerank(ctx, in)
+		if in.NextToken != nil {
+			if err := domain.CheckEvidenceBeforeSend(ctx); err != nil {
+				return nil, fmt.Errorf("rerank: page: %w", err)
+			}
+		}
+		page, err := r.client.Rerank(ctx, in, func(o *bedrockagentruntime.Options) {
+			o.HTTPClient = awsconf.GuardEvidenceSends(ctx, o.HTTPClient)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("rerank: request: %w", err)
 		}

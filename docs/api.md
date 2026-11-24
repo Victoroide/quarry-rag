@@ -434,6 +434,14 @@ service terminates the stream with an error. Previously delivered evidence
 remains with the recipient. With no evidence after filtering, both modes use
 the same localized response above.
 
+The same response-time checks apply to generated answers when
+[hosted visibility refill](architecture.md#hosted-visibility-refill) is enabled.
+The service rechecks current evidence before sending it to reranking or
+generation, including later Bedrock rerank pages and SDK retries. For streamed
+generation, it checks again after flushing the context frame and before
+dispatch. A failed check stops the query. A partial hosted search uses the
+ordinary response fields with the verified chunks it could recover.
+
 #### Streamed query answers
 
 Send `Accept: text/event-stream` to receive server-sent events. An explicit

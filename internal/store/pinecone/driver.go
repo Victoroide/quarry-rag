@@ -50,3 +50,18 @@ func (d *Driver) Ping(ctx context.Context) error {
 func (d *Driver) QueryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
 	return d.client.QueryFiltered(ctx, embedding, topK, filter)
 }
+
+// VisibilityRefillLimit caps metadata-bearing refill responses with values omitted.
+func (*Driver) VisibilityRefillLimit() int { return maxRefillTopK }
+
+// QueryCandidates preserves all partition results for SQL visibility checking.
+func (d *Driver) QueryCandidates(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	return d.client.queryCandidates(ctx, embedding, topK, filter, nil)
+}
+
+// QueryFilteredBudgeted applies all filter partitions within the attempt budget.
+func (d *Driver) QueryFilteredBudgeted(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter, budget int) ([]domain.ScoredChunk, int, error) {
+	remaining := budget
+	chunks, err := d.client.queryCandidates(ctx, embedding, topK, filter, &remaining)
+	return chunks, budget - remaining, err
+}

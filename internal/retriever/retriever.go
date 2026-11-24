@@ -92,14 +92,7 @@ func (r *Retriever) RetrieveWithEmbedding(ctx context.Context, embedding []float
 	if filter.MatchesNothing() {
 		return &Result{Mode: mode}, nil
 	}
-	queryFilter := filter
-	if mode == RetrievalModeLocal {
-		if localDocID == "" || (filter.DocumentIDs != nil && !slices.Contains(filter.DocumentIDs, localDocID)) {
-			mode = RetrievalModeGlobal
-		} else {
-			queryFilter.DocumentIDs = []string{localDocID}
-		}
-	}
+	mode, queryFilter := retrievalScope(mode, localDocID, filter)
 	chunks, err := r.queryFiltered(ctx, embedding, topK, queryFilter)
 	if err != nil {
 		return nil, fmt.Errorf("retriever: query: %w", err)
@@ -109,21 +102,7 @@ func (r *Retriever) RetrieveWithEmbedding(ctx context.Context, embedding []float
 		if err != nil {
 			return nil, fmt.Errorf("retriever: top up: %w", err)
 		}
-		merged := make([]domain.ScoredChunk, 0, len(chunks)+len(extra))
-		byID := make(map[domain.ChunkID]int, len(chunks)+len(extra))
-		for _, batch := range [][]domain.ScoredChunk{chunks, extra} {
-			for _, sc := range batch {
-				if i, ok := byID[sc.Chunk.ID]; ok {
-					if sc.Score > merged[i].Score {
-						merged[i] = sc
-					}
-				} else {
-					byID[sc.Chunk.ID] = len(merged)
-					merged = append(merged, sc)
-				}
-			}
-		}
-		chunks = merged
+		chunks = mergeChunks(chunks, extra)
 	}
 
 	// Sort by score descending.
@@ -131,7 +110,42 @@ func (r *Retriever) RetrieveWithEmbedding(ctx context.Context, embedding []float
 		return chunks[i].Score > chunks[j].Score
 	})
 
-	// Trim to topK.
+	return retrievalResult(ctx, mode, chunks, topK), nil
+}
+
+func retrievalScope(mode RetrievalMode, localDocID string, filter domain.VectorFilter) (RetrievalMode, domain.VectorFilter) {
+	if mode == RetrievalModeLocal {
+		if localDocID == "" || (filter.DocumentIDs != nil && !slices.Contains(filter.DocumentIDs, localDocID)) {
+			return RetrievalModeGlobal, filter
+		}
+		filter.DocumentIDs = []string{localDocID}
+	}
+	return mode, filter
+}
+
+func mergeChunks(batches ...[]domain.ScoredChunk) []domain.ScoredChunk {
+	size := 0
+	for _, batch := range batches {
+		size += len(batch)
+	}
+	merged := make([]domain.ScoredChunk, 0, size)
+	byID := make(map[domain.ChunkID]int, size)
+	for _, batch := range batches {
+		for _, sc := range batch {
+			if i, ok := byID[sc.Chunk.ID]; ok {
+				if sc.Score > merged[i].Score {
+					merged[i] = sc
+				}
+			} else {
+				byID[sc.Chunk.ID] = len(merged)
+				merged = append(merged, sc)
+			}
+		}
+	}
+	return merged
+}
+
+func retrievalResult(ctx context.Context, mode RetrievalMode, chunks []domain.ScoredChunk, topK int) *Result {
 	if len(chunks) > topK {
 		chunks = chunks[:topK]
 	}
@@ -147,7 +161,7 @@ func (r *Retriever) RetrieveWithEmbedding(ctx context.Context, embedding []float
 		Chunks:   chunks,
 		Mode:     mode,
 		TopScore: topScore,
-	}, nil
+	}
 }
 
 // DetermineModeWithQuery decides LOCAL or GLOBAL mode using structural signals only.

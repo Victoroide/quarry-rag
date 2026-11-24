@@ -88,9 +88,11 @@ type Config struct {
 
 	S3ExpectedBucketOwner string
 
-	PineconeUpsertBatchSize int
-	PineconeTimeout         time.Duration
-	PineconeMaxAttempts     int
+	PineconeUpsertBatchSize       int
+	PineconeTimeout               time.Duration
+	PineconeMaxAttempts           int
+	HostedVisibilityRefill        bool
+	HostedVisibilityExtraRequests int
 
 	ExtractIsolation         bool
 	ExtractTimeout           time.Duration
@@ -183,6 +185,7 @@ func Load() (*Config, error) {
 		{"CHUNK_OVERLAP", &cfg.ChunkOverlap, 64}, {"EMBEDDING_DIMENSIONS", &cfg.EmbeddingDimensions, 1024},
 		{"PINECONE_UPSERT_BATCH_SIZE", &cfg.PineconeUpsertBatchSize, 100},
 		{"PINECONE_MAX_ATTEMPTS", &cfg.PineconeMaxAttempts, 5},
+		{"HOSTED_VISIBILITY_EXTRA_REQUESTS", &cfg.HostedVisibilityExtraRequests, 1},
 		{"INGEST_WORKERS", &cfg.IngestWorkers, 2}, {"INGEST_MAX_ATTEMPTS", &cfg.IngestMaxAttempts, 5},
 		{"EXTRACT_CONCURRENCY", &cfg.ExtractConcurrency, 2}, {"EXTRACT_MEMORY_LIMIT_MB", &cfg.ExtractMemoryLimitMB, 512},
 		{"MAX_ALLOWED_DOCUMENT_IDS", &cfg.MaxAllowedDocumentIDs, 25000},
@@ -213,6 +216,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.PineconeTimeout, err = envDurationOrDefault("PINECONE_TIMEOUT", 10*time.Second); err != nil {
+		return nil, err
+	}
+	if cfg.HostedVisibilityRefill, err = envBoolOrDefault("HOSTED_VISIBILITY_REFILL", false); err != nil {
 		return nil, err
 	}
 	if cfg.LocalRetrievalThreshold, err = envFloat64OrDefault("LOCAL_RETRIEVAL_THRESHOLD", 0.70); err != nil {
@@ -408,6 +414,9 @@ func (c *Config) validate() error {
 	}
 	if c.PineconeMaxAttempts < 1 || c.PineconeMaxAttempts > 10 {
 		return fmt.Errorf("config: PINECONE_MAX_ATTEMPTS must be between 1 and 10")
+	}
+	if c.HostedVisibilityExtraRequests < 0 {
+		return fmt.Errorf("config: HOSTED_VISIBILITY_EXTRA_REQUESTS must be non-negative")
 	}
 	switch c.SynthesisModel {
 	case "primary", "fallback", "hybrid":

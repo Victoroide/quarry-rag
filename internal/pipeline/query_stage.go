@@ -88,7 +88,7 @@ func (s *RoutingStage) ID() StageID { return StageRetrievalRouting }
 
 // Run evaluates query signals and sets RetrievalMode on the QueryContext.
 func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
-	filter := domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs, Collection: qc.Collection}
+	filter := qc.vectorFilter()
 	qc.NamedEntity, qc.EntityDocumentID = "", ""
 	qc.LocalDocumentID = ""
 	qc.Candidates, qc.QueryEmbedding = nil, nil
@@ -111,7 +111,14 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 	if probeK == 0 || probeFailed {
 		return nil
 	}
-	candidates, err = scopedChunks(ctx, qc, candidates, s.visibility)
+	var ids []string
+	var previews map[string]string
+	if qc.HostedVisibilityRefill && s.previews != nil {
+		candidates = filterEvidenceScope(filter, candidates)
+		candidates, previews, err = qc.EvidenceVisibility.VisibleEvidenceWithPreviews(ctx, candidates, candidateDocumentIDs(candidates))
+	} else {
+		candidates, err = scopedChunks(ctx, qc, candidates, s.visibility)
+	}
 	if err != nil {
 		return fmt.Errorf("routing_stage: visibility: %w", err)
 	}
@@ -120,19 +127,19 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 		return nil
 	}
 	qc.TopScore = candidates[0].Score
-	var ids []string
-	var previews map[string]string
 	if s.previews != nil {
 		ids = candidateDocumentIDs(candidates)
-		previews, err = s.previews.DocumentPreviews(ctx, ids)
-		if err != nil {
-			return fmt.Errorf("routing_stage: previews: %w", err)
+		if !qc.HostedVisibilityRefill {
+			previews, err = s.previews.DocumentPreviews(ctx, ids)
+			if err != nil {
+				return fmt.Errorf("routing_stage: previews: %w", err)
+			}
 		}
 	}
 	route := s.selectRoute(qc, previews, ids)
 	qc.RetrievalMode, qc.LocalDocumentID = route.mode, route.localDocumentID
 	qc.NamedEntity, qc.EntityDocumentID = route.namedEntity, route.entityDocumentID
-	if qc.AnswerMode == domain.AnswerModeEvidence && len(ids) != 0 {
+	if qc.checksCurrentEvidence() && len(ids) != 0 {
 		qc.previewRouting = &previewRouting{stage: s, documentIDs: ids, original: route}
 	}
 	return nil
@@ -169,24 +176,32 @@ func candidateDocumentIDs(chunks []domain.ScoredChunk) []string {
 }
 
 func scopedChunks(ctx context.Context, qc *QueryContext, chunks []domain.ScoredChunk, visibility domain.DocumentVisibility) ([]domain.ScoredChunk, error) {
-	if qc.AnswerMode != domain.AnswerModeEvidence {
+	if !qc.checksCurrentEvidence() {
 		return visibleChunks(ctx, filterChunksByAllowedDocIDs(chunks, qc.AllowedDocumentIDs), visibility)
 	}
-	chunks = filterEvidenceScope(qc, chunks)
+	chunks = filterEvidenceScope(qc.vectorFilter(), chunks)
 	if qc.EvidenceVisibility != nil && len(chunks) != 0 {
 		return qc.EvidenceVisibility.VisibleEvidence(ctx, chunks)
 	}
 	return visibleChunks(ctx, chunks, visibility)
 }
 
-func filterEvidenceScope(qc *QueryContext, chunks []domain.ScoredChunk) []domain.ScoredChunk {
-	chunks = filterChunksByAllowedDocIDs(chunks, qc.AllowedDocumentIDs)
-	if qc.Collection != "" || qc.FilterDocType != "" {
+func (qc *QueryContext) vectorFilter() domain.VectorFilter {
+	return domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs, Collection: qc.Collection}
+}
+
+func (qc *QueryContext) checksCurrentEvidence() bool {
+	return qc.HostedVisibilityRefill || qc.AnswerMode == domain.AnswerModeEvidence
+}
+
+func filterEvidenceScope(filter domain.VectorFilter, chunks []domain.ScoredChunk) []domain.ScoredChunk {
+	chunks = filterChunksByAllowedDocIDs(chunks, filter.DocumentIDs)
+	if filter.Collection != "" || filter.DocType != "" {
 		filtered := make([]domain.ScoredChunk, 0, len(chunks))
 		for _, sc := range chunks {
 			collection, _ := sc.Chunk.Metadata["collection"].(string)
 			docType, _ := sc.Chunk.Metadata["doc_type"].(string)
-			if (qc.Collection == "" || collection == qc.Collection) && (qc.FilterDocType == "" || docType == qc.FilterDocType) {
+			if (filter.Collection == "" || collection == filter.Collection) && (filter.DocType == "" || docType == filter.DocType) {
 				filtered = append(filtered, sc)
 			}
 		}
@@ -201,7 +216,7 @@ func (qc *QueryContext) CheckEvidenceScope(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if qc.AnswerMode != domain.AnswerModeEvidence {
+	if !qc.checksCurrentEvidence() {
 		return nil
 	}
 	// Probe candidates can influence the public retrieval mode even when
@@ -210,7 +225,7 @@ func (qc *QueryContext) CheckEvidenceScope(ctx context.Context) error {
 	if len(candidates) == 0 {
 		return nil
 	}
-	visible := filterEvidenceScope(qc, candidates)
+	visible := filterEvidenceScope(qc.vectorFilter(), candidates)
 	var previews map[string]string
 	if qc.EvidenceVisibility != nil && len(visible) != 0 {
 		var probeIDs []string
@@ -294,7 +309,7 @@ func (s *RetrievalStage) Run(ctx context.Context, qc *QueryContext) error {
 		qc.TopScore = 0
 		return nil
 	}
-	filter := domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs, Collection: qc.Collection}
+	filter := qc.vectorFilter()
 	mode := retriever.RetrievalMode(qc.RetrievalMode)
 	if len(qc.QueryEmbedding) == 0 {
 		embedding, _, _, err := s.ret.EmbedQuery(ctx, qc.OriginalQuery, filter, 0)
@@ -303,25 +318,42 @@ func (s *RetrievalStage) Run(ctx context.Context, qc *QueryContext) error {
 		}
 		qc.QueryEmbedding = embedding
 	}
-	result, err := s.ret.RetrieveWithEmbedding(ctx, qc.QueryEmbedding, mode, qc.LocalDocumentID, qc.MaxChunks, filter)
+	qc.RetrievedChunks = nil
+	qc.TopScore = 0
+	result, err := s.retrieve(ctx, qc, mode, filter)
 	if err != nil {
 		return fmt.Errorf("retrieval_stage: %w", err)
 	}
-	// Enforce the caller's tenant/role allowlist BEFORE the synthesis stage
-	// runs, so privileged content never reaches the LLM context (and so can
-	// never leak into the generated answer). A nil allowlist is a no-op.
-	qc.RetrievedChunks = nil
-	qc.TopScore = 0
-	chunks, err := scopedChunks(ctx, qc, result.Chunks, s.visibility)
-	if err != nil {
-		return fmt.Errorf("retrieval_stage: visibility: %w", err)
-	}
-	qc.RetrievedChunks = chunks
+	qc.RetrievedChunks = result.Chunks
 	qc.RetrievalMode = string(result.Mode)
-	if len(chunks) > 0 {
-		qc.TopScore = chunks[0].Score
+	if len(result.Chunks) > 0 {
+		qc.TopScore = result.Chunks[0].Score
 	}
 	return nil
+}
+
+func (s *RetrievalStage) retrieve(ctx context.Context, qc *QueryContext, mode retriever.RetrievalMode, filter domain.VectorFilter) (*retriever.Result, error) {
+	if qc.HostedVisibilityRefill {
+		return s.ret.RetrieveVisibleWithEmbedding(ctx, qc.QueryEmbedding, mode, qc.LocalDocumentID, qc.MaxChunks, filter, qc.HostedVisibilityExtraRequests,
+			func(ctx context.Context, chunks []domain.ScoredChunk, scope domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
+				chunks = filterEvidenceScope(scope, chunks)
+				if len(chunks) == 0 {
+					return chunks, false, nil
+				}
+				visible, err := qc.EvidenceVisibility.VisibleEvidence(ctx, chunks)
+				return visible, len(visible) < len(chunks), err
+			})
+	}
+	result, err := s.ret.RetrieveWithEmbedding(ctx, qc.QueryEmbedding, mode, qc.LocalDocumentID, qc.MaxChunks, filter)
+	if err != nil {
+		return nil, err
+	}
+	// Apply the caller's allowlist and visibility before returning evidence.
+	result.Chunks, err = scopedChunks(ctx, qc, result.Chunks, s.visibility)
+	if err != nil {
+		return nil, fmt.Errorf("visibility: %w", err)
+	}
+	return result, nil
 }
 
 // filterChunksByAllowedDocIDs restricts chunks to a caller-supplied document-id
@@ -361,16 +393,28 @@ func NewRerankStage(r retriever.Reranker, timeout time.Duration) *RerankStage {
 // ID returns the stage identifier.
 func (s *RerankStage) ID() StageID { return StageRerank }
 
-// Run preserves vector order when reranking fails or its deadline expires.
+// Run preserves vector order on an upstream rerank failure and propagates
+// evidence-check failures.
 func (s *RerankStage) Run(ctx context.Context, qc *QueryContext) error {
 	if qc.AnswerMode == domain.AnswerModeEvidence || s.reranker == nil || len(qc.RetrievedChunks) == 0 {
 		return nil
 	}
 	rerankCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	rerankCtx = qc.withProviderEvidenceCheck(rerankCtx)
+	if err := domain.CheckEvidenceBeforeSend(rerankCtx); err != nil {
+		return fmt.Errorf("rerank_stage: %w", err)
+	}
 	chunks, err := s.reranker.Rerank(rerankCtx, qc.OriginalQuery, slices.Clone(qc.RetrievedChunks))
+	// The SDK can report cancellation in place of the guard's visibility error.
+	if guardErr := domain.RecordedEvidenceCheckError(rerankCtx); guardErr != nil {
+		return fmt.Errorf("rerank_stage: %w", guardErr)
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("rerank_stage: %w", ctxErr)
+	}
+	if errors.Is(err, domain.ErrEvidenceCheck) {
+		return fmt.Errorf("rerank_stage: %w", err)
 	}
 	if err == nil {
 		err = rerankCtx.Err()

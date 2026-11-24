@@ -49,8 +49,21 @@ func (v Visibility) VisibleEvidenceWithPreviews(ctx context.Context, candidates 
 		input = append(input, candidate)
 	}
 	var previews map[string]string
+	var previewIDs []string
 	if len(probeIDs) != 0 {
 		previews = make(map[string]string, len(probeIDs))
+		requested := make(map[string]struct{}, len(probeIDs))
+		for _, id := range probeIDs {
+			if parsed, err := uuid.Parse(id); err == nil {
+				requested[parsed.String()] = struct{}{}
+			}
+		}
+		for _, id := range docIDs {
+			if _, ok := requested[id]; ok {
+				previewIDs = append(previewIDs, id)
+				delete(requested, id)
+			}
+		}
 	}
 	if len(input) == 0 {
 		return input, previews, nil
@@ -63,7 +76,7 @@ JOIN chunks c ON c.id=hit.chunk_id AND c.document_id=hit.doc_id AND c.chunk_inde
 JOIN documents d ON d.id=c.document_id AND d.status='completed'
 WHERE ($5='' OR d.collection=$5) AND ($6='' OR d.doc_type=$6)
   AND encode(digest(convert_to(c.text, 'UTF8'), 'sha256'), 'hex')=hit.hash
-ORDER BY hit.ord`, chunkIDs, docIDs, indices, digests, v.Collection, v.DocType, probeIDs)
+ORDER BY hit.ord`, chunkIDs, docIDs, indices, digests, v.Collection, v.DocType, previewIDs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("postgres: visible evidence: %w", err)
 	}

@@ -77,7 +77,9 @@ func (c *Client) Converse(ctx context.Context, messages []brtypes.Message) (*bed
 			MaxTokens:   &maxToks,
 		},
 	}
-	output, err := c.rt.Converse(ctx, input)
+	output, err := c.rt.Converse(ctx, input, func(o *bedrockruntime.Options) {
+		o.HTTPClient = awsconf.GuardEvidenceSends(ctx, o.HTTPClient)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("llm: converse: %w", err)
 	}
@@ -112,7 +114,9 @@ func (c *Client) ConverseWithModelAndSystem(ctx context.Context, modelID, system
 			&brtypes.SystemContentBlockMemberText{Value: systemPrompt},
 		}
 	}
-	output, err := c.rt.Converse(ctx, input)
+	output, err := c.rt.Converse(ctx, input, func(o *bedrockruntime.Options) {
+		o.HTTPClient = awsconf.GuardEvidenceSends(ctx, o.HTTPClient)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("llm: converse (model=%s): %w", modelID, err)
 	}
