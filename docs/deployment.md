@@ -283,9 +283,10 @@ Confirm that `TestSmoke_PreexistingDocumentRemainsRetrievable` passes without sk
 Install pgvector 0.8 or later on the PostgreSQL server, for example by using
 the `pgvector/pgvector:0.8.7-pg16` image or installing the pgvector package for
 your PostgreSQL major version. The stock PostgreSQL image in the offline quick
-start lacks pgvector. Give the database role permission to create the vector
-tables and indexes. An administrator can create the `vector` extension ahead of
-time, or grant the service role permission to create it during
+start lacks pgvector. For a data-only serving login, follow the
+[owner preparation and role instructions](grant-catalog.md#database-roles).
+Deployments that initialize pgvector at service startup need a serving login
+with the privileges described under
 [vector schema initialization](architecture.md#postgresql-vector-schema).
 
 ### Changing Models or Vector Stores
