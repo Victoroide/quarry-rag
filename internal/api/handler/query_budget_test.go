@@ -414,15 +414,18 @@ func TestQueryStrictBlankEvidenceSkipsProviders(t *testing.T) {
 				{Chunk: domain.Chunk{ID: "c2", DocumentID: "00000000-0000-4000-8000-000000000002", Text: " \t\u2060"}, Score: .8},
 			}
 			ret := retriever.NewRetriever(citationQueryStore{chunks: chunks}, embedder.NewFakeEmbedder(8), .7, 10)
-			h := QueryHandler(ret, amb, cfg, nil)
+			h := QueryHandler(ret, amb, cfg, nil, WithNoEvidenceCatalog(queryTestNoEvidenceCatalog(t)))
 			const body = `{"query":"Q?","mode":"global"}`
 			req := streamQueryRequest(t.Context(), body)
+			req.Header.Set("Accept-Language", "ar")
 			if !stream {
 				req.Header.Del("Accept")
 			}
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, "ar", rec.Header().Get("Content-Language"))
+			require.Contains(t, rec.Header().Values("Vary"), "Accept-Language")
 			require.Zero(t, provider.countCalls.Load())
 			require.Zero(t, provider.converseCalls.Load())
 			if stream {
@@ -430,6 +433,10 @@ func TestQueryStrictBlankEvidenceSkipsProviders(t *testing.T) {
 				require.Len(t, events, 3)
 				require.Equal(t, "context", events[0].name)
 				require.JSONEq(t, "0", string(events[0].data["context_chunks"]))
+				require.Equal(t, "delta", events[1].name)
+				var answer string
+				require.NoError(t, json.Unmarshal(events[1].data["text"], &answer))
+				require.Equal(t, catalogAnswer, answer)
 				require.Equal(t, "done", events[2].name)
 				var done QueryStreamDone
 				require.NoError(t, json.Unmarshal(bytesOrRaw(events[2].data), &done))
@@ -440,6 +447,7 @@ func TestQueryStrictBlankEvidenceSkipsProviders(t *testing.T) {
 			} else {
 				var out QueryResponse
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+				require.Equal(t, catalogAnswer, out.Answer)
 				require.Equal(t, "no_evidence", out.FinishReason)
 				require.Zero(t, out.ContextChunks)
 				require.Zero(t, out.ModelInputTokens)

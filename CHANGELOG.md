@@ -30,6 +30,7 @@ Notable changes are grouped by release.
 - Optional embedding input profiles enforce model-specific allowances, split overlong ingestion chunks and reject overlong queries before embedding.
 - Optional exact cosine search for small filtered pgvector scopes (`PGVECTOR_EXACT_SCOPE_MAX`, disabled by default) with bounded single-snapshot probing and `quarry_pgvector_search_total` metrics.
 - The [evidence evaluation](docs/development.md#evidence-evaluation) replays a labeled fixture locally and compares scoped retrieval, answer support and index visibility against opted-in staging deployments with receipt-qualified fixture cleanup.
+- Deployments can add fixed no-evidence translations through a [local catalog](docs/configuration.md#no-evidence-translation-catalog).
 
 ### Changed
 

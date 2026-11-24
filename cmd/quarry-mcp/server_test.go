@@ -19,6 +19,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embedder"
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
+	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -687,4 +688,40 @@ func TestQueryToolStrictBudgetFields(t *testing.T) {
 			assert.Equal(t, tc.wantTokens, got.ModelInputTokens)
 		})
 	}
+}
+
+func TestQueryToolKeepsEnglishNoEvidenceDefaultWithCatalog(t *testing.T) {
+	const arabic = "لا توجد معلومات."
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	body, err := json.Marshal(map[string]string{"ar": arabic})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, body, 0o600))
+	catalog, err := pipeline.LoadNoEvidenceCatalog(path)
+	require.NoError(t, err)
+	server := httptest.NewServer(serviceapi.NewRouter(&serviceapi.RouterDeps{
+		Config:            &serviceconfig.Config{RequireDocumentAllowlist: true, ServiceToken: "token"},
+		NoEvidenceCatalog: catalog,
+		Retriever:         retriever.NewRetriever(nil, nil, .7, 2),
+	}))
+	defer server.Close()
+	httpClient, err := client.New(server.URL, client.WithServiceToken("token"))
+	require.NoError(t, err)
+	response, err := httpClient.Query(t.Context(), client.QueryRequest{Query: "Archive?", AllowedDocumentIDs: []string{}}, client.WithAcceptLanguage("ar"))
+	require.NoError(t, err)
+	require.Equal(t, arabic, response.Answer)
+
+	cs := connectServer(t, config{baseURL: server.URL, token: "token", timeout: time.Second})
+	result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "quarry_query", Arguments: map[string]any{
+		"query": "Archive?", "allowed_document_ids": []string{},
+	}})
+	require.NoError(t, err)
+	require.False(t, result.IsError, "%v", result.Content)
+	data, err := json.Marshal(result.StructuredContent)
+	require.NoError(t, err)
+	var got queryOutput
+	require.NoError(t, json.Unmarshal(data, &got))
+	require.Equal(t, "No relevant information was found to answer this question.", got.Answer)
+	require.Equal(t, "no_evidence", got.FinishReason)
+	require.Zero(t, got.TokenUsage)
+	require.Empty(t, got.Chunks)
 }

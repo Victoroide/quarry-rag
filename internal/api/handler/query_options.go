@@ -7,6 +7,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 )
 
@@ -44,7 +45,8 @@ func resolveAnswerMode(req QueryRequest, policy string) (domain.AnswerMode, int,
 }
 
 type queryOptions struct {
-	reranker retriever.Reranker
+	reranker          retriever.Reranker
+	noEvidenceCatalog *pipeline.NoEvidenceCatalog
 }
 
 // QueryOption configures optional query dependencies.
@@ -53,4 +55,9 @@ type QueryOption func(*queryOptions)
 // WithReranker selects the reranker used before synthesis context selection.
 func WithReranker(r retriever.Reranker) QueryOption {
 	return func(opts *queryOptions) { opts.reranker = r }
+}
+
+// WithNoEvidenceCatalog selects the fixed translations for queries without evidence.
+func WithNoEvidenceCatalog(catalog *pipeline.NoEvidenceCatalog) QueryOption {
+	return func(opts *queryOptions) { opts.noEvidenceCatalog = catalog }
 }

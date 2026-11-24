@@ -77,6 +77,7 @@ The table below lists the environment variables recognized by the service:
 | `QUERY_QUEUE_TIMEOUT` | duration | `2s` | 0s to 60s | Maximum wait for query admission; zero rejects immediately when all slots are occupied. |
 | `QUERY_ANSWER_POLICY` | string | `both` | `both`, `evidence_only` | Deployment policy for [query answer modes](api.md#evidence-only-queries). |
 | `EVALUATION_COLLECTION_PREFIX` | string | empty | 1–40 lowercase ASCII letters, digits or hyphens, starting with a letter or digit | Enables the [staging fixture routes and query diagnostic](development.md#evidence-evaluation) for a dedicated collection prefix. |
+| `NO_EVIDENCE_CATALOG_FILE` | path | `""` | Empty or a readable local file | Optional [no-evidence translation catalog](#no-evidence-translation-catalog). |
 | `QUERY_TIMEOUT` | duration | `60s` | 5s to 10m | Total query budget after admission. Earlier caller deadlines take precedence. |
 | `REQUIRE_DOCUMENT_ALLOWLIST` | boolean | `false` | Boolean | Require a non-null `allowed_document_ids` field on every query; an empty list is accepted and skips embedding and search. |
 | `RERANK_MODEL_ARN` | string | `""` | Empty, or an `arn:` value without whitespace or control characters | Enables [reranking before synthesis](api.md#post-query); empty disables it. Ignored in offline fake mode. See [Bedrock permissions](deployment.md#bedrock-reranking). |
@@ -213,6 +214,23 @@ unsupported in this configuration.
 
 See [query stages](architecture.md#query-stages) for fitting and
 [POST /query](api.md#post-query) for the response fields and statuses.
+
+## No-evidence translation catalog
+
+Leave `NO_EVIDENCE_CATALOG_FILE` empty to use the built-in translations. Point it to a local UTF-8 JSON object to add languages for [no-evidence answers](api.md#post-query). Keys are BCP 47 tags checked against the IANA Language Subtag Registry dated 2026-11-18, and values are operator-authored plain text. An extended-language subtag must follow its registered prefix, as in `zh-cmn`. Each tag is canonicalized with the registry's preferred values, so `zh-hnm` and `hnm`, or the deprecated `dek` and `sqm`, name one translation and one `Content-Language` value.
+
+Unicode locale attributes, keyword groups and transformed-content fields are ordered canonically. Repeated Unicode locale attributes count once, and the second character of each Unicode locale keyword must be a letter. A keyword with the sole value `true` is equivalent to the keyword alone. Unicode locale keyword and transformed-content field values use CLDR 49 aliases. For example, `ar-u-ca-islamicc` uses `ar-u-ca-islamic-civil`, and `ar-t-m0-names` uses `ar-t-m0-prprname`. Private-use subtags retain their identifiers, with case normalized to lowercase.
+
+```json
+{
+  "ar": "لم نجد معلومات ذات صلة للإجابة عن هذا السؤال.",
+  "ja": "この質問に答えるための関連情報が見つかりませんでした。"
+}
+```
+
+Use a regular file of up to 64 KiB with at most 128 additional translations. Canonical tags can contain up to 1,024 bytes and each decoded translation can contain up to 1 KiB of UTF-8 text. The server rejects invalid UTF-8 or JSON, invalid tags, duplicate canonical tags including built-in tags, and messages consisting solely of whitespace or invisible characters. It rejects control characters, bidi embeddings, overrides and isolates. Right-to-left text, standalone direction marks and script joining marks are preserved in valid messages.
+
+The server reads the file once at startup. An unreadable or invalid catalog prevents startup. Deploy the same file on every replica and restart the server to apply changes.
 
 ## Tracing
 
