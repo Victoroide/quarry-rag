@@ -21,6 +21,8 @@ fuzz:
 	go test -run='^$$' -fuzz='^FuzzResolveContext$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
 	go test -run='^$$' -fuzz='^FuzzExtractors$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
 	go test -run='^$$' -fuzz='^FuzzChunk$$' -fuzztime="$(FUZZTIME)" ./internal/chunker
+	go test -run='^$$' -fuzz='^FuzzChunkEmbeddingProfile$$' -fuzztime="$(FUZZTIME)" ./internal/chunker
+	go test -run='^$$' -fuzz='^FuzzDecodeProfile$$' -fuzztime="$(FUZZTIME)" ./internal/embeddinginput
 	go test -run='^$$' -fuzz='^FuzzSanitizeForPrompt$$' -fuzztime="$(FUZZTIME)" ./internal/textutil
 	go test -run='^$$' -fuzz='^FuzzNormalizeForIngest$$' -fuzztime="$(FUZZTIME)" ./internal/textutil
 	go test -run='^$$' -fuzz='^FuzzBuildSynthesisPrompt$$' -fuzztime="$(FUZZTIME)" ./internal/pipeline

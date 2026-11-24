@@ -6,9 +6,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+func TestChunkStageProducesFeasibleExactProfilePartition(t *testing.T) {
+	profile := testutil.OpenAIProfile(t, "../embeddinginput/testdata/cl100k_base.tiktoken.gz", 1)
+	stage := NewChunkStageWithEmbeddingProfile(chunker.NewChunker(3, 1), profile)
+	ic := NewIngestContext("doc", "测试测试", nil)
+	require.NoError(t, stage.Run(t.Context(), ic))
+	require.Len(t, ic.Chunks, 2)
+	for i, chunk := range ic.Chunks {
+		require.Equal(t, "测试", chunk.Text)
+		require.Equal(t, i, chunk.Index)
+	}
+}
 
 type concurrentIngestEmbedder struct{ active, peak atomic.Int32 }
 

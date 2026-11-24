@@ -319,7 +319,7 @@ func (w *Worker) extractText(ctx context.Context, job domain.Job, ic *pipeline.I
 	return nil
 }
 func permanent(err error) bool {
-	if errors.Is(err, domain.ErrPermanent) || errors.Is(err, pipeline.ErrNoChunks) || status.Code(err) == codes.InvalidArgument {
+	if errors.Is(err, domain.ErrPermanent) || errors.Is(err, domain.ErrEmbeddingModelLimit) || errors.Is(err, pipeline.ErrNoChunks) || status.Code(err) == codes.InvalidArgument {
 		return true
 	}
 	var apiErr smithy.APIError

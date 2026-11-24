@@ -104,7 +104,7 @@ sequenceDiagram
 
 ### Ingestion Stages
 
-1. **ChunkStage**: Converts raw document text into sliding-window text chunks bounded by [`CHUNK_TOKEN_SIZE`](configuration.md#environment-variables) and 30,000 bytes. Sentence boundaries are preferred, including full-width terminators without following whitespace. Oversized sentences split by words, and oversized words split at rune boundaries. Each window includes new text and retains up to `CHUNK_OVERLAP` estimated tokens from the previous window when both limits permit, never more than half of that window. Generates a deterministic chunk ID for each chunk.
+1. **ChunkStage**: Converts raw document text into sliding-window text chunks bounded by [`CHUNK_TOKEN_SIZE`](configuration.md#environment-variables) and 30,000 bytes. Sentence boundaries are preferred, including full-width terminators without following whitespace. By default, oversized sentences split by words and oversized words split at rune boundaries. [Embedding input profiles](configuration.md#embedding-input-profiles) add model limits and use grapheme boundaries. Each window includes new text and retains up to `CHUNK_OVERLAP` estimated tokens from the previous window when both limits permit, never more than half of that window. Generates a deterministic chunk ID for each chunk.
 2. **EmbedStage**: Embeds chunks concurrently up to [`EMBED_CONCURRENCY`](configuration.md#environment-variables); the provider also enforces its shared request limit [per replica](deployment.md#concurrency-limits).
 3. **PersistStage**:
    - Transactional stores defer the vector write and skip visibility polling; completion owns persistence. The remaining write steps apply to hosted storage.

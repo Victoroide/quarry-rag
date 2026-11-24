@@ -186,7 +186,7 @@ func run() error {
 
 	// Build ingestion pipeline stages.
 	ingestStages := []pipeline.Stage{
-		pipeline.NewChunkStage(chk),
+		pipeline.NewChunkStageWithEmbeddingProfile(chk, cfg.EmbeddingInputProfile),
 		pipeline.NewEmbedStage(emb, cfg.EmbedConcurrency),
 		pipeline.NewPersistStage(vectorStore, pipeline.WithVisibilityWait(cfg.IndexVisibilityTimeout)),
 	}
