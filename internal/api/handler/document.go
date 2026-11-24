@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/cleanup"
@@ -29,6 +31,15 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, s3Client
 
 		if _, err := uuid.Parse(docIDStr); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
+			return
+		}
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "validation", "invalid query parameters")
+			return
+		}
+		if query.Has("release_held") || hasIncarnationHeader(r.Header) {
+			writeJSONError(w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
 			return
 		}
 
@@ -74,16 +85,35 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, s3Client
 	}
 }
 
+func hasIncarnationHeader(headers http.Header) bool {
+	for name := range headers {
+		if strings.EqualFold(name, "X-Document-Incarnation") {
+			return true
+		}
+	}
+	return false
+}
+
 // ListDocumentsHandler returns document summaries or legacy references.
 func ListDocumentsHandler(cs domain.ChunkStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if lister, ok := cs.(domain.DocumentLister); ok {
-			listDocumentSummaries(w, r, lister)
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "validation", "invalid query parameters")
 			return
 		}
-		collection, apiErr := listingCollection(r)
+		collection, apiErr := listingCollection(query)
 		if apiErr != nil {
 			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			return
+		}
+		include := includeDocumentIncarnation(query)
+		if lister, ok := selectDocumentLister(cs, include); ok {
+			listDocumentSummaries(w, r, lister, query, collection, include)
+			return
+		}
+		if include {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document incarnations are unavailable")
 			return
 		}
 		if collection != "" {

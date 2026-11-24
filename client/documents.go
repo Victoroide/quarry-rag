@@ -39,6 +39,19 @@ type DocumentPage struct {
 	NextAfter *string           `json:"next_after"`
 }
 
+// DocumentIncarnationSummary includes a document's stable incarnation.
+type DocumentIncarnationSummary struct {
+	DocumentSummary
+	Incarnation string `json:"incarnation,omitempty"`
+}
+
+// DocumentIncarnationPage contains ordered summaries with their incarnations.
+type DocumentIncarnationPage struct {
+	Documents []DocumentIncarnationSummary `json:"documents"`
+	Count     int                          `json:"count"`
+	NextAfter *string                      `json:"next_after"`
+}
+
 // DeleteResponse reports deletion of a document and its related records.
 type DeleteResponse struct {
 	Deleted bool   `json:"deleted"`
@@ -54,6 +67,23 @@ type FileURL struct {
 
 // ListDocuments retrieves one page of document summaries.
 func (c *Client) ListDocuments(ctx context.Context, opts ListOptions) (*DocumentPage, error) {
+	var response DocumentPage
+	if err := c.listDocuments(ctx, opts, false, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+// ListDocumentsWithIncarnation retrieves one page with each document's incarnation.
+func (c *Client) ListDocumentsWithIncarnation(ctx context.Context, opts ListOptions) (*DocumentIncarnationPage, error) {
+	var response DocumentIncarnationPage
+	if err := c.listDocuments(ctx, opts, true, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) listDocuments(ctx context.Context, opts ListOptions, includeIncarnation bool, response any) error {
 	if opts.Limit == 0 {
 		opts.Limit = 100
 	}
@@ -64,17 +94,25 @@ func (c *Client) ListDocuments(ctx context.Context, opts ListOptions) (*Document
 	if opts.Collection != "" {
 		query.Set("collection", opts.Collection)
 	}
-	var response DocumentPage
-	if err := c.jsonRequest(ctx, http.MethodGet, "/documents?"+query.Encode(), nil, &response); err != nil {
-		return nil, err
+	if includeIncarnation {
+		query.Set("include_incarnation", "true")
 	}
-	return &response, nil
+	return c.jsonRequest(ctx, http.MethodGet, "/documents?"+query.Encode(), nil, response)
 }
 
 // GetDocument retrieves a document's ingestion status and summary.
 func (c *Client) GetDocument(ctx context.Context, id string) (*DocumentSummary, error) {
 	var response DocumentSummary
 	if err := c.jsonRequest(ctx, http.MethodGet, "/documents/"+url.PathEscape(id), nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+// GetDocumentWithIncarnation retrieves the status summary and its incarnation.
+func (c *Client) GetDocumentWithIncarnation(ctx context.Context, id string) (*DocumentIncarnationSummary, error) {
+	var response DocumentIncarnationSummary
+	if err := c.jsonRequest(ctx, http.MethodGet, "/documents/"+url.PathEscape(id)+"?include_incarnation=true", nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

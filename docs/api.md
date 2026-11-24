@@ -539,6 +539,7 @@ Optional query parameters:
 | `limit` | int | Page size from 1 to 1000 |
 | `after` | string | UUID cursor, exclusive; requires `limit` |
 | `collection` | string | Exact collection label, using the label rules above; omitted or empty lists all collections. Filters both streaming and paginated listings before ordering and limiting |
+| `include_incarnation` | bool | Send a single literal `true` to include the incarnation in each summary |
 
 Without pagination parameters, PostgreSQL streams the full listing without buffering every row. The response writes `documents` before `count`; an empty listing is `{"documents":[],"count":0}`. If a stream fails after it begins, its JSON is incomplete; discard the partial result and retry. Stores without summary support retain the reference listing and return an empty array when no documents exist.
 
@@ -568,6 +569,7 @@ Document summary fields:
 | `updated_at` | string | Latest ingestion transition timestamp in RFC 3339 format |
 | `completed_at` | string or null | Completion timestamp in RFC 3339 format |
 | `last_error` | string | Last ingestion error, included only for failed documents when recorded |
+| `incarnation` | string | Opt-in UUID for one lifetime of a document. It stays stable through ingestion status changes. Rows present at migration use their document UUID. Reusing a document UUID creates a new incarnation |
 
 Error Status Codes:
 
@@ -576,6 +578,7 @@ Error Status Codes:
 | `400 Bad Request` | `validation` | Invalid `limit`, `after` or `collection`; duplicate pagination or `collection` parameters; `after` without `limit`; or a malformed query string |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `500 Internal Server Error` | `internal` | Database query failure |
+| `503 Service Unavailable` | `unavailable` | The requested incarnation projection is unavailable |
 
 Example:
 
@@ -598,13 +601,15 @@ Returns one document summary with the fields described above. Poll this endpoint
 - **Auth**: Required (`X-Service-Token`)
 - **Response**: The document summary object (200 OK)
 
+Use `include_incarnation=true` as for [inventory](#get-documents). The Go client provides `GetDocumentWithIncarnation` and `ListDocumentsWithIncarnation` for these projections. An older server may return a summary with an empty incarnation in the Go client.
+
 | Status | Error Category | Condition |
 |---|---|---|
 | `400 Bad Request` | `validation` | `doc_id` is not a UUID |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `404 Not Found` | `not_found` | The document does not exist |
 | `500 Internal Server Error` | `internal` | Database lookup failure |
-| `503 Service Unavailable` | `unavailable` | The configured store does not support document summaries |
+| `503 Service Unavailable` | `unavailable` | The requested summary projection is unavailable |
 
 ---
 
@@ -666,13 +671,17 @@ Deletion continues after the caller disconnects, with a separate 60-second deadl
 - **Parameters**: `doc_id` (path parameter, must be a valid UUID)
 - **Request Body**: None
 
-Deletion ordering:
+`X-Document-Incarnation` and `release_held` are reserved. An upgraded endpoint returns `412 Precondition Failed` when either is present in a well-formed request, including empty values and `release_held=false`. During a mixed rollout, older endpoints may ignore these selectors. Keep the originally observed incarnation on every attempt of an incarnation-qualified operation and send it only to an endpoint that enforces the qualifier. An ID-only DELETE addresses the document currently stored under `doc_id`.
+
+Deletion proceeds in this order.
+
 1. Removes the legacy Pinecone document namespace (`doc_id`) when present.
 2. Deletes vector entries in the Pinecone default namespace where metadata `doc_id` matches.
 3. Deletes the original uploaded file from S3 if an `s3_key` exists.
 4. Deletes the document record from PostgreSQL (cascading foreign keys remove rows in `chunks` and `document_fingerprints`).
+5. Repeats the vector deletion by document ID after the PostgreSQL removal.
 
-If an error occurs while deleting vectors or object storage, PostgreSQL metadata is preserved so the operation can be retried, and the request returns `500 Internal Server Error`.
+A vector or object-store failure before PostgreSQL removal returns `500 Internal Server Error` with the document record still present. A failure in the final vector sweep also returns `500`, after the record has been removed. While the UUID is absent, a subsequent ID-only DELETE returns `404` without retrying the sweep. If the UUID has been reused, the request targets the replacement.
 
 After deletion returns successfully, subsequent queries exclude the document from answers and scored chunks immediately, even while vector deletion is still propagating through the index.
 
@@ -687,9 +696,10 @@ Error Status Codes:
 
 | Status | Error Category | Condition |
 |---|---|---|
-| `400 Bad Request` | `validation` | Invalid path or `doc_id` is not a valid UUID |
+| `400 Bad Request` | `validation` | Invalid `doc_id` or malformed query string |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `404 Not Found` | `not_found` | Document does not exist in PostgreSQL |
+| `412 Precondition Failed` | `precondition` | Incarnation-qualified deletion or hold release was requested |
 | `500 Internal Server Error` | `internal` | Database query failure or external deletion error in Pinecone or S3 |
 | `503 Service Unavailable` | `storage` | A stored file exists but file storage is not configured; no data is deleted |
 

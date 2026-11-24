@@ -20,15 +20,40 @@ type DocumentSummary struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 	CompletedAt *time.Time `json:"completed_at"`
 	LastError   *string    `json:"last_error,omitempty"`
+	Incarnation string     `json:"-"`
+}
+
+type documentSummaryJSON DocumentSummary
+
+func (d DocumentSummary) jsonFields() documentSummaryJSON {
+	if d.Status != "failed" {
+		d.LastError = nil
+	}
+	return documentSummaryJSON(d)
 }
 
 // MarshalJSON exposes the last error only for failed documents.
 func (d DocumentSummary) MarshalJSON() ([]byte, error) {
-	type summary DocumentSummary
-	if d.Status != "failed" {
-		d.LastError = nil
-	}
-	return json.Marshal(summary(d))
+	return json.Marshal(d.jsonFields())
+}
+
+// DocumentIncarnationSummary encodes an explicitly requested incarnation with the summary.
+type DocumentIncarnationSummary struct {
+	DocumentSummary
+	Incarnation string `json:"incarnation"`
+}
+
+// WithIncarnation adds the selected incarnation to the summary's JSON projection.
+func (d DocumentSummary) WithIncarnation() DocumentIncarnationSummary {
+	return DocumentIncarnationSummary{DocumentSummary: d, Incarnation: d.Incarnation}
+}
+
+// MarshalJSON encodes the incarnation alongside the standard summary fields.
+func (d DocumentIncarnationSummary) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		documentSummaryJSON
+		Incarnation string `json:"incarnation"`
+	}{d.jsonFields(), d.Incarnation})
 }
 
 // DocumentLister supports ordered document inventory and status lookups.
@@ -36,6 +61,11 @@ type DocumentLister interface {
 	StreamDocuments(context.Context, func(DocumentSummary) error) error
 	ListDocumentsPage(ctx context.Context, after string, limit int) ([]DocumentSummary, error)
 	GetDocumentSummary(ctx context.Context, id DocumentID) (*DocumentSummary, error)
+}
+
+// DocumentIncarnationLister provides a summary projection that reads document incarnations.
+type DocumentIncarnationLister interface {
+	WithDocumentIncarnations() DocumentLister
 }
 
 // CollectionDocumentLister applies a collection predicate before ordering and pagination.

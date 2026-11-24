@@ -62,10 +62,9 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	restarted := migrationTestClient(t, url)
 	require.NoError(t, restarted.RunMigrations(ctx))
 	var stored *string
-	var effective string
-	require.NoError(t, restarted.Pool.QueryRow(ctx, `SELECT incarnation::text, COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, id).Scan(&stored, &effective))
+	require.NoError(t, restarted.Pool.QueryRow(ctx, `SELECT incarnation::text FROM documents WHERE id=$1`, id).Scan(&stored))
 	require.Nil(t, stored)
-	require.Equal(t, id, effective)
+	requireHistoricalIncarnation(t, restarted.WithDocumentIncarnations(), id)
 
 	owned, err := restarted.HeartbeatJob(ctx, *job, time.Minute)
 	require.NoError(t, err)
@@ -73,6 +72,7 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	completed, err := restarted.CompleteJob(ctx, *job, []domain.Chunk{{ID: domain.ChunkID(chunkID), Text: "preserved chunk", TokenCount: 2}})
 	require.NoError(t, err)
 	require.True(t, completed)
+	effective := id
 	for range 2 {
 		require.NoError(t, restarted.DeleteDocument(ctx, result.DocumentID))
 		result, err := restarted.AcceptDocument(ctx, req)
@@ -87,6 +87,30 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 		effective = next
 	}
 	requireInactiveDeletionSchema(t, restarted)
+}
+
+func requireHistoricalIncarnation(t *testing.T, lister domain.DocumentLister, id string) {
+	t.Helper()
+	t.Run("status", func(t *testing.T) {
+		doc, err := lister.GetDocumentSummary(t.Context(), domain.DocumentID(id))
+		require.NoError(t, err)
+		require.NotNil(t, doc)
+		require.Equal(t, id, doc.Incarnation)
+	})
+	t.Run("stream", func(t *testing.T) {
+		var incarnations []string
+		require.NoError(t, lister.StreamDocuments(t.Context(), func(doc domain.DocumentSummary) error {
+			incarnations = append(incarnations, doc.Incarnation)
+			return nil
+		}))
+		require.Equal(t, []string{id}, incarnations)
+	})
+	t.Run("page", func(t *testing.T) {
+		docs, err := lister.ListDocumentsPage(t.Context(), "", 1)
+		require.NoError(t, err)
+		require.Len(t, docs, 1)
+		require.Equal(t, id, docs[0].Incarnation)
+	})
 }
 
 func TestDeletionMigrationRetriesAfterLockTimeout(t *testing.T) {

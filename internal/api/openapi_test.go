@@ -22,7 +22,8 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
+	"go.yaml.in/yaml/v4/plugin/mergekey"
 )
 
 func readOpenAPI(t *testing.T) map[string]any {
@@ -30,7 +31,7 @@ func readOpenAPI(t *testing.T) map[string]any {
 	data, err := os.ReadFile("../../docs/openapi.yaml")
 	require.NoError(t, err)
 	var doc map[string]any
-	require.NoError(t, yaml.Unmarshal(data, &doc))
+	require.NoError(t, yaml.Load(data, &doc, yaml.WithPlugin(mergekey.New(mergekey.WithDisable(true)))))
 	require.Equal(t, "3.1.0", doc["openapi"])
 	return doc
 }
@@ -165,22 +166,23 @@ func TestOpenAPIMiddlewareErrorEnvelope(t *testing.T) {
 func TestOpenAPIJSONFields(t *testing.T) {
 	schemas := openAPISchemas(t, readOpenAPI(t))
 	types := map[string]reflect.Type{
-		"HealthStatus":        reflect.TypeFor[handler.HealthStatus](),
-		"IngestRequest":       reflect.TypeFor[handler.IngestRequest](),
-		"IngestResponse":      reflect.TypeFor[handler.IngestResponse](),
-		"QueryRequest":        reflect.TypeFor[handler.QueryRequest](),
-		"QueryResponse":       reflect.TypeFor[handler.QueryResponse](),
-		"ScoredChunkResponse": reflect.TypeFor[handler.ScoredChunkResponse](),
-		"QueryStreamContext":  reflect.TypeFor[handler.QueryStreamContext](),
-		"QueryStreamDelta":    reflect.TypeFor[handler.QueryStreamDelta](),
-		"QueryStreamDone":     reflect.TypeFor[handler.QueryStreamDone](),
-		"CitationResponse":    reflect.TypeFor[handler.CitationResponse](),
-		"TokenUsage":          reflect.TypeFor[domain.TokenUsage](),
-		"DocumentSummary":     reflect.TypeFor[domain.DocumentSummary](),
-		"DocumentRef":         reflect.TypeFor[domain.DocumentRef](),
-		"DeleteResponse":      reflect.TypeFor[handler.DeleteResponse](),
-		"FileResponse":        reflect.TypeFor[handler.FileResponse](),
-		"APIError":            reflect.TypeFor[handler.APIError](),
+		"HealthStatus":               reflect.TypeFor[handler.HealthStatus](),
+		"IngestRequest":              reflect.TypeFor[handler.IngestRequest](),
+		"IngestResponse":             reflect.TypeFor[handler.IngestResponse](),
+		"QueryRequest":               reflect.TypeFor[handler.QueryRequest](),
+		"QueryResponse":              reflect.TypeFor[handler.QueryResponse](),
+		"ScoredChunkResponse":        reflect.TypeFor[handler.ScoredChunkResponse](),
+		"QueryStreamContext":         reflect.TypeFor[handler.QueryStreamContext](),
+		"QueryStreamDelta":           reflect.TypeFor[handler.QueryStreamDelta](),
+		"QueryStreamDone":            reflect.TypeFor[handler.QueryStreamDone](),
+		"CitationResponse":           reflect.TypeFor[handler.CitationResponse](),
+		"TokenUsage":                 reflect.TypeFor[domain.TokenUsage](),
+		"DocumentSummary":            reflect.TypeFor[domain.DocumentSummary](),
+		"DocumentIncarnationSummary": reflect.TypeFor[domain.DocumentIncarnationSummary](),
+		"DocumentRef":                reflect.TypeFor[domain.DocumentRef](),
+		"DeleteResponse":             reflect.TypeFor[handler.DeleteResponse](),
+		"FileResponse":               reflect.TypeFor[handler.FileResponse](),
+		"APIError":                   reflect.TypeFor[handler.APIError](),
 	}
 	for name, typ := range types {
 		t.Run(name, func(t *testing.T) {
@@ -189,7 +191,10 @@ func TestOpenAPIJSONFields(t *testing.T) {
 			fields := map[string]reflect.Type{}
 			nullable := map[string]bool{}
 			required := []string{}
-			for field := range typ.Fields() {
+			for _, field := range reflect.VisibleFields(typ) {
+				if field.Anonymous && field.Tag.Get("json") == "" {
+					continue
+				}
 				if field.IsExported() {
 					fieldName := strings.Split(field.Tag.Get("json"), ",")[0]
 					if fieldName == "" {
@@ -224,9 +229,10 @@ func TestOpenAPIJSONFields(t *testing.T) {
 	}
 
 	inline := map[string]struct{ file, function string }{
-		"ProbeStatus":     {"handler/health.go", "writeProbeStatus"},
-		"ExtractionError": {"handler/extract_errors.go", "writeExtractionError"},
-		"DocumentList":    {"handler/document_listing.go", "listDocumentSummaries"},
+		"ProbeStatus":             {"handler/health.go", "writeProbeStatus"},
+		"ExtractionError":         {"handler/extract_errors.go", "writeExtractionError"},
+		"DocumentList":            {"handler/document_listing.go", "listDocumentSummaries"},
+		"DocumentIncarnationList": {"handler/document_listing.go", "listDocumentSummaries"},
 	}
 	for name, source := range inline {
 		fields := []string{}
@@ -387,8 +393,8 @@ func TestOpenAPIPayloadBindings(t *testing.T) {
 		{"get", "/readyz", "", "ProbeStatus", []string{"200", "503"}},
 		{"post", "/ingest", "IngestRequest", "IngestResponse", []string{"200", "202"}},
 		{"post", "/query", "QueryRequest", "QueryResponse", []string{"200"}},
-		{"get", "/documents", "", "DocumentList", []string{"200"}},
-		{"get", "/documents/{doc_id}", "", "DocumentSummary", []string{"200"}},
+		{"get", "/documents", "", "DocumentInventoryResponse", []string{"200"}},
+		{"get", "/documents/{doc_id}", "", "DocumentStatusResponse", []string{"200"}},
 		{"delete", "/documents/{doc_id}", "", "DeleteResponse", []string{"200"}},
 		{"get", "/documents/{doc_id}/file", "", "FileResponse", []string{"200"}},
 	} {
@@ -443,6 +449,27 @@ func TestOpenAPIPayloadBindings(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpenAPIDocumentIncarnationSelectors(t *testing.T) {
+	doc := readOpenAPI(t)
+	paths := openAPIObject(t, doc["paths"])
+	for _, path := range []string{"/documents", "/documents/{doc_id}"} {
+		operation := openAPIObject(t, openAPIObject(t, paths[path])["get"])
+		require.Contains(t, operation["parameters"], map[string]any{"$ref": "#/components/parameters/IncludeIncarnation"})
+	}
+	operation := openAPIObject(t, openAPIObject(t, paths["/documents/{doc_id}"])["delete"])
+	parameters, ok := operation["parameters"].([]any)
+	require.True(t, ok)
+	selectors := make(map[string]any)
+	for _, value := range parameters {
+		parameter := resolveOpenAPIObject(t, doc, value)
+		name, ok := parameter["name"].(string)
+		require.True(t, ok)
+		selectors[name] = parameter["in"]
+	}
+	require.Equal(t, map[string]any{"X-Document-Incarnation": "header", "release_held": "query"}, selectors)
+	require.Contains(t, openAPIObject(t, operation["responses"]), "412")
 }
 
 func checkOpenAPIContent(t *testing.T, object map[string]any, name string) {

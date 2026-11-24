@@ -180,6 +180,7 @@ paths:
           description: 'Collection filter; see [GET /documents](api.md#get-documents).'
           schema:
             type: string
+        - $ref: '#/components/parameters/IncludeIncarnation'
       responses:
         '200':
           description: Document inventory
@@ -189,12 +190,14 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DocumentList'
+                $ref: '#/components/schemas/DocumentInventoryResponse'
         '400':
           $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '500':
+          $ref: '#/components/responses/Error'
+        '503':
           $ref: '#/components/responses/Error'
   /documents/{doc_id}:
     parameters:
@@ -206,6 +209,8 @@ paths:
       description: 'See [GET /documents/{doc_id}](api.md#get-documentsdoc_id).'
       security:
         - ServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/IncludeIncarnation'
       responses:
         '200':
           description: Document summary
@@ -215,7 +220,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DocumentSummary'
+                $ref: '#/components/schemas/DocumentStatusResponse'
         '400':
           $ref: '#/components/responses/Error'
         '401':
@@ -232,6 +237,18 @@ paths:
       description: 'See [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
       security:
         - ServiceToken: []
+      parameters:
+        - name: X-Document-Incarnation
+          in: header
+          description: 'Reserved; see [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
+          schema:
+            type: string
+            format: uuid
+        - name: release_held
+          in: query
+          description: 'Reserved; see [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
+          schema:
+            type: boolean
       responses:
         '200':
           description: Deletion result
@@ -247,6 +264,8 @@ paths:
         '401':
           $ref: '#/components/responses/Error'
         '404':
+          $ref: '#/components/responses/Error'
+        '412':
           $ref: '#/components/responses/Error'
         '500':
           $ref: '#/components/responses/Error'
@@ -300,6 +319,13 @@ components:
       schema:
         type: string
         format: uuid
+    IncludeIncarnation:
+      name: include_incarnation
+      in: query
+      description: 'Selects the [incarnation projection](api.md#get-documents).'
+      schema:
+        type: boolean
+        default: false
   headers:
     RequestID:
       description: 'Correlation value; see [Request IDs](api.md#request-ids).'
@@ -637,45 +663,84 @@ components:
             oneOf:
               - $ref: '#/components/schemas/DocumentSummary'
               - $ref: '#/components/schemas/DocumentRef'
-        count:
+        count: &documentListCount
           type: integer
-        next_after:
+        next_after: &documentListCursor
           type: [string, 'null']
           format: uuid
+    DocumentIncarnationList:
+      type: object
+      additionalProperties: false
+      required: [documents, count]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentIncarnationSummary'
+        count: *documentListCount
+        next_after: *documentListCursor
+    DocumentInventoryResponse:
+      anyOf:
+        - $ref: '#/components/schemas/DocumentList'
+        - $ref: '#/components/schemas/DocumentIncarnationList'
+    DocumentStatusResponse:
+      oneOf:
+        - $ref: '#/components/schemas/DocumentSummary'
+        - $ref: '#/components/schemas/DocumentIncarnationSummary'
     DocumentSummary:
       type: object
       description: 'See [document summaries](api.md#get-documents).'
       additionalProperties: false
       required: [document_id, doc_type, collection, status, chunk_count, file_name, file_type, created_at, updated_at, completed_at]
       properties:
-        document_id:
+        document_id: &documentSummaryID
           type: string
           format: uuid
-        doc_type:
+        doc_type: &documentSummaryDocType
           type: string
-        collection:
+        collection: &documentSummaryCollection
           type: string
-        s3_key:
+        s3_key: &documentSummaryS3Key
           type: string
-        status:
+        status: &documentSummaryStatus
           type: string
-        chunk_count:
+        chunk_count: &documentSummaryChunkCount
           type: integer
-        file_name:
+        file_name: &documentSummaryFileName
           type: [string, 'null']
-        file_type:
+        file_type: &documentSummaryFileType
           type: [string, 'null']
-        created_at:
+        created_at: &documentSummaryCreatedAt
           type: string
           format: date-time
-        updated_at:
+        updated_at: &documentSummaryUpdatedAt
           type: string
           format: date-time
-        completed_at:
+        completed_at: &documentSummaryCompletedAt
           type: [string, 'null']
           format: date-time
-        last_error:
+        last_error: &documentSummaryLastError
           type: string
+    DocumentIncarnationSummary:
+      type: object
+      additionalProperties: false
+      required: [document_id, doc_type, collection, status, chunk_count, file_name, file_type, created_at, updated_at, completed_at, incarnation]
+      properties:
+        document_id: *documentSummaryID
+        doc_type: *documentSummaryDocType
+        collection: *documentSummaryCollection
+        s3_key: *documentSummaryS3Key
+        status: *documentSummaryStatus
+        chunk_count: *documentSummaryChunkCount
+        file_name: *documentSummaryFileName
+        file_type: *documentSummaryFileType
+        created_at: *documentSummaryCreatedAt
+        updated_at: *documentSummaryUpdatedAt
+        completed_at: *documentSummaryCompletedAt
+        last_error: *documentSummaryLastError
+        incarnation:
+          type: string
+          format: uuid
     DocumentRef:
       type: object
       description: 'See [legacy document references](api.md#get-documents).'
