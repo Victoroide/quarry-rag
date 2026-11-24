@@ -149,6 +149,14 @@ type Config struct {
 
 	RerankModelARN string
 	RerankTimeout  time.Duration
+
+	RoutingPolicy             string
+	RoutingMargin             *float64
+	RoutingProfileFile        string
+	RoutingEmbeddingRevision  string
+	EffectiveRoutingMargin    float64
+	RoutingCalibrationMatched bool
+	RoutingProfileVersion     string
 }
 
 // Load reads configuration from environment variables, applies defaults,
@@ -308,6 +316,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.HTTPWriteTimeout, err = envDurationOrDefault("HTTP_WRITE_TIMEOUT", cfg.QueryTimeout+15*time.Second); err != nil {
 		return nil, err
+	}
+	if loadErr := cfg.loadRoutingConfig(); loadErr != nil {
+		return nil, loadErr
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -567,7 +578,7 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("config: LOG_LEVEL must be debug, info, warn or error")
 	}
-	return nil
+	return c.validateAndResolveRouting()
 }
 
 func envBoolOrDefault(key string, fallback bool) (bool, error) {

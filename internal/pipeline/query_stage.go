@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -19,6 +21,9 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	"github.com/aws/smithy-go"
+	"github.com/google/uuid"
+	"golang.org/x/text/unicode/norm"
+	"golang.org/x/text/width"
 )
 
 const answerSynthesisMaxOutput = 1024
@@ -53,18 +58,36 @@ func queryDigest(query string) string {
 	return hex.EncodeToString(digest[:6])
 }
 
+// RoutingConfig aliases retriever.RoutingConfig for pipeline routing construction.
+type RoutingConfig = retriever.RoutingConfig
+
+// RoutingConfigFromConfig converts service configuration into pipeline routing settings.
+func RoutingConfigFromConfig(cfg *config.Config) RoutingConfig {
+	if cfg == nil || cfg.RoutingPolicy != config.RoutingPolicyEvidence {
+		return RoutingConfig{Policy: retriever.RoutingPolicyLegacy}
+	}
+	return RoutingConfig{
+		Policy:     retriever.RoutingPolicyEvidence,
+		Margin:     cfg.EffectiveRoutingMargin,
+		Calibrated: cfg.RoutingCalibrationMatched,
+	}
+}
+
 // RoutingStage determines LOCAL or GLOBAL retrieval mode.
 type RoutingStage struct {
 	ret        *retriever.Retriever
 	visibility domain.DocumentVisibility
 	previews   domain.DocumentPreviewer
+	cfg        RoutingConfig
 }
 
 type queryRoute struct {
-	mode             string
-	localDocumentID  string
-	namedEntity      string
-	entityDocumentID string
+	mode                 string
+	reason               retriever.RouteReason
+	localDocumentID      string
+	namedEntity          string
+	entityDocumentID     string
+	previewNegativeMatch bool
 }
 
 type previewRouting struct {
@@ -73,14 +96,22 @@ type previewRouting struct {
 	original    queryRoute
 }
 
-// NewRoutingStage creates a RoutingStage.
+// NewRoutingStage creates a RoutingStage with the default legacy routing policy.
 func NewRoutingStage(ret *retriever.Retriever) *RoutingStage {
 	return NewRoutingStageWithScope(ret, nil, nil)
 }
 
 // NewRoutingStageWithScope restricts routing signals to visible candidates.
 func NewRoutingStageWithScope(ret *retriever.Retriever, vis domain.DocumentVisibility, previews domain.DocumentPreviewer) *RoutingStage {
-	return &RoutingStage{ret: ret, visibility: vis, previews: previews}
+	return NewRoutingStageWithConfig(ret, vis, previews, RoutingConfig{Policy: retriever.RoutingPolicyLegacy})
+}
+
+// NewRoutingStageWithConfig creates a RoutingStage with explicit visibility, previews and routing policy.
+func NewRoutingStageWithConfig(ret *retriever.Retriever, vis domain.DocumentVisibility, previews domain.DocumentPreviewer, cfg RoutingConfig) *RoutingStage {
+	if cfg.Policy == "" {
+		cfg.Policy = retriever.RoutingPolicyLegacy
+	}
+	return &RoutingStage{ret: ret, visibility: vis, previews: previews, cfg: cfg}
 }
 
 // ID returns the stage identifier.
@@ -94,26 +125,61 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 	qc.Candidates, qc.QueryEmbedding = nil, nil
 	qc.TopScore, qc.SkipRetrieval = 0, false
 	qc.previewRouting = nil
+	qc.previewNegativeMatch = false
+	qc.scopedSearch, qc.scopedSearchReady = nil, false
+	qc.probeSaturated, qc.probeCutoff = false, nil
+	qc.localDocumentKeys = nil
+	policy := s.cfg.Policy
+	if policy == "" {
+		policy = retriever.RoutingPolicyLegacy
+	}
+	qc.RoutingPolicy = string(policy)
 	qc.RetrievalMode = string(retriever.RetrievalModeGlobal)
+	qc.RouteReason = ""
+	defer func() {
+		slog.DebugContext(ctx, "routing completed",
+			"policy", qc.RoutingPolicy,
+			"mode", qc.RetrievalMode,
+			"reason", string(qc.RouteReason),
+			"candidates", len(qc.Candidates),
+		)
+	}()
 	if filter.MatchesNothing() {
 		qc.SkipRetrieval = true
+		qc.RouteReason = retriever.RouteReasonEmptyScope
 		return nil
 	}
 	probeK := 5
 	if strings.EqualFold(qc.RequestedMode, "global") {
 		probeK = 0
+		qc.RouteReason = retriever.RouteReasonExplicitGlobal
 	}
-	embedding, candidates, probeFailed, err := s.ret.EmbedQuery(ctx, qc.OriginalQuery, filter, probeK)
+	searchK := probeK
+	if qc.evidenceAutoRouting() {
+		searchK = max(probeK, s.ret.ChunkLimit(qc.MaxChunks))
+	}
+	embedding, candidates, probeFailed, err := s.ret.EmbedQuery(ctx, qc.OriginalQuery, filter, searchK)
 	if err != nil {
 		return fmt.Errorf("routing_stage: %w", err)
 	}
 	qc.QueryEmbedding = embedding
-	if probeK == 0 || probeFailed {
+	if probeK == 0 {
 		return nil
 	}
-	var ids []string
+	if probeFailed {
+		qc.RouteReason = retriever.RouteReasonProbeFailed
+		return nil
+	}
+	var providerKeys documentKeys
+	if qc.evidenceAutoRouting() {
+		providerKeys = providerDocumentKeys(candidates)
+		candidates = canonicalEvidenceIDs(candidates)
+		qc.scopedSearch, qc.scopedSearchReady = candidates, true
+		qc.probeSaturated = len(candidates) >= probeK && len(filter.DocumentIDs) != 1
+		candidates = candidates[:min(len(candidates), probeK)]
+	}
 	var previews map[string]string
-	if qc.HostedVisibilityRefill && s.previews != nil {
+	if qc.EvidenceVisibility != nil && (qc.evidenceAutoRouting() || qc.HostedVisibilityRefill && s.previews != nil) {
 		candidates = filterEvidenceScope(filter, candidates)
 		candidates, previews, err = qc.EvidenceVisibility.VisibleEvidenceWithPreviews(ctx, candidates, candidateDocumentIDs(candidates))
 	} else {
@@ -123,23 +189,31 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 		return fmt.Errorf("routing_stage: visibility: %w", err)
 	}
 	qc.Candidates = candidates
+	if qc.probeSaturated && len(candidates) == probeK {
+		score := candidates[probeK-1].Score
+		qc.probeCutoff = &score
+	}
 	if len(candidates) == 0 {
+		qc.RouteReason = retriever.RouteReasonEmptyProbe
 		return nil
 	}
 	qc.TopScore = candidates[0].Score
-	if s.previews != nil {
-		ids = candidateDocumentIDs(candidates)
-		if !qc.HostedVisibilityRefill {
-			previews, err = s.previews.DocumentPreviews(ctx, ids)
-			if err != nil {
-				return fmt.Errorf("routing_stage: previews: %w", err)
-			}
+	ids := candidateDocumentIDs(candidates)
+	if previews == nil && s.previews != nil {
+		previews, err = s.previews.DocumentPreviews(ctx, ids)
+		if err != nil {
+			return fmt.Errorf("routing_stage: previews: %w", err)
 		}
 	}
 	route := s.selectRoute(qc, previews, ids)
 	qc.RetrievalMode, qc.LocalDocumentID = route.mode, route.localDocumentID
 	qc.NamedEntity, qc.EntityDocumentID = route.namedEntity, route.entityDocumentID
-	if qc.checksCurrentEvidence() && len(ids) != 0 {
+	qc.RouteReason = route.reason
+	qc.previewNegativeMatch = route.previewNegativeMatch
+	if qc.evidenceAutoRouting() && route.localDocumentID != "" {
+		qc.localDocumentKeys = providerKeys.spellings(candidates, route.localDocumentID)
+	}
+	if qc.checksCurrentEvidence() && (s.previews != nil || previews != nil) {
 		qc.previewRouting = &previewRouting{stage: s, documentIDs: ids, original: route}
 	}
 	return nil
@@ -147,19 +221,139 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 
 func (s *RoutingStage) selectRoute(qc *QueryContext, previews map[string]string, ids []string) queryRoute {
 	first := qc.Candidates[0]
-	var route queryRoute
-	route.namedEntity, route.entityDocumentID = MatchNamedEntity(qc.OriginalQuery, previews, ids)
-	route.mode = string(s.ret.DetermineModeWithQuery(len(qc.SubQueries), first.Score, route.namedEntity))
 	if qc.RequestedMode != "" && !strings.EqualFold(qc.RequestedMode, "auto") {
+		var route queryRoute
 		route.mode = strings.ToUpper(qc.RequestedMode)
-	}
-	if route.mode == string(retriever.RetrievalModeLocal) {
+		route.namedEntity, route.entityDocumentID = MatchNamedEntity(qc.OriginalQuery, previews, ids)
+		if route.mode == string(retriever.RetrievalModeGlobal) {
+			route.reason = retriever.RouteReasonExplicitGlobal
+			return route
+		}
+		route.reason = retriever.RouteReasonExplicitLocal
 		route.localDocumentID = route.entityDocumentID
 		if route.localDocumentID == "" {
 			route.localDocumentID = string(first.Chunk.DocumentID)
 		}
+		return route
+	}
+
+	if s.cfg.Policy == retriever.RoutingPolicyEvidence {
+		return s.selectEvidenceRoute(qc, previews, ids)
+	}
+
+	var route queryRoute
+	route.namedEntity, route.entityDocumentID = MatchNamedEntity(qc.OriginalQuery, previews, ids)
+	decision := s.ret.DetermineLegacyRoute(len(qc.SubQueries), first.Score, route.namedEntity, string(first.Chunk.DocumentID), route.entityDocumentID)
+	route.mode = string(decision.Mode)
+	route.reason = decision.Reason
+	route.localDocumentID = decision.LocalDocumentID
+	return route
+}
+
+func (s *RoutingStage) selectEvidenceRoute(qc *QueryContext, previews map[string]string, ids []string) queryRoute {
+	docs := retriever.AggregateDocumentScores(qc.Candidates)
+	signals := analyzeQuerySignals(qc.OriginalQuery, qc.SubQueries)
+	signals.ProbeSaturated, signals.ProbeCutoff = qc.probeSaturated, qc.probeCutoff
+	em := MatchNamedEntityEvidence(qc.OriginalQuery, previews, ids)
+	entity := retriever.EntityDecision{
+		DocumentID: em.DocumentID,
+		Ambiguous:  em.Ambiguous,
+		Negated:    em.Negated,
+	}
+	decision := s.ret.DetermineEvidenceRoute(s.cfg, signals, docs, entity)
+	route := queryRoute{
+		mode:                 string(decision.Mode),
+		reason:               decision.Reason,
+		localDocumentID:      decision.LocalDocumentID,
+		previewNegativeMatch: em.NegativeChecked,
+	}
+	if decision.Mode == retriever.RetrievalModeLocal && decision.Reason == retriever.RouteReasonNamedEntity {
+		route.namedEntity = em.Entity
+		route.entityDocumentID = em.DocumentID
 	}
 	return route
+}
+
+var (
+	strongMultiCueRe       = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}_-])(?:compare|compares|comparing|comparison|versus|vs|differences|difference|compara|comparar|comparacion|diferencia|diferencias)(?:$|[^\p{L}\p{N}_-])`)
+	pluralScopeRequestRe   = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}_])(?:which|what|list|listing|find|show|cuales|que|lista|listar)(?:[^\p{L}\p{N}_]+(?:\p{L}+)){0,2}[^\p{L}\p{N}_]+(?:documents|reports|files|guides|manuals|records|policies|archives|documentos|informes|archivos|guias|expedientes|normas)(?:$|[^\p{L}\p{N}_])`)
+	followUpRequestCueRe   = regexp.MustCompile(`^(?:what|who|where|when|why|how|which|is|are|was|were|do|does|did|can|could|will|would|has|have|should|must|may|describe|explain|list|tell|give|summarize|compare|check|find|que|cual|cuales|quien|donde|cuando|como|explica|dime|lista|compara|resume)(?:$|[^\p{L}\p{N}_])`)
+	coordinatedRequestRe   = regexp.MustCompile(`(?:^|[^\p{L}\p{N}_])(?:and|or|y|o|e)\s+(?:what|who|where|when|why|how|which|que|cual|cuales|quien|donde|cuando|como)(?:$|[^\p{L}\p{N}_])`)
+	numberedMultiRequestRe = regexp.MustCompile(`(?s)(?:^|\s)1[.)][ \t]+\S.*?\s2[.)][ \t]+\S`)
+)
+
+func analyzeQuerySignals(query string, subQueries []string) retriever.QuerySignals {
+	normalized := foldLatinMarks(strings.ToLower(stripFormatChars(width.Fold.String(norm.NFC.String(query)))))
+	return retriever.QuerySignals{
+		ExplicitMultiRequest: hasExplicitMultiRequestPunctuation(normalized) || coordinatedRequestRe.MatchString(normalized),
+		StrongMultiNeedCue:   strongMultiCueRe.MatchString(normalized) || pluralScopeRequestRe.MatchString(normalized),
+		DistinctSubQueries:   hasDistinctSubQueries(subQueries),
+	}
+}
+
+func hasDistinctSubQueries(subQueries []string) bool {
+	if len(subQueries) <= 1 {
+		return false
+	}
+	first := strings.TrimSpace(subQueries[0])
+	for _, sq := range subQueries[1:] {
+		if strings.TrimSpace(sq) != first {
+			return true
+		}
+	}
+	return false
+}
+
+func hasExplicitMultiRequestPunctuation(normalized string) bool {
+	if numberedMultiRequestRe.MatchString(normalized) {
+		return true
+	}
+	// Multiple closing question marks (ignoring repeated runs like "???").
+	qRuns := 0
+	inRun := false
+	firstQEnd := -1
+	for i, r := range normalized {
+		isQ := r == '?' || r == '？' || r == '؟'
+		if isQ {
+			if !inRun {
+				qRuns++
+				if qRuns == 1 {
+					firstQEnd = i + utf8.RuneLen(r)
+				}
+			}
+			inRun = true
+			continue
+		}
+		if inRun {
+			firstQEnd = i
+			inRun = false
+		}
+	}
+	if qRuns >= 2 {
+		return true
+	}
+	if qRuns == 1 && firstQEnd > 0 && firstQEnd < len(normalized) {
+		tail := strings.TrimLeft(strings.TrimSpace(normalized[firstQEnd:]), "¿¡.,;:!?？؟\"'()[] ")
+		if tail != "" && followUpRequestCueRe.MatchString(tail) {
+			return true
+		}
+	}
+	// Semicolon separating non-trivial word-bearing clauses.
+	for _, sep := range []string{";", "；"} {
+		if strings.Contains(normalized, sep) {
+			parts := strings.Split(normalized, sep)
+			wordClauses := 0
+			for _, part := range parts {
+				if strings.ContainsFunc(part, unicode.IsLetter) || strings.ContainsFunc(part, unicode.IsDigit) {
+					wordClauses++
+				}
+			}
+			if wordClauses >= 2 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func candidateDocumentIDs(chunks []domain.ScoredChunk) []string {
@@ -175,8 +369,63 @@ func candidateDocumentIDs(chunks []domain.ScoredChunk) []string {
 	return ids
 }
 
+// documentKeys records the document keys the vector store returned for each
+// canonical chunk. A metadata filter compares keys byte for byte, so a targeted
+// search must use the spelling the store holds, not the canonical UUID.
+type documentKeys map[domain.ChunkID][]string
+
+func providerDocumentKeys(chunks []domain.ScoredChunk) documentKeys {
+	keys := make(documentKeys, len(chunks))
+	for _, sc := range chunks {
+		id := sc.Chunk.ID
+		if parsed, err := uuid.Parse(string(id)); err == nil {
+			id = domain.ChunkID(parsed.String())
+		}
+		if key := string(sc.Chunk.DocumentID); !slices.Contains(keys[id], key) {
+			keys[id] = append(keys[id], key)
+		}
+	}
+	return keys
+}
+
+// spellings lists the stored spellings of target among verified chunks, in
+// score order without repeats. Without a recorded key the canonical ID stands.
+func (k documentKeys) spellings(verified []domain.ScoredChunk, target string) []string {
+	var spellings []string
+	for _, sc := range verified {
+		if string(sc.Chunk.DocumentID) != target {
+			continue
+		}
+		for _, key := range k[sc.Chunk.ID] {
+			if !slices.Contains(spellings, key) {
+				spellings = append(spellings, key)
+			}
+		}
+	}
+	if len(spellings) == 0 {
+		return []string{target}
+	}
+	return spellings
+}
+
+// canonicalEvidenceIDs makes UUID aliases comparable within automatic evidence
+// routing while keeping the vector store's original identifiers intact.
+func canonicalEvidenceIDs(chunks []domain.ScoredChunk) []domain.ScoredChunk {
+	normalized := slices.Clone(chunks)
+	for i := range normalized {
+		ch := &normalized[i].Chunk
+		if id, err := uuid.Parse(string(ch.DocumentID)); err == nil {
+			ch.DocumentID = domain.DocumentID(id.String())
+		}
+		if id, err := uuid.Parse(string(ch.ID)); err == nil {
+			ch.ID = domain.ChunkID(id.String())
+		}
+	}
+	return normalized
+}
+
 func scopedChunks(ctx context.Context, qc *QueryContext, chunks []domain.ScoredChunk, visibility domain.DocumentVisibility) ([]domain.ScoredChunk, error) {
-	if !qc.checksCurrentEvidence() {
+	if !qc.checksCurrentEvidence() && !qc.evidenceAutoRouting() {
 		return visibleChunks(ctx, filterChunksByAllowedDocIDs(chunks, qc.AllowedDocumentIDs), visibility)
 	}
 	chunks = filterEvidenceScope(qc.vectorFilter(), chunks)
@@ -190,8 +439,14 @@ func (qc *QueryContext) vectorFilter() domain.VectorFilter {
 	return domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs, Collection: qc.Collection}
 }
 
+func (qc *QueryContext) evidenceAutoRouting() bool {
+	return qc.RoutingPolicy == string(retriever.RoutingPolicyEvidence) &&
+		(qc.RequestedMode == "" || strings.EqualFold(qc.RequestedMode, "auto"))
+}
+
 func (qc *QueryContext) checksCurrentEvidence() bool {
-	return qc.HostedVisibilityRefill || qc.AnswerMode == domain.AnswerModeEvidence
+	return qc.HostedVisibilityRefill || qc.AnswerMode == domain.AnswerModeEvidence ||
+		qc.evidenceAutoRouting() && qc.EvidenceVisibility != nil
 }
 
 func filterEvidenceScope(filter domain.VectorFilter, chunks []domain.ScoredChunk) []domain.ScoredChunk {
@@ -293,7 +548,7 @@ func (qc *QueryContext) CheckEvidenceScope(ctx context.Context) error {
 		}
 	}
 	if routing := qc.previewRouting; routing != nil {
-		if previews == nil {
+		if previews == nil && routing.stage.previews != nil {
 			var err error
 			previews, err = routing.stage.previews.DocumentPreviews(ctx, routing.documentIDs)
 			if err != nil {
@@ -372,32 +627,112 @@ func (s *RetrievalStage) Run(ctx context.Context, qc *QueryContext) error {
 	qc.RetrievalMode = string(result.Mode)
 	if len(result.Chunks) > 0 {
 		qc.TopScore = result.Chunks[0].Score
+		for _, sc := range result.Chunks[1:] {
+			qc.TopScore = max(qc.TopScore, sc.Score)
+		}
 	}
 	return nil
 }
 
 func (s *RetrievalStage) retrieve(ctx context.Context, qc *QueryContext, mode retriever.RetrievalMode, filter domain.VectorFilter) (*retriever.Result, error) {
+	if qc.evidenceAutoRouting() {
+		return s.retrieveRoutedEvidence(ctx, qc, mode, filter)
+	}
 	if qc.HostedVisibilityRefill {
-		return s.ret.RetrieveVisibleWithEmbedding(ctx, qc.QueryEmbedding, mode, qc.LocalDocumentID, qc.MaxChunks, filter, qc.HostedVisibilityExtraRequests,
-			func(ctx context.Context, chunks []domain.ScoredChunk, scope domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
-				chunks = filterEvidenceScope(scope, chunks)
-				if len(chunks) == 0 {
-					return chunks, false, nil
-				}
-				visible, err := qc.EvidenceVisibility.VisibleEvidence(ctx, chunks)
-				return visible, len(visible) < len(chunks), err
-			})
+		return s.ret.RetrieveVisibleWithEmbedding(ctx, qc.QueryEmbedding, mode, qc.LocalDocumentID, qc.MaxChunks, filter, qc.HostedVisibilityExtraRequests, qc.verifyHostedEvidence)
 	}
 	result, err := s.ret.RetrieveWithEmbedding(ctx, qc.QueryEmbedding, mode, qc.LocalDocumentID, qc.MaxChunks, filter)
 	if err != nil {
 		return nil, err
 	}
-	// Apply the caller's allowlist and visibility before returning evidence.
 	result.Chunks, err = scopedChunks(ctx, qc, result.Chunks, s.visibility)
 	if err != nil {
 		return nil, fmt.Errorf("visibility: %w", err)
 	}
 	return result, nil
+}
+
+func (qc *QueryContext) verifyHostedEvidence(ctx context.Context, chunks []domain.ScoredChunk, scope domain.VectorFilter) ([]domain.ScoredChunk, bool, error) {
+	chunks = filterEvidenceScope(scope, chunks)
+	if len(chunks) == 0 {
+		return chunks, false, nil
+	}
+	visible, err := qc.EvidenceVisibility.VisibleEvidence(ctx, chunks)
+	return visible, len(visible) < len(chunks), err
+}
+
+func (s *RetrievalStage) retrieveRoutedEvidence(ctx context.Context, qc *QueryContext, mode retriever.RetrievalMode, filter domain.VectorFilter) (*retriever.Result, error) {
+	var result *retriever.Result
+	var err error
+	local := mode == retriever.RetrievalModeLocal
+	switch {
+	case local:
+		result, err = s.ret.RetrieveEvidenceLocal(ctx, qc.QueryEmbedding, qc.LocalDocumentID, qc.localDocumentKeys, qc.MaxChunks, filter)
+	case qc.scopedSearchReady:
+		result = &retriever.Result{Mode: mode, Chunks: qc.scopedSearch}
+	default:
+		result, err = s.ret.RetrieveWithEmbedding(ctx, qc.QueryEmbedding, mode, qc.LocalDocumentID, qc.MaxChunks, filter)
+	}
+	if err != nil {
+		return nil, err
+	}
+	input := result.Chunks
+	if local || !qc.scopedSearchReady {
+		input = canonicalEvidenceIDs(input)
+	}
+	if local {
+		input = slices.Concat(filterChunksByAllowedDocIDs(input, []string{qc.LocalDocumentID}), qc.scopedSearch)
+	}
+	chunks, err := scopedChunks(ctx, qc, input, s.visibility)
+	if err != nil {
+		return nil, fmt.Errorf("visibility: %w", err)
+	}
+	chunks = uniqueEvidenceChunks(chunks)
+	if qc.scopedSearchReady && !local {
+		// The cached search is verified in score order before K applies, so a
+		// stale or aliased leading hit cannot hide a current chunk fetched with it.
+		chunks = chunks[:min(len(chunks), s.ret.ChunkLimit(qc.MaxChunks))]
+	}
+	if local {
+		chunks = selectLocalEvidence(chunks, qc.LocalDocumentID, s.ret.ChunkLimit(qc.MaxChunks))
+		if len(chunks) == 0 {
+			return nil, ErrEvidenceScopeChanged
+		}
+	}
+	result.Chunks = chunks
+	return result, nil
+}
+
+func uniqueEvidenceChunks(chunks []domain.ScoredChunk) []domain.ScoredChunk {
+	seen := make(map[domain.ChunkID]struct{}, len(chunks))
+	unique := make([]domain.ScoredChunk, 0, len(chunks))
+	for _, sc := range chunks {
+		if _, duplicate := seen[sc.Chunk.ID]; duplicate {
+			continue
+		}
+		seen[sc.Chunk.ID] = struct{}{}
+		unique = append(unique, sc)
+	}
+	return unique
+}
+
+// selectLocalEvidence keeps target chunks ahead of any scope-wide fill.
+func selectLocalEvidence(chunks []domain.ScoredChunk, target string, limit int) []domain.ScoredChunk {
+	var primary, fill []domain.ScoredChunk
+	for _, sc := range chunks {
+		if string(sc.Chunk.DocumentID) == target {
+			primary = append(primary, sc)
+		} else {
+			fill = append(fill, sc)
+		}
+	}
+	if len(primary) == 0 {
+		return nil
+	}
+	if len(primary) < min(3, limit) {
+		primary = append(primary, fill...)
+	}
+	return primary[:min(len(primary), limit)]
 }
 
 // filterChunksByAllowedDocIDs restricts chunks to a caller-supplied document-id
@@ -446,13 +781,18 @@ func (s *RerankStage) Run(ctx context.Context, qc *QueryContext) error {
 	rerankCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	rerankCtx = qc.withProviderEvidenceCheck(rerankCtx)
-	if err := domain.CheckEvidenceBeforeSend(rerankCtx); err != nil {
-		return fmt.Errorf("rerank_stage: %w", err)
+	if scopeErr := domain.CheckEvidenceBeforeSend(rerankCtx); scopeErr != nil &&
+		(qc.HostedVisibilityRefill || ctx.Err() != nil || rerankCtx.Err() == nil || !errors.Is(scopeErr, context.DeadlineExceeded)) {
+		return fmt.Errorf("rerank_stage: %w", scopeErr)
 	}
-	chunks, err := s.reranker.Rerank(rerankCtx, qc.OriginalQuery, slices.Clone(qc.RetrievedChunks))
-	// The SDK can report cancellation in place of the guard's visibility error.
-	if guardErr := domain.RecordedEvidenceCheckError(rerankCtx); guardErr != nil {
-		return fmt.Errorf("rerank_stage: %w", guardErr)
+	var chunks []domain.ScoredChunk
+	err := rerankCtx.Err()
+	if err == nil {
+		chunks, err = s.reranker.Rerank(rerankCtx, qc.OriginalQuery, slices.Clone(qc.RetrievedChunks))
+		// The SDK can report cancellation in place of the visibility error.
+		if guardErr := domain.RecordedEvidenceCheckError(rerankCtx); guardErr != nil {
+			return fmt.Errorf("rerank_stage: %w", guardErr)
+		}
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("rerank_stage: %w", ctxErr)
@@ -569,6 +909,12 @@ func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor f
 
 // Run synthesizes a grounded answer in the language of the question.
 func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
+	timeout := 45 * time.Second
+	if s.cfg != nil && s.cfg.SynthesisTimeout > 0 {
+		timeout = s.cfg.SynthesisTimeout
+	}
+	synthesisCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	qc.Excerpts, qc.Truncated = nil, nil
 	qc.Citations = nil
 	if qc.IncludeCitations {
@@ -595,13 +941,13 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 		}
 	}
 	if len(qc.RetrievedChunks) == 0 {
-		return s.finishWithoutEvidence(ctx, qc)
+		return s.finishWithoutEvidence(synthesisCtx, qc)
 	}
 
 	strict := s.cfg.SynthesisInputProfile != "" && qc.AnswerMode != domain.AnswerModeEvidence
 	chunks, truncated := trimChunksForSynthesis(qc.RetrievedChunks, s.cfg.SynthesisContextTokens, s.cfg.SynthesisRelativeScoreFloor, strict)
 	if strict && len(chunks) == 0 {
-		return s.finishWithoutEvidence(ctx, qc)
+		return s.finishWithoutEvidence(synthesisCtx, qc)
 	}
 	qc.ContextChunks = len(chunks)
 	qc.Truncated = truncated
@@ -618,9 +964,9 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 			qc.ContextTokens += llm.EstimateTokens(sc.Chunk.Text)
 		}
 		if qc.Stream != nil {
-			return qc.Stream.start(ctx)
+			return qc.Stream.start(synthesisCtx)
 		}
-		return ctx.Err()
+		return synthesisCtx.Err()
 	}
 
 	var boundary string
@@ -657,13 +1003,6 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	// Synthesis is free-form text — never JSON. Use the plain path so
 	// the ambassador's JSON-correction retry loop is bypassed even when
 	// SYNTHESIS_MODEL=primary routes us through Nova Micro.
-	timeout := s.cfg.SynthesisTimeout
-	if timeout <= 0 {
-		timeout = 45 * time.Second
-	}
-	synthesisCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	if strict {
 		profile, err := s.ambassador.ResolveInputProfile(s.cfg, modelID)
 		if err != nil {

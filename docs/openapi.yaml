@@ -740,6 +740,7 @@ components:
           type: string
         mode:
           type: string
+          description: 'Automatic routing uses the deployment policy. See [retrieval modes](api.md#post-query).'
         answer_mode:
           type: string
           enum: [generated, evidence]

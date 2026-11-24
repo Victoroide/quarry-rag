@@ -10,6 +10,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
+	"github.com/Victoroide/quarry-rag/internal/retriever"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -93,15 +94,23 @@ type QueryContext struct {
 	AcceptLanguage string
 
 	// Populated by routing stage.
-	NamedEntity      string
-	EntityDocumentID string
-	LocalDocumentID  string
-	Candidates       []domain.ScoredChunk
-	SkipRetrieval    bool
-	previewRouting   *previewRouting
+	NamedEntity          string
+	EntityDocumentID     string
+	LocalDocumentID      string
+	Candidates           []domain.ScoredChunk
+	SkipRetrieval        bool
+	previewRouting       *previewRouting
+	previewNegativeMatch bool
+	scopedSearch         []domain.ScoredChunk
+	scopedSearchReady    bool
+	localDocumentKeys    []string
+	probeSaturated       bool
+	probeCutoff          *float64
 
 	// Populated by routing stage.
 	RetrievalMode  string
+	RoutingPolicy  string
+	RouteReason    retriever.RouteReason
 	QueryEmbedding []float32
 	TopScore       float64
 
@@ -180,7 +189,15 @@ func RunRetrievalPipeline(ctx context.Context, qc *QueryContext, stages []QueryS
 	defer func() {
 		switch qc.RetrievalMode {
 		case "LOCAL", "GLOBAL":
-			metrics.FromContext(ctx).QueryMode.WithLabelValues(qc.RetrievalMode).Inc()
+			m := metrics.FromContext(ctx)
+			m.QueryMode.WithLabelValues(qc.RetrievalMode).Inc()
+			if retriever.ValidRouteReason(qc.RouteReason) {
+				policy := qc.RoutingPolicy
+				if policy == "" {
+					policy = string(retriever.RoutingPolicyLegacy)
+				}
+				m.QueryRouteReason.WithLabelValues(policy, qc.RetrievalMode, string(qc.RouteReason)).Inc()
+			}
 		}
 	}()
 	if qc.StageTimingsMS == nil {
@@ -252,6 +269,12 @@ func setQueryAttributes(ctx context.Context, span trace.Span, id StageID, qc *Qu
 			attribute.String("quarry.synthesis.count_method", qc.CountMethod),
 			attribute.Int("quarry.synthesis.model_input_tokens", qc.ModelInputTokens),
 		)
+	}
+	if qc.RoutingPolicy != "" {
+		span.SetAttributes(attribute.String("quarry.routing.policy", qc.RoutingPolicy))
+	}
+	if retriever.ValidRouteReason(qc.RouteReason) {
+		span.SetAttributes(attribute.String("quarry.routing.reason", string(qc.RouteReason)))
 	}
 	if !tracing.ContentCapture(ctx) {
 		span.SetAttributes(attribute.Int("quarry.query.bytes", len(qc.OriginalQuery)), attribute.String("quarry.query.digest", queryDigest(qc.OriginalQuery)))

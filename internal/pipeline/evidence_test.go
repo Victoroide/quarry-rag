@@ -38,8 +38,8 @@ func TestEvidenceSelectionSkipsGenerationAndReranking(t *testing.T) {
 			}
 			started := 0
 			qc.Stream = &QueryStream{
-				Context: func() error { started++; return nil },
-				Delta:   func(string) error { t.Fatal("evidence query sent a text delta"); return nil },
+				Context: func(context.Context) error { started++; return nil },
+				Delta:   func(context.Context, string) error { t.Fatal("evidence query sent a text delta"); return nil },
 			}
 			stages := []QueryStage{NewRerankStage(unexpectedEvidenceReranker{t}, 0), NewSynthesisStage(amb, cfg)}
 			_, err := RunRetrievalPipeline(t.Context(), qc, stages)

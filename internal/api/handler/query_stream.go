@@ -68,17 +68,17 @@ func acceptsQueryStream(r *http.Request) bool {
 func newQueryStream(ctx context.Context, w http.ResponseWriter, r *http.Request, qc *pipeline.QueryContext) *queryStream {
 	s := &queryStream{w: w, r: r, ctx: ctx, qc: qc}
 	qc.Stream = &pipeline.QueryStream{
-		Context: func() error {
-			return s.event("context", QueryStreamContext{Mode: qc.RetrievalMode, ChunksUsed: len(qc.RetrievedChunks), ContextChunks: qc.ContextChunks, ScoredChunks: queryScoredChunks(qc)})
+		Context: func(stageCtx context.Context) error {
+			return s.event(stageCtx, "context", QueryStreamContext{Mode: qc.RetrievalMode, ChunksUsed: len(qc.RetrievedChunks), ContextChunks: qc.ContextChunks, ScoredChunks: queryScoredChunks(qc)})
 		},
-		Delta: func(text string) error {
-			return s.event("delta", QueryStreamDelta{Text: text})
+		Delta: func(stageCtx context.Context, text string) error {
+			return s.event(stageCtx, "delta", QueryStreamDelta{Text: text})
 		},
 	}
 	return s
 }
 
-func (s *queryStream) event(name string, value any) error {
+func (s *queryStream) event(ctx context.Context, name string, value any) error {
 	if err := s.r.Context().Err(); err != nil {
 		return err
 	}
@@ -87,9 +87,12 @@ func (s *queryStream) event(name string, value any) error {
 		return err
 	}
 	if name != "error" {
-		if scopeErr := s.qc.CheckEvidenceScope(s.ctx); scopeErr != nil {
+		if scopeErr := s.qc.CheckEvidenceScope(ctx); scopeErr != nil {
 			return scopeErr
 		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
 	}
 	if !s.started {
 		s.w.Header().Set("Content-Type", "text/event-stream")
@@ -123,7 +126,7 @@ func (s *queryStream) finish(ctx context.Context, err error) {
 		if code == 0 {
 			return
 		}
-		if writeErr := s.event("error", body); writeErr != nil {
+		if writeErr := s.event(context.WithoutCancel(ctx), "error", body); writeErr != nil {
 			slog.DebugContext(ctx, "write query stream error", "error", writeErr)
 		}
 	}
@@ -145,5 +148,5 @@ func (s *queryStream) done() error {
 			done.Citations = append(done.Citations, CitationResponse{Excerpt: c.Excerpt, DocID: string(c.DocumentID), ChunkIndex: c.ChunkIndex, Offset: c.Offset, Verified: c.Verified, Overlap: c.Overlap})
 		}
 	}
-	return s.event("done", done)
+	return s.event(s.ctx, "done", done)
 }

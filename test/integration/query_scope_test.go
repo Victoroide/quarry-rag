@@ -230,3 +230,75 @@ func TestDocumentPreviewsAreRestrictedToCandidates(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, got)
 }
+
+func TestEvidenceRoutingScopeIsolationWithPostgres(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	client := visibilityClient(t)
+	vs := memory.NewFakeVectorStore()
+
+	archiveA, archiveB, otherCol := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	for _, d := range []struct {
+		id, collection, preview, text string
+		vec                           []float32
+	}{
+		{archiveA, "alpha", "Summit Ledger North.", "Summit Ledger North retention window three years.", []float32{1, 0, 0, 0}},
+		{archiveB, "alpha", "Summit Ledger South.", "Summit Ledger South retention window five years.", []float32{0.92, 0.39, 0, 0}},
+		{otherCol, "beta", "Summit Ledger North.", "Summit Ledger North retention window three years.", []float32{1, 0, 0, 0}},
+	} {
+		_, err := client.Pool.Exec(t.Context(),
+			`INSERT INTO documents (id, content, content_preview, status, collection, doc_type) VALUES ($1, $2, $3, 'completed', $4, 'report')`,
+			d.id, d.text, d.preview, d.collection)
+		require.NoError(t, err)
+		chunks := []domain.Chunk{{
+			ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(d.id), Index: 0, Text: d.text, Embedding: d.vec,
+			Metadata: map[string]any{"collection": d.collection, "doc_type": "report"},
+		}}
+		require.NoError(t, client.InsertChunks(t.Context(), chunks))
+		require.NoError(t, vs.Upsert(t.Context(), "", chunks))
+	}
+
+	margin := 0.15
+	cfg := &config.Config{
+		BedrockFallbackModel:      "fallback",
+		MaxChunksPerQuery:         6,
+		RoutingPolicy:             config.RoutingPolicyEvidence,
+		RoutingMargin:             &margin,
+		RoutingCalibrationMatched: true,
+		EffectiveRoutingMargin:    margin,
+	}
+	amb := llm.NewAmbassador(cfg)
+	amb.SetClient(llm.NewFakeConverser())
+	h := handler.QueryHandler(retriever.NewRetriever(vs, visibilityFixedEmbedder{vec: []float32{1, 0, 0, 0}}, 0.70, 6), amb, cfg, client.Pool)
+
+	for _, tc := range []struct {
+		col, allowlist, wantMode string
+		wantDocs                 []string
+	}{
+		{"alpha", "", "GLOBAL", []string{archiveA, archiveB}},
+		{"alpha", `,"allowed_document_ids":null`, "GLOBAL", []string{archiveA, archiveB}},
+		{"alpha", fmt.Sprintf(`,"allowed_document_ids":[%q,%q]`, archiveA, otherCol), "LOCAL", []string{archiveA}},
+		{"beta", fmt.Sprintf(`,"allowed_document_ids":[%q]`, otherCol), "LOCAL", []string{otherCol}},
+	} {
+		rec := scopeQuery(t, h, fmt.Sprintf(`{"query":"Summit Ledger retention window","collection":%q,"filter_doc_type":"report"%s}`, tc.col, tc.allowlist))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp handler.QueryResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Equal(t, tc.wantMode, resp.Mode)
+		ids := make([]string, 0, len(resp.ScoredChunks))
+		for _, sc := range resp.ScoredChunks {
+			ids = append(ids, sc.DocID)
+		}
+		require.ElementsMatch(t, tc.wantDocs, ids)
+	}
+
+	// Empty allowlist in evidence mode short-circuits safely with no_evidence.
+	rec := scopeQuery(t, h, `{"query":"Summit Ledger retention window","allowed_document_ids":[]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp handler.QueryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, "GLOBAL", resp.Mode)
+	require.Equal(t, "no_evidence", resp.FinishReason)
+	require.Empty(t, resp.ScoredChunks)
+}

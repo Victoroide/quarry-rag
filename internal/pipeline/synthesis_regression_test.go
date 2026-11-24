@@ -69,7 +69,7 @@ func TestStrictSynthesisRejectsPartialAndMalformedAdaptersBeforeFrames(t *testin
 				started := false
 				qc := &QueryContext{OriginalQuery: "Q?", RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{Text: "evidence"}, Score: 1}}}
 				if tc.stream {
-					qc.Stream = &QueryStream{Context: func() error { started = true; return nil }, Delta: func(string) error { return nil }}
+					qc.Stream = &QueryStream{Context: func(context.Context) error { started = true; return nil }, Delta: func(context.Context, string) error { return nil }}
 				}
 				err := NewSynthesisStage(amb, cfg).Run(t.Context(), qc)
 				if tc.wantErr == nil {
@@ -259,10 +259,10 @@ func TestStrictHostedSendsApplyBothEvidenceChecks(t *testing.T) {
 					}
 					return current, nil
 				}},
-				Stream: &QueryStream{Context: func() error {
+				Stream: &QueryStream{Context: func(context.Context) error {
 					published, changed = true, changed || tc.when == "context"
 					return nil
-				}, Delta: func(string) error { return nil }},
+				}, Delta: func(context.Context, string) error { return nil }},
 			}
 			err := NewSynthesisStage(amb, cfg).Run(t.Context(), qc)
 			require.Equal(t, tc.sent, double.converseCalls)

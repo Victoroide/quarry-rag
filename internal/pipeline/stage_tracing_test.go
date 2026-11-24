@@ -44,7 +44,7 @@ func TestQueryStageSpansAndContentPolicy(t *testing.T) {
 		t.Run(fmt.Sprint(capture), func(t *testing.T) {
 			recorder := pipelineRecorder(t)
 			ctx, parent := otel.Tracer("test").Start(tracing.WithContentCapture(t.Context(), capture), "request")
-			qc := &QueryContext{OriginalQuery: "fixture-question", SubQueries: []string{"fixture-question"}, RetrievalMode: "LOCAL", RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{DocumentID: "doc", Text: strings.Repeat("界", 4001), Index: 2, Metadata: map[string]any{"doc_type": "manual"}}, Score: 0.9}}, TopScore: 0.9, ContextChunks: 1, ContextTokens: 12, FinishReason: "end_turn", FinalAnswer: "fixture-answer"}
+			qc := &QueryContext{OriginalQuery: "fixture-question", SubQueries: []string{"fixture-question"}, RetrievalMode: "LOCAL", RoutingPolicy: "evidence", RouteReason: "strong_lead", RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{DocumentID: "doc", Text: strings.Repeat("界", 4001), Index: 2, Metadata: map[string]any{"doc_type": "manual"}}, Score: 0.9}}, TopScore: 0.9, ContextChunks: 1, ContextTokens: 12, FinishReason: "end_turn", FinalAnswer: "fixture-answer"}
 			stages := []QueryStage{}
 			for _, id := range []StageID{StageQueryDecomposition, StageRetrievalRouting, StageRetrieval, StageSynthesis} {
 				stages = append(stages, metricQueryStage{id, func(*QueryContext) error { return nil }})
@@ -61,6 +61,8 @@ func TestQueryStageSpansAndContentPolicy(t *testing.T) {
 				require.Equal(t, string(stages[i].ID()), attrs["quarry.stage"].AsString())
 				require.EqualValues(t, 1, attrs["quarry.query.sub_queries"].AsInt64())
 				require.Equal(t, "LOCAL", attrs["quarry.retrieval.mode"].AsString())
+				require.Equal(t, "evidence", attrs["quarry.routing.policy"].AsString())
+				require.Equal(t, "strong_lead", attrs["quarry.routing.reason"].AsString())
 				require.EqualValues(t, 1, attrs["quarry.retrieval.chunks"].AsInt64())
 				require.Equal(t, 0.9, attrs["quarry.retrieval.top_score"].AsFloat64())
 				require.EqualValues(t, 1, attrs["quarry.synthesis.context_chunks"].AsInt64())

@@ -23,9 +23,13 @@ func TestPipelineMetricsIncludeFailedStagesAndEffectiveMode(t *testing.T) {
 	ctx := metrics.WithService(t.Context(), m)
 	_, err := RunIngestionPipeline(ctx, NewIngestContext("doc", "text", nil), []Stage{ingestMetricStage{}})
 	require.Error(t, err)
-	qc := &QueryContext{}
+	qc := &QueryContext{RoutingPolicy: "legacy", RouteReason: "low_score"}
 	_, err = RunRetrievalPipeline(ctx, qc, []QueryStage{
-		metricQueryStage{StageRetrievalRouting, func(qc *QueryContext) error { qc.RetrievalMode = "LOCAL"; return nil }},
+		metricQueryStage{StageRetrievalRouting, func(qc *QueryContext) error {
+			qc.RetrievalMode = "LOCAL"
+			qc.RouteReason = "strong_lead"
+			return nil
+		}},
 		metricQueryStage{StageRetrieval, func(qc *QueryContext) error { qc.RetrievalMode = "GLOBAL"; return nil }},
 		metricQueryStage{StageSynthesis, func(*QueryContext) error { return errors.New("unavailable") }},
 	})
@@ -36,6 +40,7 @@ func TestPipelineMetricsIncludeFailedStagesAndEffectiveMode(t *testing.T) {
 		require.Contains(t, b.String(), `quarry_pipeline_stage_duration_seconds_count{stage="`+stage+`"} 1`)
 	}
 	require.Contains(t, b.String(), `quarry_query_mode_total{mode="GLOBAL"} 1`)
+	require.Contains(t, b.String(), `quarry_query_route_reason_total{policy="legacy",mode="GLOBAL",reason="strong_lead"} 1`)
 	require.NotContains(t, b.String(), `quarry_query_mode_total{mode="LOCAL"}`)
 }
 

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -34,7 +35,7 @@ func TestOpenAISynthesisPaths(t *testing.T) {
 			qc := &QueryContext{OriginalQuery: "synthetic question", IncludeCitations: true, RetrievedChunks: []domain.ScoredChunk{{Chunk: domain.Chunk{Text: "synthetic evidence"}, Score: .9}}}
 			var deltas strings.Builder
 			if stream {
-				qc.Stream = &QueryStream{Context: func() error { return nil }, Delta: func(s string) error { deltas.WriteString(s); return nil }}
+				qc.Stream = &QueryStream{Context: func(context.Context) error { return nil }, Delta: func(_ context.Context, s string) error { deltas.WriteString(s); return nil }}
 			}
 			require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
 			require.Equal(t, "stop", qc.FinishReason)

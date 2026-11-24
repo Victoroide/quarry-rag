@@ -158,20 +158,24 @@ sequenceDiagram
     alt Explicit GLOBAL
         Routing->>Routing: Select GLOBAL without a probe
     else Automatic or explicit LOCAL
-        Routing->>Pinecone: Probe top 5 with doc_type, collection and allowlist filters
+        Routing->>Pinecone: Scoped search with an evidence probe of up to five hits
         Pinecone-->>Routing: Scoped candidates
         Routing->>Metadata: Check candidate visibility and load candidate previews
         Metadata-->>Routing: Visible candidates and their previews
-        Routing->>Routing: Match entity phrases using whole words and candidate order
-        Routing->>Routing: Determine mode (sub-queries > 1 -> GLOBAL, entity -> LOCAL, score >= threshold -> LOCAL, else GLOBAL)
+        Routing->>Routing: Legacy compares whole words in candidate order
+        Routing->>Routing: Evidence resolves independent name spans and ambiguity
+        Routing->>Routing: Apply legacy or evidence routing policy to select LOCAL or GLOBAL
         Note over Routing: Explicit LOCAL overrides score and sub-query count, and no visible candidate selects GLOBAL
         Routing->>Routing: For LOCAL, select entity document or best visible candidate
     end
 
     Handler->>Retrieval: Run(QueryContext)
-    Retrieval->>Pinecone: Query default namespace with doc_type, collection and allowlist filters
-    Note over Retrieval: LOCAL searches the selected document, and fewer than 3 chunks triggers one scope-wide top-up
-    Pinecone-->>Retrieval: Scored chunks
+    alt Automatic evidence GLOBAL with a completed scoped search
+        Retrieval->>Retrieval: Reuse the scoped hits
+    else Vector search needed
+        Retrieval->>Pinecone: Query default namespace with the selected scope
+        Pinecone-->>Retrieval: Scored chunks
+    end
     Retrieval->>Retrieval: filterChunksByAllowedDocIDs (tenant allowlist enforcement)
     Retrieval->>Retrieval: Remove chunks of unavailable documents using PostgreSQL
 
@@ -195,7 +199,7 @@ sequenceDiagram
 
 ### Query Time Budget
 
-Each handler admits up to [`QUERY_CONCURRENCY`](configuration.md#environment-variables) queries [per replica](deployment.md#concurrency-limits), waiting at most `QUERY_QUEUE_TIMEOUT` before returning 503 with `Retry-After: 1`. Admission precedes all pipeline work. Each admitted query gets `QUERY_TIMEOUT` across decomposition, routing, embedding, retrieval, reranking and synthesis, with a nested `SYNTHESIS_TIMEOUT` for the synthesis call; an earlier parent deadline always wins. Cancellation propagates to upstream calls and waiting queries.
+Each handler admits up to [`QUERY_CONCURRENCY`](configuration.md#environment-variables) queries [per replica](deployment.md#concurrency-limits), waiting at most `QUERY_QUEUE_TIMEOUT` before returning 503 with `Retry-After: 1`. Admission precedes all pipeline work. Each admitted query gets `QUERY_TIMEOUT` across the pipeline. Nested reranking and synthesis deadlines cover their scope checks, provider calls and synthesis frames. An earlier parent deadline takes precedence.
 
 The AWS SDK retryer is the single transport retry layer for Bedrock, configured with `AWS_MAX_ATTEMPTS`. The ambassador makes one client call per operation and does not add backoff or retry throttled requests. Structured-output correction remains separate; answer synthesis uses the plain-text path without correction calls. SDK retries and their backoff share the synthesis or embedding deadline. The [query API](api.md#post-query) defines the response statuses. Full errors are logged at error level.
 
@@ -204,21 +208,18 @@ The AWS SDK retryer is the single transport retry layer for Bedrock, configured 
 1. **DecomposeStage**: Logs the query byte length and first 12 hexadecimal SHA-256 digits without the query text. Sets the sub-query count from multi-need surface signals (comparison keywords, conjunctions, aggregation markers). Makes no database or generation calls.
 2. **RoutingStage**:
    - An empty allowlist skips embedding and retrieval. Otherwise, embeds the incoming query once with the configured embedding provider. Explicit `global` skips the routing probe.
-   - Automatic routing and explicit `local` probe the top five candidates with the same allowlist and document-type filters as retrieval, then remove unavailable documents. Entity matching reads only those candidates' previews, uses whole words, prefers full and longer phrases, and breaks ties by candidate score order.
-   - Evaluates whether to route to `LOCAL` or `GLOBAL` retrieval:
+   - Automatic routing and explicit `local` probe the top five candidates within the request's collection, allowlist and document type. Entity matching uses the stored previews of visible candidates.
+   - Evaluates whether to route to `LOCAL` or `GLOBAL` retrieval according to [`ROUTING_POLICY`](configuration.md#environment-variables):
      - Explicit `global` selects `GLOBAL`. Explicit `local` selects `LOCAL` when a visible candidate exists, regardless of score or sub-query count.
-     - If the similarity probe fails, `GLOBAL` retrieval is selected without discarding the query embedding.
-     - If no visible candidate remains, `GLOBAL` retrieval is selected.
-     - If multi-need signals produced multiple sub-query requirements, `GLOBAL` mode is selected.
-     - If a specific named entity is identified, `LOCAL` mode is selected.
-     - If the highest vector similarity score meets or exceeds [`LOCAL_RETRIEVAL_THRESHOLD`](configuration.md#environment-variables), `LOCAL` mode is selected.
-     - Otherwise, `GLOBAL` mode is selected.
-   - `LOCAL` targets the matched entity's document, or the highest-scoring visible candidate's document when no entity matches.
+     - If the similarity probe fails or no visible candidate remains, `GLOBAL` retrieval is selected without discarding the query embedding.
+     - Under `legacy`, multiple sub-queries select `GLOBAL`. With one sub-query, a whole-word entity match or a top score at `LOCAL_RETRIEVAL_THRESHOLD` or higher selects `LOCAL`.
+     - Under `evidence`, each visible document contributes its strongest chunk score. Multiple requests, ambiguous names or a named exclusion select `GLOBAL`. Matching handles Unicode width, accents, mixed scripts, numbered titles and minor spelling variants and keeps independent mentions. An exclusion applies only to the name in its own object phrase. A unique matched name can select its document unless a strong score lead favors another. Without a match, `LOCAL` requires a top score at `LOCAL_RETRIEVAL_THRESHOLD` or higher and a positive lead that meets the calibrated margin. When the probe fills in a multi-document scope, its last visible score bounds possible unseen rivals only if every probe hit verifies. An unverifiable cutoff or a tie selects `GLOBAL`.
+   - Records the active policy and a bounded route reason on the span (`quarry.routing.policy`, `quarry.routing.reason`), debug logs and [metrics](configuration.md#metrics). `LOCAL` targets the matched entity's document, or the highest-scoring visible candidate's document when no entity matches.
 3. **RetrievalStage**:
    - Queries the configured vector backend using the embedding produced during routing.
-   - Both modes query the default namespace with `filter_doc_type`, `collection` and `allowed_document_ids` applied before top-K selection. `LOCAL` narrows the document filter to the routed document. If that query returns fewer than three chunks, it makes one additional query using the original authorized scope and document-type filter. Results merge by chunk ID using the highest score, then sort and trim to top-K. `GLOBAL` queries the authorized scope once by default. Pinecone allowlists above 10000 IDs require one sequential query per group.
+   - Searches apply `filter_doc_type`, `collection` and `allowed_document_ids` in the default namespace before top-K selection. Legacy and explicit `LOCAL` search the routed document and fetch a scope-wide supplement if fewer than three chunks return. Automatic evidence routing fetches the larger of five hits or top-K from the original scope, and routes from only the first five. `GLOBAL` verifies every hit of that search in score order before applying top-K. `LOCAL` searches the target even at small limits, using each spelling of the document ID the vector store returned for it, and fills sparse results from the verified scope hits with target chunks first. Allowlists above 10000 IDs require one sequential query per group.
    - Retains the allowlist post-filter before synthesis as defense in depth. A nil allowlist allows all documents; an empty allowlist denies all documents.
-   - Checks document visibility in PostgreSQL after the allowlist filter and before synthesis. Only completed documents, in the requested collection when one is set, contribute chunks. Failed, unfinished, deleted and missing documents are excluded even if their vectors remain searchable. Lookup failures stop the query. The top score is recomputed from visible chunks. Pinecone deployments can enable [hosted visibility refill](#hosted-visibility-refill).
+   - Checks document visibility in PostgreSQL after the allowlist filter. Automatic evidence routing verifies the hit's document, chunk index and text against current completed rows and reads probe previews in the same statement snapshot. It checks candidates again before reranking, generation and each JSON or SSE release. Lookup failures stop the query. Pinecone deployments can enable [hosted visibility refill](#hosted-visibility-refill).
 4. **RerankStage**: Applies optional [reranking](api.md#post-query) before context selection.
 5. **SynthesisStage**:
    - When [`MIN_RELEVANCE_SCORE`](configuration.md#environment-variables) is positive, drops chunks below it before adaptive trimming. If no authorized evidence remains, returns the [no-evidence response](api.md#post-query).

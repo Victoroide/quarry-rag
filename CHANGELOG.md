@@ -13,6 +13,7 @@ Notable changes are grouped by release.
 - Staged delegated access-token verification with request-scoped subject credentials for the Go client and stdio MCP.
 - Document status and inventory can include the ingestion-time index visibility observation and timestamp on request, with opt-in Pinecone serverless watermark checks.
 
+- Opt-in evidence-based automatic retrieval routing (`ROUTING_POLICY=evidence`, `ROUTING_MARGIN`, `ROUTING_PROFILE_FILE`) using visible per-document score aggregation, entity ambiguity and exclusion matching, calibrated margins, and bounded `quarry_query_route_reason_total` metrics.
 - `INGEST_CONTENT_DEDUP=off` lets deployments disable content matching across upload IDs and retain explicit UUID retries.
 - Optional OCR of image-only PDF uploads through Amazon Textract (`OCR_PROVIDER=textract`, requires `S3_BUCKET`; migration 008).
 - Optional PostgreSQL vector store (`VECTOR_STORE=postgres`, pgvector) that writes vectors in the completion transaction.
