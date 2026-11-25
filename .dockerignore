@@ -1,5 +1,7 @@
-scripts/
 docs/
+# Documents read by the test stage.
+!docs/api.md
+!docs/deployment.md
 !docs/openapi.yaml
 .env
 .env.*

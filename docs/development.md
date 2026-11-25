@@ -37,7 +37,7 @@ make test
 make ci
 ```
 
-`make ci` runs vet, lint, the full race suite and the diagram check in order, then builds the runtime image. `docker build --target test .` runs the short suite without requiring a nested Docker daemon.
+`make ci` runs vet, lint, the full race suite and the diagram check in order, then builds the runtime image. `docker build --target test .` runs the root module's short suite without requiring a nested Docker daemon. The host suite checks that the build context includes the Go test files and repository files they name with literal paths. Add a `.dockerignore` exception when a test needs another file from `docs/`.
 
 ### 1. Unit Tests
 
