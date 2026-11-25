@@ -265,7 +265,7 @@ the schema and enable `pgcrypto`.
 
 #### Index Visibility Rollout
 
-Deploy the readers and migration 011 before enabling `lsn` on all replicas that
+Deploy the readers and migration 012 before enabling `lsn` on all replicas that
 share the ingestion queue. Earlier workers can still complete jobs with a null
 observation. Drain or pause the queue while switching modes if every new job must
 record an LSN observation. Pinecone startup rejects `lsn` for indexes outside its

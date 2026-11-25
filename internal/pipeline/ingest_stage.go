@@ -273,11 +273,7 @@ func (s *PersistStage) waitForVisibility(ctx context.Context, ic *IngestContext,
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	result := domain.VisibilityTimeout
-	if visibilityStopped(ic.Stopping) {
-		result = domain.VisibilityUnknown
-	}
-	ic.observeIndex(result)
+	ic.observeIndex(domain.VisibilityTimeout)
 	metrics.FromContext(ctx).IndexVisibility.WithLabelValues("timeout").Inc()
 	attrs := []any{"document_id", ic.DocumentID, "waited_ms", time.Since(start).Milliseconds()}
 	if probeErr != nil {

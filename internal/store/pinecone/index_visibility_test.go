@@ -24,10 +24,11 @@ func TestWriteVisibilityWatermarks(t *testing.T) {
 	}{
 		{"maximum across batches", "12", "15", "archive", []string{"14", "15"}, []domain.IndexVisibility{"", domain.VisibilityWritesIndexed}},
 		{"out of order receipts", "15", "12", "archive", []string{"14", "15"}, []domain.IndexVisibility{"", domain.VisibilityWritesIndexed}},
-		{"missing first receipt", "", "15", "archive", nil, nil},
-		{"missing second receipt", "12", "", "archive", nil, nil},
+		{"missing first receipt", "", "15", "archive", []string{"99"}, nil},
+		{"missing second receipt", "12", "", "archive", []string{"99"}, nil},
 		{"invalid receipt", "12", "15, 16", "archive", nil, nil},
 		{"missing query watermark", "12", "15", "archive", []string{""}, []domain.IndexVisibility{domain.VisibilityUnknown}},
+		{"invalid query watermark", "12", "15", "archive", []string{"-1"}, []domain.IndexVisibility{domain.VisibilityUnknown}},
 		{"different namespace", "12", "15", "other", []string{"99"}, []domain.IndexVisibility{domain.VisibilityUnknown}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -80,6 +81,7 @@ func TestWriteVisibilityWatermarks(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 			c := visibilityClient(t, server)
+			c.maxAttempts = 3
 			chunks := []domain.Chunk{
 				{ID: "chunk-0", Embedding: []float32{1, 0}, Metadata: map[string]any{"collection": "archive"}},
 				{ID: "chunk-1", Embedding: []float32{1, 0}, Metadata: map[string]any{"collection": "archive"}},
@@ -98,7 +100,7 @@ func TestWriteVisibilityWatermarks(t *testing.T) {
 			}
 			server.Close()
 			require.Equal(t, 2, writes)
-			require.Equal(t, len(tt.watermarks), reads)
+			require.Equal(t, len(tt.want), reads)
 		})
 	}
 }
@@ -190,6 +192,32 @@ func TestWriteVisibilityUsesSDKDefaultNamespace(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, probe)
 	got, err := probe(t.Context(), []float32{1, 0})
+	require.NoError(t, err)
+	require.Equal(t, domain.VisibilityWritesIndexed, got)
+}
+
+func TestWriteVisibilityReplaysPublishedServerlessExchange(t *testing.T) {
+	// Replay the successful responses in Pinecone's Check data freshness guide.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "2026-07", r.Header.Get("X-Pinecone-Api-Version"))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/vectors/upsert":
+			w.Header().Set("x-pinecone-request-lsn", "4")
+			_, _ = io.WriteString(w, `{"upsertedCount":1}`)
+		case "/query":
+			w.Header().Set("x-pinecone-max-indexed-lsn", "5")
+			_, _ = io.WriteString(w, `{"results":[],"matches":[{"id":"vec1","score":0.891132772,"values":[0.1,0.2,0.3,0.4]}],"namespace":"example-namespace","usage":{"readUnits":6}}`)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+	probe, err := visibilityClient(t, server).UpsertWithVisibility(t.Context(), "example-namespace", []domain.Chunk{{ID: "vec1", Embedding: []float32{0.1, 0.2, 0.3, 0.4}}})
+	require.NoError(t, err)
+	require.NotNil(t, probe)
+	got, err := probe(t.Context(), []float32{0.3, 0.3, 0.3, 0.3})
 	require.NoError(t, err)
 	require.Equal(t, domain.VisibilityWritesIndexed, got)
 }

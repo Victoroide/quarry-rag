@@ -282,7 +282,7 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 	if _, err = pipeline.RunIngestionPipeline(ctx, ic, w.stages); err != nil {
 		return err
 	}
-	ok, err := w.store.CompleteJob(ctx, job, ic.Chunks)
+	ok, err := w.store.CompleteJob(ctx, job, ic.Chunks, ic.IndexObservation)
 	if err != nil {
 		return err
 	}

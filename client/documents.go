@@ -13,23 +13,26 @@ type ListOptions struct {
 	Limit int
 	After string
 
-	Collection string
+	Collection             string
+	IncludeIndexVisibility bool
 }
 
 // DocumentSummary describes a document and its collection without content or metadata.
 type DocumentSummary struct {
-	ID          string     `json:"document_id"`
-	DocType     string     `json:"doc_type"`
-	Collection  string     `json:"collection"`
-	S3Key       *string    `json:"s3_key,omitempty"`
-	Status      string     `json:"status"`
-	ChunkCount  int        `json:"chunk_count"`
-	FileName    *string    `json:"file_name"`
-	FileType    *string    `json:"file_type"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	CompletedAt *time.Time `json:"completed_at"`
-	LastError   *string    `json:"last_error,omitempty"`
+	ID                        string     `json:"document_id"`
+	DocType                   string     `json:"doc_type"`
+	Collection                string     `json:"collection"`
+	S3Key                     *string    `json:"s3_key,omitempty"`
+	Status                    string     `json:"status"`
+	ChunkCount                int        `json:"chunk_count"`
+	FileName                  *string    `json:"file_name"`
+	FileType                  *string    `json:"file_type"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
+	CompletedAt               *time.Time `json:"completed_at"`
+	LastError                 *string    `json:"last_error,omitempty"`
+	IndexVisibility           string     `json:"index_visibility,omitempty"`
+	IndexVisibilityObservedAt *time.Time `json:"index_visibility_observed_at,omitempty"`
 }
 
 // DocumentPage contains ordered document summaries and an optional continuation cursor.
@@ -97,13 +100,25 @@ func (c *Client) listDocuments(ctx context.Context, opts ListOptions, includeInc
 	if includeIncarnation {
 		query.Set("include_incarnation", "true")
 	}
+	if opts.IncludeIndexVisibility {
+		query.Set("include_index_visibility", "true")
+	}
 	return c.jsonRequest(ctx, http.MethodGet, "/documents?"+query.Encode(), nil, response)
 }
 
 // GetDocument retrieves a document's ingestion status and summary.
 func (c *Client) GetDocument(ctx context.Context, id string) (*DocumentSummary, error) {
+	return c.getDocument(ctx, id, "")
+}
+
+// GetDocumentWithIndexVisibility retrieves a summary with its index visibility observation.
+func (c *Client) GetDocumentWithIndexVisibility(ctx context.Context, id string) (*DocumentSummary, error) {
+	return c.getDocument(ctx, id, "?include_index_visibility=true")
+}
+
+func (c *Client) getDocument(ctx context.Context, id, query string) (*DocumentSummary, error) {
 	var response DocumentSummary
-	if err := c.jsonRequest(ctx, http.MethodGet, "/documents/"+url.PathEscape(id), nil, &response); err != nil {
+	if err := c.jsonRequest(ctx, http.MethodGet, "/documents/"+url.PathEscape(id)+query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

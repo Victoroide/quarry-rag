@@ -94,9 +94,11 @@ func TestDocumentStatusEndpoint(t *testing.T) {
 			doc := domain.DocumentSummary{ID: summaryFirstID, DocType: "manual", S3Key: &key, Status: status, ChunkCount: 4, FileName: &name, FileType: &kind, CreatedAt: now, UpdatedAt: now, LastError: &lastError}
 			if status == "completed" {
 				doc.CompletedAt = &now
+				doc.IndexVisibility = domain.VisibilityWritesIndexed
+				doc.IndexVisibilityObservedAt = &now
 			}
 			router := api.NewRouter(&api.RouterDeps{Config: &config.Config{ServiceToken: "secret"}, ChunkStore: summaryStore{documents: []domain.DocumentSummary{doc}}})
-			w := summaryRequest(t, router, "/documents/"+summaryFirstID, "secret")
+			w := summaryRequest(t, router, "/documents/"+summaryFirstID+"?include_index_visibility=true", "secret")
 			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 			var body map[string]any
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
@@ -111,8 +113,12 @@ func TestDocumentStatusEndpoint(t *testing.T) {
 			require.Equal(t, body["created_at"], body["updated_at"])
 			if status == "completed" {
 				require.Equal(t, body["created_at"], body["completed_at"])
+				require.Equal(t, "writes_indexed", body["index_visibility"])
+				require.Equal(t, body["created_at"], body["index_visibility_observed_at"])
 			} else {
 				require.Nil(t, body["completed_at"])
+				require.Equal(t, "unknown", body["index_visibility"])
+				require.NotContains(t, body, "index_visibility_observed_at")
 			}
 			if status == "failed" {
 				require.Equal(t, lastError, body["last_error"])

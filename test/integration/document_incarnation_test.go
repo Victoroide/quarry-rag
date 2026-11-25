@@ -57,7 +57,8 @@ func TestLegacyDocumentSummarySchema(t *testing.T) {
 			contract := published.Paths[tc.route].Get.Responses["200"].Content["application/json"].Schema
 			require.NotEmpty(t, contract)
 			publishedValidator := documentResponseValidator(t, published.Components.Schemas, contract)
-			for _, option := range []string{"", "include_incarnation=false", "include_incarnation=True", "include_incarnation=true&include_incarnation=false"} {
+			for _, option := range []string{"", "include_incarnation=false", "include_incarnation=True", "include_incarnation=true&include_incarnation=false",
+				"include_index_visibility=false", "include_index_visibility=True", "include_index_visibility=true&include_index_visibility=true"} {
 				rec := incarnationRead(t, router, withQuery(tc.path, option), "incarnation-reader")
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				var body map[string]any
@@ -76,6 +77,24 @@ func TestLegacyDocumentSummarySchema(t *testing.T) {
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &extended))
 			require.Error(t, legacyValidator.Validate(extended), "the legacy schema must reject the opt-in field")
 			require.NoError(t, publishedValidator.Validate(extended), "the published schema must accept the opt-in body")
+			for _, option := range []string{"include_index_visibility=true", "include_index_visibility=true&include_incarnation=true"} {
+				rec := incarnationRead(t, router, withQuery(tc.path, option), "incarnation-reader")
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				var observed map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &observed))
+				require.Error(t, legacyValidator.Validate(observed), "the legacy schema must reject opted-in visibility")
+				require.NoError(t, publishedValidator.Validate(observed))
+				if tc.legacySchema == "DocumentList" {
+					var page struct {
+						Documents []map[string]any `json:"documents"`
+					}
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+					require.Len(t, page.Documents, 1)
+					observed = page.Documents[0]
+				}
+				require.Equal(t, "unknown", observed["index_visibility"])
+				require.NotContains(t, observed, "index_visibility_observed_at")
+			}
 		})
 	}
 }
@@ -155,7 +174,7 @@ func TestDocumentIncarnationIsSeparateFromHTTPRepresentation(t *testing.T) {
 	job, err := c.ClaimJob(ctx, "incarnation-reader", time.Minute, 5)
 	require.NoError(t, err)
 	require.NotNil(t, job)
-	completed, err := c.CompleteJob(ctx, *job, nil)
+	completed, err := c.CompleteJob(ctx, *job, nil, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, completed)
 	restarted, err := pgstore.NewClient(ctx, c.Pool.Config().ConnString())

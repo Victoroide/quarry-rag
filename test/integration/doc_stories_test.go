@@ -78,7 +78,7 @@ func TestDOCStoryProfilesPreserveIngestIdentity(t *testing.T) {
 		job, err := c.ClaimJob(t.Context(), "doc-stories", time.Minute, 3)
 		require.NoError(t, err)
 		require.NotNil(t, job)
-		completed, err := c.CompleteJob(t.Context(), *job, nil)
+		completed, err := c.CompleteJob(t.Context(), *job, nil, domain.IndexObservation{})
 		require.NoError(t, err)
 		require.True(t, completed)
 	}

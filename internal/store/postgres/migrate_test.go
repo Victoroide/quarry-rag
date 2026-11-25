@@ -33,9 +33,10 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, domain.AcceptAccepted, result.Outcome)
 	id := string(result.DocumentID)
-	job, err := c.ClaimJob(ctx, "schema-upgrade", time.Minute, 5)
+	// The pre-migration binary claimed work without a lease token.
+	job := domain.Job{Document: req.Document, LeaseOwner: "schema-upgrade", Attempts: 1}
+	_, err = c.Pool.Exec(ctx, `UPDATE ingest_jobs SET state='running',attempts=$2,lease_owner=$3,lease_until=NOW()+interval '1 minute' WHERE document_id=$1`, id, job.Attempts, job.LeaseOwner)
 	require.NoError(t, err)
-	require.NotNil(t, job)
 	chunkID := uuid.NewString()
 	_, err = c.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,'preserved chunk',2)`, chunkID, id)
 	require.NoError(t, err)
@@ -47,7 +48,8 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	read := func() snapshot {
 		var s snapshot
 		require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_relation_filenode('documents'), jsonb_build_array(
-			to_jsonb(d)-'incarnation'-'grant_catalog_assigned', to_jsonb(ch), to_jsonb(f), to_jsonb(j))::text
+			to_jsonb(d)-'incarnation'-'grant_catalog_assigned'-'index_visibility'-'index_visibility_observed_at',
+			to_jsonb(ch), to_jsonb(f), to_jsonb(j)-'lease_token')::text
 			FROM documents d JOIN chunks ch ON ch.document_id=d.id
 			JOIN document_fingerprints f ON f.document_id=d.id JOIN ingest_jobs j ON j.document_id=d.id
 			WHERE d.id=$1 AND j.state='running' AND j.lease_until > clock_timestamp()`, id).Scan(&s.filenode, &s.rows))
@@ -65,11 +67,15 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	require.NoError(t, restarted.Pool.QueryRow(ctx, `SELECT incarnation::text FROM documents WHERE id=$1`, id).Scan(&stored))
 	require.Nil(t, stored)
 	requireHistoricalIncarnation(t, restarted.WithDocumentIncarnations(), id)
+	summary, err := restarted.GetDocumentSummary(ctx, job.Document.ID)
+	require.NoError(t, err)
+	require.Equal(t, domain.VisibilityUnknown, summary.IndexVisibility)
+	require.Nil(t, summary.IndexVisibilityObservedAt)
 
-	owned, err := restarted.HeartbeatJob(ctx, *job, time.Minute)
+	owned, err := restarted.HeartbeatJob(ctx, job, time.Minute)
 	require.NoError(t, err)
 	require.True(t, owned)
-	completed, err := restarted.CompleteJob(ctx, *job, []domain.Chunk{{ID: domain.ChunkID(chunkID), Text: "preserved chunk", TokenCount: 2}})
+	completed, err := restarted.CompleteJob(ctx, job, []domain.Chunk{{ID: domain.ChunkID(chunkID), Text: "preserved chunk", TokenCount: 2}}, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, completed)
 	effective := id

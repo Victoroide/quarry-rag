@@ -196,6 +196,7 @@ paths:
           schema:
             type: string
         - $ref: '#/components/parameters/IncludeIncarnation'
+        - $ref: '#/components/parameters/IncludeIndexVisibility'
       responses:
         '200':
           description: Document inventory
@@ -226,6 +227,7 @@ paths:
         - ServiceToken: []
       parameters:
         - $ref: '#/components/parameters/IncludeIncarnation'
+        - $ref: '#/components/parameters/IncludeIndexVisibility'
       responses:
         '200':
           description: Document summary
@@ -338,6 +340,13 @@ components:
       name: include_incarnation
       in: query
       description: 'Selects the [incarnation projection](api.md#get-documents).'
+      schema:
+        type: boolean
+        default: false
+    IncludeIndexVisibility:
+      name: include_index_visibility
+      in: query
+      description: 'Selects the [index visibility observation](api.md#get-documents).'
       schema:
         type: boolean
         default: false
@@ -746,6 +755,12 @@ components:
         completed_at: &documentSummaryCompletedAt
           type: [string, 'null']
           format: date-time
+        index_visibility: &documentSummaryIndexVisibility
+          type: string
+          enum: [unknown, disabled, timeout, sample_seen, writes_indexed, transactional]
+        index_visibility_observed_at: &documentSummaryIndexVisibilityObservedAt
+          type: string
+          format: date-time
         last_error: &documentSummaryLastError
           type: string
     DocumentIncarnationSummary:
@@ -764,6 +779,8 @@ components:
         created_at: *documentSummaryCreatedAt
         updated_at: *documentSummaryUpdatedAt
         completed_at: *documentSummaryCompletedAt
+        index_visibility: *documentSummaryIndexVisibility
+        index_visibility_observed_at: *documentSummaryIndexVisibilityObservedAt
         last_error: *documentSummaryLastError
         incarnation:
           type: string

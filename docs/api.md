@@ -607,6 +607,7 @@ Optional query parameters:
 | `after` | string | UUID cursor, exclusive; requires `limit` |
 | `collection` | string | Exact collection label, using the label rules above; omitted or empty lists all collections. Filters both streaming and paginated listings before ordering and limiting |
 | `include_incarnation` | bool | Send a single literal `true` to include the incarnation in each summary |
+| `include_index_visibility` | bool | Send a single literal `true` to include the index visibility observation in each summary |
 
 Without pagination parameters, PostgreSQL streams the full listing without buffering every row. The response writes `documents` before `count`; an empty listing is `{"documents":[],"count":0}`. If a stream fails after it begins, its JSON is incomplete; discard the partial result and retry. Stores without summary support retain the reference listing and return an empty array when no documents exist.
 
@@ -635,8 +636,24 @@ Document summary fields:
 | `created_at` | string | Creation timestamp in RFC 3339 format |
 | `updated_at` | string | Latest ingestion transition timestamp in RFC 3339 format |
 | `completed_at` | string or null | Completion timestamp in RFC 3339 format |
+| `index_visibility` | string | Opt-in evidence recorded for indexing during ingestion |
+| `index_visibility_observed_at` | string | RFC 3339 timestamp included with a recorded observation when opted in |
 | `last_error` | string | Last ingestion error, included only for failed documents when recorded |
 | `incarnation` | string | Opt-in UUID for one lifetime of a document. It stays stable through ingestion status changes. Rows present at migration use their document UUID. Reusing a document UUID creates a new incarnation |
+
+| Index visibility | Meaning |
+|---|---|
+| `unknown` | Evidence is unavailable. This includes older rows, incomplete ingestion, missing or invalid receipt or watermark headers, and writes retried after a timeout, lost response or gateway error. |
+| `disabled` | The visibility wait was disabled. |
+| `timeout` | The visibility wait expired or shutdown ended it before confirmation. |
+| `sample_seen` | A filtered search returned the sampled chunk ID. An earlier attempt can use the same ID. |
+| `writes_indexed` | Pinecone reported index progress through every acknowledged write batch in the namespace. Subsequent operations may have already updated or deleted those records. |
+| `transactional` | PostgreSQL committed the vectors with document completion. |
+
+Observations describe one point in time. Completion can include any of these
+outcomes. Status and inventory requests read the stored values from PostgreSQL.
+The Go client exposes both fields on `DocumentSummary` through
+`ListOptions.IncludeIndexVisibility` and `GetDocumentWithIndexVisibility`.
 
 Error Status Codes:
 
@@ -645,7 +662,7 @@ Error Status Codes:
 | `400 Bad Request` | `validation` | Invalid `limit`, `after` or `collection`; duplicate pagination or `collection` parameters; `after` without `limit`; or a malformed query string |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `500 Internal Server Error` | `internal` | Database query failure |
-| `503 Service Unavailable` | `unavailable` | The requested incarnation projection is unavailable |
+| `503 Service Unavailable` | `unavailable` | The requested summary projection is unavailable |
 
 Example:
 
@@ -668,7 +685,7 @@ Returns one document summary with the fields described above. Poll this endpoint
 - **Auth**: Required (`X-Service-Token`)
 - **Response**: The document summary object (200 OK)
 
-Use `include_incarnation=true` as for [inventory](#get-documents). The Go client provides `GetDocumentWithIncarnation` and `ListDocumentsWithIncarnation` for these projections. An older server may return a summary with an empty incarnation in the Go client.
+Use `include_incarnation=true` and `include_index_visibility=true` as for [inventory](#get-documents). The Go client provides `GetDocumentWithIncarnation` and `ListDocumentsWithIncarnation` for the incarnation projection. Older servers can leave the requested fields empty in the Go client.
 
 | Status | Error Category | Condition |
 |---|---|---|

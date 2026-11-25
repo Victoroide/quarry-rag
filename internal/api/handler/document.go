@@ -107,13 +107,17 @@ func ListDocumentsHandler(cs domain.ChunkStore) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
-		include := includeDocumentIncarnation(query)
-		if lister, ok := selectDocumentLister(cs, include); ok {
-			listDocumentSummaries(w, r, lister, query, collection, include)
+		projection := documentSummaryOptions(query)
+		if lister, ok := selectDocumentLister(cs, projection.incarnation); ok {
+			listDocumentSummaries(w, r, lister, query, collection, projection)
 			return
 		}
-		if include {
+		if projection.incarnation {
 			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document incarnations are unavailable")
+			return
+		}
+		if projection.indexVisibility {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document index visibility is unavailable")
 			return
 		}
 		if collection != "" {

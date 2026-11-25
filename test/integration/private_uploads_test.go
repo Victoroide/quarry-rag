@@ -223,7 +223,7 @@ func TestPrivateOCRRetryKeepsAcceptedSource(t *testing.T) {
 	require.NotNil(t, next)
 	require.Equal(t, text, next.Document.Content)
 	require.Equal(t, "ocr", next.Document.TextSource)
-	done, err := c.CompleteJob(ctx, *next, nil)
+	done, err := c.CompleteJob(ctx, *next, nil, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, done)
 

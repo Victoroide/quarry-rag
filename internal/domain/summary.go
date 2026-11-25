@@ -8,19 +8,21 @@ import (
 
 // DocumentSummary describes a document without its content or metadata.
 type DocumentSummary struct {
-	ID          string     `json:"document_id"`
-	DocType     string     `json:"doc_type"`
-	Collection  string     `json:"collection"`
-	S3Key       *string    `json:"s3_key,omitempty"`
-	Status      string     `json:"status"`
-	ChunkCount  int        `json:"chunk_count"`
-	FileName    *string    `json:"file_name"`
-	FileType    *string    `json:"file_type"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	CompletedAt *time.Time `json:"completed_at"`
-	LastError   *string    `json:"last_error,omitempty"`
-	Incarnation string     `json:"-"`
+	ID                        string          `json:"document_id"`
+	DocType                   string          `json:"doc_type"`
+	Collection                string          `json:"collection"`
+	S3Key                     *string         `json:"s3_key,omitempty"`
+	Status                    string          `json:"status"`
+	ChunkCount                int             `json:"chunk_count"`
+	FileName                  *string         `json:"file_name"`
+	FileType                  *string         `json:"file_type"`
+	CreatedAt                 time.Time       `json:"created_at"`
+	UpdatedAt                 time.Time       `json:"updated_at"`
+	CompletedAt               *time.Time      `json:"completed_at"`
+	LastError                 *string         `json:"last_error,omitempty"`
+	Incarnation               string          `json:"-"`
+	IndexVisibility           IndexVisibility `json:"index_visibility,omitempty"`
+	IndexVisibilityObservedAt *time.Time      `json:"index_visibility_observed_at,omitempty"`
 }
 
 type documentSummaryJSON DocumentSummary

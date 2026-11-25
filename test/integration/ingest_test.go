@@ -427,7 +427,7 @@ func (m *mockChunkStore) ClaimJob(_ context.Context, owner string, _ time.Durati
 func (*mockChunkStore) HeartbeatJob(context.Context, domain.Job, time.Duration) (bool, error) {
 	return true, nil
 }
-func (m *mockChunkStore) CompleteJob(_ context.Context, j domain.Job, chunks []domain.Chunk) (bool, error) {
+func (m *mockChunkStore) CompleteJob(_ context.Context, j domain.Job, chunks []domain.Chunk, _ domain.IndexObservation) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	doc, ok := m.documents[string(j.Document.ID)]

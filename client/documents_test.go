@@ -13,13 +13,16 @@ import (
 func TestDocuments(t *testing.T) {
 	next := "00000000-0000-4000-8000-000000000003"
 	summary := client.DocumentSummary{ID: "00000000-0000-4000-8000-000000000001", DocType: "guide", Status: "completed", ChunkCount: 2, CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	summary.IndexVisibility = "sample_seen"
+	summary.IndexVisibilityObservedAt = &summary.CreatedAt
 	c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "synthetic-token", r.Header.Get("X-Service-Token"))
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/documents":
-			assert.Equal(t, "after=00000000-0000-4000-8000-000000000002&limit=2", r.URL.RawQuery)
+			assert.Equal(t, "after=00000000-0000-4000-8000-000000000002&include_index_visibility=true&limit=2", r.URL.RawQuery)
 			writeJSON(t, w, client.DocumentPage{Documents: []client.DocumentSummary{summary}, Count: 1, NextAfter: &next})
 		case "GET /api/documents/00000000-0000-4000-8000-000000000001":
+			assert.Equal(t, "include_index_visibility=true", r.URL.RawQuery)
 			writeJSON(t, w, summary)
 		case "DELETE /api/documents/00000000-0000-4000-8000-000000000001":
 			writeJSON(t, w, client.DeleteResponse{Deleted: true, DocID: "00000000-0000-4000-8000-000000000001"})
@@ -30,11 +33,11 @@ func TestDocuments(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	})
-	page, err := c.ListDocuments(t.Context(), client.ListOptions{Limit: 2, After: "00000000-0000-4000-8000-000000000002"})
+	page, err := c.ListDocuments(t.Context(), client.ListOptions{Limit: 2, After: "00000000-0000-4000-8000-000000000002", IncludeIndexVisibility: true})
 	require.NoError(t, err)
 	assert.Equal(t, []client.DocumentSummary{summary}, page.Documents)
 	assert.Equal(t, &next, page.NextAfter)
-	got, err := c.GetDocument(t.Context(), "00000000-0000-4000-8000-000000000001")
+	got, err := c.GetDocumentWithIndexVisibility(t.Context(), "00000000-0000-4000-8000-000000000001")
 	require.NoError(t, err)
 	assert.Equal(t, &summary, got)
 	deleted, err := c.DeleteDocument(t.Context(), "00000000-0000-4000-8000-000000000001")

@@ -46,7 +46,7 @@ func (s *leaseTestStore) HeartbeatJob(context.Context, domain.Job, time.Duration
 	defer s.mu.Unlock()
 	return s.heartbeat, nil
 }
-func (s *leaseTestStore) CompleteJob(context.Context, domain.Job, []domain.Chunk) (bool, error) {
+func (s *leaseTestStore) CompleteJob(context.Context, domain.Job, []domain.Chunk, domain.IndexObservation) (bool, error) {
 	s.events <- "completed"
 	return true, nil
 }

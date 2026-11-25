@@ -219,7 +219,7 @@ func TestCompleteJobVectorsAtomic(t *testing.T) {
 	require.NoError(t, err)
 	done := make(chan error, 1)
 	go func() {
-		ok, completeErr := c.CompleteJob(t.Context(), *job, chunks)
+		ok, completeErr := c.CompleteJob(t.Context(), *job, chunks, domain.IndexObservation{})
 		if completeErr == nil && !ok {
 			completeErr = domain.ErrJobNotOwned
 		}
@@ -233,12 +233,20 @@ func TestCompleteJobVectorsAtomic(t *testing.T) {
 	var count int
 	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM chunk_vectors`).Scan(&count))
 	require.Zero(t, count)
+	summary, err := c.GetDocumentSummary(t.Context(), job.Document.ID)
+	require.NoError(t, err)
+	require.Equal(t, domain.VisibilityUnknown, summary.IndexVisibility)
+	require.Nil(t, summary.IndexVisibilityObservedAt)
 	got, err := v.QueryFiltered(t.Context(), []float32{1, 0, 0}, 10, domain.VectorFilter{})
 	require.NoError(t, err)
 	require.Empty(t, got)
 	_, err = holder.Exec(t.Context(), `SELECT pg_advisory_unlock(8191)`)
 	require.NoError(t, err)
 	require.NoError(t, <-done)
+	summary, err = c.GetDocumentSummary(t.Context(), job.Document.ID)
+	require.NoError(t, err)
+	require.Equal(t, domain.VisibilityTransactional, summary.IndexVisibility)
+	require.NotNil(t, summary.IndexVisibilityObservedAt)
 	got, err = v.QueryFiltered(t.Context(), []float32{1, 0, 0}, 10, domain.VectorFilter{Collection: "archive", DocType: "report"})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -255,7 +263,7 @@ func TestCompleteJobVectorsRollback(t *testing.T) {
 		{ID: domain.ChunkID(uuid.NewString()), DocumentID: job.Document.ID, Embedding: []float32{1, 0, 0}},
 		{ID: domain.ChunkID(uuid.NewString()), DocumentID: job.Document.ID, Index: 1, Embedding: []float32{1, 0}},
 	}
-	ok, err := c.CompleteJob(t.Context(), *job, chunks)
+	ok, err := c.CompleteJob(t.Context(), *job, chunks, domain.IndexObservation{})
 	require.Error(t, err)
 	require.False(t, ok)
 	var vectors, storedChunks, jobs int
@@ -269,7 +277,7 @@ func TestCompleteJobVectorsRollback(t *testing.T) {
 	require.Equal(t, 1, jobs)
 	require.Equal(t, "processing", status)
 	chunks = chunks[:1]
-	ok, err = c.CompleteJob(t.Context(), *job, chunks)
+	ok, err = c.CompleteJob(t.Context(), *job, chunks, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, ok)
 	got, err := v.QueryFiltered(t.Context(), []float32{1, 0, 0}, 1, domain.VectorFilter{})
@@ -285,7 +293,7 @@ func TestCompleteJobVectorsRollBackOnLaterFailure(t *testing.T) {
 	require.NotNil(t, job)
 	_, err = c.Pool.Exec(t.Context(), `CREATE FUNCTION fail_fingerprint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic failure'; END $$; CREATE TRIGGER fail_fingerprint BEFORE INSERT ON document_fingerprints FOR EACH ROW EXECUTE FUNCTION fail_fingerprint()`)
 	require.NoError(t, err)
-	ok, err := c.CompleteJob(t.Context(), *job, []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: job.Document.ID, Embedding: []float32{1, 0, 0}}})
+	ok, err := c.CompleteJob(t.Context(), *job, []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: job.Document.ID, Embedding: []float32{1, 0, 0}}}, domain.IndexObservation{})
 	require.ErrorContains(t, err, "synthetic failure")
 	require.False(t, ok)
 	var vectors, storedChunks, jobs int

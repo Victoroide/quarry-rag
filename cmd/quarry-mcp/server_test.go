@@ -403,6 +403,8 @@ func TestToolsCallHTTPAPI(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "sample.md")
 	syntheticFile(t, path)
+	observedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	summary := domain.DocumentSummary{ID: "00000000-0000-4000-8000-000000000001", Collection: "tenant-a", Status: "completed", IndexVisibility: domain.VisibilityWritesIndexed, IndexVisibilityObservedAt: &observedAt}
 	var calls atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -415,10 +417,11 @@ func TestToolsCallHTTPAPI(t *testing.T) {
 			assert.Equal(t, client.QueryRequest{Query: "synthetic question", Mode: "local", FilterDocType: "guide", MaxChunks: 2, AllowedDocumentIDs: []string{}}, body)
 			assert.NoError(t, json.NewEncoder(w).Encode(client.QueryResponse{Answer: "synthetic answer", Mode: "LOCAL", FinishReason: "stop", ChunksUsed: 1, ContextChunks: 1, TokenUsage: client.TokenUsage{InputTokens: 10}, ScoredChunks: []client.ScoredChunkResponse{{DocID: "00000000-0000-4000-8000-000000000001", DocType: "guide", ChunkIndex: 2, Score: 0.9, Text: "synthetic evidence"}}}))
 		case "GET /prefix/documents":
-			assert.Equal(t, "limit=100", r.URL.RawQuery)
-			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"documents": []domain.DocumentSummary{{ID: "00000000-0000-4000-8000-000000000001", Collection: "tenant-a", Status: "processing"}}, "count": 1, "next_after": nil}))
+			assert.Equal(t, "include_index_visibility=true&limit=100", r.URL.RawQuery)
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"documents": []domain.DocumentSummary{summary}, "count": 1, "next_after": nil}))
 		case "GET /prefix/documents/00000000-0000-4000-8000-000000000001":
-			assert.NoError(t, json.NewEncoder(w).Encode(domain.DocumentSummary{ID: "00000000-0000-4000-8000-000000000001", Collection: "tenant-a", Status: "processing"}))
+			assert.Equal(t, "include_index_visibility=true", r.URL.RawQuery)
+			assert.NoError(t, json.NewEncoder(w).Encode(summary))
 		case "DELETE /prefix/documents/00000000-0000-4000-8000-000000000001":
 			assert.NoError(t, json.NewEncoder(w).Encode(client.DeleteResponse{Deleted: true, DocID: "00000000-0000-4000-8000-000000000001"}))
 		case "POST /prefix/ingest":
@@ -461,8 +464,8 @@ func TestToolsCallHTTPAPI(t *testing.T) {
 		expected map[string]any
 	}{
 		{"quarry_query", map[string]any{"query": "synthetic question", "mode": "local", "filter_doc_type": "guide", "max_chunks": 2, "allowed_document_ids": []string{}}, map[string]any{"answer": "synthetic answer", "mode": "LOCAL", "finish_reason": "stop", "chunks_used": float64(1), "context_chunks": float64(1), "token_usage": map[string]any{"input_tokens": float64(10), "output_tokens": float64(0), "total_tokens": float64(0)}, "chunks": []any{map[string]any{"doc_id": "00000000-0000-4000-8000-000000000001", "doc_type": "guide", "chunk_index": float64(2), "score": 0.9, "text": "synthetic evidence"}}}},
-		{"quarry_list_documents", map[string]any{}, map[string]any{"next_after": nil}},
-		{"quarry_get_document", map[string]any{"document_id": "00000000-0000-4000-8000-000000000001"}, map[string]any{"document_id": "00000000-0000-4000-8000-000000000001", "collection": "tenant-a", "status": "processing"}},
+		{"quarry_list_documents", map[string]any{"include_index_visibility": true}, map[string]any{"next_after": nil}},
+		{"quarry_get_document", map[string]any{"document_id": "00000000-0000-4000-8000-000000000001", "include_index_visibility": true}, map[string]any{"document_id": "00000000-0000-4000-8000-000000000001", "collection": "tenant-a", "status": "completed", "index_visibility": "writes_indexed", "index_visibility_observed_at": observedAt.Format(time.RFC3339)}},
 		{"quarry_ingest_text", map[string]any{"content": "synthetic text", "document_id": "00000000-0000-4000-8000-000000000001", "doc_type": "guide", "metadata": map[string]any{"category": "example"}, "collection": "tenant-a"}, map[string]any{"document_id": "00000000-0000-4000-8000-000000000001", "status": "processing"}},
 		{"quarry_ingest_file", map[string]any{"path": path, "document_id": "00000000-0000-4000-8000-000000000001", "doc_type": "guide", "metadata": map[string]any{"category": "example"}, "collection": "tenant-a"}, map[string]any{"document_id": "00000000-0000-4000-8000-000000000001", "status": "processing"}},
 		{"quarry_delete_document", map[string]any{"document_id": "00000000-0000-4000-8000-000000000001"}, map[string]any{"deleted": true, "doc_id": "00000000-0000-4000-8000-000000000001"}},
@@ -485,6 +488,8 @@ func TestToolsCallHTTPAPI(t *testing.T) {
 				document, ok := documents[0].(map[string]any)
 				require.True(t, ok)
 				assert.Equal(t, "tenant-a", document["collection"])
+				assert.Equal(t, "writes_indexed", document["index_visibility"])
+				assert.Equal(t, observedAt.Format(time.RFC3339), document["index_visibility_observed_at"])
 			}
 		})
 	}

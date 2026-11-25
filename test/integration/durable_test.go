@@ -70,6 +70,10 @@ func TestAcceptedDocumentSurvivesWorkerRestart(t *testing.T) {
 	next.Start(t.Context())
 	defer next.Shutdown()
 	durableStatus(t, c, response.DocumentID, "completed")
+	summary, err := c.GetDocumentSummary(t.Context(), domain.DocumentID(response.DocumentID))
+	require.NoError(t, err)
+	require.Equal(t, domain.VisibilitySampleSeen, summary.IndexVisibility)
+	require.NotNil(t, summary.IndexVisibilityObservedAt)
 }
 
 type durableErrorEmbedder struct{}
@@ -300,8 +304,8 @@ type durableCompletionStore struct {
 	completed chan struct{}
 }
 
-func (s durableCompletionStore) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.Chunk) (bool, error) {
-	ok, err := s.Client.CompleteJob(ctx, j, chunks)
+func (s durableCompletionStore) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.Chunk, observation domain.IndexObservation) (bool, error) {
+	ok, err := s.Client.CompleteJob(ctx, j, chunks, observation)
 	if ok && err == nil {
 		close(s.completed)
 	}

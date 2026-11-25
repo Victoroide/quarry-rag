@@ -51,7 +51,7 @@ func TestAcceptCollectionIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, job)
 	require.Equal(t, req.Fingerprint, job.Document.Fingerprint)
-	ok, err := c.CompleteJob(t.Context(), *job, nil)
+	ok, err := c.CompleteJob(t.Context(), *job, nil, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, ok)
 	again, err = c.AcceptDocument(t.Context(), req)
@@ -161,10 +161,10 @@ func TestPrivateIdentitySurvivesPolicySwitchAndLeaseReclaim(t *testing.T) {
 	require.NotNil(t, next)
 	require.Equal(t, private.DocumentID, next.Document.ID)
 	require.Equal(t, 2, next.Attempts)
-	done, err := c.CompleteJob(ctx, *job, nil)
+	done, err := c.CompleteJob(ctx, *job, nil, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.False(t, done)
-	done, err = c.CompleteJob(ctx, *next, nil)
+	done, err = c.CompleteJob(ctx, *next, nil, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, done)
 	_, exists, err = c.CheckFingerprint(ctx, req.Fingerprint)
@@ -310,7 +310,7 @@ func TestCompleteRequiresLeaseAndProcessingStatus(t *testing.T) {
 	chunks := []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: id, Text: "completion", TokenCount: 1}}
 	stale := *job
 	stale.LeaseOwner = "stale"
-	ok, err := c.CompleteJob(t.Context(), stale, chunks)
+	ok, err := c.CompleteJob(t.Context(), stale, chunks, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.False(t, ok)
 	var state string
@@ -318,12 +318,12 @@ func TestCompleteRequiresLeaseAndProcessingStatus(t *testing.T) {
 	require.Equal(t, "processing", state)
 	_, err = c.Pool.Exec(t.Context(), `UPDATE documents SET status='failed' WHERE id=$1`, string(id))
 	require.NoError(t, err)
-	ok, err = c.CompleteJob(t.Context(), *job, chunks)
+	ok, err = c.CompleteJob(t.Context(), *job, chunks, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.False(t, ok)
 	_, err = c.Pool.Exec(t.Context(), `UPDATE documents SET status='processing' WHERE id=$1`, string(id))
 	require.NoError(t, err)
-	ok, err = c.CompleteJob(t.Context(), *job, chunks)
+	ok, err = c.CompleteJob(t.Context(), *job, chunks, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, ok)
 	var count int
@@ -387,7 +387,7 @@ func TestLegacyProcessingRowsAreRequeued(t *testing.T) {
 	job, err := c.ClaimJob(t.Context(), "owner", time.Minute, 5)
 	require.NoError(t, err)
 	require.Equal(t, domain.DocumentID(ids[1]), job.Document.ID)
-	ok, err := c.CompleteJob(t.Context(), *job, nil)
+	ok, err := c.CompleteJob(t.Context(), *job, nil, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, ok)
 	_, exists, err = c.CheckFingerprint(t.Context(), chunker.Fingerprint("legacy 1"))
@@ -449,7 +449,7 @@ func TestCompleteRollsBackInvalidChunks(t *testing.T) {
 	id := jobsAccept(t, c, "atomic completion")
 	j, err := c.ClaimJob(t.Context(), "owner", time.Minute, 5)
 	require.NoError(t, err)
-	ok, err := c.CompleteJob(t.Context(), *j, []domain.Chunk{{ID: "invalid", Text: "text"}})
+	ok, err := c.CompleteJob(t.Context(), *j, []domain.Chunk{{ID: "invalid", Text: "text"}}, domain.IndexObservation{})
 	require.Error(t, err)
 	require.False(t, ok)
 	var state string

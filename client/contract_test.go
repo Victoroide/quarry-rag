@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/client"
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
@@ -38,12 +39,13 @@ func (s summaryStore) GetDocumentSummary(context.Context, domain.DocumentID) (*d
 }
 
 func TestDocumentPageRoundTrip(t *testing.T) {
-	doc := domain.DocumentSummary{ID: "00000000-0000-4000-8000-000000000001", DocType: "guide", Collection: "tenant-a", Status: "completed", ChunkCount: 3}
+	observedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	doc := domain.DocumentSummary{ID: "00000000-0000-4000-8000-000000000001", DocType: "guide", Collection: "tenant-a", Status: "completed", ChunkCount: 3, IndexVisibility: domain.VisibilityTransactional, IndexVisibilityObservedAt: &observedAt}
 	server := httptest.NewServer(handler.ListDocumentsHandler(summaryStore{docs: []domain.DocumentSummary{doc}}))
 	defer server.Close()
 	c, err := client.New(server.URL)
 	require.NoError(t, err)
-	page, err := c.ListDocuments(t.Context(), client.ListOptions{Limit: 1})
+	page, err := c.ListDocuments(t.Context(), client.ListOptions{Limit: 1, IncludeIndexVisibility: true})
 	require.NoError(t, err)
 	require.Len(t, page.Documents, 1)
 	encoded, err := json.Marshal(page.Documents[0])
@@ -66,7 +68,7 @@ func TestDocumentStatusRoundTrip(t *testing.T) {
 			defer server.Close()
 			c, err := client.New(server.URL)
 			require.NoError(t, err)
-			summary, err := c.GetDocument(t.Context(), doc.ID)
+			summary, err := c.GetDocumentWithIndexVisibility(t.Context(), doc.ID)
 			require.NoError(t, err)
 			encoded, err := json.Marshal(summary)
 			require.NoError(t, err)
@@ -75,6 +77,8 @@ func TestDocumentStatusRoundTrip(t *testing.T) {
 			assert.Equal(t, collection, fields["collection"])
 			assert.Equal(t, doc.ID, summary.ID)
 			assert.Equal(t, "processing", summary.Status)
+			assert.Equal(t, "unknown", summary.IndexVisibility)
+			assert.Nil(t, summary.IndexVisibilityObservedAt)
 		})
 	}
 }

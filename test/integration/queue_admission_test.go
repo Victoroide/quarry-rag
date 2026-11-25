@@ -132,7 +132,7 @@ func TestFailedRetriesAtDurableQueueLimit(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &observed))
 	require.Equal(t, handler.IngestResponse{DocumentID: occupantID, Status: "processing"}, observed)
 
-	completed, err := c.CompleteJob(t.Context(), *occupant, nil)
+	completed, err := c.CompleteJob(t.Context(), *occupant, nil, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, completed)
 	requeued, err := api.Ingest(t.Context(), retry)
