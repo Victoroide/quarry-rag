@@ -50,20 +50,40 @@ func TestChunkOutputBoundAtMaximumOverlap(t *testing.T) {
 }
 
 func TestChunkOutputBoundAcrossWindows(t *testing.T) {
-	for _, size := range []int{2, 3, 4, 5, 8, 31, 64, 511, 512, 2048, 8191, 8192} {
+	texts := []struct{ name, text string }{
+		{"words", strings.Repeat("ab ", 2048)},
+		{"long word", strings.Repeat("Abc123xy", 1024)},
+		{"dense", strings.Repeat("漢字", 2048)},
+		{"sentences", strings.Repeat("Archive records remain. Longer preservation notes follow.\n\n", 128)},
+		{"mixed estimates", strings.Repeat("a ", 200) + strings.Repeat("😀", 2000) + " " + strings.Repeat("b ", 200)},
+	}
+	// List the documented overlap caps independently of the constructor.
+	for _, window := range []struct{ size, overlapCap int }{
+		{2, 1}, {3, 1}, {4, 2}, {5, 2}, {8, 4}, {31, 15},
+		{64, 32}, {511, 255}, {512, 256}, {2048, 1024}, {8191, 4095}, {8192, 4096},
+	} {
+		size := window.size
 		overlaps := []int{0, 1, size / 4, size / 2, size/2 + 1, size - 1, size, 65535}
 		slices.Sort(overlaps)
+		previousOverlap := -1
 		for _, overlap := range slices.Compact(overlaps) {
-			t.Run(fmt.Sprintf("%d/%d", size, overlap), func(t *testing.T) {
-				for _, tc := range []struct{ name, text string }{
-					{"words", strings.Repeat("ab ", 2048)},
-					{"long word", strings.Repeat("Abc123xy", 1024)},
-					{"dense", strings.Repeat("漢字", 2048)},
-					{"sentences", strings.Repeat("Archive records remain. Longer preservation notes follow.\n\n", 128)},
-					{"mixed estimates", strings.Repeat("a ", 200) + strings.Repeat("😀", 2000) + " " + strings.Repeat("b ", 200)},
-				} {
+			c := NewChunker(size, overlap)
+			wantOverlap := min(overlap, window.overlapCap)
+			t.Run(fmt.Sprintf("clamp/%d/%d", size, overlap), func(t *testing.T) {
+				if c.chunkSize != size || c.overlap != wantOverlap {
+					t.Fatalf("window = %d/%d, want %d/%d", c.chunkSize, c.overlap, size, wantOverlap)
+				}
+			})
+			// Sorted inputs produce adjacent equivalent windows. Each eliminated
+			// output case maps to the same size, overlap and text family below.
+			if wantOverlap == previousOverlap {
+				continue
+			}
+			previousOverlap = wantOverlap
+			t.Run(fmt.Sprintf("output/%d/%d", size, wantOverlap), func(t *testing.T) {
+				for _, tc := range texts {
 					t.Run(tc.name, func(t *testing.T) {
-						assertChunkOutputBound(t, tc.text, NewChunker(size, overlap).Chunk("document", tc.text))
+						assertChunkOutputBound(t, tc.text, c.Chunk("document", tc.text))
 					})
 				}
 			})
