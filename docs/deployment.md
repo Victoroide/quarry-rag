@@ -257,11 +257,28 @@ the schema and enable `pgcrypto`.
 ### Pinecone Vector Index
 
 - Set `PINECONE_API_KEY` and `PINECONE_INDEX_NAME` for the hosted index.
-- **API Version**: The v5 Go SDK uses Pinecone API version `2025-10`.
+- **API Version**: The v5 Go SDK uses Pinecone API version `2025-10`. With `INDEX_VISIBILITY_MODE=lsn`, ingestion upserts and visibility probes use the `2026-07` HTTP data plane. Both pin the unique index host and use the SDK's `__default__` namespace for ingestion.
 - **Startup Requirements**: The index dimension must equal [`EMBEDDING_DIMENSIONS`](configuration.md#environment-variables), the metric must be `cosine`, and the index must be ready. Startup fails if any requirement is unmet.
-- **Request Limits**: Upserts use at most [`PINECONE_UPSERT_BATCH_SIZE`](configuration.md#environment-variables) records and 1.5 MiB of estimated encoded data per batch. `PINECONE_TIMEOUT` bounds each attempt, and `PINECONE_MAX_ATTEMPTS` limits write and deletion attempts.
+- **Request Limits**: Upserts use at most [`PINECONE_UPSERT_BATCH_SIZE`](configuration.md#environment-variables) records per batch. The 1.5 MiB batch limit uses an estimate for SDK requests and the serialized size for HTTP requests. `PINECONE_TIMEOUT` bounds each attempt, and `PINECONE_MAX_ATTEMPTS` limits write and deletion attempts.
 - **Deletion**: If metadata-filter deletion returns `InvalidArgument`, `Unimplemented`, or `FailedPrecondition`, the service queries the default namespace with an exact `doc_id` filter and deletes the returned identifiers in batches of at most 1,000. Each identifier is deleted once per operation, so stale query results do not repeat deletions. Enumeration stops when no new identifiers appear or after deleting a result with fewer than 1,000 matches, and otherwise fails after 10 rounds. Missing vectors and namespaces are accepted as already deleted.
-- **Purpose**: High-dimensional vector search. Chunks are upserted only into the default namespace (`""`), which the SDK maps to `__default__` and the console displays as `__default__`, with `doc_id` metadata identifying each document. Per-document namespaces created by earlier versions are removed when their document is deleted. All namespace operations share one connection, which closes only when the client shuts down.
+- **Purpose**: High-dimensional vector search. Ingested chunks use `doc_id` metadata to identify each document. Per-document namespaces created by earlier versions are removed when their document is deleted. SDK namespace operations share one connection, which closes when the client shuts down.
+
+#### Index Visibility Rollout
+
+Deploy the readers and migration 011 before enabling `lsn` on all replicas that
+share the ingestion queue. Earlier workers can still complete jobs with a null
+observation. Drain or pause the queue while switching modes if every new job must
+record an LSN observation. Pinecone startup rejects `lsn` for indexes outside its
+serverless service. To roll back, disable `lsn` and allow active waits to finish.
+Both modes use the same job states and can read the same stored documents.
+
+Before enabling `lsn`, set `QUARRY_PINECONE_STAGING_INDEX` to a serverless staging
+index and provide its `PINECONE_API_KEY`. Verify both write receipts and the query
+watermark in an isolated namespace. The check deletes its test vectors.
+
+```sh
+GOMAXPROCS=4 go test -p 2 -count=1 -v ./internal/store/pinecone -run '^TestStagingServerlessVisibilityHeaders$'
+```
 
 #### SDK Deployment Verification
 

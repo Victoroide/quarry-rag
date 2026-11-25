@@ -81,7 +81,7 @@ RUN_SMOKE=1 go test ./test/smoke/... -count=1 -v -timeout 120s
 
 ### 4. Fuzz Tests
 
-The full race suite executes each fuzz target's seed corpus on pull requests and pushes to `main`. To exercise generated inputs locally, use `make fuzz`. It discovers targets from active test files in the root module and applies the `FUZZTIME` budget to each target. The default is 30 seconds per target.
+The full race suite executes each fuzz target's seed corpus on pull requests and pushes to `main`. To exercise generated inputs locally, use `make fuzz`. It discovers targets from active test files in the root module and applies the `FUZZTIME` budget to each target. The default is 30 seconds per target. The suite includes a target for parsing Pinecone write receipt headers.
 
 ```sh
 make fuzz FUZZTIME=2m
