@@ -16,6 +16,7 @@ type ingestOptions struct {
 	contentDedup          domain.ContentDedup
 	fixturePrefix         string
 	fixtureVectorIdentity string
+	journal               domain.SourceUploadJournal
 }
 
 // WithEvaluationFixtures enables receipt-qualified admission for one staging prefix.

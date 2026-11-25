@@ -22,6 +22,7 @@ const (
 	AcceptOCRRetryRequired
 	AcceptNeedsPDFText
 	AcceptOCRRetryAfterExpiry
+	AcceptUploadExpired
 )
 
 // ContentDedup controls whether uploads participate in collection-wide content matching.
@@ -51,6 +52,8 @@ type AcceptRequest struct {
 	TryLegacyPDFText         bool
 	// SupportsScopedVectors permits tagged admission if the database is active.
 	SupportsScopedVectors bool
+	// SourceUpload, when set, must still be staged for the new document's original file.
+	SourceUpload *SourceUploadLink
 }
 
 // AcceptResult identifies the document selected by acceptance.

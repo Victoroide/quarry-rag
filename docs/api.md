@@ -242,7 +242,9 @@ A configured source store must accept the original file before a new document
 is accepted. In collection mode, the service can resolve an explicit UUID or a
 shared match before uploading a source. Each PUT uses a unique object key.
 Cleanup uses best-effort deletion for objects confirmed unused and retains
-objects when ownership is uncertain.
+objects when ownership is uncertain. With the
+[source upload journal](deployment.md#source-upload-journal), an upload that
+acceptance never adopts is reclaimed later instead of being retained.
 
 Error Status Codes:
 
@@ -258,6 +260,7 @@ Error Status Codes:
 | `503 Service Unavailable` | `busy` | All upload slots remain occupied beyond `EXTRACT_QUEUE_TIMEOUT`: `too many concurrent uploads`, with `Retry-After: 5` |
 | `503 Service Unavailable` | `extraction` | The extraction child cannot be started: `document extraction is unavailable` |
 | `503 Service Unavailable` | `storage` | Source upload failed: `source file storage is unavailable`; `Retry-After: 30` |
+| `503 Service Unavailable` | `storage` | With the source upload journal, reclamation claimed the upload before acceptance: `source file upload expired before acceptance; retry the upload`; `Retry-After: 30` |
 | `503 Service Unavailable` | `queue` | See [queue admission and retries](#queue-admission-and-retries) |
 | `503 Service Unavailable` | `unavailable` | Document lookup or atomic acceptance failed |
 

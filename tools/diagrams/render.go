@@ -170,12 +170,18 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 			fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s"><path d="M%s %sH%s"/></g>`, p.Border, number(nodeStroke), number(n.Box.X), number(n.Box.Y+42), number(n.Box.X+n.Box.W))
 		}
 	}
-	writeLabel := func(l label, fill string) error {
+	writeLabel := func(l label, fill, id string) error {
 		fillAttr := ""
 		if fill != p.Text {
 			fillAttr = ` fill="` + fill + `"`
 		}
-		fmt.Fprintf(&b, `<g%s transform="translate(%s %s) scale(%s)">`, fillAttr, number(l.X), number(l.Y), strconv.FormatFloat(l.Size/1000, 'f', -1, 64))
+		labelAttrs := fillAttr
+		if id != "" {
+			// Both the normal and highlighted instances supply their own fill.
+			fmt.Fprintf(&b, `<g%s>`, fillAttr)
+			labelAttrs = ` id="` + id + `"`
+		}
+		fmt.Fprintf(&b, `<g%s transform="translate(%s %s) scale(%s)">`, labelAttrs, number(l.X), number(l.Y), strconv.FormatFloat(l.Size/1000, 'f', -1, 64))
 		x := 0.0
 		for _, r := range l.Text {
 			_, advance, err := f.glyph(l.Bold, r)
@@ -195,10 +201,20 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 			}
 		}
 		b.WriteString("</g>")
+		if id != "" {
+			b.WriteString("</g>")
+		}
 		return nil
 	}
 
-	for _, l := range labels {
+	animatedTables := make(map[string]bool)
+	for _, n := range d.Nodes {
+		if len(n.Columns) > 0 && len(n.Times) > 0 {
+			animatedTables[n.ID] = true
+		}
+	}
+	labelIDs := make(map[int]string)
+	for i, l := range labels {
 		fill := p.Text
 		if l.Kind == "muted" || l.Kind == "group" {
 			fill = p.Muted
@@ -206,7 +222,10 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 		if l.Kind == "accent" {
 			fill = p.Accent
 		}
-		if err := writeLabel(l, fill); err != nil {
+		if animatedTables[l.Owner] && (l.Kind == "muted" || l.Kind == "accent") {
+			labelIDs[i] = fmt.Sprintf("table-label-%d", i)
+		}
+		if err := writeLabel(l, fill, labelIDs[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -215,9 +234,13 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 			continue
 		}
 		fmt.Fprintf(&b, `<g class="ink" opacity="0" fill="%s" style="animation:n%d %ss %s infinite">`, p.Text, i, number(d.Duration), easing)
-		for _, l := range labels {
+		for j, l := range labels {
 			if l.Owner == n.ID && (l.Kind == "muted" || l.Kind == "accent") {
-				if err := writeLabel(l, p.Text); err != nil {
+				if id := labelIDs[j]; id != "" {
+					fmt.Fprintf(&b, `<use href="#%s"/>`, id)
+					continue
+				}
+				if err := writeLabel(l, p.Text, ""); err != nil {
 					return nil, err
 				}
 			}

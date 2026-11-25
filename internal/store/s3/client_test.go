@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -28,6 +29,39 @@ func s3EndpointClient(t *testing.T, endpoint, owner string) *Client {
 		o.BaseEndpoint = &endpoint
 		o.UsePathStyle = true
 	})
+}
+
+func TestPutSourceSeparatesAcknowledgmentFromSettlement(t *testing.T) {
+	for _, retry := range []bool{false, true} {
+		name := "first attempt"
+		if retry {
+			name = "retry after gateway timeout"
+		}
+		t.Run(name, func(t *testing.T) {
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					t.Error(err)
+				}
+				if attempts.Add(1) == 1 && retry {
+					w.WriteHeader(http.StatusGatewayTimeout)
+					return
+				}
+				w.Header().Set("x-amz-version-id", "written")
+			}))
+			defer server.Close()
+			client := newClient(aws.Config{
+				Region: "us-east-1", Credentials: credentials.NewStaticCredentialsProvider("test-key", "test-secret", ""), RetryMaxAttempts: 2,
+			}, "owned-bucket", "", func(o *awss3.Options) {
+				o.BaseEndpoint = &server.URL
+				o.UsePathStyle = true
+			})
+			result, err := client.PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("original"))
+			if err != nil || !result.Acknowledged || result.VersionID != "written" || result.Settled == retry {
+				t.Fatalf("unexpected outcome after %d attempts: %+v, %v", attempts.Load(), result, err)
+			}
+		})
+	}
 }
 
 func TestS3RequestsCarryExpectedOwner(t *testing.T) {
@@ -187,6 +221,104 @@ func TestUploadSanitizesKey(t *testing.T) {
 			stored := <-received
 			if key != want || stored != want || !utf8.ValidString(key) {
 				t.Fatalf("key = %q, stored key = %q, want %q", key, stored, want)
+			}
+		})
+	}
+}
+
+func TestNewKeyIsAllocatedBeforeTheWrite(t *testing.T) {
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- strings.TrimPrefix(r.URL.Path, "/owned-bucket/")
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := s3EndpointClient(t, server.URL, "")
+	key := client.NewKey("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "reference", "../report.pdf")
+	if want := "documents/reference/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222/_report.pdf"; key != want {
+		t.Fatalf("key = %q, want %q", key, want)
+	}
+	if other := client.NewKey("11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", "reference", "../report.pdf"); other == key {
+		t.Fatal("attempts share an object key")
+	}
+	select {
+	case got := <-received:
+		t.Fatalf("allocating a key wrote %q", got)
+	default:
+	}
+	if client.Bucket() != "owned-bucket" {
+		t.Fatalf("bucket = %q", client.Bucket())
+	}
+	if _, err := client.Put(t.Context(), key, extractor.FileTypePDF, strings.NewReader("content")); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-received; got != key {
+		t.Fatalf("stored key = %q, want %q", got, key)
+	}
+}
+
+func TestPutReportsTheCreatedVersion(t *testing.T) {
+	for _, version := range []string{"", "3HL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY"} {
+		t.Run("version="+version, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					t.Error(err)
+				}
+				if version != "" {
+					w.Header().Set("x-amz-version-id", version)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			got, err := s3EndpointClient(t, server.URL, "").Put(t.Context(), "documents/document/id/attempt/file.pdf", extractor.FileTypePDF, strings.NewReader("content"))
+			if err != nil || got != version {
+				t.Fatalf("version = %q, error = %v, want %q", got, err, version)
+			}
+		})
+	}
+}
+
+func TestPutFailureIsReported(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	if _, err := s3EndpointClient(t, server.URL, "").Put(t.Context(), "documents/document/id/attempt/file.pdf", extractor.FileTypePDF, strings.NewReader("content")); err == nil {
+		t.Fatal("failed write accepted")
+	}
+}
+
+func TestDeleteVersionTargetsOneVersion(t *testing.T) {
+	for _, version := range []string{"", "v1", "null"} {
+		t.Run("version="+version, func(t *testing.T) {
+			requests := make(chan *http.Request, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			client := s3EndpointClient(t, server.URL, "123456789012")
+			if err := client.DeleteVersion(t.Context(), "documents/document/id/attempt/file.pdf", version); err != nil {
+				t.Fatal(err)
+			}
+			r := <-requests
+			if r.Method != http.MethodDelete || r.URL.Path != "/owned-bucket/documents/document/id/attempt/file.pdf" {
+				t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.URL.Query().Get("versionId"); got != version {
+				t.Fatalf("versionId = %q, want %q", got, version)
+			}
+			if r.URL.Query().Has("versionId") != (version != "") {
+				t.Fatalf("versionId presence = %v for %q", r.URL.Query().Has("versionId"), version)
+			}
+			if got := r.Header.Get("x-amz-expected-bucket-owner"); got != "123456789012" {
+				t.Fatalf("owner = %q", got)
 			}
 		})
 	}
