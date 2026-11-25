@@ -184,17 +184,12 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		MetricsAddr:               os.Getenv("METRICS_ADDR"),
 		ServerPort:                envOrDefault("SERVER_PORT", "8081"),
-		AWSRegion:                 os.Getenv("AWS_REGION"),
-		AWSAccessKeyID:            os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretKey:              os.Getenv("AWS_SECRET_ACCESS_KEY"),
 		BedrockEmbedModel:         envOrDefault("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0"),
 		BedrockPrimaryModel:       envOrDefault("BEDROCK_PRIMARY_MODEL", "amazon.nova-micro-v1:0"),
 		BedrockFallbackModel:      envOrDefault("BEDROCK_FALLBACK_MODEL", "us.meta.llama4-maverick-17b-instruct-v1:0"),
 		PineconeAPIKey:            os.Getenv("PINECONE_API_KEY"),
 		PineconeIndexName:         os.Getenv("PINECONE_INDEX_NAME"),
-		DatabaseURL:               os.Getenv("DATABASE_URL"),
 		VectorStore:               envOrDefault("VECTOR_STORE", "pinecone"),
-		S3Bucket:                  os.Getenv("S3_BUCKET"),
 		SynthesisModel:            envOrDefault("SYNTHESIS_MODEL", "fallback"),
 		SynthesisInputProfile:     os.Getenv("SYNTHESIS_INPUT_PROFILE"),
 		SynthesisOpenAIDeployment: os.Getenv("SYNTHESIS_OPENAI_DEPLOYMENT"),
@@ -202,8 +197,6 @@ func Load() (*Config, error) {
 		NoEvidenceCatalogFile:     os.Getenv("NO_EVIDENCE_CATALOG_FILE"),
 		ServiceToken:              os.Getenv("SERVICE_TOKEN"),
 		ServiceTokens:             strings.Split(os.Getenv("SERVICE_TOKENS"), ","),
-		S3ExpectedBucketOwner:     os.Getenv("S3_EXPECTED_BUCKET_OWNER"),
-		AWSSessionToken:           os.Getenv("AWS_SESSION_TOKEN"),
 		RerankModelARN:            os.Getenv("RERANK_MODEL_ARN"),
 		OCRProvider:               envOrDefault("OCR_PROVIDER", "none"),
 		OCRPDFMode:                envOrDefault("OCR_PDF_MODE", OCRPDFImageOnly),
@@ -242,7 +235,6 @@ func Load() (*Config, error) {
 		{"EXTRACT_CONCURRENCY", &cfg.ExtractConcurrency, 2}, {"EXTRACT_MEMORY_LIMIT_MB", &cfg.ExtractMemoryLimitMB, 512},
 		{"MAX_ALLOWED_DOCUMENT_IDS", &cfg.MaxAllowedDocumentIDs, 25000},
 		{"PGVECTOR_EXACT_SCOPE_MAX", &cfg.PGVectorExactScopeMax, 0},
-		{"AWS_MAX_ATTEMPTS", &cfg.AWSMaxAttempts, 4},
 		{"QUERY_CONCURRENCY", &cfg.QueryConcurrency, 32},
 	} {
 		value, err := envIntOrDefault(setting.key, setting.fallback)
@@ -250,6 +242,9 @@ func Load() (*Config, error) {
 			return nil, err
 		}
 		*setting.dst = value
+	}
+	if err := cfg.loadStorageEnv(); err != nil {
+		return nil, err
 	}
 	var err error
 	if cfg.SynthesisContextTokens, err = envIntOrDefault("SYNTHESIS_CONTEXT_TOKENS", 2400); err != nil {
@@ -448,11 +443,8 @@ func (c *Config) validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("config: missing required environment variables: %v", missing)
 	}
-	if (c.AWSAccessKeyID == "") != (c.AWSSecretKey == "") {
-		return fmt.Errorf("config: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be both set or both empty")
-	}
-	if c.AWSMaxAttempts < 1 || c.AWSMaxAttempts > 10 {
-		return fmt.Errorf("config: AWS_MAX_ATTEMPTS must be between 1 and 10")
+	if err := c.validateAWS(); err != nil {
+		return err
 	}
 	if c.EmbedTimeout < time.Second || c.EmbedTimeout > 2*time.Minute {
 		return fmt.Errorf("config: EMBED_TIMEOUT must be between 1s and 2m")
@@ -525,10 +517,8 @@ func (c *Config) validate() error {
 	if err := c.validateServiceTokens(); err != nil {
 		return err
 	}
-	if c.S3ExpectedBucketOwner != "" {
-		if len(c.S3ExpectedBucketOwner) != 12 || strings.IndexFunc(c.S3ExpectedBucketOwner, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
-			return fmt.Errorf("config: S3_EXPECTED_BUCKET_OWNER must contain exactly 12 digits")
-		}
+	if err := c.validateS3Owner(); err != nil {
+		return err
 	}
 	if c.ExtractTimeout < time.Second || c.ExtractTimeout > 10*time.Minute {
 		return fmt.Errorf("config: EXTRACT_TIMEOUT must be between 1s and 10m")

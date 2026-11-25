@@ -91,6 +91,9 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_import_batch(text, boolean) TO qu
 GRANT SELECT ON public.grant_catalog_policy_audit TO quarry_auditor;
 ```
 
+If serving replicas will enable the source upload journal, also apply the
+[source upload journal database grants](deployment.md#source-upload-journal-database-grants).
+
 For pgvector, preinstall the extension as a database administrator or use an
 owner login with extension installation privileges. Make the extension schema
 visible to the owner and serving logins. Use the configured embedding dimension

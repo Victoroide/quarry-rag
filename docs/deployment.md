@@ -457,6 +457,89 @@ OpenAI-compatible tracing sets `gen_ai.system` and `gen_ai.provider.name` to `op
   - `s3:DeleteObject` on `arn:aws:s3:::{bucket}/documents/*`
   - `s3:ListBucket` on `arn:aws:s3:::{bucket}`, required by the startup and health `HeadBucket` checks.
 
+### Source Upload Journal
+
+By default an original is written to S3 before PostgreSQL accepts its document.
+A process that stops between the two steps, or a compensating delete that
+fails, leaves an object that no document references. The service cannot tell it
+from the original of a job that is merely delayed, so it never deletes objects
+by age or prefix.
+
+`SOURCE_UPLOAD_JOURNAL=true` makes the owner durable first. Each multipart
+upload stages a PostgreSQL row naming the bucket, the generated object key, the
+collection and an upload ID before the object is written. Staging and all PUT
+attempts share a five-minute deadline, and the row has a 15-minute lease.
+Acceptance adopts the row in the transaction that inserts the document, so a
+document and its journal row
+commit together; if reclamation has claimed the row first, acceptance fails
+with `503` and the caller retries the upload. The version ID that S3 returns is
+recorded. Unadopted journaled uploads stay available for reclamation after an
+acceptance failure, including when the commit outcome is unknown.
+Reclamation only considers objects recorded in the journal.
+
+- **Rollout.** Deploy a release with migration 014 to every replica with the
+  journal off. Apply the database grants below after the migration and before
+  enabling the journal on every replica. A replica that predates the setting
+  writes unjournaled originals, which reclamation never selects. Before rolling
+  back to a release without the journal, run reclamation until its inventory
+  lists no `staged` rows and no `claimed` rows other than those that are
+  protected, referenced by a document or pending with `unacknowledged_write`.
+  Older releases ignore every `source_uploads` row, and a later journaled
+  release resumes their rechecks, as described in the
+  [reclamation reference](development.md#source-upload-reclamation-scriptsreconcile).
+- **Bucket versioning.** Deleting a key in a versioned bucket only adds a delete
+  marker and keeps every version, so a delete is not erasure. Reclamation lists
+  the exact recorded key and deletes each version and marker by its version ID.
+  A lifecycle rule for noncurrent versions can also remove them but does not
+  replace reclamation.
+- **Object Lock and legal holds.** A version under retention or a legal hold is
+  never deleted, and no other version of its key is deleted either. It stays
+  `claimed` with its reason in the inventory until the protection ends.
+- **IAM.** The role that runs reclamation needs
+  `s3:ListBucketVersions` on `arn:aws:s3:::{bucket}`, plus `s3:GetObjectVersion`,
+  `s3:GetObjectRetention`, `s3:GetObjectLegalHold` and `s3:DeleteObjectVersion`
+  on `arn:aws:s3:::{bucket}/documents/*`. Do not grant bucket-wide deletion or
+  `s3:BypassGovernanceRetention`.
+
+#### Source upload journal database grants
+
+For a new installation or an upgrade, use the metadata owner to grant the
+serving login access to the journal after migration 014. Substitute your
+metadata schema for `public` and your login names for the examples.
+
+```sql
+GRANT SELECT, INSERT, UPDATE ON public.source_uploads TO quarry_service;
+```
+
+Provision a separate maintenance login for reclamation. Both the serving and
+maintenance logins need `CONNECT` on the metadata database and the metadata
+schema first in their PostgreSQL search path. For reconciliation, set
+`DATABASE_URL` to the maintenance login. Grant these privileges for inventory.
+
+```sql
+GRANT USAGE ON SCHEMA public TO quarry_source_maintenance;
+GRANT SELECT ON public.source_uploads TO quarry_source_maintenance;
+GRANT SELECT (s3_key) ON public.documents TO quarry_source_maintenance;
+GRANT SELECT (source_key) ON public.document_deletions TO quarry_source_maintenance;
+```
+
+Add the following privileges if the maintenance login will also run `-apply`.
+
+```sql
+GRANT UPDATE, DELETE ON public.source_uploads TO quarry_source_maintenance;
+```
+
+Reclamation runs while ingestion continues. Inspect the inventory before
+applying:
+
+```sh
+make reconcile ARGS="-source-uploads"
+make reconcile ARGS="-source-uploads -apply"
+```
+
+The [reclamation reference](development.md#source-upload-reclamation-scriptsreconcile)
+describes the bounds, the report and the reasons an upload stays pending.
+
 ---
 
 ## Optional PDF OCR

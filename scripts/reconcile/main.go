@@ -1,4 +1,4 @@
-// Package main reconciles vectors and legacy namespaces with stored documents.
+// Package main reconciles stored vectors and original files with document ownership.
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
 	"github.com/google/uuid"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 )
@@ -27,7 +28,19 @@ type options struct {
 
 	BackfillCollections bool
 	After               string
+
+	// SourceUploads selects the object-store mode for journaled originals.
+	SourceUploads bool
+	MinAge        time.Duration
+	Settle        time.Duration
+	MaxBytes      int64
+	Batch         int
 }
+
+const (
+	defaultSourceUploadLimit = 1000
+	minSettle                = time.Minute
+)
 
 func parseOptions(args []string, output io.Writer) (options, error) {
 	var opts options
@@ -35,11 +48,35 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.SetOutput(output)
 	flags.BoolVar(&opts.Apply, "apply", false, "apply the selected deletions or collection updates")
 	flags.BoolVar(&opts.BackfillCollections, "backfill-collections", false, "label existing vectors with their document collection instead of deleting orphans")
-	flags.IntVar(&opts.Limit, "limit", 100000, "maximum vectors and namespace vectors selected, or documents for collection backfill")
+	flags.IntVar(&opts.Limit, "limit", 100000, "maximum vectors and namespace vectors selected, documents for collection backfill, or uploads examined (default 1000 with -source-uploads)")
 	flags.IntVar(&opts.Page, "page", 100, "vector listing page size (1-1000)")
 	flags.StringVar(&opts.After, "after", "", "continue a collection backfill after this document UUID")
+	flags.BoolVar(&opts.SourceUploads, "source-uploads", false, "reclaim journaled original files that no document adopted, independent of the vector store")
+	flags.DurationVar(&opts.MinAge, "min-age", time.Hour, "with -source-uploads, leave uploads younger than this untouched")
+	flags.DurationVar(&opts.Settle, "settle", 30*time.Minute, "with -source-uploads, minimum time between a claim and the settlement of a fully accounted-for write (at least 1m)")
+	flags.Int64Var(&opts.MaxBytes, "max-bytes", 1<<30, "with -source-uploads, maximum object bytes removed in one run")
+	flags.IntVar(&opts.Batch, "batch", 100, "with -source-uploads, uploads claimed and removed per round (1-1000)")
 	if err := flags.Parse(args); err != nil {
 		return opts, err
+	}
+	set := map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if opts.SourceUploads {
+		if opts.BackfillCollections || set["after"] || set["page"] {
+			return opts, errors.New("-source-uploads cannot be combined with -backfill-collections, -after or -page")
+		}
+		if !set["limit"] {
+			opts.Limit = defaultSourceUploadLimit
+		}
+		if opts.MinAge < 0 || opts.Settle < minSettle || opts.MaxBytes < 1 || opts.Batch < 1 || opts.Batch > 1000 {
+			return opts, errors.New("provide -min-age of zero or more, -settle of at least 1m, -max-bytes greater than zero and -batch between 1 and 1000")
+		}
+	} else {
+		for _, name := range []string{"min-age", "settle", "max-bytes", "batch"} {
+			if set[name] {
+				return opts, fmt.Errorf("-%s requires -source-uploads", name)
+			}
+		}
 	}
 	if flags.NArg() != 0 || opts.Limit < 1 || opts.Page < 1 || opts.Page > 1000 {
 		return opts, errors.New("provide -limit greater than zero and -page between 1 and 1000, with no positional arguments")
@@ -59,7 +96,7 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
-		slog.Error("reconcile vectors", "error", err)
+		slog.Error("reconcile", "error", err)
 		os.Exit(1)
 	}
 }
@@ -68,6 +105,9 @@ func run() error {
 	opts, err := parseOptions(os.Args[1:], os.Stderr)
 	if err != nil {
 		return err
+	}
+	if opts.SourceUploads {
+		return runSourceUploads(opts)
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -136,6 +176,35 @@ func run() error {
 		return conn.WithNamespace(name).DeleteAllVectorsInNamespace(deleteCtx)
 	}
 	result, err := reconcile(ctx, conn, deleteNamespace, lookup, opts, os.Stderr)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
+func runSourceUploads(opts options) error {
+	cfg, err := config.LoadSourceUploadMaintenance()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	pg, err := pgstore.NewClient(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := pg.Close(ctx); closeErr != nil {
+			slog.Error("close document store", "error", closeErr)
+		}
+	}()
+	objects, err := s3store.New(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	result, err := reconcileSourceUploads(ctx, pg, objects, cfg.S3Bucket, opts)
 	if err != nil {
 		return err
 	}
