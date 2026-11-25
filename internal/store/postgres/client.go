@@ -19,6 +19,9 @@ import (
 type Client struct {
 	Pool             *pgxpool.Pool
 	vectorDimensions atomic.Int32
+	vectorTable      atomic.Pointer[string]
+	generationName   atomic.Pointer[string]
+	vectorStateReady atomic.Bool
 }
 
 // Option customizes PostgreSQL pool construction.

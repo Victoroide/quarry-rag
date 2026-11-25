@@ -1,6 +1,6 @@
 {
   "Width": 840,
-  "Height": 1504,
+  "Height": 1766,
   "Nodes": {
     "documents": {
       "X": 16,
@@ -55,6 +55,24 @@
       "Y": 1040,
       "W": 352,
       "H": 402
+    },
+    "vector_generations": {
+      "X": 16,
+      "Y": 1392,
+      "W": 352,
+      "H": 312
+    },
+    "vector_generation_documents": {
+      "X": 16,
+      "Y": 968,
+      "W": 352,
+      "H": 204
+    },
+    "vector_state": {
+      "X": 16,
+      "Y": 1180,
+      "W": 352,
+      "H": 204
     }
   },
   "Groups": []

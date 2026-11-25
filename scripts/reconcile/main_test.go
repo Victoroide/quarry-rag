@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -240,4 +241,19 @@ func TestReconcileDeleteErrorsAreReported(t *testing.T) {
 		_, err := reconcile(t.Context(), idx, idx.deleteNamespace, noDocuments, options{Apply: true, Limit: 10, Page: 1}, &bytes.Buffer{})
 		require.ErrorIs(t, err, failure)
 	}
+}
+
+type fakeGate struct{ err error }
+
+func (g fakeGate) WritersOpen(context.Context) error { return g.err }
+
+func TestMaintenanceWritesRespectTheWriterGate(t *testing.T) {
+	frozen := fakeGate{err: domain.ErrWritersFrozen}
+	require.NoError(t, requireWritableForApply(t.Context(), frozen, options{}), "a dry run only reads")
+	require.NoError(t, requireWritableForApply(t.Context(), fakeGate{}, options{Apply: true}))
+	err := requireWritableForApply(t.Context(), frozen, options{Apply: true})
+	require.ErrorIs(t, err, domain.ErrWritersFrozen)
+	require.ErrorContains(t, err, "paused")
+	err = requireWritableForApply(t.Context(), fakeGate{err: domain.ErrGenerationMismatch}, options{Apply: true, BackfillCollections: true})
+	require.ErrorIs(t, err, domain.ErrGenerationMismatch)
 }

@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"time"
 )
 
 // EmbeddingProvider generates vector embeddings from text.
@@ -44,4 +45,15 @@ type ChunkStore interface {
 	DeleteDocument(ctx context.Context, id DocumentID) error
 	Close(ctx context.Context) error
 	RunMigrations(ctx context.Context) error
+}
+
+// WriteRequestTimeout bounds one document deletion request. A migration
+// waits at least this long after freezing writers for requests already in flight.
+const WriteRequestTimeout = 60 * time.Second
+
+// WriterGate reports whether this replica may admit, claim or delete documents.
+// It returns ErrWritersFrozen while a migration freezes writers and
+// ErrGenerationMismatch when the replica serves a retired or unactivated target.
+type WriterGate interface {
+	WritersOpen(ctx context.Context) error
 }

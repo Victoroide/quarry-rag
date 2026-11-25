@@ -133,6 +133,50 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 		}
 		fmt.Fprintf(&b, `<path id="%s" d="%s"/>`, id, path)
 	}
+	writeGlyphs := func(l label) error {
+		x := 0.0
+		for _, r := range l.Text {
+			_, advance, err := f.glyph(l.Bold, r)
+			if err != nil {
+				return err
+			}
+			if r != ' ' {
+				if x == 0 {
+					fmt.Fprintf(&b, `<use href="#%s"/>`, glyphID(l.Bold, r))
+				} else {
+					fmt.Fprintf(&b, `<use href="#%s" x="%s"/>`, glyphID(l.Bold, r), number(math.Round(x)))
+				}
+			}
+			x += advance
+			if l.Kind == "group" {
+				x += 1000 * groupTracking
+			}
+		}
+		return nil
+	}
+	// Share the glyph runs for SQL types, whose labels recur throughout the schema.
+	type glyphRun struct {
+		text          string
+		bold, tracked bool
+	}
+	runKey := func(l label) glyphRun { return glyphRun{l.Text, l.Bold, l.Kind == "group"} }
+	runs := make(map[glyphRun]int)
+	for _, l := range labels {
+		if !l.ReuseGlyphs {
+			continue
+		}
+		key := runKey(l)
+		if _, found := runs[key]; found {
+			continue
+		}
+		id := len(runs)
+		runs[key] = id
+		fmt.Fprintf(&b, `<g id="run%d">`, id)
+		if err := writeGlyphs(l); err != nil {
+			return nil, err
+		}
+		b.WriteString("</g>")
+	}
 	fmt.Fprintf(&b, `<marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="7" refX="8" refY="3.5" orient="auto"><path d="M0 0L8 3.5L0 7Z" fill="%s"/></marker></defs>`, p.Edge)
 	rect := func(class string, r box, radius float64, extra string) {
 		fmt.Fprintf(&b, `<rect class="%s" x="%s" y="%s" width="%s" height="%s" rx="%s"%s/>`, class, number(r.X), number(r.Y), number(r.W), number(r.H), number(radius), extra)
@@ -182,23 +226,10 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 			labelAttrs = ` id="` + id + `"`
 		}
 		fmt.Fprintf(&b, `<g%s transform="translate(%s %s) scale(%s)">`, labelAttrs, number(l.X), number(l.Y), strconv.FormatFloat(l.Size/1000, 'f', -1, 64))
-		x := 0.0
-		for _, r := range l.Text {
-			_, advance, err := f.glyph(l.Bold, r)
-			if err != nil {
-				return err
-			}
-			if r != ' ' {
-				if x == 0 {
-					fmt.Fprintf(&b, `<use href="#%s"/>`, glyphID(l.Bold, r))
-				} else {
-					fmt.Fprintf(&b, `<use href="#%s" x="%s"/>`, glyphID(l.Bold, r), number(math.Round(x)))
-				}
-			}
-			x += advance
-			if l.Kind == "group" {
-				x += 1000 * groupTracking
-			}
+		if l.ReuseGlyphs {
+			fmt.Fprintf(&b, `<use href="#run%d"/>`, runs[runKey(l)])
+		} else if err := writeGlyphs(l); err != nil {
+			return err
 		}
 		b.WriteString("</g>")
 		if id != "" {

@@ -66,6 +66,9 @@ type Config struct {
 
 	VectorStore           string
 	PGVectorExactScopeMax int
+	// VectorGeneration (VECTOR_GENERATION) selects the vector target recorded by
+	// a reindex. Empty selects the legacy target.
+	VectorGeneration string
 
 	WorkerQueueSize         int
 	EmbedConcurrency        int
@@ -198,6 +201,8 @@ func Load() (*Config, error) {
 		PineconeAPIKey:            os.Getenv("PINECONE_API_KEY"),
 		PineconeIndexName:         os.Getenv("PINECONE_INDEX_NAME"),
 		VectorStore:               envOrDefault("VECTOR_STORE", "pinecone"),
+		VectorGeneration:          os.Getenv("VECTOR_GENERATION"),
+		S3Bucket:                  os.Getenv("S3_BUCKET"),
 		SynthesisModel:            envOrDefault("SYNTHESIS_MODEL", "fallback"),
 		SynthesisInputProfile:     os.Getenv("SYNTHESIS_INPUT_PROFILE"),
 		SynthesisOpenAIDeployment: os.Getenv("SYNTHESIS_OPENAI_DEPLOYMENT"),
@@ -423,6 +428,9 @@ func (c *Config) validate() error {
 	}
 	if c.PGVectorExactScopeMax < 0 || c.PGVectorExactScopeMax > 100000 {
 		return fmt.Errorf("config: PGVECTOR_EXACT_SCOPE_MAX must be between 0 and 100000")
+	}
+	if c.VectorGeneration != "" && (!domain.ValidGenerationName(c.VectorGeneration) || c.FakeMode) {
+		return fmt.Errorf("config: VECTOR_GENERATION must be 1 to 24 lowercase letters, digits or underscores starting with a letter, and is unavailable in offline fake mode")
 	}
 	type requirement struct {
 		name  string
@@ -697,4 +705,12 @@ func (c *Config) validateProviders() error {
 		}
 	}
 	return nil
+}
+
+// ActiveVectorGeneration returns the generation this process serves.
+func (c *Config) ActiveVectorGeneration() string {
+	if c.VectorGeneration == "" {
+		return domain.LegacyGeneration
+	}
+	return c.VectorGeneration
 }

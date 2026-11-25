@@ -17,17 +17,18 @@ type exactScopeIndex struct {
 }
 
 var exactScopeIndexes = [...]exactScopeIndex{
-	{name: "idx_chunk_vectors_collection_doc_type", keys: []string{"collection", "doc_type", "document_id"}},
-	{name: "idx_chunk_vectors_doc_type_document_id", keys: []string{"doc_type", "document_id"}},
+	{name: "collection_doc_type", keys: []string{"collection", "doc_type", "document_id"}},
+	{name: "doc_type_document_id", keys: []string{"doc_type", "document_id"}},
 }
 
 type vectorTable struct {
 	oid    uint32
 	schema string
+	name   string
 }
 
 func (t vectorTable) identifier() string {
-	return pgx.Identifier{t.schema, "chunk_vectors"}.Sanitize()
+	return pgx.Identifier{t.schema, t.name}.Sanitize()
 }
 
 func (idx exactScopeIndex) createSQL(table vectorTable) string {
@@ -38,7 +39,7 @@ func (idx exactScopeIndex) createSQL(table vectorTable) string {
 
 // ensureExactScopeIndexes validates the probe indexes and builds missing indexes
 // concurrently under a dedicated session lock.
-func (c *Client) ensureExactScopeIndexes(ctx context.Context) error {
+func (c *Client) ensureExactScopeIndexes(ctx context.Context, tableName string) error {
 	conn, err := c.Pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection: %w", err)
@@ -55,14 +56,15 @@ func (c *Client) ensureExactScopeIndexes(ctx context.Context) error {
 		return fmt.Errorf("acquire index initialization lock: %w", err)
 	}
 
-	var table vectorTable
+	table := vectorTable{name: tableName}
 	err = conn.QueryRow(ctx, `SELECT c.oid, n.nspname
  FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
- WHERE c.oid = 'chunk_vectors'::regclass`).Scan(&table.oid, &table.schema)
+ WHERE c.oid = to_regclass(format('%I.%I', current_schema(), $1::text))`, tableName).Scan(&table.oid, &table.schema)
 	if err != nil {
 		return fmt.Errorf("resolve vector table: %w", err)
 	}
 	for _, idx := range exactScopeIndexes {
+		idx.name = "idx_" + tableName + "_" + idx.name
 		exists, checkErr := checkExactScopeIndex(ctx, conn, table, idx)
 		if checkErr != nil {
 			return checkErr

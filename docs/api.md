@@ -140,6 +140,13 @@ requeues the same document UUID.
 In-flight duplicates return 202 `processing` and completed duplicates return
 200 `already_ingested`, both with the existing UUID, even when the queue is full.
 
+#### Writer pause
+
+While an operator [freezes writers](deployment.md#changing-models-or-vector-stores)
+for a vector migration, every ingestion request returns 503 with error category
+`frozen` and `Retry-After: 30`, including duplicates, and stores nothing. An
+upload's source object is removed. Queries, listings and downloads continue.
+
 #### Variant A: JSON Request
 
 - **Content-Type**: `application/json` (accepts standard parameters such as `charset=utf-8`)
@@ -185,6 +192,7 @@ Error Status Codes:
 | `413 Payload Too Large` | `validation` | JSON request payload exceeds 8,097,152 bytes |
 | `415 Unsupported Media Type` | `validation` | Content-Type is not `application/json` or `multipart/form-data` |
 | `503 Service Unavailable` | `queue` | See [queue admission and retries](#queue-admission-and-retries) |
+| `503 Service Unavailable` | `frozen` | Writers are paused; see [writer pause](#writer-pause) |
 | `503 Service Unavailable` | `unavailable` | Document lookup or atomic acceptance failed |
 
 Example:
@@ -262,6 +270,7 @@ Error Status Codes:
 | `503 Service Unavailable` | `storage` | Source upload failed: `source file storage is unavailable`; `Retry-After: 30` |
 | `503 Service Unavailable` | `storage` | With the source upload journal, reclamation claimed the upload before acceptance: `source file upload expired before acceptance; retry the upload`; `Retry-After: 30` |
 | `503 Service Unavailable` | `queue` | See [queue admission and retries](#queue-admission-and-retries) |
+| `503 Service Unavailable` | `frozen` | Writers are paused; see [writer pause](#writer-pause) |
 | `503 Service Unavailable` | `unavailable` | Document lookup or atomic acceptance failed |
 
 Content verification and extraction error codes:
@@ -898,7 +907,8 @@ Error Status Codes:
 | `500 Internal Server Error` | `internal` | Database query failure or external deletion error in Pinecone or S3. Repeat the same request |
 | `503 Service Unavailable` | `storage` | A stored file or the document's vectors need a store that is not configured; no data is deleted |
 | `503 Service Unavailable` | `busy` | Another request holds the cleanup claim; repeat the same request after `Retry-After` |
-| `503 Service Unavailable` | `unavailable` | The deletion mode could not be read; nothing was changed |
+| `503 Service Unavailable` | `frozen` | Writers are paused for a vector migration; no data is deleted. `Retry-After: 30` |
+| `503 Service Unavailable` | `unavailable` | The deletion mode or the document store could not be read, or this replica does not serve the active vector generation; nothing was changed. `Retry-After: 30` when the writer check failed |
 
 Example:
 

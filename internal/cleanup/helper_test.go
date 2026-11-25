@@ -356,3 +356,69 @@ func (c *cancelAfterBegin) BeginScopedDeletion(ctx context.Context, p domain.Pri
 	c.cancel()
 	return incarnation, complete, err
 }
+
+func TestCleanerPausesDuringAVectorMigration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	databaseURL := pgtest.StartVector(t)
+	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
+	require.NoError(t, metadata.RunMigrations(t.Context()))
+	id := domain.DocumentID(uuid.NewString())
+	require.NoError(t, metadata.InsertDocument(t.Context(), domain.Document{ID: id}))
+
+	cleaner, err := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
+	require.NoError(t, metadata.FreezeWriters(t.Context(), "g2"))
+	require.ErrorIs(t, cleaner.Delete(t.Context(), string(id)), domain.ErrWritersFrozen)
+	doc, err := metadata.GetDocument(t.Context(), id)
+	require.NoError(t, err)
+	require.NotNil(t, doc, "a paused deletion leaves the document")
+
+	other, err := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL, VectorGeneration: "g2"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, other.Close(context.Background())) })
+	require.NoError(t, metadata.ThawWriters(t.Context()))
+	require.ErrorIs(t, other.Delete(t.Context(), string(id)), domain.ErrGenerationMismatch, "a tool configured for another generation cannot delete")
+
+	require.NoError(t, cleaner.Delete(t.Context(), string(id)))
+}
+
+func TestCheckpointedCleanerPausesDuringAVectorMigration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	databaseURL := pgtest.StartVector(t)
+	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
+	require.NoError(t, metadata.RunMigrations(t.Context()))
+	_, err = pgstore.NewVectorStore(t.Context(), metadata, 3)
+	require.NoError(t, err)
+	cfg := &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL, EmbeddingDimensions: 3}
+	require.NoError(t, metadata.PinVectorGeneration(t.Context(), pgstore.LegacyGeneration, "postgres", "chunk_vectors", "", cfg.EmbeddingSettings()))
+	id := domain.DocumentID(uuid.NewString())
+	require.NoError(t, metadata.InsertDocument(t.Context(), domain.Document{ID: id}))
+	var incarnation string
+	require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, string(id)).Scan(&incarnation))
+	_, err = metadata.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	require.NoError(t, err)
+
+	cleaner, err := New(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
+	require.NoError(t, metadata.FreezeWriters(t.Context(), "g2"))
+	require.ErrorIs(t, cleaner.DeleteIncarnation(t.Context(), string(id), incarnation), domain.ErrWritersFrozen)
+	doc, err := metadata.GetDocument(t.Context(), id)
+	require.NoError(t, err)
+	require.NotNil(t, doc, "a paused checkpointed deletion leaves the document")
+	var begun int
+	require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT count(*) FROM document_deletions WHERE document_id=$1`, string(id)).Scan(&begun))
+	require.Zero(t, begun, "no checkpoint is recorded while writers are paused")
+
+	require.NoError(t, metadata.ThawWriters(t.Context()))
+	require.NoError(t, cleaner.DeleteIncarnation(t.Context(), string(id), incarnation))
+}

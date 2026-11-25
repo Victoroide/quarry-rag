@@ -20,6 +20,7 @@ type label struct {
 	X, Y, Size  float64
 	Bold        bool
 	Owner, Kind string
+	ReuseGlyphs bool
 }
 type edge struct {
 	ID, From, To string

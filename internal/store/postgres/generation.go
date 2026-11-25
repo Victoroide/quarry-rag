@@ -1,0 +1,583 @@
+package postgres
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// LegacyGeneration names the vector target used before generations existed.
+const LegacyGeneration = domain.LegacyGeneration
+
+// Generation states.
+const (
+	StateStaging  = "staging"
+	StateVerified = "verified"
+	StateActive   = "active"
+	StateRetired  = "retired"
+)
+
+// Profile origins distinguish what a stored profile rests on.
+const (
+	OriginRecorded = "recorded"
+	OriginAttested = "attested"
+)
+
+var (
+	// ErrGenerationDrift marks a generation whose recorded identity differs from the requested one.
+	ErrGenerationDrift = errors.New("vector generation identity drifted")
+	// ErrLiveTarget marks a write aimed at the active vector generation.
+	ErrLiveTarget = errors.New("the active vector generation is protected from migration writes")
+)
+
+// ValidGenerationName reports whether name can identify a generation and name its table.
+func ValidGenerationName(name string) bool { return domain.ValidGenerationName(name) }
+
+// VectorTable returns the PostgreSQL table holding a generation's vectors.
+func VectorTable(generation string) string {
+	if generation == LegacyGeneration {
+		return "chunk_vectors"
+	}
+	return "chunk_vectors_" + generation
+}
+
+// Generation is one vector target and the embedding profile it stores.
+type Generation struct {
+	Name         string
+	Store        string
+	Target       string
+	Profile      domain.EmbeddingProfile
+	Origin       string
+	State        string
+	CorpusDigest string
+	VerifiedAt   *time.Time
+	Verification json.RawMessage
+}
+
+// VectorState is the singleton coordinating generations and the writer freeze.
+type VectorState struct {
+	Active           string
+	Frozen           bool
+	FrozenAt         *time.Time
+	FreezeGeneration string
+}
+
+// Quiesce reports whether stopped writers have settled.
+type Quiesce struct {
+	Frozen        bool
+	Settled       bool
+	RunningJobs   int
+	OpenDeletions int
+}
+
+// Quiet reports that a freeze is in force and nothing is still writing.
+func (q Quiesce) Quiet() bool {
+	return q.Frozen && q.Settled && q.RunningJobs == 0 && q.OpenDeletions == 0
+}
+
+// Checkpoint is the durable progress of one document in a target generation.
+type Checkpoint struct {
+	DocumentID     string
+	SourceRevision string
+	Incarnation    string
+	ChunkIDs       []string
+	Complete       bool
+	Copied         int
+	Embedded       int
+}
+
+func (g Generation) validate() error {
+	if !ValidGenerationName(g.Name) {
+		return fmt.Errorf("postgres: invalid generation name %q", g.Name)
+	}
+	if g.Store != "postgres" && g.Store != "pinecone" {
+		return fmt.Errorf("postgres: generation store must be postgres or pinecone")
+	}
+	if g.Target == "" {
+		return errors.New("postgres: generation target is required")
+	}
+	if g.Origin != OriginRecorded && g.Origin != OriginAttested {
+		return fmt.Errorf("postgres: generation origin must be %q or %q", OriginRecorded, OriginAttested)
+	}
+	if err := g.Profile.Validate(); err != nil {
+		return fmt.Errorf("postgres: %w", err)
+	}
+	return nil
+}
+
+// SetVectorGeneration names the generation this replica serves. It must be
+// called before the replica admits or claims work.
+func (c *Client) SetVectorGeneration(name string) { c.generationName.Store(&name) }
+
+func (c *Client) generation() string {
+	if name := c.generationName.Load(); name != nil {
+		return *name
+	}
+	return LegacyGeneration
+}
+
+type queryRower interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (c *Client) gate(ctx context.Context, q queryRower) error {
+	if !c.vectorStateReady.Load() {
+		// A schema older than migration 012 has no freeze to honor and only the legacy target.
+		var present bool
+		if err := q.QueryRow(ctx, `SELECT to_regclass('vector_state') IS NOT NULL`).Scan(&present); err != nil {
+			return fmt.Errorf("postgres: read vector state: %w", err)
+		}
+		if !present {
+			if mine := c.generation(); mine != LegacyGeneration {
+				return fmt.Errorf("%w: replica serves %q, but no generation is recorded", domain.ErrGenerationMismatch, mine)
+			}
+			return nil
+		}
+		c.vectorStateReady.Store(true)
+	}
+	var active string
+	var frozen bool
+	if err := q.QueryRow(ctx, `SELECT active_generation, frozen FROM vector_state`).Scan(&active, &frozen); err != nil {
+		return fmt.Errorf("postgres: read vector state: %w", err)
+	}
+	if mine := c.generation(); active != mine {
+		return fmt.Errorf("%w: replica serves %q, active is %q", domain.ErrGenerationMismatch, mine, active)
+	}
+	if frozen {
+		return domain.ErrWritersFrozen
+	}
+	return nil
+}
+
+// WritersOpen implements domain.WriterGate.
+func (c *Client) WritersOpen(ctx context.Context) error { return c.gate(ctx, c.Pool) }
+
+var _ domain.WriterGate = (*Client)(nil)
+
+// VectorState reads the active generation and the freeze flag.
+func (c *Client) VectorState(ctx context.Context) (VectorState, error) {
+	return readVectorState(ctx, c.Pool)
+}
+
+func readVectorState(ctx context.Context, q queryRower) (VectorState, error) {
+	var s VectorState
+	err := q.QueryRow(ctx, `SELECT active_generation, frozen, frozen_at, COALESCE(freeze_generation, '') FROM vector_state`).Scan(&s.Active, &s.Frozen, &s.FrozenAt, &s.FreezeGeneration)
+	if err != nil {
+		return s, fmt.Errorf("postgres: read vector state: %w", err)
+	}
+	return s, nil
+}
+
+// Generation returns a registered generation, or nil when it is not registered.
+func (c *Client) Generation(ctx context.Context, name string) (*Generation, error) {
+	return readGeneration(ctx, c.Pool, name, "")
+}
+
+func readGeneration(ctx context.Context, q queryRower, name, lock string) (*Generation, error) {
+	var g Generation
+	var profile []byte
+	var digest *string
+	err := q.QueryRow(ctx, `SELECT name, store, target, profile, profile_origin, state, corpus_digest, verified_at, COALESCE(verification, 'null'::jsonb)
+ FROM vector_generations WHERE name=$1 `+lock, name).Scan(&g.Name, &g.Store, &g.Target, &profile, &g.Origin, &g.State, &digest, &g.VerifiedAt, &g.Verification)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: read generation %q: %w", name, err)
+	}
+	if err = json.Unmarshal(profile, &g.Profile); err != nil {
+		return nil, fmt.Errorf("postgres: decode generation %q profile: %w", name, err)
+	}
+	if digest != nil {
+		g.CorpusDigest = *digest
+	}
+	return &g, nil
+}
+
+// RegisterGeneration records a generation, or confirms that an existing record
+// is identical. A different store, target or profile fails closed.
+func (c *Client) RegisterGeneration(ctx context.Context, g Generation) (Generation, error) {
+	if err := g.validate(); err != nil {
+		return Generation{}, err
+	}
+	profile, err := json.Marshal(g.Profile)
+	if err != nil {
+		return Generation{}, fmt.Errorf("postgres: encode generation profile: %w", err)
+	}
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return Generation{}, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	state, err := readVectorState(ctx, tx)
+	if err != nil {
+		return Generation{}, err
+	}
+	initial := StateStaging
+	if state.Active == g.Name {
+		initial = StateActive
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO vector_generations(name, store, target, profile, profile_hash, profile_origin, state)
+ VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (name) DO NOTHING`, g.Name, g.Store, g.Target, profile, g.Profile.Hash(), g.Origin, initial); err != nil {
+		if isUniqueViolation(err) {
+			return Generation{}, fmt.Errorf("%w: target %s %q already belongs to another generation", ErrGenerationDrift, g.Store, g.Target)
+		}
+		return Generation{}, fmt.Errorf("postgres: register generation %q: %w", g.Name, err)
+	}
+	got, err := readGeneration(ctx, tx, g.Name, "")
+	if err != nil {
+		return Generation{}, err
+	}
+	if got.Store != g.Store || got.Target != g.Target || got.Profile.Hash() != g.Profile.Hash() {
+		return Generation{}, fmt.Errorf("%w: generation %q is already registered with a different store, target or profile", ErrGenerationDrift, g.Name)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Generation{}, err
+	}
+	return *got, nil
+}
+
+// PinVectorGeneration fails closed unless the replica's configured generation
+// is the active one and its target and embedding settings match the record.
+func (c *Client) PinVectorGeneration(ctx context.Context, generation, store, target string, configured domain.EmbeddingProfile) error {
+	state, err := c.VectorState(ctx)
+	if err != nil {
+		return err
+	}
+	if state.Active != generation {
+		return fmt.Errorf("%w: configured generation %q, active generation %q", domain.ErrGenerationMismatch, generation, state.Active)
+	}
+	row, err := c.Generation(ctx, generation)
+	if err != nil {
+		return err
+	}
+	if row == nil {
+		if generation == LegacyGeneration {
+			return nil
+		}
+		return fmt.Errorf("%w: generation %q is not registered", domain.ErrGenerationMismatch, generation)
+	}
+	if row.Store != store || row.Target != target {
+		return fmt.Errorf("%w: generation %q targets %s %q, configured %s %q", ErrGenerationDrift, generation, row.Store, row.Target, store, target)
+	}
+	got := row.Profile
+	if got.Provider != configured.Provider || got.Model != configured.Model || got.Dimensions != configured.Dimensions || got.Metric != configured.Metric {
+		return fmt.Errorf("%w: generation %q records %s %q at %d dimensions, configured %s %q at %d", ErrGenerationDrift, generation,
+			got.Provider, got.Model, got.Dimensions, configured.Provider, configured.Model, configured.Dimensions)
+	}
+	return nil
+}
+
+// FreezeWriters pauses admission, job claims and deletions for a migration.
+// It returns once every admission that began earlier has committed, so later
+// admissions observe the freeze.
+func (c *Client) FreezeWriters(ctx context.Context, generation string) error {
+	if !ValidGenerationName(generation) {
+		return fmt.Errorf("postgres: invalid generation name %q", generation)
+	}
+	tag, err := c.Pool.Exec(ctx, `UPDATE vector_state SET frozen=TRUE, frozen_at=CASE WHEN frozen THEN frozen_at ELSE NOW() END, freeze_generation=$1
+ WHERE NOT frozen OR freeze_generation=$1`, generation)
+	if err != nil {
+		return fmt.Errorf("postgres: freeze writers: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		state, stateErr := c.VectorState(ctx)
+		if stateErr != nil {
+			return stateErr
+		}
+		return fmt.Errorf("postgres: writers are already frozen for generation %q", state.FreezeGeneration)
+	}
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
+		return fmt.Errorf("postgres: wait for admissions: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// ThawWriters resumes admission, job claims and deletions.
+func (c *Client) ThawWriters(ctx context.Context) error {
+	if _, err := c.Pool.Exec(ctx, `UPDATE vector_state SET frozen=FALSE, frozen_at=NULL, freeze_generation=NULL`); err != nil {
+		return fmt.Errorf("postgres: resume writers: %w", err)
+	}
+	return nil
+}
+
+// WriterQuiesce reports whether the freeze has settled for at least window and
+// no leased job or deletion receipt remains open.
+func (c *Client) WriterQuiesce(ctx context.Context, window time.Duration) (Quiesce, error) {
+	var q Quiesce
+	err := c.Pool.QueryRow(ctx, `SELECT frozen, COALESCE(frozen_at + make_interval(secs=>$1) <= NOW(), FALSE),
+ (SELECT count(*) FROM ingest_jobs WHERE state='running' AND lease_until > NOW()),
+ (SELECT count(*) FROM document_deletions WHERE NOT finalized) FROM vector_state`, window.Seconds()).Scan(&q.Frozen, &q.Settled, &q.RunningJobs, &q.OpenDeletions)
+	if err != nil {
+		return q, fmt.Errorf("postgres: read writer state: %w", err)
+	}
+	return q, nil
+}
+
+func frozenFor(state VectorState, generation string) error {
+	switch {
+	case !state.Frozen:
+		return fmt.Errorf("postgres: writers are not frozen for generation %q", generation)
+	case state.FreezeGeneration != generation:
+		return fmt.Errorf("postgres: writers are frozen for generation %q, not %q", state.FreezeGeneration, generation)
+	}
+	return nil
+}
+
+// RecordVerification stores a passing verification of a generation under the freeze.
+func (c *Client) RecordVerification(ctx context.Context, generation, corpusDigest string, report json.RawMessage) error {
+	if corpusDigest == "" {
+		return errors.New("postgres: a verification needs a corpus digest")
+	}
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	state, err := lockVectorState(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if freezeErr := frozenFor(state, generation); freezeErr != nil {
+		return freezeErr
+	}
+	tag, err := tx.Exec(ctx, `UPDATE vector_generations SET state='verified', corpus_digest=$2, verification=$3, verified_at=NOW(), updated_at=NOW()
+ WHERE name=$1 AND state IN ('staging','verified','retired')`, generation, corpusDigest, []byte(report))
+	if err != nil {
+		return fmt.Errorf("postgres: record verification: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: generation %q is not registered or is already active", generation)
+	}
+	return tx.Commit(ctx)
+}
+
+func lockVectorState(ctx context.Context, tx pgx.Tx) (VectorState, error) {
+	var s VectorState
+	err := tx.QueryRow(ctx, `SELECT active_generation, frozen, frozen_at, COALESCE(freeze_generation, '') FROM vector_state FOR UPDATE`).Scan(&s.Active, &s.Frozen, &s.FrozenAt, &s.FreezeGeneration)
+	if err != nil {
+		return s, fmt.Errorf("postgres: lock vector state: %w", err)
+	}
+	return s, nil
+}
+
+// ActivateGeneration makes a verified generation the one replicas must serve.
+// It requires the freeze for that generation, a settled and idle system, and a
+// corpus unchanged since verification. Writers stay frozen until ThawWriters.
+func (c *Client) ActivateGeneration(ctx context.Context, name, corpusDigest string, window time.Duration) error {
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	state, err := lockVectorState(ctx, tx)
+	if err != nil {
+		return err
+	}
+	target, err := readGeneration(ctx, tx, name, "FOR UPDATE")
+	if err != nil {
+		return err
+	}
+	if target == nil {
+		return fmt.Errorf("postgres: generation %q is not registered", name)
+	}
+	if state.Active == name {
+		return fmt.Errorf("postgres: generation %q is already active", name)
+	}
+	if freezeErr := frozenFor(state, name); freezeErr != nil {
+		return freezeErr
+	}
+	var settled bool
+	var running, open int
+	err = tx.QueryRow(ctx, `SELECT frozen_at + make_interval(secs=>$1) <= NOW(),
+ (SELECT count(*) FROM ingest_jobs WHERE state='running' AND lease_until > NOW()),
+ (SELECT count(*) FROM document_deletions WHERE NOT finalized) FROM vector_state`, window.Seconds()).Scan(&settled, &running, &open)
+	if err != nil {
+		return fmt.Errorf("postgres: read writer state: %w", err)
+	}
+	if !settled {
+		return fmt.Errorf("postgres: the freeze is still settling; wait %s after freezing", window)
+	}
+	if running > 0 || open > 0 {
+		return fmt.Errorf("postgres: %d in-flight jobs and %d open deletions must finish before activation", running, open)
+	}
+	if target.State != StateVerified {
+		return fmt.Errorf("postgres: generation %q is %s; it must be verified", name, target.State)
+	}
+	if target.CorpusDigest != corpusDigest {
+		return fmt.Errorf("postgres: corpus changed since verification of generation %q", name)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE vector_generations SET state='retired', updated_at=NOW() WHERE name=$1 AND state='active'`, state.Active); err != nil {
+		return fmt.Errorf("postgres: retire generation %q: %w", state.Active, err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE vector_generations SET state='active', updated_at=NOW() WHERE name=$1`, name); err != nil {
+		return fmt.Errorf("postgres: activate generation %q: %w", name, err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE vector_state SET active_generation=$1`, name); err != nil {
+		return fmt.Errorf("postgres: record active generation: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// guardGenerationWrite locks the generation row and refuses live or missing targets.
+// A write invalidates any earlier verification.
+func guardGenerationWrite(ctx context.Context, tx pgx.Tx, generation string) error {
+	state, err := readVectorState(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if state.Active == generation {
+		return fmt.Errorf("%w: %q", ErrLiveTarget, generation)
+	}
+	tag, err := tx.Exec(ctx, `UPDATE vector_generations SET state='staging', corpus_digest=NULL, verification=NULL, verified_at=NULL, updated_at=NOW()
+ WHERE name=$1 AND state IN ('staging','verified','retired')`, generation)
+	if err != nil {
+		return fmt.Errorf("postgres: mark generation %q staging: %w", generation, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: generation %q is not registered", generation)
+	}
+	return nil
+}
+
+// GenerationCheckpoints returns the ledger entries for the supplied documents.
+func (c *Client) GenerationCheckpoints(ctx context.Context, generation string, documentIDs []string) (map[string]Checkpoint, error) {
+	out := make(map[string]Checkpoint, len(documentIDs))
+	if len(documentIDs) == 0 {
+		return out, nil
+	}
+	rows, err := c.Pool.Query(ctx, `SELECT document_id::text, source_revision, COALESCE(incarnation::text, ''), chunk_ids, complete, copied, embedded
+ FROM vector_generation_documents WHERE generation=$1 AND document_id=ANY($2::uuid[])`, generation, documentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: read generation checkpoints: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cp Checkpoint
+		if err = rows.Scan(&cp.DocumentID, &cp.SourceRevision, &cp.Incarnation, &cp.ChunkIDs, &cp.Complete, &cp.Copied, &cp.Embedded); err != nil {
+			return nil, fmt.Errorf("postgres: read generation checkpoint: %w", err)
+		}
+		out[cp.DocumentID] = cp
+	}
+	return out, rows.Err()
+}
+
+// BeginGenerationDocument records the intent to write keys for a document.
+// The recorded set only grows until completion, so an interrupted write never
+// strands a key the ledger cannot find.
+func (c *Client) BeginGenerationDocument(ctx context.Context, generation, documentID string, chunkIDs []string) error {
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if guardErr := guardGenerationWrite(ctx, tx, generation); guardErr != nil {
+		return guardErr
+	}
+	var existing []string
+	err = tx.QueryRow(ctx, `SELECT chunk_ids FROM vector_generation_documents WHERE generation=$1 AND document_id=$2 FOR UPDATE`, generation, documentID).Scan(&existing)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("postgres: read generation ledger: %w", err)
+	}
+	union := slices.Clone(existing)
+	union = append(union, chunkIDs...)
+	slices.Sort(union)
+	union = slices.Compact(union)
+	if _, err = tx.Exec(ctx, `INSERT INTO vector_generation_documents(generation, document_id, source_revision, chunk_ids, complete)
+ VALUES($1,$2,'',$3,FALSE)
+ ON CONFLICT (generation, document_id) DO UPDATE SET source_revision='', incarnation=NULL, chunk_ids=EXCLUDED.chunk_ids, complete=FALSE, copied=0, embedded=0, checkpointed_at=NOW()`, generation, documentID, union); err != nil {
+		return fmt.Errorf("postgres: record generation intent: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// CompleteGenerationDocument marks a document's target keys current for a source revision.
+func (c *Client) CompleteGenerationDocument(ctx context.Context, generation, documentID, revision, incarnation string, chunkIDs []string, copied, embedded int) error {
+	if revision == "" || incarnation == "" {
+		return errors.New("postgres: a checkpoint needs a source revision and incarnation")
+	}
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if guardErr := guardGenerationWrite(ctx, tx, generation); guardErr != nil {
+		return guardErr
+	}
+	ids := slices.Clone(chunkIDs)
+	slices.Sort(ids)
+	tag, err := tx.Exec(ctx, `UPDATE vector_generation_documents SET source_revision=$3, incarnation=$4::uuid, chunk_ids=$5, complete=TRUE, copied=$6, embedded=$7, checkpointed_at=NOW()
+ WHERE generation=$1 AND document_id=$2`, generation, documentID, revision, incarnation, ids, copied, embedded)
+	if err != nil {
+		return fmt.Errorf("postgres: complete generation checkpoint: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres: no write intent recorded for document %s", documentID)
+	}
+	return tx.Commit(ctx)
+}
+
+// CountGenerationDocuments counts ledger entries by completion.
+func (c *Client) CountGenerationDocuments(ctx context.Context, generation string) (complete, incomplete int, err error) {
+	err = c.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE complete), count(*) FILTER (WHERE NOT complete)
+ FROM vector_generation_documents WHERE generation=$1`, generation).Scan(&complete, &incomplete)
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: count generation documents: %w", err)
+	}
+	return complete, incomplete, nil
+}
+
+// OrphanedGenerationDocuments lists ledger entries whose document is no longer
+// completed in the source, so their target keys must be removed.
+func (c *Client) OrphanedGenerationDocuments(ctx context.Context, generation string, limit int) ([]Checkpoint, error) {
+	rows, err := c.Pool.Query(ctx, `SELECT l.document_id::text, l.source_revision, COALESCE(l.incarnation::text, ''), l.chunk_ids, l.complete, l.copied, l.embedded
+ FROM vector_generation_documents l
+ WHERE l.generation=$1 AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.id=l.document_id AND d.status='completed')
+ ORDER BY l.document_id LIMIT $2`, generation, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list orphaned generation documents: %w", err)
+	}
+	defer rows.Close()
+	var out []Checkpoint
+	for rows.Next() {
+		var cp Checkpoint
+		if err = rows.Scan(&cp.DocumentID, &cp.SourceRevision, &cp.Incarnation, &cp.ChunkIDs, &cp.Complete, &cp.Copied, &cp.Embedded); err != nil {
+			return nil, fmt.Errorf("postgres: read orphaned generation document: %w", err)
+		}
+		out = append(out, cp)
+	}
+	return out, rows.Err()
+}
+
+// ForgetGenerationDocument removes a ledger entry after its target keys are gone.
+func (c *Client) ForgetGenerationDocument(ctx context.Context, generation, documentID string) error {
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if guardErr := guardGenerationWrite(ctx, tx, generation); guardErr != nil {
+		return guardErr
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM vector_generation_documents WHERE generation=$1 AND document_id=$2`, generation, documentID); err != nil {
+		return fmt.Errorf("postgres: forget generation document: %w", err)
+	}
+	return tx.Commit(ctx)
+}
