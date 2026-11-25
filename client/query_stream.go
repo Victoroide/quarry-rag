@@ -68,44 +68,34 @@ func (c *Client) QueryStream(ctx context.Context, input QueryRequest, fn func(Ev
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/query", bytes.NewReader(data))
+	req, credentials, err := c.newRequest(ctx, http.MethodPost, "/query", bytes.NewReader(data), "application/json", "text/event-stream", opts...)
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("X-Service-Token", c.token)
-	}
-	for _, opt := range opts {
-		if opt == nil {
-			return errors.New("request option is required")
-		}
-		opt(req)
+		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.perform(req, credentials)
 	if err != nil {
-		return fmt.Errorf("perform request: %w", err)
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return decodeAPIError(resp)
+		return decodeAPIError(resp, credentials)
 	}
 	contentType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || contentType != "text/event-stream" {
 		return errors.New("unexpected stream Content-Type")
 	}
-	err = readQueryEvents(ctx, resp.Body, fn)
+	err = readQueryEvents(ctx, resp.Body, fn, credentials)
 	var streamErr *StreamError
 	if errors.As(err, &streamErr) {
-		streamErr.RequestID = resp.Header.Get("X-Request-ID")
+		streamErr.RequestID = credentials.redact(resp.Header.Get("X-Request-ID"))
 	}
 	return err
 }
 
 const maxQueryEventBytes = 8 << 20
 
-func readQueryEvents(ctx context.Context, body io.Reader, fn func(Event) error) error {
+func readQueryEvents(ctx context.Context, body io.Reader, fn func(Event) error, credentials requestCredentials) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64<<10), maxQueryEventBytes)
 	name := ""
@@ -119,7 +109,7 @@ func readQueryEvents(ctx context.Context, body io.Reader, fn func(Event) error) 
 		if line == "" {
 			if data.Len() > 0 {
 				event := Event{Type: name, Data: json.RawMessage(strings.TrimSuffix(data.String(), "\n"))}
-				done, err := dispatchQueryEvent(event, &contextSeen, fn)
+				done, err := dispatchQueryEvent(event, &contextSeen, fn, credentials)
 				if err != nil || done {
 					return err
 				}
@@ -148,12 +138,12 @@ func readQueryEvents(ctx context.Context, body io.Reader, fn func(Event) error) 
 		return err
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read query stream: %w", err)
+		return fmt.Errorf("read query stream: %w", credentials.safeError(err))
 	}
 	return fmt.Errorf("read query stream: %w", io.ErrUnexpectedEOF)
 }
 
-func dispatchQueryEvent(event Event, contextSeen *bool, fn func(Event) error) (bool, error) {
+func dispatchQueryEvent(event Event, contextSeen *bool, fn func(Event) error, credentials requestCredentials) (bool, error) {
 	switch event.Type {
 	case "context", "delta", "done", "error":
 	default:
@@ -183,7 +173,14 @@ func dispatchQueryEvent(event Event, contextSeen *bool, fn func(Event) error) (b
 		if err := json.Unmarshal(event.Data, &body); err != nil || body.Error == "" || body.Message == "" {
 			return false, errors.New("invalid query error event")
 		}
-		streamErr = &StreamError{Code: body.Error, Message: body.Message}
+		streamErr = &StreamError{Code: credentials.redact(body.Error), Message: credentials.redact(body.Message)}
+		if streamErr.Code != body.Error || streamErr.Message != body.Message || credentials.redact(string(event.Data)) != string(event.Data) {
+			data, err := json.Marshal(ErrorResponse{Error: streamErr.Code, Message: streamErr.Message})
+			if err != nil {
+				return false, errors.New("invalid query error event")
+			}
+			event.Data = data
+		}
 	}
 	if err := fn(event); err != nil {
 		return false, err

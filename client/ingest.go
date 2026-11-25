@@ -60,6 +60,11 @@ func (c *Client) IngestFile(ctx context.Context, upload FileUpload) (*IngestResp
 	reader, writer := io.Pipe()
 	defer func() { _ = reader.Close() }()
 	form := multipart.NewWriter(writer)
+	req, credentials, err := c.newRequest(ctx, http.MethodPost, "/ingest", reader, form.FormDataContentType(), "application/json")
+	if err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
 	go func() {
 		err := writeUpload(form, upload, metadata)
 		if err == nil {
@@ -68,7 +73,7 @@ func (c *Client) IngestFile(ctx context.Context, upload FileUpload) (*IngestResp
 		_ = writer.CloseWithError(err)
 	}()
 	var response IngestResponse
-	if err := c.request(ctx, http.MethodPost, "/ingest", reader, form.FormDataContentType(), &response); err != nil {
+	if err := c.doJSON(req, credentials, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

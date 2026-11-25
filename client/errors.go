@@ -35,17 +35,17 @@ type APIError struct {
 // Error returns the HTTP status and service error message.
 func (e *APIError) Error() string { return fmt.Sprintf("%d %s: %s", e.StatusCode, e.Code, e.Message) }
 
-func decodeAPIError(resp *http.Response) *APIError {
-	err := &APIError{StatusCode: resp.StatusCode, Code: "http_error", Message: http.StatusText(resp.StatusCode), RequestID: resp.Header.Get("X-Request-ID")}
+func decodeAPIError(resp *http.Response, credentials requestCredentials) *APIError {
+	err := &APIError{StatusCode: resp.StatusCode, Code: "http_error", Message: http.StatusText(resp.StatusCode), RequestID: credentials.redact(resp.Header.Get("X-Request-ID"))}
 	var envelope ExtractionErrorResponse
 	if decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&envelope); decodeErr == nil {
 		if envelope.Error != "" {
-			err.Code = envelope.Error
+			err.Code = credentials.redact(envelope.Error)
 		}
 		if envelope.Message != "" {
-			err.Message = envelope.Message
+			err.Message = credentials.redact(envelope.Message)
 		}
-		err.ExtractionCode = envelope.Code
+		err.ExtractionCode = credentials.redact(envelope.Code)
 	}
 	retry := resp.Header.Get("Retry-After")
 	if seconds, parseErr := strconv.ParseInt(retry, 10, 64); parseErr == nil {
