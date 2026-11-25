@@ -148,7 +148,9 @@ func TestEvidenceStreamStopsBeforeCompletionOnCancellationOrTimeout(t *testing.T
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			cfg := streamQueryConfig()
-			cfg.QueryTimeout = 50 * time.Millisecond
+			if timeout {
+				cfg.QueryTimeout = 50 * time.Millisecond
+			}
 			retrievalCtx := make(chan context.Context, 1)
 			store := evidenceQueryVector{search: func(ctx context.Context, _ []float32, _ int, _ domain.VectorFilter) ([]domain.ScoredChunk, error) {
 				retrievalCtx <- ctx

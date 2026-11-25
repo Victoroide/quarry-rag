@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
@@ -169,37 +170,38 @@ func TestHealthCacheExpires(t *testing.T) {
 }
 
 func TestHealthChecksRunConcurrentlyWithDeadlines(t *testing.T) {
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
-	check := func(ctx context.Context) error {
-		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > 5*time.Second || time.Until(deadline) <= 0 {
-			t.Error("probe has no bounded deadline")
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{}, 2)
+		release := make(chan struct{})
+		defer close(release)
+		check := func(ctx context.Context) error {
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) > 5*time.Second || time.Until(deadline) <= 0 {
+				t.Error("probe has no bounded deadline")
+			}
+			started <- struct{}{}
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
-		started <- struct{}{}
-		select {
-		case <-release:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
+		p := NewProbes(&healthVectorStore{check: check}, &healthChunkStore{check: check}, nil, time.Minute)
+		go p.Snapshot(t.Context())
+		synctest.Wait()
+		if got := len(started); got != 2 {
+			t.Fatalf("started %d of 2 dependency checks concurrently", got)
 		}
-	}
-	p := NewProbes(&healthVectorStore{check: check}, &healthChunkStore{check: check}, nil, time.Minute)
-	finished := make(chan struct{})
-	go func() { p.Snapshot(t.Context()); close(finished) }()
-	defer func() { close(release); <-finished }()
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("dependency checks did not start concurrently")
-		}
-	}
+	})
 }
 
 func TestHealthRefreshSurvivesCallerCancellation(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	finish := func() { releaseOnce.Do(func() { close(release) }) }
+	defer finish()
 	cs := &healthChunkStore{check: func(ctx context.Context) error {
 		close(started)
 		select {
@@ -214,14 +216,10 @@ func TestHealthRefreshSurvivesCallerCancellation(t *testing.T) {
 	defer cancel()
 	first := make(chan HealthStatus, 1)
 	go func() { first <- p.Snapshot(ctx) }()
-	<-started
+	awaitSignal(t, started, "the shared refresh to start")
 	cancel()
-	select {
-	case <-first:
-	case <-time.After(time.Second):
-		t.Error("canceled caller did not return promptly")
-	}
-	close(release)
+	awaitSignal(t, first, "the canceled caller to return")
+	finish()
 	status := p.Snapshot(t.Context())
 	if status.Postgres != "ok" || cs.calls.Load() != 1 {
 		t.Fatalf("shared refresh was canceled: %+v, calls = %d", status, cs.calls.Load())
