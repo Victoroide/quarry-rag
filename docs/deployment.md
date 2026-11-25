@@ -64,11 +64,13 @@ The service is packaged using a multi-stage Docker build that outputs a minimal,
 
 Both base images are pinned by multi-platform index digest in the Dockerfile. Dependabot updates their tags and digests together.
 
-1. **`base`**: Builds on the Go image pinned in the [Dockerfile](../Dockerfile), installs compilation tools (`gcc`, `musl-dev`, `git`), and downloads Go modules.
+1. **`base`**: Uses the Go image pinned in the [Dockerfile](../Dockerfile) for the requested platform, installs compilation tools (`gcc`, `musl-dev`, `git`), and downloads Go modules for the `test` and `lint` stages.
 2. **`test`**: Runs static checks (`go vet ./...`) and the short suite with data race instrumentation (`go test -short ./... -count=1 -race`); Docker-backed tests run in full on the host or CI runner.
 3. **`lint`**: Compiles and executes `golangci-lint` (v2.15.0) against `.golangci.yml`.
-4. **`builder`**: Compiles the statically linked binary (`CGO_ENABLED=0 go build -o /bin/server ./cmd/server`) and collects the license and notice files of the Go standard library and every linked module.
-5. **`runtime`**: Uses the Alpine Linux runtime pinned in the Dockerfile. Installs CA certificates and timezone data, creates a dedicated system user and group (`app`, numeric UID/GID `10001:10001`), copies the compiled server binary containing the embedded migrations, and sets the non-root user as the execution user.
+4. **`builder`**: Uses a native build-host stage with its own cached module-download layer. It cross-compiles the statically linked binary for the requested platform and collects the license and notice files of the Go standard library and every module linked for that target.
+5. **`runtime`**: Uses the Alpine Linux runtime pinned in the Dockerfile for the target platform. Installs CA certificates and timezone data, creates a dedicated system user and group (`app`, numeric UID/GID `10001:10001`), copies the compiled server binary containing the embedded migrations, and sets the non-root user as the execution user.
+
+A multi-platform build therefore compiles each architecture natively. Only the final stage, which installs the runtime packages, runs on the target platform and needs emulation when it differs from the build host.
 
 For host verification, `make vet`, `make lint` and `make test` run directly with the local Go toolchain; the full test suite needs a Docker daemon. The [`make ci` description](development.md#test-suites) lists the combined checks.
 
