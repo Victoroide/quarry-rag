@@ -56,6 +56,9 @@ func identityFingerprint(policy domain.ContentDedup, id domain.DocumentID, finge
 
 func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, existingPDFOnly, includeLegacy bool) (domain.AcceptResult, error) {
 	result := domain.AcceptResult{DocumentID: req.Document.ID}
+	if req.SourceUpload != nil && req.Document.S3Key == nil {
+		return result, errors.New("source upload link requires an object key")
+	}
 	// Reads after the advisory lock wait must see the previous holder's commit.
 	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
@@ -264,6 +267,20 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 	}
 	if err != nil {
 		return result, err
+	}
+	if req.SourceUpload != nil {
+		// Cleanup claims a staged upload under a row lock, so exactly one of
+		// the claim and this adoption succeeds.
+		tag, linkErr := tx.Exec(ctx, `UPDATE source_uploads SET state='linked',linked_document_id=$2,linked_at=NOW(),acknowledged_at=COALESCE(acknowledged_at,NOW()),version_id=COALESCE(NULLIF($5,''),version_id)
+			WHERE id=$1 AND state='staged' AND document_id=$2 AND collection=$3 AND object_key=$4`,
+			req.SourceUpload.ID, string(req.Document.ID), req.Collection, *req.Document.S3Key, req.SourceUpload.VersionID)
+		if linkErr != nil {
+			return result, linkErr
+		}
+		if tag.RowsAffected() != 1 {
+			result.Outcome = domain.AcceptUploadExpired
+			return result, nil
+		}
 	}
 	result.Outcome = domain.AcceptAccepted
 	return result, tx.Commit(ctx)

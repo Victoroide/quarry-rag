@@ -102,6 +102,8 @@ type Config struct {
 	SubjectAuthority SubjectAuthorityConfig
 
 	S3ExpectedBucketOwner string
+	// SourceUploadJournal records each original file's owner before it is written.
+	SourceUploadJournal bool
 
 	PineconeUpsertBatchSize       int
 	PineconeTimeout               time.Duration
@@ -287,6 +289,9 @@ func Load() (*Config, error) {
 	if cfg.ExtractIsolation, err = envBoolOrDefault("EXTRACT_ISOLATION", true); err != nil {
 		return nil, err
 	}
+	if cfg.SourceUploadJournal, err = envBoolOrDefault("SOURCE_UPLOAD_JOURNAL", false); err != nil {
+		return nil, err
+	}
 	if cfg.ExtractTimeout, err = envDurationOrDefault("EXTRACT_TIMEOUT", 30*time.Second); err != nil {
 		return nil, err
 	}
@@ -405,6 +410,9 @@ func (c *Config) validate() error {
 		}
 	default:
 		return fmt.Errorf("config: OCR_PDF_MODE must be image_only or mixed")
+	}
+	if c.SourceUploadJournal && strings.TrimSpace(c.S3Bucket) == "" {
+		return fmt.Errorf("config: SOURCE_UPLOAD_JOURNAL=true requires S3_BUCKET")
 	}
 	if c.VectorStore != "" && c.VectorStore != "pinecone" && c.VectorStore != "postgres" {
 		return fmt.Errorf("config: VECTOR_STORE must be pinecone or postgres")

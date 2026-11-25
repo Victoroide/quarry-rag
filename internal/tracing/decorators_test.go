@@ -239,6 +239,46 @@ func TestStorageAndExtractionDecorators(t *testing.T) {
 	require.Equal(t, "text", spanAttrs(spans[3])["quarry.extract.file_type"].AsString())
 }
 
+type fixtureSourceObjects struct{ fixtureObjects }
+
+func (fixtureSourceObjects) Bucket() string { return "fixture-bucket" }
+func (fixtureSourceObjects) NewKey(documentID, uploadID, docType, fileName string) string {
+	return strings.Join([]string{docType, documentID, uploadID, fileName}, "/")
+}
+func (fixtureSourceObjects) PutSource(_ context.Context, key string, _ extractor.FileType, r io.Reader) (domain.SourceUploadResult, error) {
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return domain.SourceUploadResult{Settled: true}, err
+	}
+	if key == "refused" {
+		return domain.SourceUploadResult{}, errors.New("storage unavailable")
+	}
+	return domain.SourceUploadResult{VersionID: "fixture-version", Acknowledged: true}, nil
+}
+func TestSourceObjectStoreDecoratorKeepsKeyAllocation(t *testing.T) {
+	_, plain := WrapObjectStore(fixtureObjects{}).(SourceObjectStore)
+	require.False(t, plain, "a store without caller-allocated keys must not gain them")
+
+	recorder := recordSpans(t)
+	ctx, parent := otel.Tracer("test").Start(t.Context(), "ingest")
+	defer parent.End()
+	wrapped, ok := WrapObjectStore(fixtureSourceObjects{}).(SourceObjectStore)
+	require.True(t, ok)
+	require.Equal(t, "fixture-bucket", wrapped.Bucket())
+	require.Equal(t, "type/doc/upload/name", wrapped.NewKey("doc", "upload", "type", "name"))
+	result, err := wrapped.PutSource(ctx, "stored-key", extractor.FileTypeText, strings.NewReader("fixture-file"))
+	require.NoError(t, err)
+	require.Equal(t, domain.SourceUploadResult{VersionID: "fixture-version", Acknowledged: true}, result)
+	_, err = wrapped.PutSource(ctx, "refused", extractor.FileTypeText, strings.NewReader("fixture-file"))
+	require.Error(t, err)
+	spans := recorder.Ended()
+	require.Len(t, spans, 2)
+	for _, span := range spans {
+		require.Equal(t, "storage.put", span.Name())
+		require.Equal(t, "s3", spanAttrs(span)["quarry.storage.system"].AsString())
+	}
+	require.Equal(t, codes.Error, spans[1].Status().Code)
+}
+
 func TestModelDecoratorCapturesGuardedText(t *testing.T) {
 	recorder := recordSpans(t)
 	converser, ok := WrapConverser(fixtureModelConverser{}, "aws.bedrock", "default-model").(llm.ModelConverser)

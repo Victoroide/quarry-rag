@@ -132,6 +132,10 @@ func acceptIngestWith(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		return result.Outcome, nil
 	case domain.AcceptNeedsSource, domain.AcceptNeedsPDFText:
 		return result.Outcome, nil
+	case domain.AcceptUploadExpired:
+		rw.Header().Set("Retry-After", "30")
+		writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file upload expired before acceptance; retry the upload")
+		return result.Outcome, nil
 	default:
 		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return result.Outcome, nil

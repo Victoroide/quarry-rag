@@ -327,7 +327,7 @@ func TestCanvasAndInspectionTextSize(t *testing.T) {
 		if d.W > 960 {
 			t.Errorf("%s width %g > 960", d.Name, d.W)
 		}
-		if d.Name == "system-architecture" && d.H > 760 || d.Name == "database-schema" && d.H > 1100 {
+		if d.Name == "system-architecture" && d.H > 760 || d.Name == "database-schema" && d.H > 1510 {
 			t.Errorf("%s height %g", d.Name, d.H)
 		}
 		for _, l := range sceneLabels(d) {

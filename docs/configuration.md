@@ -93,6 +93,7 @@ The table below lists the environment variables recognized by the service:
 | `SERVICE_TOKEN` | string | `""` | No whitespace or control characters after trimming | Shared secret merged with `SERVICE_TOKENS`; see [Service Token Rotation](deployment.md#service-token-rotation). At least one token is required when `GO_RAG_FAKE_MODE=false`. |
 | `SERVICE_TOKENS` | comma-separated strings | `""` | No whitespace or control characters within a token after trimming | Additional secrets accepted in `X-Service-Token` for rotation; see [Service Token Rotation](deployment.md#service-token-rotation). Tokens are trimmed, empty entries are dropped and duplicates are removed across both variables. Startup warns with only the count of tokens shorter than 32 bytes; use secrets of at least 32 bytes. An empty combined list leaves routes open only in offline mode. |
 | `SHUTDOWN_DRAIN_DELAY` | duration | `5s` | 0s to 60s | Delay after readiness starts returning draining, before HTTP shutdown. A second termination signal skips the remaining delay. |
+| `SOURCE_UPLOAD_JOURNAL` | boolean | `false` | `true` requires `S3_BUCKET` | Records the owner of each original file in PostgreSQL before it is written to S3, so uploads that no document adopts can be [reclaimed](deployment.md#source-upload-journal). Enable only after every replica runs a release with migration 014 and this setting. |
 | `SYNTHESIS_CONTEXT_TOKENS` | integer | `2400` | 256 to 100000 | Maximum sum of estimated tokens in sanitized excerpt bodies. Generated answers also include prompt instructions, the question and markers. |
 | `SYNTHESIS_INPUT_PROFILE` | string | `""` | `""` or `"strict"` | Enables [strict synthesis budgets](#strict-synthesis-budgets). Incompatible with `GO_RAG_FAKE_MODE=true`. |
 | `SYNTHESIS_OPENAI_DEPLOYMENT` | string | `""` | `chatml-v1\|<model-revision>\|<base-address>` | Explicit deployment match for strict OpenAI-compatible synthesis. |
@@ -325,6 +326,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `011_grant_catalog.sql` | Installs the [operator grant catalog](grant-catalog.md) with an empty policy at revision zero. |
 | `012_index_visibility.sql` | Adds index visibility observations to documents and a lease token to ingestion jobs. |
 | `013_vector_mutations.sql` | Records each document's vector format, published attempt and vector mutation state. |
+| `014_source_uploads.sql` | Adds an empty journal of original-file uploads, with a unique object key per bucket and a foreign key to the adopting document. It leaves existing rows in place and never infers ownership of earlier objects. |
 | `015_mixed_pdf_ocr.sql` | Records page manifests, versioned extraction provenance, and coverage. Adds a lease constraint for jobs that require a mixed-PDF worker. |
 | `017_evaluation_fixtures.sql` | Adds durable receipts and UUID reservations for the [opt-in evaluation fixtures](development.md#evidence-evaluation). |
 | `018_evaluation_vector_identity.sql` | Binds new fixture receipts to their vector store and permits reservations for durably retired submissions. |

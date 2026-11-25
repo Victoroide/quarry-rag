@@ -17,7 +17,6 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/extractor"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
-	"github.com/google/uuid"
 )
 
 // ObjectStore stores and removes original uploaded files.
@@ -313,24 +312,29 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		return
 	}
 	var s3Key *string
+	var written sourceWrite
+	writer := sourceWriter{objects: s3Client, journal: opts.journal}
 	if s3Client != nil {
 		docType := formDocType
 		if docType == "" {
 			docType = domain.DefaultDocType
 		}
-		// Each attempt owns a distinct object so rollback cannot delete another acceptance's file.
-		key, uploadErr := s3Client.Upload(r.Context(), docID+"/"+uuid.NewString(), docType, fileName, ft, bytes.NewReader(fileData))
+		var uploadErr error
+		written, uploadErr = writer.write(r.Context(), docID, req.Collection, docType, fileName, ft, fileData)
 		if uploadErr != nil {
 			slog.ErrorContext(r.Context(), "upload source file", "error", uploadErr)
 			rw.Header().Set("Retry-After", "30")
 			writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 			return
 		}
-		s3Key = &key
+		s3Key = &written.key
 		acceptReq.Document.S3Key = s3Key
+		acceptReq.SourceUpload = written.link
 	}
 	outcome, acceptErr := acceptIngest(rw, r, wk, cs, acceptReq)
-	if s3Key != nil && outcome != domain.AcceptAccepted {
+	// Reconciliation owns every unadopted journaled upload. It fences acceptance
+	// and checks the full version history, including writes the SDK retried.
+	if s3Key != nil && written.link == nil && outcome != domain.AcceptAccepted {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 		defer cancel()
 		if acceptErr != nil {
@@ -340,8 +344,8 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 				return
 			}
 		}
-		if err := s3Client.Delete(cleanupCtx, *s3Key); err != nil {
-			slog.ErrorContext(cleanupCtx, "remove unaccepted source file", "error", err)
+		if deleteErr := s3Client.Delete(cleanupCtx, *s3Key); deleteErr != nil {
+			slog.ErrorContext(cleanupCtx, "remove unaccepted source file", "error", deleteErr)
 		}
 	}
 }

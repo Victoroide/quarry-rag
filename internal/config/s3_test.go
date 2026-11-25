@@ -38,3 +38,36 @@ func TestExpectedBucketOwnerValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestSourceUploadJournalConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name, journal, bucket, wantError string
+		want                             bool
+	}{
+		{name: "default"},
+		{name: "disabled without bucket", journal: "false"},
+		{name: "enabled", journal: "true", bucket: "synthetic-bucket", want: true},
+		{name: "enabled without bucket", journal: "true", wantError: "S3_BUCKET"},
+		{name: "invalid", journal: "sometimes", bucket: "synthetic-bucket", wantError: "SOURCE_UPLOAD_JOURNAL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GO_RAG_FAKE_MODE", "true")
+			t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
+			t.Setenv("S3_BUCKET", tc.bucket)
+			t.Setenv("SOURCE_UPLOAD_JOURNAL", tc.journal)
+			cfg, err := Load()
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("want %s error, got %v", tc.wantError, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.SourceUploadJournal != tc.want {
+				t.Fatalf("journal = %v, want %v", cfg.SourceUploadJournal, tc.want)
+			}
+		})
+	}
+}

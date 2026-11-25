@@ -69,10 +69,13 @@ sequenceDiagram
     Caller->>Handler: POST /ingest
     Handler->>Handler: Extract, remove content NUL, validate
     opt Source storage enabled and identity still unresolved
+        opt Source upload journal enabled
+            Handler->>Postgres: Stage upload owner and object key
+        end
         Handler->>S3: Upload original file
     end
     Handler->>Postgres: AcceptDocument transaction
-    Note over Postgres: Resolve identity, check capacity for new jobs, commit document and job together
+    Note over Postgres: Resolve identity, check capacity for new jobs, link a staged upload, commit document and job together
     alt Accepted, processing duplicate, or failed duplicate requeued
         Handler-->>Caller: 202 processing with existing or new ID
     else Completed duplicate
@@ -80,7 +83,7 @@ sequenceDiagram
     else Identity conflict or queue full
         Handler-->>Caller: 409 conflict or 503 queue
     end
-    Note over Handler,S3: Remove a new upload when acceptance does not use it
+    Note over Handler,S3: Remove a new upload when acceptance does not use it; reclamation removes uploads left behind
     Worker->>Postgres: Claim ready job or expired lease
     loop Until processing ends
         Worker->>Postgres: Renew lease every lease / 3
@@ -281,7 +284,7 @@ Embedded SQL migrations define the relational schema and apply in numeric order 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.svg">
-  <img alt="Data model. The chunks, document_fingerprints, ingest_jobs and document_pdf_extractions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column. The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes." src="diagrams/database-schema-light.svg">
+  <img alt="Data model. The chunks, document_fingerprints, ingest_jobs and document_pdf_extractions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column. The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes." src="diagrams/database-schema-light.svg">
 </picture>
 
 ### Table Definitions
@@ -290,6 +293,7 @@ Embedded SQL migrations define the relational schema and apply in numeric order 
 - **`chunks`**: Stores segmented text blocks and approximate token counts linked to parent documents via cascading foreign keys.
 - **`ingest_jobs`**: Stores pending or running work, attempt counts, lease ownership and expiry, retry scheduling, and the latest error. Each claim assigns a new lease token, including when shutdown or a failed-job requeue allows reuse of an attempt number. Deleting a document cascades to its job.
 - **`document_fingerprints`**: Maps collection-scoped SHA-256 content fingerprints to document UUIDs accepted under the `collection` policy.
+- **`source_uploads`**: Journals each original-file upload when [`SOURCE_UPLOAD_JOURNAL`](configuration.md#environment-variables) is enabled. A row records the bucket, object key, collection and intended document ID before the write, the PUT's settlement state, the version S3 returned, and a bounded lease. It is `staged` until acceptance links it to the new document in the transaction that inserts the document, `linked` afterwards, and `claimed` once reclamation fences it. Deleting the document cascades to its linked row.
 
 ---
 

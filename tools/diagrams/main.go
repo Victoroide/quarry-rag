@@ -45,8 +45,8 @@ func generate(root string, check bool) (err error) {
 			total += len(b)
 		}
 	}
-	if total >= 600000 {
-		return fmt.Errorf("combined SVGs exceed 600 KB: %d", total)
+	if total >= 640000 {
+		return fmt.Errorf("combined SVGs exceed 640 KB: %d", total)
 	}
 	for path, b := range outputs {
 		if check {

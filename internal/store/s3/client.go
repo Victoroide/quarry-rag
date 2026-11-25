@@ -17,10 +17,13 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/awsconf"
 	"github.com/Victoroide/quarry-rag/internal/config"
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go/middleware"
 )
 
 // Client wraps the AWS S3 SDK for file storage.
@@ -59,6 +62,19 @@ func newClient(awsCfg aws.Config, bucket, owner string, optFns ...func(*s3.Optio
 	}
 }
 
+// Bucket returns the configured bucket name.
+func (c *Client) Bucket() string { return c.bucket }
+
+// NewKey allocates the object key of one upload attempt without contacting S3.
+// Key structure: documents/{docType}/{documentID}/{uploadID}/{filename}
+func (c *Client) NewKey(documentID, uploadID, docType, filename string) string {
+	return objectKey(sanitizeKeyComponent(documentID, 64, "document")+"/"+sanitizeKeyComponent(uploadID, 64, "upload"), docType, filename)
+}
+
+func objectKey(docID, docType, filename string) string {
+	return fmt.Sprintf("documents/%s/%s/%s", sanitizeKeyComponent(docType, 64, "document"), docID, sanitizeKeyComponent(filename, 200, "file"))
+}
+
 // Upload stores a file in S3 and returns the S3 key.
 // Upload callers provide a document ID plus a unique attempt segment.
 // Key structure: documents/{docType}/{docID}/{attemptID}/{filename}
@@ -70,21 +86,51 @@ func (c *Client) Upload(
 	ft extractor.FileType,
 	r io.Reader,
 ) (string, error) {
-	key := fmt.Sprintf("documents/%s/%s/%s", sanitizeKeyComponent(docType, 64, "document"), docID, sanitizeKeyComponent(filename, 200, "file"))
-	contentType := extractor.ContentTypeFromFileType(ft)
+	key := objectKey(docID, docType, filename)
+	if _, err := c.Put(ctx, key, ft, r); err != nil {
+		return "", err
+	}
+	return key, nil
+}
 
-	_, err := c.s3Client.PutObject(ctx, &s3.PutObjectInput{
+// Put stores a file under a caller-allocated key and returns the object version
+// that S3 created, or an empty string when the bucket does not report one.
+func (c *Client) Put(ctx context.Context, key string, ft extractor.FileType, r io.Reader) (string, error) {
+	result, err := c.PutSource(ctx, key, ft, r)
+	return result.VersionID, err
+}
+
+// PutSource reports whether all SDK attempts have a known outcome. A final
+// acknowledgment alone provides no evidence about the earlier requests.
+func (c *Client) PutSource(ctx context.Context, key string, ft extractor.FileType, r io.Reader) (domain.SourceUploadResult, error) {
+	contentType := extractor.ContentTypeFromFileType(ft)
+	var mayHaveDispatched bool
+	out, err := c.s3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:              &c.bucket,
 		Key:                 &key,
 		Body:                r,
 		ContentType:         &contentType,
 		ExpectedBucketOwner: c.owner,
+	}, func(opts *s3.Options) {
+		opts.APIOptions = append(opts.APIOptions, func(stack *middleware.Stack) error {
+			// Validation and serialization can fail before the SDK reaches its
+			// request attempt loop in Finalize.
+			return stack.Finalize.Add(middleware.FinalizeMiddlewareFunc("RecordSourceUploadDispatch",
+				func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+					mayHaveDispatched = true
+					return next.HandleFinalize(ctx, in)
+				}), middleware.Before)
+		})
 	})
 	if err != nil {
-		return "", fmt.Errorf("s3: upload %s: %w", key, err)
+		return domain.SourceUploadResult{Settled: !mayHaveDispatched}, fmt.Errorf("s3: upload %s: %w", key, err)
 	}
 	slog.DebugContext(ctx, "s3 object uploaded", "key", key, "content_type", contentType)
-	return key, nil
+	attempts, ok := retry.GetAttemptResults(out.ResultMetadata)
+	return domain.SourceUploadResult{
+		VersionID: aws.ToString(out.VersionId), Acknowledged: true,
+		Settled: ok && len(attempts.Results) == 1,
+	}, nil
 }
 
 // PresignGet returns a presigned GET URL with a requested lifetime of 15 minutes.
@@ -107,13 +153,23 @@ func (c *Client) PresignGet(ctx context.Context, s3Key string) (string, error) {
 }
 
 // Delete removes an object from S3 by key.
+// A versioned bucket records a delete marker and keeps earlier versions.
 func (c *Client) Delete(ctx context.Context, s3Key string) error {
-	_, err := c.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	return c.DeleteVersion(ctx, s3Key, "")
+}
+
+// DeleteVersion permanently removes one version of an object. An empty version
+// deletes the current object like Delete.
+func (c *Client) DeleteVersion(ctx context.Context, s3Key, versionID string) error {
+	input := &s3.DeleteObjectInput{
 		Bucket:              &c.bucket,
 		Key:                 &s3Key,
 		ExpectedBucketOwner: c.owner,
-	})
-	if err != nil {
+	}
+	if versionID != "" {
+		input.VersionId = &versionID
+	}
+	if _, err := c.s3Client.DeleteObject(ctx, input); err != nil {
 		return fmt.Errorf("s3: delete %s: %w", s3Key, err)
 	}
 	slog.DebugContext(ctx, "s3 object deleted", "key", s3Key)

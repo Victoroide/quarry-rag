@@ -549,6 +549,17 @@ func TestEvaluationMigrationInventory(t *testing.T) {
 	})
 }
 
+func TestEmbeddedMigrationsIncludeIndexVisibilityAndSourceUploads(t *testing.T) {
+	migrations, err := loadMigrations(migrationFiles)
+	require.NoError(t, err)
+	names := make(map[int]string, len(migrations))
+	for _, migration := range migrations {
+		names[migration.version] = migration.name
+	}
+	require.Equal(t, "012_index_visibility.sql", names[12])
+	require.Equal(t, "014_source_uploads.sql", names[14])
+}
+
 func TestInvalidMigrationFilesAreRejected(t *testing.T) {
 	for _, names := range [][]string{
 		{"001_first.sql", "001_duplicate.sql"},

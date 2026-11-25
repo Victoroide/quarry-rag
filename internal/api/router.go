@@ -4,6 +4,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -89,6 +90,9 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			return extractor.NewWithStories(ft, docStories, docxStories).Extract(ctx, bytes.NewReader(data))
 		})))
 	}
+	if deps.Config.SourceUploadJournal {
+		ingestOpts = append(ingestOpts, handler.WithSourceUploadJournal(sourceUploadJournal(deps.ChunkStore)))
+	}
 	probes := deps.Probes
 	if probes == nil {
 		probes = handler.NewProbes(deps.VectorStore, deps.ChunkStore, deps.S3Client, deps.Config.HealthCacheTTL)
@@ -123,4 +127,30 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	mux.HandleFunc("DELETE /evaluation/fixtures/{doc_id}", middleware.RequireServiceTokens(tokens, handler.EvaluationFixtureDeleteHandler(deps.ChunkStore, deps.PineconeDriver,
 		handler.EvaluationFixtureOptions{Prefix: deps.Config.EvaluationCollectionPrefix, VectorIdentity: fixtureStore, LocalVectors: deps.Config.VectorStore == "postgres" && !deps.Config.FakeMode})))
 	return middleware.RequestID(middleware.Metrics(middleware.Tracing(middleware.Logging(middleware.Recovery(mux)), deps.Config.Tracing.CaptureContent), deps.Metrics))
+}
+
+// sourceUploadJournal returns the store's journal, or one that refuses every
+// upload so a store without journaling never writes untracked originals.
+func sourceUploadJournal(store domain.ChunkStore) domain.SourceUploadJournal {
+	if journal, ok := store.(domain.SourceUploadJournal); ok {
+		return journal
+	}
+	slog.Error("SOURCE_UPLOAD_JOURNAL is enabled but the document store cannot journal uploads")
+	return unavailableJournal{}
+}
+
+type unavailableJournal struct{}
+
+var errJournalUnavailable = errors.New("source upload journal is unavailable")
+
+func (unavailableJournal) StageSourceUpload(context.Context, domain.SourceUpload) error {
+	return errJournalUnavailable
+}
+
+func (unavailableJournal) BeginSourceUpload(context.Context, string) error {
+	return errJournalUnavailable
+}
+
+func (unavailableJournal) RecordSourceUploadResult(context.Context, string, domain.SourceUploadResult) error {
+	return errJournalUnavailable
 }
