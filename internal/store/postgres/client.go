@@ -17,11 +17,13 @@ import (
 // Client manages the PostgreSQL connection pool and provides
 // chunk metadata and document fingerprint operations.
 type Client struct {
+	GenerationLedger
 	Pool             *pgxpool.Pool
-	vectorDimensions atomic.Int32
+	vectorDimensions atomic.Int64
 	vectorTable      atomic.Pointer[string]
 	generationName   atomic.Pointer[string]
 	vectorStateReady atomic.Bool
+	writerSlots      chan struct{}
 }
 
 // Option customizes PostgreSQL pool construction.
@@ -50,7 +52,7 @@ func NewClient(ctx context.Context, databaseURL string, opts ...Option) (*Client
 		return nil, fmt.Errorf("postgres: ping: %w", err)
 	}
 	slog.InfoContext(ctx, "postgres connected")
-	return &Client{Pool: pool}, nil
+	return &Client{Pool: pool, GenerationLedger: GenerationLedger{db: pool}, writerSlots: make(chan struct{}, config.MaxConns)}, nil
 }
 
 func poolConfig(url string) (*pgxpool.Config, error) {

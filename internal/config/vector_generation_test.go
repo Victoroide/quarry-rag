@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/Victoroide/quarry-rag/internal/domain"
 )
 
 func TestVectorGenerationDefaultsToLegacy(t *testing.T) {
@@ -56,4 +58,47 @@ func TestVectorGenerationRejectsUnsafeNamesAndFakeMode(t *testing.T) {
 			t.Fatalf("offline fake mode keeps no generations, got %v", err)
 		}
 	})
+}
+
+func TestVectorTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cfg    Config
+		store  string
+		target string
+	}{
+		{name: "legacy postgres", cfg: Config{VectorStore: "postgres"}, store: "postgres", target: "chunk_vectors"},
+		{name: "generation postgres", cfg: Config{VectorStore: "postgres", VectorGeneration: "g2"}, store: "postgres", target: "chunk_vectors_g2"},
+		{name: "explicit legacy postgres", cfg: Config{VectorStore: "postgres", VectorGeneration: "legacy"}, store: "postgres", target: "chunk_vectors"},
+		{name: "pinecone index", cfg: Config{VectorStore: "pinecone", PineconeIndexName: "quarry-g2", VectorGeneration: "g2"}, store: "pinecone", target: "quarry-g2"},
+		{name: "default pinecone", cfg: Config{PineconeIndexName: "quarry"}, store: "pinecone", target: "quarry"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, target := tc.cfg.VectorTarget()
+			if store != tc.store || target != tc.target {
+				t.Fatalf("got %s %s", store, target)
+			}
+		})
+	}
+}
+
+func TestEmbeddingSettings(t *testing.T) {
+	bedrock := (&Config{EmbeddingProvider: "bedrock", BedrockEmbedModel: "amazon.titan-embed-text-v2:0", EmbeddingDimensions: 1024}).EmbeddingSettings()
+	if bedrock != (domain.EmbeddingProfile{Provider: "bedrock", Model: "amazon.titan-embed-text-v2:0", ModelRevision: "amazon.titan-embed-text-v2:0", Dimensions: 1024, Metric: domain.MetricCosine}) {
+		t.Fatalf("unexpected settings %+v", bedrock)
+	}
+	compatible := (&Config{EmbeddingProvider: "openai", OpenAIEmbeddingModel: "embed-small", BedrockEmbedModel: "ignored", EmbeddingDimensions: 384}).EmbeddingSettings()
+	if compatible != (domain.EmbeddingProfile{Provider: "openai", Model: "embed-small", Dimensions: 384, Metric: domain.MetricCosine}) {
+		t.Fatalf("unexpected settings %+v", compatible)
+	}
+	cfg := Config{EmbeddingProvider: "openai", OpenAIEmbeddingModel: "embed-small", EmbeddingModelRevision: "deployment-1",
+		EmbeddingDimensions: 384, ExtractionChunkVersion: "release", ChunkTokenSize: 512, ChunkOverlap: 64, OCRProvider: "none"}
+	profile := cfg.EmbeddingSettings()
+	if profile.ModelRevision != "deployment-1" || profile.ExtractionChunkVersion != "release/size=512/overlap=64/ocr=none/doc=0/docx=0" {
+		t.Fatalf("unexpected deployment or text identity %+v", profile)
+	}
+	cfg.ChunkOverlap++
+	if cfg.EmbeddingSettings().Hash() == profile.Hash() {
+		t.Fatal("changing chunk overlap must change the profile identity")
+	}
 }

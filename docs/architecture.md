@@ -344,9 +344,9 @@ search results in PostgreSQL order, including its collation for tied chunk IDs.
 
 A vector generation names one vector target and the embedding profile it stores: provider, model, exact model revision, dimensions, distance metric and the extraction and chunking version of the stored chunks. Migration 012 records them in three tables. Generations are written only by [`make reindex`](development.md#vector-reindex-scriptsreindex).
 
-- **`vector_generations`**: One row per generation with its store (`postgres` or `pinecone`), target table or index, profile, profile origin (`recorded` or operator-`attested`) and state (`staging`, `verified`, `active` or `retired`). A verified row also stores the corpus digest and the verification report. A target belongs to at most one generation.
+- **`vector_generations`**: One row per generation with its store, target, profile, state, prior activation and pending-write status. A verified row also stores the corpus digest and verification report. Each physical target belongs to a single generation.
 - **`vector_generation_documents`**: The write ledger of a generation, one row per source document: the source revision and incarnation observed at the last completed write, the chunk keys written, and the counts copied and embedded. It has no foreign key to `documents`, so the keys of a deleted document remain known until the target is cleaned.
-- **`vector_state`**: A singleton naming the active generation (`legacy` until a reindex is activated) and recording the writer freeze with its time and owning generation.
+- **`vector_state`**: A singleton naming the active generation, binding the legacy target independently of its profile and recording the writer freeze with its time and owning generation.
 
 The `legacy` generation is the target that existed before generations: the fixed `chunk_vectors` table or the index named by `PINECONE_INDEX_NAME`. Another PostgreSQL generation stores its vectors in `chunk_vectors_<name>` with the same columns and indexes, so the live table is never altered in place. Deleting a document cascades to every generation table.
 

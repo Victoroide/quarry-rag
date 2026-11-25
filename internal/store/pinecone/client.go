@@ -706,57 +706,67 @@ func (p *Client) Ping(ctx context.Context) error {
 	})
 }
 
+// chunkFromMetadata decodes a stored record into its logical chunk. It reports
+// false for a record whose incarnation, revision or attempt tags are not
+// self-consistent, so that no reader treats it as a retrievable chunk.
+func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
+	chunk := domain.Chunk{ID: domain.ChunkID(id)}
+	if md == nil {
+		return chunk, true
+	}
+	fields := md.GetFields()
+	if v, ok := fields["doc_id"]; ok {
+		chunk.DocumentID = domain.DocumentID(v.GetStringValue())
+	}
+	if v, ok := fields["chunk_index"]; ok {
+		chunk.Index = int(v.GetNumberValue())
+	}
+	if v, ok := fields["text"]; ok {
+		chunk.Text = v.GetStringValue()
+	}
+	if v, ok := fields["token_count"]; ok {
+		chunk.TokenCount = int(v.GetNumberValue())
+	}
+	if v, ok := fields[domain.VectorIncarnationKey]; ok {
+		chunk.VectorIncarnation = v.GetStringValue()
+		if chunk.VectorIncarnation == "" {
+			return chunk, false
+		}
+	}
+	chunk.Metadata = make(map[string]any)
+	for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey} {
+		if v, ok := fields[key]; ok {
+			chunk.Metadata[key] = v.GetStringValue()
+		}
+	}
+	if value, tagged := fields[domain.VectorRevisionKey]; tagged {
+		target := vectorTarget{document: string(chunk.DocumentID), revision: value.GetStringValue()}
+		if attempt, present := fields[domain.VectorAttemptKey]; present {
+			target.attempt = attempt.GetStringValue()
+			if !validVectorIDPart(target.attempt) {
+				return chunk, false
+			}
+		}
+		logical, ok := target.logicalID(string(chunk.ID))
+		if !ok {
+			return chunk, false
+		}
+		chunk.ID = domain.ChunkID(logical)
+	} else if _, hasAttempt := fields[domain.VectorAttemptKey]; hasAttempt {
+		return chunk, false
+	}
+	return chunk, true
+}
+
 func matchesToScoredChunks(matches []*pinecone.ScoredVector, namespace string) []domain.ScoredChunk {
 	scored := make([]domain.ScoredChunk, 0, len(matches))
 	for _, m := range matches {
 		if m == nil || m.Vector == nil {
 			continue
 		}
-		chunk := domain.Chunk{
-			ID: domain.ChunkID(m.Vector.Id),
-		}
-		if m.Vector.Metadata != nil {
-			fields := m.Vector.Metadata.GetFields()
-			if v, ok := fields["doc_id"]; ok {
-				chunk.DocumentID = domain.DocumentID(v.GetStringValue())
-			}
-			if v, ok := fields["chunk_index"]; ok {
-				chunk.Index = int(v.GetNumberValue())
-			}
-			if v, ok := fields["text"]; ok {
-				chunk.Text = v.GetStringValue()
-			}
-			if v, ok := fields["token_count"]; ok {
-				chunk.TokenCount = int(v.GetNumberValue())
-			}
-			if v, ok := fields[domain.VectorIncarnationKey]; ok {
-				chunk.VectorIncarnation = v.GetStringValue()
-				if chunk.VectorIncarnation == "" {
-					continue
-				}
-			}
-			chunk.Metadata = make(map[string]any)
-			for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey} {
-				if v, ok := fields[key]; ok {
-					chunk.Metadata[key] = v.GetStringValue()
-				}
-			}
-			if value, tagged := fields[domain.VectorRevisionKey]; tagged {
-				target := vectorTarget{document: string(chunk.DocumentID), revision: value.GetStringValue()}
-				if attempt, present := fields[domain.VectorAttemptKey]; present {
-					target.attempt = attempt.GetStringValue()
-					if !validVectorIDPart(target.attempt) {
-						continue
-					}
-				}
-				id, ok := target.logicalID(string(chunk.ID))
-				if !ok {
-					continue
-				}
-				chunk.ID = domain.ChunkID(id)
-			} else if _, hasAttempt := fields[domain.VectorAttemptKey]; hasAttempt {
-				continue
-			}
+		chunk, ok := chunkFromMetadata(m.Vector.Id, m.Vector.Metadata)
+		if !ok {
+			continue
 		}
 		scored = append(scored, domain.ScoredChunk{
 			Chunk:     chunk,

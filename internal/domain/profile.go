@@ -32,6 +32,14 @@ var generationName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,23}$`)
 // and, for PostgreSQL, name its table.
 func ValidGenerationName(name string) bool { return generationName.MatchString(name) }
 
+// VectorTable returns the PostgreSQL table holding a generation's vectors.
+func VectorTable(generation string) string {
+	if generation == LegacyGeneration {
+		return "chunk_vectors"
+	}
+	return "chunk_vectors_" + generation
+}
+
 // Profile size limits.
 const (
 	MaxProfileBytes      = 4096

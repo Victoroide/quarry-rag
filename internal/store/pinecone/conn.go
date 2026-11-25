@@ -21,12 +21,17 @@ import (
 // ErrMetadataTooLarge marks metadata that exceeds the per-record limit.
 var ErrMetadataTooLarge = errors.New("pinecone: record metadata exceeds 40960 bytes")
 
+// ErrIndexShape marks a target with incompatible dimensions or distance metric.
+var ErrIndexShape = errors.New("pinecone: index shape does not match configuration")
+
 type indexConn interface {
 	UpsertVectors(context.Context, []*pinecone.Vector) (uint32, error)
 	QueryByVectorValues(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error)
 	DeleteVectorsByFilter(context.Context, *structpb.Struct) error
 	DeleteVectorsById(context.Context, []string) error
 	DeleteAllVectorsInNamespace(context.Context) error
+	FetchVectors(context.Context, []string) (*pinecone.FetchVectorsResponse, error)
+	ListVectors(context.Context, *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error)
 	Close() error
 }
 
@@ -173,10 +178,10 @@ func validateIndex(idx *pinecone.Index, cfg *config.Config) error {
 		return errors.New("pinecone: missing index dimension")
 	}
 	if int64(*idx.Dimension) != int64(cfg.EmbeddingDimensions) {
-		return fmt.Errorf("pinecone: index dimension %d does not match EMBEDDING_DIMENSIONS %d", *idx.Dimension, cfg.EmbeddingDimensions)
+		return fmt.Errorf("%w: index dimension %d does not match EMBEDDING_DIMENSIONS %d", ErrIndexShape, *idx.Dimension, cfg.EmbeddingDimensions)
 	}
 	if idx.Metric != pinecone.Cosine {
-		return fmt.Errorf("pinecone: index metric must be cosine, got %q", idx.Metric)
+		return fmt.Errorf("%w: index metric must be cosine, got %q", ErrIndexShape, idx.Metric)
 	}
 	if idx.Status == nil || !idx.Status.Ready {
 		return errors.New("pinecone: index is not ready")

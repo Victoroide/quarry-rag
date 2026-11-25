@@ -9,6 +9,8 @@ CREATE TABLE vector_generations (
     corpus_digest TEXT,
     verification JSONB,
     verified_at TIMESTAMPTZ,
+    ever_active BOOLEAN NOT NULL DEFAULT FALSE,
+    pending_write BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -34,7 +36,9 @@ CREATE TABLE vector_state (
     active_generation TEXT NOT NULL DEFAULT 'legacy' CHECK (active_generation ~ '^[a-z][a-z0-9_]{0,23}$'),
     frozen BOOLEAN NOT NULL DEFAULT FALSE,
     frozen_at TIMESTAMPTZ,
-    freeze_generation TEXT
+    freeze_generation TEXT,
+    legacy_store TEXT CHECK (legacy_store IN ('postgres', 'pinecone')),
+    legacy_target TEXT CHECK ((legacy_store IS NULL) = (legacy_target IS NULL) AND legacy_target IS DISTINCT FROM '')
 );
 
 INSERT INTO vector_state DEFAULT VALUES;
