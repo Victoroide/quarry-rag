@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
@@ -34,7 +35,6 @@ func TestQueryRerankScoresAreOptionalAndPreserveVectorScore(t *testing.T) {
 	for _, mode := range []string{"enabled", "disabled", "fallback"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := deadlineQueryConfig(t)
-			cfg.QueryTimeout, cfg.SynthesisTimeout = time.Second, 500*time.Millisecond
 			amb := llm.NewAmbassador(cfg)
 			amb.SetClient(llm.NewFakeConverser())
 			ret := retriever.NewRetriever(deadlineQueryStore{}, &deadlineEmbedder{release: closedQueryChannel()}, .7, 10)
@@ -104,7 +104,7 @@ func (e deadlineEmbedder) Embed(ctx context.Context, _ string) ([]float32, error
 
 func deadlineQueryConfig(t *testing.T) *config.Config {
 	t.Helper()
-	return &config.Config{MaxChunksPerQuery: 10, BedrockFallbackModel: "fallback", QueryTimeout: 50 * time.Millisecond, SynthesisTimeout: 40 * time.Millisecond, QueryConcurrency: 1, QueryQueueTimeout: 20 * time.Millisecond}
+	return &config.Config{MaxChunksPerQuery: 10, BedrockFallbackModel: "fallback", QueryTimeout: time.Hour, SynthesisTimeout: time.Hour, QueryConcurrency: 1, QueryQueueTimeout: time.Hour}
 }
 func deadlineQueryHandler(cfg *config.Config, emb domain.EmbeddingProvider, client llm.Converser) http.HandlerFunc {
 	amb := llm.NewAmbassador(cfg)
@@ -148,7 +148,7 @@ func TestQueryReportsSynthesisContextAndOptionalCitations(t *testing.T) {
 		{"no evidence by default", false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{MaxChunksPerQuery: 10, BedrockFallbackModel: "fallback", QueryTimeout: 5 * time.Second, SynthesisTimeout: 4 * time.Second}
+			cfg := streamQueryConfig()
 			cfg.SynthesisContextTokens, cfg.SynthesisRelativeScoreFloor = 256, .55
 			var chunks []domain.ScoredChunk
 			if tc.evidence {
@@ -218,19 +218,20 @@ func TestQueryReportsSynthesisContextAndOptionalCitations(t *testing.T) {
 }
 
 func TestQueryTimesOutWith504(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
-	defer cancel()
+	ctx := testBudget(t)
+	cfg := deadlineQueryConfig(t)
+	cfg.QueryTimeout = 50 * time.Millisecond
 	rec := httptest.NewRecorder()
-	deadlineQueryHandler(deadlineQueryConfig(t), deadlineEmbedder{}, nil)(rec, deadlineQueryRequest(ctx))
+	deadlineQueryHandler(cfg, deadlineEmbedder{}, nil)(rec, deadlineQueryRequest(ctx))
 	deadlineAssertError(t, rec, 504, "timeout")
 	require.NoError(t, ctx.Err(), "query exhausted the caller deadline")
 }
 func TestQueryOverloadReturns503(t *testing.T) {
 	entered, release := make(chan struct{}, 2), make(chan struct{})
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	ctx, cancel := context.WithCancel(testBudget(t))
 	defer cancel()
 	cfg := deadlineQueryConfig(t)
-	cfg.QueryTimeout = time.Second
+	cfg.QueryQueueTimeout = 20 * time.Millisecond
 	h := deadlineQueryHandler(cfg, deadlineEmbedder{entered: entered, release: release}, llm.NewFakeConverser())
 	done := make(chan struct{})
 	go func() { defer close(done); h(httptest.NewRecorder(), deadlineQueryRequest(ctx)) }()
@@ -255,12 +256,10 @@ func TestThrottlingMapsTo503(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%T/%s", err, err.Error()), func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-			defer cancel()
 			h := deadlineQueryHandler(deadlineQueryConfig(t), embedder.NewFakeEmbedder(256), deadlineConverser(func(context.Context) (*bedrockruntime.ConverseOutput, error) {
 				return nil, fmt.Errorf("upstream: %w", err)
 			}))
-			h(rec, deadlineQueryRequest(ctx))
+			h(rec, deadlineQueryRequest(testBudget(t)))
 			deadlineAssertError(t, rec, 503, "upstream_throttled")
 			require.Equal(t, "2", rec.Header().Get("Retry-After"))
 			require.NotContains(t, rec.Body.String(), "secret-host:443")
@@ -388,37 +387,44 @@ func TestQueryNoEvidenceLanguageCombinesHeaderLines(t *testing.T) {
 }
 
 func TestQueryQueueHonorsCancellation(t *testing.T) {
-	entered := make(chan struct{}, 2)
-	cfg := deadlineQueryConfig(t)
-	cfg.QueryTimeout, cfg.QueryQueueTimeout = time.Second, time.Second
-	h := deadlineQueryHandler(cfg, deadlineEmbedder{entered: entered}, nil)
-	firstCtx, firstCancel := context.WithCancel(t.Context())
-	defer firstCancel()
-	firstDone := make(chan struct{})
-	go func() { defer close(firstDone); h(httptest.NewRecorder(), deadlineQueryRequest(firstCtx)) }()
-	<-entered
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	rec := httptest.NewRecorder()
-	go func() { defer close(done); h(rec, deadlineQueryRequest(ctx)) }()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(300 * time.Millisecond):
-		t.Error("queued request did not stop after cancellation")
-	}
-	firstCancel()
-	<-firstDone
-	<-done
-	require.Empty(t, rec.Body.String())
-	require.Empty(t, rec.Header())
-	require.Empty(t, entered, "queued request entered the pipeline")
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{}, 2)
+		h := deadlineQueryHandler(deadlineQueryConfig(t), deadlineEmbedder{entered: entered}, nil)
+		firstCtx, firstCancel := context.WithCancel(t.Context())
+		defer firstCancel()
+		go h(httptest.NewRecorder(), deadlineQueryRequest(firstCtx))
+		<-entered
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan struct{})
+		rec := httptest.NewRecorder()
+		go func() { defer close(done); h(rec, deadlineQueryRequest(ctx)) }()
+		synctest.Wait()
+		require.Empty(t, entered, "queued request entered the pipeline")
+		select {
+		case <-done:
+			t.Fatal("the second request returned before cancellation")
+		default:
+		}
+
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("the queued request did not stop after cancellation")
+		}
+		require.Empty(t, rec.Body.String())
+		require.Empty(t, rec.Header())
+		require.Empty(t, entered, "queued request entered the pipeline")
+	})
 }
 
 func TestQueryRejectsImmediatelyWithZeroQueueTimeout(t *testing.T) {
 	entered := make(chan struct{}, 2)
 	cfg := deadlineQueryConfig(t)
-	cfg.QueryTimeout, cfg.QueryQueueTimeout = time.Second, 0
+	cfg.QueryQueueTimeout = 0
 	h := deadlineQueryHandler(cfg, deadlineEmbedder{entered: entered}, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

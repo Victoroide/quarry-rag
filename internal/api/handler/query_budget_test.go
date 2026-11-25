@@ -72,8 +72,8 @@ func handlerBedrockStrictConfig() *config.Config {
 		BedrockFallbackModel:   "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 		SynthesisInputProfile:  "strict",
 		SynthesisContextTokens: 20_000,
-		SynthesisTimeout:       4 * time.Second,
-		QueryTimeout:           5 * time.Second,
+		SynthesisTimeout:       time.Hour,
+		QueryTimeout:           time.Hour,
 		MaxChunksPerQuery:      10,
 	}
 }
@@ -121,6 +121,8 @@ func TestQueryStrictBudgetJSONAndStreamParity(t *testing.T) {
 			}))
 			defer oaiServer.Close()
 
+			// The parity checks share the test deadline while the tokenizer and local server run.
+			ctx := testBudget(t)
 			cfg := &config.Config{
 				LLMProvider:               "openai",
 				OpenAIBaseURL:             oaiServer.URL,
@@ -128,8 +130,8 @@ func TestQueryStrictBudgetJSONAndStreamParity(t *testing.T) {
 				SynthesisOpenAIDeployment: "chatml-v1|gpt-4-0613|" + oaiServer.URL,
 				SynthesisInputProfile:     "strict",
 				SynthesisContextTokens:    20_000,
-				SynthesisTimeout:          4 * time.Second,
-				QueryTimeout:              5 * time.Second,
+				SynthesisTimeout:          time.Hour,
+				QueryTimeout:              time.Hour,
 				MaxChunksPerQuery:         10,
 			}
 			require.NoError(t, llm.ValidateSynthesisProfile(cfg))
@@ -142,7 +144,7 @@ func TestQueryStrictBudgetJSONAndStreamParity(t *testing.T) {
 
 			body, err := json.Marshal(QueryRequest{Query: fixture.question, Mode: "global"})
 			require.NoError(t, err)
-			jsonReq := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/query", strings.NewReader(string(body)))
+			jsonReq := httptest.NewRequestWithContext(ctx, http.MethodPost, "/query", strings.NewReader(string(body)))
 			jsonReq.Header.Set("Content-Type", "application/json")
 			jsonRec := httptest.NewRecorder()
 			h.ServeHTTP(jsonRec, jsonReq)
@@ -157,7 +159,7 @@ func TestQueryStrictBudgetJSONAndStreamParity(t *testing.T) {
 			require.Equal(t, 2, jsonResp.ContextChunks)
 
 			sseRec := httptest.NewRecorder()
-			h.ServeHTTP(sseRec, streamQueryRequest(t.Context(), string(body)))
+			h.ServeHTTP(sseRec, streamQueryRequest(ctx, string(body)))
 			require.Equal(t, http.StatusOK, sseRec.Code, sseRec.Body.String())
 			events := recordedEvents(t, sseRec.Body.String())
 			require.Len(t, events, 3)

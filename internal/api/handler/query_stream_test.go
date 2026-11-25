@@ -39,7 +39,7 @@ func (c *queryStreamConverser) ConverseStreamWithModelAndSystem(ctx context.Cont
 }
 
 func streamQueryConfig() *config.Config {
-	return &config.Config{MaxChunksPerQuery: 10, BedrockFallbackModel: "fallback", QueryTimeout: 5 * time.Second, SynthesisTimeout: 4 * time.Second}
+	return &config.Config{MaxChunksPerQuery: 10, BedrockFallbackModel: "fallback", QueryTimeout: time.Hour, SynthesisTimeout: time.Hour}
 }
 
 func streamQueryHandler(cfg *config.Config, evidence bool, c llm.Converser) http.HandlerFunc {
@@ -96,7 +96,10 @@ func TestQueryStreamRerankingPreservesScoresAndSynthesisOrder(t *testing.T) {
 	for _, mode := range []string{"enabled", "disabled", "fallback", "timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := streamQueryConfig()
-			cfg.RerankTimeout = 5 * time.Millisecond
+			cfg.RerankTimeout = time.Hour
+			if mode == "timeout" {
+				cfg.RerankTimeout = 5 * time.Millisecond
+			}
 			chunks := []domain.ScoredChunk{
 				{Chunk: domain.Chunk{ID: "orchard-0", DocumentID: "orchard", Text: "Orchard archive."}, Score: .9},
 				{Chunk: domain.Chunk{ID: "river-1", DocumentID: "river", Index: 1, Text: "River archive."}, Score: .8},
@@ -311,9 +314,10 @@ func TestQueryStreamPreEventErrorsRemainJSON(t *testing.T) {
 		})
 	}
 	cfg := deadlineQueryConfig(t)
+	cfg.QueryTimeout = 50 * time.Millisecond
 	rec := httptest.NewRecorder()
 	h := deadlineQueryHandler(cfg, deadlineEmbedder{}, nil)
-	h(rec, streamQueryRequest(t.Context(), `{"query":"archive"}`))
+	h(rec, streamQueryRequest(testBudget(t), `{"query":"archive"}`))
 	deadlineAssertError(t, rec, 504, "timeout")
 	requireQueryResponseHeaders(t, rec, http.StatusGatewayTimeout, "application/json")
 }
@@ -355,9 +359,7 @@ func streamDisconnect(t *testing.T, events []string, run func(publish func(strin
 		ended <- err
 		return nil, err
 	}}
-	cfg := streamQueryConfig()
-	cfg.QueryTimeout, cfg.SynthesisTimeout = time.Hour, time.Hour
-	srv := httptest.NewServer(streamQueryHandler(cfg, true, c))
+	srv := httptest.NewServer(streamQueryHandler(streamQueryConfig(), true, c))
 	defer srv.Close()
 	defer close(testEnded)
 	ctx, cancel := context.WithCancel(testBudget(t))
@@ -460,7 +462,6 @@ func TestQueryStreamAdmissionAndSynthesisTimeout(t *testing.T) {
 	cfg := streamQueryConfig()
 	cfg.QueryConcurrency = 1
 	cfg.QueryQueueTimeout = 10 * time.Millisecond
-	cfg.SynthesisTimeout = time.Second
 	entered := make(chan struct{}, 1)
 	c := &queryStreamConverser{call: func(ctx context.Context, _ func(string) error) (*bedrockruntime.ConverseOutput, error) {
 		entered <- struct{}{}
