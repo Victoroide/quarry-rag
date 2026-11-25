@@ -27,7 +27,7 @@ jobs:
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
-          args: --timeout=5m --config=.golangci.yml
+          args: --timeout=5m --config=.golangci.yml ./... ./.github/scripts/testreport
 
   test:
     name: Test with race detection
@@ -35,6 +35,33 @@ jobs:
     timeout-minutes: 20
     env:
       CGO_ENABLED: "1"
+    services:
+      postgres:
+        image: postgres:16.13-alpine3.23@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+        ports:
+          - 5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U rag -d postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      pgvector:
+        image: pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+        ports:
+          - 5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U rag -d postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,10 +69,71 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Check container engine
-        run: docker info
+          cache: false
+      - name: Locate Go caches
+        id: go
+        shell: bash
+        run: |
+          {
+            echo "version=$(go env GOVERSION)"
+            echo "modules=$(go env GOMODCACHE)"
+            echo "image=${ImageOS}-${ImageVersion}"
+            echo "week=$(date -u +%G-W%V)"
+          } >> "$GITHUB_OUTPUT"
+          echo "GOCACHE=$RUNNER_TEMP/go-build-race" >> "$GITHUB_ENV"
+      - name: Restore Go modules
+        id: modules
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.modules }}
+          key: go-mod-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.version }}-
+      - name: Restore race build objects
+        id: build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.GOCACHE }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.image }}-${{ steps.go.outputs.version }}-cgo1-${{ hashFiles('go.mod', 'go.sum') }}-${{ steps.go.outputs.week }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.image }}-${{ steps.go.outputs.version }}-cgo1-${{ hashFiles('go.mod', 'go.sum') }}-
+            go-race-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.image }}-${{ steps.go.outputs.version }}-cgo1-
+      - name: Check database services
+        shell: bash
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER" psql -U rag -d postgres -v ON_ERROR_STOP=1 -tAc 'SELECT version()'
+          docker exec "$PGVECTOR_CONTAINER" psql -U rag -d postgres -v ON_ERROR_STOP=1 -tAc "SELECT name || ' ' || default_version FROM pg_available_extensions WHERE name = 'vector'" | grep -Fx 'vector 0.8.7'
+          docker exec --user root "$PGVECTOR_CONTAINER" localedef --no-archive -i es_ES -f UTF-8 es_ES.utf8
+      - name: Test the report tool
+        run: go test -race -count=1 ./.github/scripts/testreport
+      - name: Build the report tool
+        run: go build -o "$RUNNER_TEMP/testreport" ./.github/scripts/testreport
       - name: Run unit and integration tests
-        run: go test -race -count=1 ./...
+        shell: bash
+        env:
+          QUARRY_TEST_POSTGRES_ADMIN_DSN: postgres://rag:rag@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres?sslmode=disable
+          QUARRY_TEST_PGVECTOR_ADMIN_DSN: postgres://rag:rag@127.0.0.1:${{ job.services.pgvector.ports['5432'] }}/postgres?sslmode=disable
+          MODULE_CACHE: ${{ steps.modules.outputs.cache-hit == 'true' && 'exact hit' || steps.modules.outputs.cache-matched-key != '' && 'restored from an earlier key' || 'miss' }}
+          BUILD_CACHE: ${{ steps.build.outputs.cache-hit == 'true' && 'exact hit' || steps.build.outputs.cache-matched-key != '' && 'restored from an earlier key' || 'miss' }}
+        run: |
+          mapfile -t packages < <(go list ./...)
+          go test -race -count=1 -json ./... |
+            "$RUNNER_TEMP/testreport" -module-cache "$MODULE_CACHE" -build-cache "$BUILD_CACHE" "${packages[@]}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save Go modules
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.modules.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.modules }}
+          key: ${{ steps.modules.outputs.cache-primary-key }}
+      - name: Save race build objects
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.GOCACHE }}
+          key: ${{ steps.build.outputs.cache-primary-key }}
 
   windows-ledger:
     name: Test Windows fixture ledger

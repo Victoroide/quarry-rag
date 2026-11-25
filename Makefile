@@ -8,12 +8,12 @@ build:
 
 # Run static analysis on the host.
 vet:
-	go vet ./...
+	go vet ./... ./.github/scripts/testreport
 
 lint:
-	golangci-lint run ./...
+	golangci-lint run ./... ./.github/scripts/testreport
 
-# Full tests need a running Docker daemon for isolated database containers.
+# Database-backed tests start containers unless the test services are configured; see docs/development.md.
 test:
 	go test -race -count=1 ./...
 

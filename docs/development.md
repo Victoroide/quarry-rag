@@ -101,13 +101,16 @@ Failing inputs are saved under the affected package's `testdata/fuzz/<Target>/` 
 
 | Workflow | Trigger | Checks |
 |---|---|---|
-| [CI](../.github/workflows/ci.yml) | Pushes to `main` and pull requests | Lint; Test with race detection; Build service and runtime image for both published platforms and check them; Check reachable vulnerabilities; Check vector diagrams. |
+| [CI](../.github/workflows/ci.yml) | Pushes to `main` and pull requests | Lint; Test with race detection against PostgreSQL and pgvector services; Build service and runtime image for both published platforms and check them; Check reachable vulnerabilities; Check vector diagrams. |
 | [CodeQL](../.github/workflows/codeql.yml) | Pushes to `main`, pull requests targeting `main` and a daily schedule at 04:31 UTC | Analyze Go for security issues. |
 | [Dependency review](../.github/workflows/dependency-review.yml) | Pull requests | Review dependency changes; reject vulnerabilities of high severity or above. |
 | [Scorecard](../.github/workflows/scorecard.yml) | Pushes to `main`, weekly, branch protection changes and manual dispatch | Publish Scorecard results, retain the SARIF artifact for five days and upload it to code scanning. |
 | [Release](../.github/workflows/release.yml) | Version tags matching `v*.*.*` | Builds archives and the runtime image, signs provenance, and publishes the release only after both builds and attestations succeed. |
 | [Release check](../.github/workflows/release-check.yml) | Pull requests | Checks [release packaging](#releases) when release inputs may have changed. Cancels superseded checks for the same pull request. |
 | [Fuzz](../.github/workflows/fuzz.yml) | Daily and manual dispatch | Exercise every discovered target for five seconds per target, with two minutes per target on Mondays and by default on manual dispatch. Longer campaigns group targets by package and split jobs at the runner time limit. Manual dispatch accepts a per-target duration up to 5h56m. Failing inputs are retained for 14 days. |
+| [Database fixtures](../.github/workflows/fixtures.yml) | Weekly and manual dispatch | Run representative PostgreSQL and pgvector tests with disposable containers, shuffled, in separate invocations. |
+
+The race job runs `go test -race -count=1 -json ./...` against a PostgreSQL service and a pgvector service pinned to the images that `pgtest` starts locally. It also tests `.github/scripts/testreport` with race detection in a separate step because `./...` skips directories beginning with a dot. The report command fails the job when a package does not build, fails, has no result or reuses a cached one. Its summary lists package results, the slowest tests and subtests separately, skips, packages without test files, fixture setup and cleanup times, and the state of both caches. The module cache and the race build objects are restored under separate keys, and only pushes to `main` save them, so pull requests build cold when no entry matches.
 
 ### Runtime Image Job
 
