@@ -155,19 +155,23 @@ func (c *Client) PresignGet(ctx context.Context, s3Key string) (string, error) {
 // Delete removes an object from S3 by key.
 // A versioned bucket records a delete marker and keeps earlier versions.
 func (c *Client) Delete(ctx context.Context, s3Key string) error {
-	return c.DeleteVersion(ctx, s3Key, "")
+	return c.deleteObject(ctx, s3Key, nil)
 }
 
-// DeleteVersion permanently removes one version of an object. An empty version
-// deletes the current object like Delete.
+// DeleteVersion permanently removes the named version of an object.
 func (c *Client) DeleteVersion(ctx context.Context, s3Key, versionID string) error {
+	if versionID == "" {
+		return fmt.Errorf("s3: delete version of %s: %w", s3Key, ErrVersionIDMissing)
+	}
+	return c.deleteObject(ctx, s3Key, &versionID)
+}
+
+func (c *Client) deleteObject(ctx context.Context, s3Key string, versionID *string) error {
 	input := &s3.DeleteObjectInput{
 		Bucket:              &c.bucket,
 		Key:                 &s3Key,
+		VersionId:           versionID,
 		ExpectedBucketOwner: c.owner,
-	}
-	if versionID != "" {
-		input.VersionId = &versionID
 	}
 	if _, err := c.s3Client.DeleteObject(ctx, input); err != nil {
 		return fmt.Errorf("s3: delete %s: %w", s3Key, err)
