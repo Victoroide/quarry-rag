@@ -85,9 +85,13 @@ To opt in to smoke testing against a configured service:
 RUN_SMOKE=1 go test ./test/smoke/... -count=1 -v -timeout 120s
 ```
 
+The versioned-bucket check writes and deletes objects under `documents/smoke/` in `S3_BUCKET`, so it also requires `SMOKE_S3_VERSIONED=1` and a disposable bucket with versioning enabled. It verifies that a write reports a version, that a plain delete leaves the version behind a marker, and that deleting by version ID removes both, which [source upload reclamation](#source-upload-reclamation-scriptsreconcile) relies on.
+
 ### 4. Fuzz Tests
 
 The full race suite executes each fuzz target's seed corpus on pull requests and pushes to `main`. The targets cover Unicode entity matching, calibration profile parsing and Pinecone write receipt header parsing. To exercise generated inputs locally, use `make fuzz`. It discovers targets from active test files in the root module and applies the `FUZZTIME` budget to each target. The default is 30 seconds per target.
+
+The source-upload reconciliation target exercises the object keys accepted by reclamation.
 
 ```sh
 make fuzz FUZZTIME=2m
@@ -217,6 +221,91 @@ are deleted as a whole. PostgreSQL rows and source objects are preserved. A
 delete error stops further deletions and returns a nonzero exit status; earlier
 successful deletions remain applied. Rerun the dry run after the index has
 converged to verify the remaining selections.
+
+### Source Upload Reclamation (`scripts/reconcile`)
+
+Use `-source-uploads` to reclaim original files recorded by
+[`SOURCE_UPLOAD_JOURNAL`](configuration.md#environment-variables)
+that no document adopted. Configure `DATABASE_URL`, `S3_BUCKET`, `AWS_REGION`
+and AWS credentials. Set `S3_EXPECTED_BUCKET_OWNER` to enforce the expected
+account. The command runs independently of serving and vector configuration
+and can run during ingestion. Each version listing is scoped to a recorded
+object key in the configured bucket, and the command matches the full key.
+Prerequisites and rollout are in the
+[deployment guide](deployment.md#source-upload-journal).
+
+```sh
+make reconcile ARGS="-source-uploads"
+make reconcile ARGS="-source-uploads -apply"
+```
+
+Without `-apply` the command only reads: it changes no database row and writes
+or deletes no object. It reads the journal and the recorded keys' versions and
+retention state, then prints what `-apply` would do. With `-apply` it claims
+uploads that are unadopted and past their lease and `-min-age`, rechecks that no
+document or deletion receipt names the key, and deletes every version and
+delete marker of that key by version ID. A claimed row fences acceptance: a
+stalled upload that reaches acceptance afterwards fails with `503` and is
+retried by its caller.
+
+Before dispatching a PUT, the writer marks its journal row as uncertain. An
+acknowledgment confirms that attempt alone. A lost response or an earlier
+attempt with an unknown outcome can still produce a version. While the key is
+empty, reconciliation keeps rechecking it at the pace the reasons below give. It
+drops the row after a clean recheck at least `-settle` after the claim only when
+the writer never dispatched a PUT or all attempts are accounted for.
+
+A row pending with `unacknowledged_write` never settles on its own. It records
+a PUT with an unknown outcome and keeps its key under exact-key rechecks. A late
+version is still found and removed on a later check.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-source-uploads` | off | Selects this mode; it cannot be combined with `-backfill-collections`, `-after` or `-page`. |
+| `-apply` | off | Performs the removals; without it nothing is written. |
+| `-limit` | 1000 | Maximum uploads examined in one run. `limited` in the report is true when more were due. |
+| `-min-age` | `1h` | Uploads younger than this stay untouched, even after their lease. |
+| `-settle` | `30m` | Minimum time between claim and settlement for accounted-for writes (at least `1m`). |
+| `-max-bytes` | 1 GiB | Maximum object bytes deleted in one run; a version that would exceed it stays pending. |
+| `-batch` | 100 | Uploads claimed per round, 1 to 1000. |
+
+The command prints JSON: `mode` (`inventory` or `apply`), `examined`, `limited`,
+`deleted_versions`, `deleted_bytes`, `settled` and `pending`; `uploads`, the
+first 100 examined uploads with `upload_id`, `key`, `acknowledged`, `write_pending`, `action`
+(`delete`, `settle` or `pending`), `reason`, `versions`, `removals` and `bytes`; and
+`journal`, the bucket's rows counted by `state`, `reason`, `acknowledged` and
+`write_pending` with the oldest creation time. `write_pending` identifies a PUT
+with at least one possible delivery outstanding, even when `acknowledged` is
+true. Per-upload `removals` and `bytes` count versions
+and bytes selected in inventory mode or confirmed deleted in apply mode. Both
+modes process rows in due-time order and share one byte budget across rows.
+Apply reserves bytes before sending each delete and keeps the reservation even
+if the response fails. A partial removal reports its confirmed counts and stays
+pending with the reason. Inventory leaves the aggregate deletion counters at zero.
+
+An upload stays `pending`, with one of these reasons, until the uncertainty
+ends. `awaiting_settlement` rechecks every `-settle`/3. Every other reason
+retries after `-settle`/3 doubled for up to six steps, at most one day (about
+10.7 hours with the default `-settle`).
+
+| Reason | Meaning |
+|---|---|
+| `awaiting_settlement` | The object was removed or is absent; a clean recheck can drop the row when its writes are accounted for. |
+| `unacknowledged_write` | The object is absent, and at least one PUT could still land. |
+| `legal_hold`, `retention_until=<time>` | A version is protected; no version of the key is deleted. |
+| `versions_unlisted`, `versions_truncated` | The key's version history could not be read, its listing was indeterminate, or it exceeded 100 entries. |
+| `version_id_missing` | A version or delete marker lacks an ID, so the entire key stays pending. |
+| `version_size_invalid` | A data version has a missing or negative size, so the entire key stays pending. |
+| `lock_unknown` | The protection of a version could not be read; nothing is deleted. |
+| `delete_failed`, `delete_failed:<code>` | A delete returned an error. A later check reinspects the key. |
+| `byte_limit` | The next version would exceed `-max-bytes`. |
+| `referenced_by_document` | A document or deletion receipt names the key; it is never deleted. |
+| `unrecognized_key` | The key is not `documents/{type}/{document}/{upload}/{file}` for its own row. |
+
+A database error stops the command with a nonzero status; an S3 error leaves
+the affected upload pending. Rerun the inventory until `journal` shows no
+`staged` or `claimed` rows beyond uploads that are legitimately in flight,
+protected or pending with `unacknowledged_write`.
 
 ### Collection Metadata Backfill
 
