@@ -32,7 +32,7 @@ ci:
 image-check:
 	set -e; dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; \
 	docker buildx build --target runtime --platform linux/amd64,linux/arm64 --output "type=oci,dest=$$dir/runtime-image.tar" .; \
-	.github/scripts/image-check.sh "$$dir/runtime-image.tar"
+	docker buildx build --target verify-runtime --build-context "runtime-output=$$dir" --output type=cacheonly --progress plain .
 
 # Start the full stack
 up:
