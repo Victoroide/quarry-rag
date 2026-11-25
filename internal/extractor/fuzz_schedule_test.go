@@ -1,72 +1,49 @@
 package extractor
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"os"
-	"path/filepath"
-	"regexp"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
 
-// TestFuzzTargetsAreScheduled keeps the local and scheduled fuzzing entry
-// points in step with the fuzz functions declared by this package.
 func TestFuzzTargetsAreScheduled(t *testing.T) {
-	const root = "../.."
-	workingDirectory, err := filepath.Abs(".")
-	if err != nil {
-		t.Fatal(err)
+	pkg := strings.TrimSpace(fuzzCommandOutput(t, exec.CommandContext(t.Context(), "go", "list", ".")))
+	listed := fuzzCommandOutput(t, exec.CommandContext(t.Context(), "go", "test", "-p", "2", "-list", "^Fuzz", "."))
+	var want []string
+	for line := range strings.SplitSeq(listed, "\n") {
+		if strings.HasPrefix(line, "Fuzz") {
+			want = append(want, line)
+		}
 	}
-	moduleRoot, err := filepath.Abs(root)
-	if err != nil {
-		t.Fatal(err)
+	if len(want) == 0 {
+		t.Fatal("go test listed no active fuzz targets")
 	}
-	relative, err := filepath.Rel(moduleRoot, workingDirectory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pkg := "./" + filepath.ToSlash(relative)
-	quotedPkg := regexp.QuoteMeta(pkg)
+	slices.Sort(want)
 
-	files, err := filepath.Glob("*_test.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var targets []string
-	for _, file := range files {
-		parsed, parseErr := parser.ParseFile(token.NewFileSet(), file, nil, 0)
-		if parseErr != nil {
-			t.Fatal(parseErr)
+	cmd := exec.CommandContext(t.Context(), "go", "run", "./scripts/fuzz")
+	cmd.Dir = "../.."
+	inventory := fuzzCommandOutput(t, cmd)
+	var got []string
+	for line := range strings.SplitSeq(strings.TrimSuffix(inventory, "\n"), "\n") {
+		path, target, ok := strings.Cut(line, "\t")
+		if !ok || path == "" || target == "" {
+			t.Fatalf("invalid inventory entry %q", line)
 		}
-		for _, decl := range parsed.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Fuzz") {
-				targets = append(targets, fn.Name.Name)
-			}
+		if path == pkg {
+			got = append(got, target)
 		}
 	}
-	if len(targets) == 0 {
-		t.Fatal("no fuzz targets found")
+	if !slices.Equal(got, want) {
+		t.Errorf("scheduled fuzz targets = %q, go test lists %q", got, want)
 	}
+}
 
-	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+func fuzzCommandOutput(t *testing.T, cmd *exec.Cmd) string {
+	t.Helper()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%s: %v\n%s", cmd, err, output)
 	}
-	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "fuzz.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, target := range targets {
-		name := regexp.QuoteMeta(target)
-		command := regexp.MustCompile(`(?m)^\tgo test -run='\^\$\$' -fuzz='\^` + name + `\$\$' -fuzztime="\$\(FUZZTIME\)" ` + quotedPkg + `$`)
-		if !command.Match(makefile) {
-			t.Errorf("Makefile fuzz target does not run %s in %s", target, pkg)
-		}
-		entry := regexp.MustCompile(`(?m)^\s*- package: ` + quotedPkg + `\n\s*target: ` + name + `$`)
-		if !entry.Match(workflow) {
-			t.Errorf("fuzz workflow matrix does not run %s in %s", target, pkg)
-		}
-	}
+	return string(output)
 }

@@ -18,23 +18,7 @@ test:
 	go test -race -count=1 ./...
 
 fuzz:
-	go test -run='^$$' -fuzz='^FuzzResolveContext$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
-	go test -run='^$$' -fuzz='^FuzzExtractors$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
-	go test -run='^$$' -fuzz='^FuzzDOCFIBAndPieces$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
-	go test -run='^$$' -fuzz='^FuzzDOCStoryPLC$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
-	go test -run='^$$' -fuzz='^FuzzDOCXStories$$' -fuzztime="$(FUZZTIME)" ./internal/extractor
-	go test -run='^$$' -fuzz='^FuzzChunk$$' -fuzztime="$(FUZZTIME)" ./internal/chunker
-	go test -run='^$$' -fuzz='^FuzzChunkEmbeddingProfile$$' -fuzztime="$(FUZZTIME)" ./internal/chunker
-	go test -run='^$$' -fuzz='^FuzzDecodeProfile$$' -fuzztime="$(FUZZTIME)" ./internal/embeddinginput
-	go test -run='^$$' -fuzz='^FuzzSanitizeForPrompt$$' -fuzztime="$(FUZZTIME)" ./internal/textutil
-	go test -run='^$$' -fuzz='^FuzzNormalizeForIngest$$' -fuzztime="$(FUZZTIME)" ./internal/textutil
-	go test -run='^$$' -fuzz='^FuzzBuildSynthesisPrompt$$' -fuzztime="$(FUZZTIME)" ./internal/pipeline
-	go test -run='^$$' -fuzz='^FuzzCountOpenAIChatTokens$$' -fuzztime="$(FUZZTIME)" ./internal/llm
-	go test -run='^$$' -fuzz='^FuzzDecodeJSONObject$$' -fuzztime="$(FUZZTIME)" ./internal/api/handler
-	go test -run='^$$' -fuzz='^FuzzDecodeGrantBatch$$' -fuzztime="$(FUZZTIME)" ./internal/store/postgres
-	go test -run='^$$' -fuzz='^FuzzSubjectCredentialParsing$$' -fuzztime="$(FUZZTIME)" ./internal/subjectauth
-	go test -run='^$$' -fuzz='^FuzzSubjectTrustAndClaims$$' -fuzztime="$(FUZZTIME)" ./internal/subjectauth
-	go test -run='^$$' -fuzz='^FuzzVerifyCitations$$' -fuzztime="$(FUZZTIME)" ./internal/pipeline
+	FUZZTIME="$(FUZZTIME)" sh .github/scripts/fuzz.sh
 
 # Run host quality gates before building the runtime image.
 ci:
