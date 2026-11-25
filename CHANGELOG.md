@@ -10,6 +10,7 @@ Notable changes are grouped by release.
 - Optional [Word binary stories](docs/api.md#word-binary-extraction) for `.doc` uploads.
 - Optional [strict synthesis budgeting](docs/configuration.md#strict-synthesis-budgets) measures complete model input, reserves answer space and reports the measured input count.
 - `DOCX_STORIES` lets deployments opt in to indexing DOCX headers, footers and comments.
+- Staged delegated access-token verification with request-scoped subject credentials for the Go client and stdio MCP.
 - `INGEST_CONTENT_DEDUP=off` lets deployments disable content matching across upload IDs and retain explicit UUID retries.
 - Optional OCR of image-only PDF uploads through Amazon Textract (`OCR_PROVIDER=textract`, requires `S3_BUCKET`; migration 008).
 - Optional PostgreSQL vector store (`VECTOR_STORE=postgres`, pgvector) that writes vectors in the completion transaction.

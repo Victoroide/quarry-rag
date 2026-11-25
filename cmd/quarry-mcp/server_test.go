@@ -49,16 +49,21 @@ func stdioPipes(t *testing.T) (input, output, logs *os.File) {
 
 func TestStdioSession(t *testing.T) {
 	var calls atomic.Int32
+	subject := subjectFixture(time.Now().Add(time.Minute), 1)
+	file := filepath.Join(t.TempDir(), "subject-token")
+	replaceSubjectFile(t, file, subject, 0o600)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		assert.Equal(t, "GET /documents/00000000-0000-4000-8000-000000000001", r.Method+" "+r.URL.Path)
 		assert.Equal(t, "synthetic-token", r.Header.Get("X-Service-Token"))
+		assert.Equal(t, "Bearer "+subject, r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"document_id":"00000000-0000-4000-8000-000000000001","doc_type":"guide","collection":"","status":"processing","chunk_count":0,"file_name":null,"file_type":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","completed_at":null}`)
 	}))
 	defer api.Close()
 	t.Setenv("QUARRY_URL", strings.TrimPrefix(api.URL, "http://"))
 	t.Setenv("QUARRY_SERVICE_TOKEN", "synthetic-token")
+	t.Setenv("QUARRY_SUBJECT_TOKEN_FILE", file)
 	for _, name := range []string{"QUARRY_TIMEOUT", "QUARRY_MCP_FILE_ROOTS", "QUARRY_MCP_READ_ONLY"} {
 		t.Setenv(name, "")
 	}
@@ -131,6 +136,7 @@ func TestStdioSession(t *testing.T) {
 	diagnostics, err := io.ReadAll(logs)
 	require.NoError(t, err)
 	assert.NotContains(t, string(diagnostics), "synthetic-token")
+	assert.NotContains(t, string(diagnostics), subject)
 	assert.EqualValues(t, 1, calls.Load())
 }
 

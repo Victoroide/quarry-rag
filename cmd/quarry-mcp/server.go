@@ -14,7 +14,11 @@ import (
 )
 
 func newServer(cfg config) (*mcp.Server, error) {
-	api, err := client.New(cfg.baseURL, client.WithServiceToken(cfg.token), client.WithTimeout(cfg.timeout))
+	opts := []client.Option{client.WithServiceToken(cfg.token), client.WithTimeout(cfg.timeout)}
+	if cfg.subjectTokenFile != "" {
+		opts = append(opts, client.WithSubjectCredentialProvider(subjectTokenFile(cfg.subjectTokenFile)))
+	}
+	api, err := client.New(cfg.baseURL, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -67,6 +71,8 @@ func toolErrorMessage(err error, token string) string {
 		}
 	case errors.As(err, &rejected):
 		message = rejected.Error()
+	case errors.Is(err, client.ErrSubjectCredential):
+		message = client.ErrSubjectCredential.Error()
 	case errors.Is(err, context.DeadlineExceeded):
 		message = "request timed out"
 	case errors.Is(err, context.Canceled):

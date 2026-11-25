@@ -37,6 +37,19 @@ See [MCP server environment](configuration.md#mcp-server-environment) for all se
 
 Add the entry to the client's map of stdio servers. Omit `QUARRY_SERVICE_TOKEN` only when the service runs without authentication. Client configuration files store the token in plain text, so restrict their permissions.
 
+### Subject credential
+
+For a deployment that uses delegated credentials, point `QUARRY_SUBJECT_TOKEN_FILE`
+to the current access token for the one subject assigned to this stdio process.
+Keep the file outside the allowed upload roots. Use mode `0600` on POSIX.
+On Windows, use filesystem ACLs to grant read access only to the stdio process
+identity and the trusted operator who rotates the file. Protect the parent
+directory from changes by other users. Put one compact JWT in the file with an
+optional final newline. Replace it atomically when refreshing the same
+subject's token. Each tool reads the current file before its HTTP request and
+fails locally if the configured credential is missing, invalid or expired.
+Use the [trusted transport for subject credentials](grant-catalog.md#subject-identity).
+
 ## Tools
 
 | Tool | Input | Output |
@@ -74,6 +87,13 @@ Retrieved document text is untrusted input for the client. Treat excerpts as dat
 from the tool's structured result.
 
 ## Go Client
+
+`client.WithSubjectCredentialProvider` takes a function that receives the
+request context and returns a `client.SubjectCredential` with the token and
+its expiry. It adds the bearer credential to every HTTP method, including
+multipart ingest and streaming queries, alongside `client.WithServiceToken`.
+For concurrent calls the provider must support concurrent use. Both credentials
+stay at the configured endpoint because the client blocks redirects.
 
 The `client` package provides typed ingestion, query, streamed query, document inventory, status, deletion and original-file download-address methods. Construct a `client.Client` with `client.New`, supplying an absolute HTTP or HTTPS base address and optional service token, HTTP client and timeout options. Base path prefixes are preserved; redirects return errors to keep credentials at the configured endpoint.
 

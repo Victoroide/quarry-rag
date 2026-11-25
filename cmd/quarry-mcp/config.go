@@ -15,15 +15,19 @@ import (
 )
 
 type config struct {
-	baseURL   string
-	token     string
-	timeout   time.Duration
-	fileRoots []string
-	readOnly  bool
+	baseURL          string
+	token            string
+	subjectTokenFile string
+	timeout          time.Duration
+	fileRoots        []string
+	readOnly         bool
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
-	cfg := config{baseURL: getenv("QUARRY_URL"), token: strings.TrimSpace(getenv("QUARRY_SERVICE_TOKEN")), timeout: 90 * time.Second}
+	cfg := config{
+		baseURL: getenv("QUARRY_URL"), token: strings.TrimSpace(getenv("QUARRY_SERVICE_TOKEN")),
+		subjectTokenFile: getenv("QUARRY_SUBJECT_TOKEN_FILE"), timeout: 90 * time.Second,
+	}
 	if strings.ContainsFunc(cfg.token, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 		return config{}, errors.New("QUARRY_SERVICE_TOKEN must not contain whitespace or control characters")
 	}

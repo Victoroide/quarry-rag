@@ -8,6 +8,10 @@ The table below lists the environment variables recognized by the service:
 
 | Variable | Type | Default | Constraints | Description |
 |---|---|---|---|---|
+| `AUTHZ_AUDIENCE` | string | `""` | Quarry-specific audience reserved at the issuer | Staged [subject authority](grant-catalog.md#subject-identity) setting. |
+| `AUTHZ_ISSUER` | string | `""` | Exact HTTPS issuer without credentials, query or fragment | Staged subject authority setting. |
+| `AUTHZ_JWKS_FILE` | path | `""` | Local public key set | Staged subject authority setting. |
+| `AUTHZ_MODE` | string | `service` | `service` or unset | Other values prevent startup. |
 | `AWS_ACCESS_KEY_ID` | string | `""` | Set together with `AWS_SECRET_ACCESS_KEY`, or leave both empty | Optional static AWS access key ID. When both keys are empty, AWS clients use the default credential chain. |
 | `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. See [AWS retries](deployment.md#aws-retries-and-deadlines) for retry policy details. |
 | `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls, Bedrock reranking and S3 object storage. Required outside offline mode when either provider uses Bedrock, reranking is enabled, or original-file storage is enabled. |
@@ -251,6 +255,7 @@ The local stdio command reads these variables separately from the HTTP service. 
 | `QUARRY_MCP_FILE_ROOTS` | path list | `""` (disabled) | Existing directories separated by the OS path-list separator | Allowed roots for file ingestion; roots and file paths are resolved through symlinks. Only regular files with `.pdf`, `.docx`, `.doc`, `.txt`, `.md` or `.markdown` extensions are accepted, case-insensitively. |
 | `QUARRY_MCP_READ_ONLY` | boolean | `false` | Boolean | Registers only query, list and get tools. |
 | `QUARRY_SERVICE_TOKEN` | string | `""` | No whitespace or control characters after trimming | Sent only in the `X-Service-Token` request header. |
+| `QUARRY_SUBJECT_TOKEN_FILE` | path | `""` | Protected regular file | Optional source of the [stdio subject credential](mcp.md#subject-credential). |
 | `QUARRY_TIMEOUT` | duration | `90s` | 1s to 10m | HTTP request timeout, including upload and response transfer. The default exceeds the service's default write timeout. |
 | `QUARRY_URL` | string | Required | Absolute HTTP or HTTPS address, or `host:port` for plain HTTP; no credentials, query or fragment | HTTP API base address; any path prefix is preserved. |
 
