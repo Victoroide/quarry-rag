@@ -59,6 +59,7 @@ type Job struct {
 	DocType    string
 	Attempts   int
 	LeaseOwner string
+	LeaseToken *string
 
 	Collection string
 }
@@ -67,7 +68,7 @@ type Job struct {
 type JobStore interface {
 	ClaimJob(context.Context, string, time.Duration, int) (*Job, error)
 	HeartbeatJob(context.Context, Job, time.Duration) (bool, error)
-	CompleteJob(context.Context, Job, []Chunk) (bool, error)
+	CompleteJob(context.Context, Job, []Chunk, IndexObservation) (bool, error)
 	RetryJob(context.Context, Job, time.Duration, string) error
 	FailJob(context.Context, Job, string) error
 	ReleaseJob(context.Context, Job) error

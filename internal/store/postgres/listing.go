@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const summaryColumns = `id::text, doc_type, collection, s3_key, status, chunk_count, file_name, file_type, created_at, updated_at, completed_at, last_error`
+const summaryColumns = `id::text, doc_type, collection, s3_key, status, chunk_count, file_name, file_type, created_at, updated_at, completed_at, last_error, COALESCE(index_visibility,'unknown'), index_visibility_observed_at`
 
 var _ domain.DocumentLister = (*Client)(nil)
 
@@ -33,7 +33,7 @@ func (c documentLister) columns() string {
 
 func (c documentLister) scanDocumentSummary(row pgx.Row) (*domain.DocumentSummary, error) {
 	var doc domain.DocumentSummary
-	dest := []any{&doc.ID, &doc.DocType, &doc.Collection, &doc.S3Key, &doc.Status, &doc.ChunkCount, &doc.FileName, &doc.FileType, &doc.CreatedAt, &doc.UpdatedAt, &doc.CompletedAt, &doc.LastError}
+	dest := []any{&doc.ID, &doc.DocType, &doc.Collection, &doc.S3Key, &doc.Status, &doc.ChunkCount, &doc.FileName, &doc.FileType, &doc.CreatedAt, &doc.UpdatedAt, &doc.CompletedAt, &doc.LastError, &doc.IndexVisibility, &doc.IndexVisibilityObservedAt}
 	if c.includeIncarnation {
 		dest = append(dest, &doc.Incarnation)
 	}

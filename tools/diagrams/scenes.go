@@ -130,10 +130,10 @@ func dataModel() diagram {
 	d.Nodes = []node{
 		{ID: "documents", Title: "documents", Columns: []column{
 			{"id", "UUID", "PK", ""}, {"content", "TEXT", "", ""}, {"metadata", "JSONB", "", ""}, {"status", "TEXT", "", ""}, {"chunk_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"file_name", "TEXT", "", ""}, {"file_type", "TEXT", "", ""}, {"s3_key", "TEXT", "", ""}, {"content_preview", "TEXT", "", ""}, {"doc_type", "TEXT", "", ""}, {"fingerprint", "TEXT", "", ""}, {"last_error", "TEXT", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"completed_at", "TIMESTAMPTZ", "", ""}, {"collection", "TEXT", "", ""}, {"text_source", "TEXT", "", ""}, {"content_dedup", "TEXT", "", ""},
-			{"incarnation", "UUID", "", ""}}},
+			{"incarnation", "UUID", "", ""}, {"index_visibility", "TEXT", "", ""}, {"index_visibility_observed_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "chunks", Title: "chunks", Columns: []column{{"id", "UUID", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"chunk_index", "INTEGER", "", ""}, {"text", "TEXT", "", ""}, {"token_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_fingerprints", Title: "document_fingerprints", Columns: []column{{"fingerprint", "TEXT", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"created_at", "TIMESTAMPTZ", "", ""}}},
-		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"lease_token", "UUID", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_deletions", Title: "document_deletions", Columns: []column{
 			{"document_id", "UUID", "PK", ""}, {"incarnation", "UUID", "", ""}, {"kind", "TEXT", "", ""}, {"source_key", "TEXT", "", ""}, {"source_bucket", "TEXT", "", ""}, {"vector_mode", "TEXT", "", ""}, {"vector_index", "TEXT", "", ""}, {"vector_namespace", "TEXT", "", ""}, {"memory_owner", "UUID", "", ""}, {"step", "INTEGER", "", ""}, {"held", "BOOLEAN", "", ""}, {"finalized", "BOOLEAN", "", ""}, {"claim", "UUID", "", ""}, {"claim_until", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_deletion_activation", Title: "document_deletion_activation", Columns: []column{{"singleton", "BOOLEAN", "PK", ""}, {"activated_at", "TIMESTAMPTZ", "", ""}}},
@@ -144,7 +144,7 @@ func dataModel() diagram {
 	}{
 		{"documents-chunks", "chunks", "0..n", 428, 136, 194},
 		{"documents-fingerprints", "document_fingerprints", "0..n", 416, 148, 472},
-		{"documents-jobs", "ingest_jobs", "0..1", 404, 160, 644},
+		{"documents-jobs", "ingest_jobs", "0..1", 404, 160, 616},
 	} {
 		l := &label{Text: v.card, X: 464, Y: v.y - 14, Size: edgeLabelSize, Kind: "muted", Owner: v.id}
 		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {472, v.y}}})

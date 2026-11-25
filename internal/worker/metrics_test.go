@@ -19,7 +19,7 @@ type metricJobStore struct {
 	complete      bool
 }
 
-func (s metricJobStore) CompleteJob(context.Context, domain.Job, []domain.Chunk) (bool, error) {
+func (s metricJobStore) CompleteJob(context.Context, domain.Job, []domain.Chunk, domain.IndexObservation) (bool, error) {
 	return s.complete, s.transitionErr
 }
 func (s metricJobStore) RetryJob(context.Context, domain.Job, time.Duration, string) error {

@@ -19,8 +19,11 @@ func DocumentStatusHandler(cs domain.ChunkStore) http.HandlerFunc {
 			return
 		}
 		query, err := url.ParseQuery(r.URL.RawQuery)
-		include := err == nil && includeDocumentIncarnation(query)
-		lister, ok := selectDocumentLister(cs, include)
+		var projection documentSummaryProjection
+		if err == nil {
+			projection = documentSummaryOptions(query)
+		}
+		lister, ok := selectDocumentLister(cs, projection.incarnation)
 		if !ok {
 			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document status is unavailable")
 			return
@@ -36,15 +39,23 @@ func DocumentStatusHandler(cs domain.ChunkStore) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(documentSummaryBody(*doc, include)); err != nil {
+		if err := json.NewEncoder(w).Encode(projection.body(*doc)); err != nil {
 			slog.ErrorContext(r.Context(), "encode document summary", "error", err)
 		}
 	}
 }
 
-func includeDocumentIncarnation(query url.Values) bool {
-	values := query["include_incarnation"]
-	return len(values) == 1 && values[0] == "true"
+type documentSummaryProjection struct {
+	incarnation     bool
+	indexVisibility bool
+}
+
+func documentSummaryOptions(query url.Values) documentSummaryProjection {
+	enabled := func(key string) bool {
+		values := query[key]
+		return len(values) == 1 && values[0] == "true"
+	}
+	return documentSummaryProjection{incarnation: enabled("include_incarnation"), indexVisibility: enabled("include_index_visibility")}
 }
 
 func selectDocumentLister(cs domain.ChunkStore, include bool) (domain.DocumentLister, bool) {
@@ -59,8 +70,14 @@ func selectDocumentLister(cs domain.ChunkStore, include bool) (domain.DocumentLi
 	return lister, ok
 }
 
-func documentSummaryBody(doc domain.DocumentSummary, include bool) any {
-	if include {
+func (p documentSummaryProjection) body(doc domain.DocumentSummary) any {
+	if !p.indexVisibility {
+		doc.IndexVisibility = ""
+		doc.IndexVisibilityObservedAt = nil
+	} else if doc.IndexVisibility == "" {
+		doc.IndexVisibility = domain.VisibilityUnknown
+	}
+	if p.incarnation {
 		return doc.WithIncarnation()
 	}
 	return doc

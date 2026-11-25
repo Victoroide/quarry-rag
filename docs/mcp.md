@@ -55,8 +55,8 @@ Use the [trusted transport for subject credentials](grant-catalog.md#subject-ide
 | Tool | Input | Output |
 |---|---|---|
 | `quarry_query` | Question, retrieval mode, answer mode, document type, collection, chunk limit, optional citation request and optional document ID allowlist | Answer, finish reason, mode, chunk counts, token usage, optional strict input count diagnostics (`count_method`, `model_input_tokens`), scored evidence in `chunks` with excerpt numbers, and requested citations |
-| `quarry_list_documents` | Optional collection, page limit and continuation cursor | Document summaries including collection, and `next_after` |
-| `quarry_get_document` | Document ID | Document summary including collection and ingestion status |
+| `quarry_list_documents` | Optional collection, page limit, continuation cursor and `include_index_visibility` | Document summaries including collection, and `next_after` |
+| `quarry_get_document` | Document ID and optional `include_index_visibility` | Document summary including collection and ingestion status |
 | `quarry_ingest_text` | Content, optional collection, document type, ID and metadata | Document ID and acceptance status |
 | `quarry_ingest_file` | Local path, optional collection, document type, ID and metadata | Document ID and acceptance status |
 | `quarry_delete_document` | Document ID | Deletion result and document ID |

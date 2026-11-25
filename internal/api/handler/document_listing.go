@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain.DocumentLister, query url.Values, collection string, include bool) {
+func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain.DocumentLister, query url.Values, collection string, projection documentSummaryProjection) {
 	scoped, ok := lister.(domain.CollectionDocumentLister)
 	if collection != "" && !ok {
 		writeJSONError(w, http.StatusInternalServerError, "internal", "collection filtering is unavailable")
@@ -21,7 +21,7 @@ func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain
 	}
 
 	if !query.Has("limit") && !query.Has("after") {
-		streamDocumentSummaries(w, r, lister, scoped, collection, include)
+		streamDocumentSummaries(w, r, lister, scoped, collection, projection)
 		return
 	}
 	limit, err := strconv.Atoi(query.Get("limit"))
@@ -49,24 +49,17 @@ func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain
 		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to list documents")
 		return
 	}
-	if docs == nil {
-		docs = []domain.DocumentSummary{}
-	}
 	var next *string
 	if len(docs) == limit {
 		next = &docs[len(docs)-1].ID
 	}
-	var documents any = docs
-	if include {
-		projected := make([]domain.DocumentIncarnationSummary, len(docs))
-		for i, doc := range docs {
-			projected[i] = doc.WithIncarnation()
-		}
-		documents = projected
+	documents := make([]any, len(docs))
+	for i, doc := range docs {
+		documents[i] = projection.body(doc)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(struct {
-		Documents any     `json:"documents"`
+		Documents []any   `json:"documents"`
 		Count     int     `json:"count"`
 		NextAfter *string `json:"next_after"`
 	}{documents, len(docs), next}); err != nil {
@@ -74,11 +67,11 @@ func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain
 	}
 }
 
-func streamDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain.DocumentLister, scoped domain.CollectionDocumentLister, collection string, include bool) {
+func streamDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain.DocumentLister, scoped domain.CollectionDocumentLister, collection string, projection documentSummaryProjection) {
 	count := 0
 	started := false
 	visit := func(doc domain.DocumentSummary) error {
-		encoded, err := json.Marshal(documentSummaryBody(doc, include))
+		encoded, err := json.Marshal(projection.body(doc))
 		if err != nil {
 			return err
 		}

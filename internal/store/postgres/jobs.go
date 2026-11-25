@@ -100,7 +100,7 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest) (
 		return result, nil
 	}
 	if id != "" {
-		if _, err = tx.Exec(ctx, `UPDATE documents SET status='processing',last_error=NULL,updated_at=NOW() WHERE id=$1`, id); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE documents SET status='processing',last_error=NULL,index_visibility=NULL,index_visibility_observed_at=NULL,updated_at=NOW() WHERE id=$1`, id); err != nil {
 			return result, err
 		}
 		if _, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id) VALUES($1) ON CONFLICT DO NOTHING`, id); err != nil {
@@ -160,8 +160,8 @@ func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration
 	for range 10 {
 		j := &domain.Job{LeaseOwner: owner}
 		var id string
-		err := c.Pool.QueryRow(ctx, `UPDATE ingest_jobs j SET state='running',attempts=j.attempts+1,lease_owner=$1,lease_until=NOW()+make_interval(secs=>$2),updated_at=NOW()
-   WHERE j.document_id=(SELECT document_id FROM ingest_jobs WHERE (state='pending' AND next_attempt_at<=NOW()) OR (state='running' AND lease_until<NOW()) ORDER BY next_attempt_at,created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING j.document_id::text,j.attempts`, owner, lease.Seconds()).Scan(&id, &j.Attempts)
+		err := c.Pool.QueryRow(ctx, `UPDATE ingest_jobs j SET state='running',attempts=j.attempts+1,lease_owner=$1,lease_until=NOW()+make_interval(secs=>$2),lease_token=gen_random_uuid(),updated_at=NOW()
+   WHERE j.document_id=(SELECT document_id FROM ingest_jobs WHERE (state='pending' AND next_attempt_at<=NOW()) OR (state='running' AND lease_until<NOW()) ORDER BY next_attempt_at,created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING j.document_id::text,j.attempts,j.lease_token::text`, owner, lease.Seconds()).Scan(&id, &j.Attempts, &j.LeaseToken)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -177,7 +177,7 @@ func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration
 		}
 		var metadata []byte
 		var fingerprint *string
-		err = c.Pool.QueryRow(ctx, `SELECT content,metadata,file_name,file_type,s3_key,doc_type,fingerprint,collection FROM documents WHERE id=$1`, id).Scan(&j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType, &j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection)
+		err = c.Pool.QueryRow(ctx, `SELECT d.content,d.metadata,d.file_name,d.file_type,d.s3_key,d.doc_type,d.fingerprint,d.collection,d.text_source FROM documents d JOIN ingest_jobs j ON d.id=j.document_id WHERE d.id=$1 AND j.lease_token=$2`, id, j.LeaseToken).Scan(&j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType, &j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}
@@ -187,11 +187,6 @@ func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration
 		if fingerprint != nil {
 			j.Document.Fingerprint = *fingerprint
 		}
-		if err = c.Pool.QueryRow(ctx, `SELECT text_source FROM documents WHERE id=$1`, id).Scan(&j.Document.TextSource); errors.Is(err, pgx.ErrNoRows) {
-			continue
-		} else if err != nil {
-			return nil, fmt.Errorf("postgres: load text source: %w", err)
-		}
 		if err = json.Unmarshal(metadata, &j.Document.Metadata); err != nil {
 			return nil, fmt.Errorf("postgres: decode job metadata: %w", err)
 		}
@@ -200,14 +195,49 @@ func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration
 	return nil, nil
 }
 
+// jobClaim identifies one lease of a job by $1 document, $2 owner, $3 attempt
+// and $4 lease token. Owner and attempt numbers repeat after release or
+// replacement, so the token is part of the identity.
+const jobClaim = `document_id=$1 AND lease_owner=$2 AND attempts=$3 AND lease_token IS NOT DISTINCT FROM $4 AND state='running'`
+
+// jobLive also requires the database clock to be before the lease deadline.
+const jobLive = jobClaim + ` AND lease_until>clock_timestamp()`
+
+// lockClaimedJob takes the job row lock of a claim, waiting for any other
+// transaction that holds it. A statement that qualifies the row before such a
+// wait can still apply its effect afterwards if the holder released the row
+// unchanged, so a lease deadline must be tested by a later statement.
+func lockClaimedJob(ctx context.Context, tx pgx.Tx, j domain.Job) (bool, error) {
+	var locked int
+	err := tx.QueryRow(ctx, `SELECT 1 FROM ingest_jobs WHERE `+jobClaim+` FOR UPDATE`, string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // HeartbeatJob renews a live lease without reviving an expired attempt.
 func (c *Client) HeartbeatJob(ctx context.Context, j domain.Job, lease time.Duration) (bool, error) {
-	tag, err := c.Pool.Exec(ctx, `UPDATE ingest_jobs SET lease_until=NOW()+make_interval(secs=>$3),updated_at=NOW() WHERE document_id=$1 AND lease_owner=$2 AND state='running' AND attempts=$4 AND lease_until>NOW()`, string(j.Document.ID), j.LeaseOwner, lease.Seconds(), j.Attempts)
-	return tag.RowsAffected() == 1, err
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if held, lockErr := lockClaimedJob(ctx, tx, j); lockErr != nil || !held {
+		return false, lockErr
+	}
+	tag, err := tx.Exec(ctx, `UPDATE ingest_jobs SET lease_until=clock_timestamp()+make_interval(secs=>$5),updated_at=NOW() WHERE `+jobLive, string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken, lease.Seconds())
+	if err != nil || tag.RowsAffected() != 1 {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
 }
 
 // CompleteJob commits chunks and completion only while the document and lease remain valid.
-func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.Chunk) (bool, error) {
+func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.Chunk, observation domain.IndexObservation) (bool, error) {
+	if j.LeaseToken == nil && observation.Visibility != "" {
+		return false, nil
+	}
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -216,19 +246,23 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	var policy domain.ContentDedup
 	var fingerprint *string
 	var collection string
-	err = tx.QueryRow(ctx, `UPDATE documents SET status='completed',chunk_count=$2,completed_at=NOW(),updated_at=NOW(),last_error=NULL WHERE id=$1 AND status='processing' RETURNING content_dedup,fingerprint,collection`, string(j.Document.ID), len(chunks)).Scan(&policy, &fingerprint, &collection)
+	err = tx.QueryRow(ctx, `SELECT content_dedup,fingerprint,collection FROM documents WHERE id=$1 AND status='processing' FOR UPDATE`, string(j.Document.ID)).Scan(&policy, &fingerprint, &collection)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	tag, err := tx.Exec(ctx, `DELETE FROM ingest_jobs WHERE document_id=$1 AND lease_owner=$2 AND attempts=$3 AND state='running' AND lease_until>NOW()`, string(j.Document.ID), j.LeaseOwner, j.Attempts)
+	leaseArgs := []any{string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken}
+	// Look without locking: persistence can be slow, and the heartbeat needs the
+	// job row to renew the lease while it runs.
+	var live int
+	err = tx.QueryRow(ctx, `SELECT 1 FROM ingest_jobs WHERE `+jobLive, leaseArgs...).Scan(&live)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
-	}
-	if tag.RowsAffected() != 1 {
-		return false, nil
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM chunks WHERE document_id=$1`, string(j.Document.ID)); err != nil {
 		return false, err
@@ -258,6 +292,7 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 		if err = insertVectors(ctx, tx, vectors, dimensions); err != nil {
 			return false, fmt.Errorf("postgres: complete vectors: %w", err)
 		}
+		observation = domain.IndexObservation{Visibility: domain.VisibilityTransactional}
 	}
 	if policy == domain.ContentDedupCollection {
 		if fingerprint == nil {
@@ -270,6 +305,19 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 		if _, err = tx.Exec(ctx, `INSERT INTO document_fingerprints(fingerprint,document_id) VALUES($1,$2) ON CONFLICT(fingerprint) DO NOTHING`, *fingerprint, string(j.Document.ID)); err != nil {
 			return false, err
 		}
+	}
+	if _, err = tx.Exec(ctx, `UPDATE documents SET status='completed',chunk_count=$2,completed_at=statement_timestamp(),updated_at=statement_timestamp(),last_error=NULL,
+        index_visibility=NULLIF($3,''),index_visibility_observed_at=CASE WHEN $3='transactional' THEN statement_timestamp() ELSE $4 END WHERE id=$1`, string(j.Document.ID), len(chunks), observation.Visibility, observation.ObservedAt); err != nil {
+		return false, err
+	}
+	// Persistence can outlast the lease, and a renewal may have extended it.
+	// Lock the job row only now, then test the lease in the next statement.
+	if held, lockErr := lockClaimedJob(ctx, tx, j); lockErr != nil || !held {
+		return false, lockErr
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM ingest_jobs WHERE `+jobLive, leaseArgs...)
+	if err != nil || tag.RowsAffected() != 1 {
+		return false, err
 	}
 	if commitErr := tx.Commit(ctx); commitErr != nil {
 		return false, commitErr
@@ -299,7 +347,15 @@ func (c *Client) changeJob(ctx context.Context, j domain.Job, query string, args
 	if err != nil {
 		return err
 	}
-	params := []any{id, j.LeaseOwner, j.Attempts}
+	// Lock the claim before the guarded statement so that its lease check runs
+	// after any wait for another transaction's lock on the row.
+	if held, lockErr := lockClaimedJob(ctx, tx, j); lockErr != nil || !held {
+		if lockErr != nil {
+			return lockErr
+		}
+		return domain.ErrJobNotOwned
+	}
+	params := []any{id, j.LeaseOwner, j.Attempts, j.LeaseToken}
 	params = append(params, args...)
 	tag, err := tx.Exec(ctx, query, params...)
 	if err != nil {
@@ -323,17 +379,17 @@ func (c *Client) changeJob(ctx context.Context, j domain.Job, query string, args
 
 // RetryJob reschedules an owned attempt and records its latest failure.
 func (c *Client) RetryJob(ctx context.Context, j domain.Job, delay time.Duration, message string) error {
-	return c.changeJob(ctx, j, `UPDATE ingest_jobs SET state='pending',lease_owner=NULL,lease_until=NULL,next_attempt_at=NOW()+make_interval(secs=>$4),last_error=$5,updated_at=NOW() WHERE document_id=$1 AND lease_owner=$2 AND attempts=$3 AND state='running' AND lease_until>NOW()`, []any{delay.Seconds(), jobError(message)}, &message)
+	return c.changeJob(ctx, j, `UPDATE ingest_jobs SET state='pending',lease_owner=NULL,lease_until=NULL,lease_token=NULL,next_attempt_at=NOW()+make_interval(secs=>$5),last_error=$6,updated_at=NOW() WHERE `+jobLive, []any{delay.Seconds(), jobError(message)}, &message)
 }
 
 // FailJob records a terminal failure and removes the owned work.
 func (c *Client) FailJob(ctx context.Context, j domain.Job, message string) error {
-	return c.changeJob(ctx, j, `DELETE FROM ingest_jobs WHERE document_id=$1 AND lease_owner=$2 AND attempts=$3 AND state='running' AND lease_until>NOW()`, nil, &message)
+	return c.changeJob(ctx, j, `DELETE FROM ingest_jobs WHERE `+jobLive, nil, &message)
 }
 
 // ReleaseJob returns interrupted work without consuming an attempt.
 func (c *Client) ReleaseJob(ctx context.Context, j domain.Job) error {
-	return c.changeJob(ctx, j, `UPDATE ingest_jobs SET state='pending',lease_owner=NULL,lease_until=NULL,next_attempt_at=NOW(),attempts=GREATEST(attempts-1,0),updated_at=NOW() WHERE document_id=$1 AND lease_owner=$2 AND attempts=$3 AND state='running'`, nil, nil)
+	return c.changeJob(ctx, j, `UPDATE ingest_jobs SET state='pending',lease_owner=NULL,lease_until=NULL,lease_token=NULL,next_attempt_at=NOW(),attempts=GREATEST(attempts-1,0),updated_at=NOW() WHERE `+jobClaim, nil, nil)
 }
 
 // DocumentExists reports whether deletion has removed a document.
@@ -351,7 +407,7 @@ func (c *Client) StoreOCRText(ctx context.Context, j domain.Job, text string) er
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var id string
-	err = tx.QueryRow(ctx, `SELECT d.id::text FROM documents d JOIN ingest_jobs j ON j.document_id=d.id WHERE d.id=$1 AND d.status='processing' AND j.lease_owner=$2 AND j.attempts=$3 AND j.state='running' AND j.lease_until>clock_timestamp() FOR UPDATE OF d,j`, string(j.Document.ID), j.LeaseOwner, j.Attempts).Scan(&id)
+	err = tx.QueryRow(ctx, `SELECT d.id::text FROM documents d JOIN ingest_jobs j ON j.document_id=d.id WHERE d.id=$1 AND d.status='processing' AND j.lease_owner=$2 AND j.attempts=$3 AND j.lease_token IS NOT DISTINCT FROM $4 AND j.state='running' AND j.lease_until>clock_timestamp() FOR UPDATE OF d,j`, string(j.Document.ID), j.LeaseOwner, j.Attempts, j.LeaseToken).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ErrJobNotOwned
 	}
@@ -363,7 +419,7 @@ func (c *Client) StoreOCRText(ctx context.Context, j domain.Job, text string) er
 		preview = preview[:120]
 	}
 	// Recheck the lease after any wait for the document and job row locks.
-	tag, err := tx.Exec(ctx, `UPDATE documents d SET content=$2,content_preview=$3,text_source='ocr',updated_at=NOW() WHERE d.id=$1 AND EXISTS(SELECT 1 FROM ingest_jobs j WHERE j.document_id=d.id AND j.lease_owner=$4 AND j.attempts=$5 AND j.state='running' AND j.lease_until>clock_timestamp())`, id, text, string(preview), j.LeaseOwner, j.Attempts)
+	tag, err := tx.Exec(ctx, `UPDATE documents d SET content=$2,content_preview=$3,text_source='ocr',updated_at=NOW() WHERE d.id=$1 AND EXISTS(SELECT 1 FROM ingest_jobs j WHERE j.document_id=d.id AND j.lease_owner=$4 AND j.attempts=$5 AND j.lease_token IS NOT DISTINCT FROM $6 AND j.state='running' AND j.lease_until>clock_timestamp())`, id, text, string(preview), j.LeaseOwner, j.Attempts, j.LeaseToken)
 	if err != nil {
 		return err
 	}

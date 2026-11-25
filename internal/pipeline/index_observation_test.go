@@ -62,7 +62,7 @@ func TestPersistLSNObservation(t *testing.T) {
 					want, wantProbes = domain.VisibilityTimeout, []time.Duration{0, 200 * time.Millisecond, 600 * time.Millisecond}
 				case "shutdown":
 					time.AfterFunc(50*time.Millisecond, func() { close(stopping) })
-					want, wantProbes = domain.VisibilityUnknown, []time.Duration{0}
+					want, wantProbes = domain.VisibilityTimeout, []time.Duration{0}
 				case "late response":
 					want, wantProbes = domain.VisibilityTimeout, []time.Duration{0}
 				case "lease lost":

@@ -104,7 +104,7 @@ func TestAcceptAfterQueueLimitDecrease(t *testing.T) {
 	job, err := c.ClaimJob(t.Context(), "completed", time.Minute, 5)
 	require.NoError(t, err)
 	require.NotNil(t, job)
-	ok, err := c.CompleteJob(t.Context(), *job, nil)
+	ok, err := c.CompleteJob(t.Context(), *job, nil, domain.IndexObservation{})
 	require.NoError(t, err)
 	require.True(t, ok)
 
