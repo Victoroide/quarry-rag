@@ -1,0 +1,6 @@
+{"ImportPath":"example.test/jsonmod/dep","Action":"build-output","Output":"# example.test/jsonmod/dep\n"}
+{"ImportPath":"example.test/jsonmod/dep","Action":"build-output","Output":"dep/dep.go:3:14: undefined: missingFixtureNumber\n"}
+{"ImportPath":"example.test/jsonmod/dep","Action":"build-fail"}
+{"Time":"2026-11-25T17:30:35.142324-04:00","Action":"start","Package":"example.test/jsonmod/app"}
+{"Time":"2026-11-25T17:30:35.142955-04:00","Action":"output","Package":"example.test/jsonmod/app","Output":"FAIL\texample.test/jsonmod/app [build failed]\n","OutputType":"frame"}
+{"Time":"2026-11-25T17:30:35.142989-04:00","Action":"fail","Package":"example.test/jsonmod/app","Elapsed":0.001,"FailedBuild":"example.test/jsonmod/dep"}

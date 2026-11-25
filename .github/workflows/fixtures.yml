@@ -1,0 +1,40 @@
+name: Database fixtures
+
+on:
+  schedule:
+    - cron: "37 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  containers:
+    name: Check container fallback
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Check container engine
+        run: |
+          go version
+          docker info
+      - name: Check the fixture helper
+        run: go test -race -count=1 -shuffle=on -v -run 'TestContainerFallback|TestStartServesQueries|TestStartVectorCreatesTheExtension|TestServiceFixtures' ./internal/testutil/pgtest
+      - name: Check PostgreSQL fixtures in containers
+        run: go test -race -count=1 -shuffle=on -v -run 'TestMigrationsAreAppliedOnce|TestEvidenceVisibilityMatchesUTF8BytesOnLatin1Database|TestGrantCatalog$' ./internal/store/postgres
+      - name: Check pgvector fixtures in containers
+        run: go test -race -count=1 -shuffle=on -v -run 'TestVectorSchemaDimensions|TestGrantCatalogRestrictedVectorStartup' ./internal/store/postgres
+      - name: Check cleanup fixtures in containers
+        run: go test -race -count=1 -shuffle=on -v ./internal/cleanup

@@ -1,0 +1,37 @@
+{"ImportPath":"example.test/jsonmod/broken [example.test/jsonmod/broken.test]","Action":"build-output","Output":"# example.test/jsonmod/broken [example.test/jsonmod/broken.test]\n"}
+{"ImportPath":"example.test/jsonmod/broken [example.test/jsonmod/broken.test]","Action":"build-output","Output":"broken/b_test.go:5:28: undefined: undefinedSymbol\n"}
+{"ImportPath":"example.test/jsonmod/broken [example.test/jsonmod/broken.test]","Action":"build-fail"}
+{"Time":"2026-11-25T16:42:12.615425-04:00","Action":"start","Package":"example.test/jsonmod/broken"}
+{"Time":"2026-11-25T16:42:12.61549-04:00","Action":"output","Package":"example.test/jsonmod/broken","Output":"FAIL\texample.test/jsonmod/broken [build failed]\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:12.615498-04:00","Action":"fail","Package":"example.test/jsonmod/broken","Elapsed":0,"FailedBuild":"example.test/jsonmod/broken [example.test/jsonmod/broken.test]"}
+{"Time":"2026-11-25T16:42:12.615673-04:00","Action":"start","Package":"example.test/jsonmod/notests"}
+{"Time":"2026-11-25T16:42:12.615679-04:00","Action":"output","Package":"example.test/jsonmod/notests","Output":"?   \texample.test/jsonmod/notests\t[no test files]\n"}
+{"Time":"2026-11-25T16:42:12.615682-04:00","Action":"skip","Package":"example.test/jsonmod/notests","Elapsed":0}
+{"Time":"2026-11-25T16:42:12.858235-04:00","Action":"start","Package":"example.test/jsonmod/ok"}
+{"Time":"2026-11-25T16:42:13.062124-04:00","Action":"run","Package":"example.test/jsonmod/ok","Test":"TestParent"}
+{"Time":"2026-11-25T16:42:13.062188-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestParent","Output":"=== RUN   TestParent\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.062198-04:00","Action":"run","Package":"example.test/jsonmod/ok","Test":"TestParent/child"}
+{"Time":"2026-11-25T16:42:13.062202-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestParent/child","Output":"=== RUN   TestParent/child\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.085191-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestParent/child","Output":"    ok_test.go:11: pgtest: setup 1.5s\n"}
+{"Time":"2026-11-25T16:42:13.085236-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestParent/child","Output":"    ok_test.go:12: pgtest: cleanup 250ms\n"}
+{"Time":"2026-11-25T16:42:13.085258-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestParent/child","Output":"--- PASS: TestParent/child (0.02s)\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.085271-04:00","Action":"pass","Package":"example.test/jsonmod/ok","Test":"TestParent/child","Elapsed":0.02}
+{"Time":"2026-11-25T16:42:13.085285-04:00","Action":"run","Package":"example.test/jsonmod/ok","Test":"TestParent/skipped"}
+{"Time":"2026-11-25T16:42:13.085303-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestParent/skipped","Output":"=== RUN   TestParent/skipped\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.085312-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestParent/skipped","Output":"    ok_test.go:14: needs a service\n"}
+{"Time":"2026-11-25T16:42:13.085321-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestParent/skipped","Output":"--- SKIP: TestParent/skipped (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.085336-04:00","Action":"skip","Package":"example.test/jsonmod/ok","Test":"TestParent/skipped","Elapsed":0}
+{"Time":"2026-11-25T16:42:13.085344-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestParent","Output":"--- PASS: TestParent (0.02s)\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.085352-04:00","Action":"pass","Package":"example.test/jsonmod/ok","Test":"TestParent","Elapsed":0.02}
+{"Time":"2026-11-25T16:42:13.085362-04:00","Action":"run","Package":"example.test/jsonmod/ok","Test":"TestOther"}
+{"Time":"2026-11-25T16:42:13.085373-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestOther","Output":"=== RUN   TestOther\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.085398-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestOther","Output":"--- PASS: TestOther (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.085406-04:00","Action":"pass","Package":"example.test/jsonmod/ok","Test":"TestOther","Elapsed":0}
+{"Time":"2026-11-25T16:42:13.085416-04:00","Action":"run","Package":"example.test/jsonmod/ok","Test":"TestFails"}
+{"Time":"2026-11-25T16:42:13.085424-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestFails","Output":"=== RUN   TestFails\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.085432-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestFails","Output":"    ok_test.go:19: boom\n","OutputType":"error"}
+{"Time":"2026-11-25T16:42:13.08544-04:00","Action":"output","Package":"example.test/jsonmod/ok","Test":"TestFails","Output":"--- FAIL: TestFails (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.085447-04:00","Action":"fail","Package":"example.test/jsonmod/ok","Test":"TestFails","Elapsed":0}
+{"Time":"2026-11-25T16:42:13.085467-04:00","Action":"output","Package":"example.test/jsonmod/ok","Output":"FAIL\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.086184-04:00","Action":"output","Package":"example.test/jsonmod/ok","Output":"FAIL\texample.test/jsonmod/ok\t0.227s\n","OutputType":"frame"}
+{"Time":"2026-11-25T16:42:13.086222-04:00","Action":"fail","Package":"example.test/jsonmod/ok","Elapsed":0.228}
