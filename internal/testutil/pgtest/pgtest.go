@@ -3,6 +3,7 @@ package pgtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,6 +15,11 @@ import (
 const image = "postgres:16.13-alpine3.23"
 
 const vectorImage = "pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f"
+
+// reaperShutdownRetry repeats a start that failed because Docker was removing
+// the reaper that exited after an idle period, until the library can create a
+// new one. See reaperShuttingDown.
+var reaperShutdownRetry = retryPolicy{window: time.Minute, first: 250 * time.Millisecond, limit: 2 * time.Second}
 
 // Start runs a PostgreSQL container and returns its connection URL once the
 // server accepts connections. The container is removed when the test ends.
@@ -31,6 +37,9 @@ func start(t testing.TB, containerImage string, opts ...testcontainers.Container
 	if testing.Short() {
 		t.Skip("requires a Docker daemon")
 	}
+	if err := isolateReaper(); err != nil {
+		t.Fatalf("isolate reaper session: %v", err)
+	}
 	ctx := context.Background()
 	// The image opens its port for a temporary server during initialization,
 	// so readiness also waits for the second startup log line.
@@ -43,7 +52,18 @@ func start(t testing.TB, containerImage string, opts ...testcontainers.Container
 			wait.ForListeningPort("5432/tcp"),
 		),
 	}
-	container, err := postgres.Run(ctx, containerImage, append(options, opts...)...)
+	options = append(options, opts...)
+	var container *postgres.PostgresContainer
+	err := reaperShutdownRetry.run(ctx, func() error {
+		var runErr error
+		container, runErr = postgres.Run(ctx, containerImage, options...)
+		if runErr != nil {
+			// A start that fails after creating the container returns it,
+			// and a retry would otherwise leave it behind.
+			runErr = errors.Join(runErr, testcontainers.TerminateContainer(container))
+		}
+		return runErr
+	})
 	if err != nil {
 		t.Fatalf("start postgres container: %v", err)
 	}

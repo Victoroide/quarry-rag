@@ -67,7 +67,7 @@ go test -race -count=1 ./test/integration/...
 go test -race -count=1 ./internal/store/postgres/...
 ```
 
-Docker must be running locally to permit Testcontainers to manage the ephemeral PostgreSQL database instance. Database-backed tests skip under `go test -short` with an explicit daemon requirement message; CI runs the full suite without `-short`. The offline query test ingests through HTTP, polls document status until completion, and verifies cited evidence and document restrictions through the router.
+Docker must be running locally to permit Testcontainers to manage the ephemeral PostgreSQL database instance. Database-backed tests skip under `go test -short` with an explicit daemon requirement message; CI runs the full suite without `-short`. The cleanup container that Testcontainers starts exits, by default, after a test process has had no database container for ten seconds. `internal/testutil/pgtest` gives each test process its own cleanup container, unless `TESTCONTAINERS_SESSION_ID` is set, so that concurrent packages cannot end each other's. It also waits up to a minute for Docker to finish removing an exited one and starts the database again, so a test that begins during the removal does not fail. The offline query test ingests through HTTP, polls document status until completion, and verifies cited evidence and document restrictions through the router.
 
 ### 3. Smoke Tests
 
