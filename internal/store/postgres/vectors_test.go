@@ -78,7 +78,7 @@ func seedSearchVectors(t *testing.T, c *Client, near, far int) {
 func TestVectorSearchCanUseHNSW(t *testing.T) {
 	c, _ := vectorDatabase(t)
 	seedSearchVectors(t, c, 2000, 0)
-	query, args, ok := searchSQL("[1,0,0]", 10, domain.VectorFilter{}, false)
+	query, args, ok := searchSQL("chunk_vectors", "[1,0,0]", 10, domain.VectorFilter{}, false)
 	require.True(t, ok)
 	tx, err := c.Pool.Begin(t.Context())
 	require.NoError(t, err)
@@ -358,7 +358,7 @@ func TestVectorInsertValidatesBatchBeforeWriting(t *testing.T) {
 	tx, err := c.Pool.Begin(t.Context())
 	require.NoError(t, err)
 	defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
-	err = insertVectors(t.Context(), tx, []domain.Chunk{
+	err = insertVectors(t.Context(), tx, "chunk_vectors", []domain.Chunk{
 		{ID: "valid", DocumentID: id, Embedding: []float32{1, 0, 0}},
 		{ID: "invalid", DocumentID: id, Index: 1, Embedding: []float32{1, 0}},
 	}, 3)

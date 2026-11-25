@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
 	"github.com/google/uuid"
@@ -96,6 +97,17 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	return opts, nil
 }
 
+// requireWritableForApply stops maintenance writes while a vector migration freezes writers.
+func requireWritableForApply(ctx context.Context, gate domain.WriterGate, opts options) error {
+	if !opts.Apply {
+		return nil
+	}
+	if err := gate.WritersOpen(ctx); err != nil {
+		return fmt.Errorf("maintenance writes are paused: %w", err)
+	}
+	return nil
+}
+
 func main() {
 	if err := run(); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -135,6 +147,10 @@ func run() error {
 			slog.Error("close document store", "error", closeErr)
 		}
 	}()
+	pg.SetVectorGeneration(cfg.ActiveVectorGeneration())
+	if gateErr := requireWritableForApply(ctx, pg, opts); gateErr != nil {
+		return gateErr
+	}
 	if opts.BackfillScoped && !opts.Apply {
 		result, backfillErr := backfillScoped(ctx, pg, nil, opts)
 		if backfillErr != nil {

@@ -75,6 +75,13 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 		return result, err
 	}
+	if gateErr := c.gate(ctx, tx); gateErr != nil {
+		if errors.Is(gateErr, domain.ErrWritersFrozen) {
+			result.Outcome = domain.AcceptFrozen
+			return result, nil
+		}
+		return result, gateErr
+	}
 	if req.EvaluationReceipt != "" {
 		if req.EvaluationVectorIdentity == "" {
 			return result, errors.New("evaluation fixture vector store is unspecified")
@@ -424,10 +431,11 @@ func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, st
 		var fingerprint, profile *string
 		var coverage *domain.PDFCoverage
 		var assigned bool
-		err := c.Pool.QueryRow(ctx, statement, args...).
-			Scan(&id, &j.Attempts, &j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType,
+		err := c.claimJobLease(ctx, statement, args, func(row pgx.Row) error {
+			return row.Scan(&id, &j.Attempts, &j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType,
 				&j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource, &j.Incarnation, &j.LeaseToken, &j.ScopedVectors, &profile, &coverage, &manifest, &assigned)
-		if errors.Is(err, pgx.ErrNoRows) {
+		})
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, domain.ErrWritersFrozen) {
 			return nil, nil
 		}
 		if err != nil {
@@ -491,6 +499,23 @@ func lockClaimedJob(ctx context.Context, tx pgx.Tx, j domain.Job) (bool, error) 
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// claimJobLease runs the claim statement in a transaction that holds the
+// writer gate until the lease commits.
+func (c *Client) claimJobLease(ctx context.Context, statement string, args []any, scan func(pgx.Row) error) error {
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if gateErr := c.gate(ctx, tx); gateErr != nil {
+		return gateErr
+	}
+	if err = scan(tx.QueryRow(ctx, statement, args...)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // HeartbeatJob renews a live lease without reviving an expired attempt.
@@ -557,7 +582,8 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 		return false, batchErr
 	}
 	if dimensions := int(c.vectorDimensions.Load()); dimensions != 0 {
-		if _, err = tx.Exec(ctx, `DELETE FROM chunk_vectors WHERE document_id=$1`, string(j.Document.ID)); err != nil {
+		table := c.vectorTargetTable()
+		if _, err = tx.Exec(ctx, `DELETE FROM `+pgx.Identifier{table}.Sanitize()+` WHERE document_id=$1`, string(j.Document.ID)); err != nil {
 			return false, err
 		}
 		vectors := make([]domain.Chunk, len(chunks))
@@ -571,7 +597,7 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 			ch.Metadata["collection"] = j.Collection
 			vectors[i] = ch
 		}
-		if err = insertVectors(ctx, tx, vectors, dimensions); err != nil {
+		if err = insertVectors(ctx, tx, table, vectors, dimensions); err != nil {
 			return false, fmt.Errorf("postgres: complete vectors: %w", err)
 		}
 		observation = domain.IndexObservation{Visibility: domain.VisibilityTransactional}

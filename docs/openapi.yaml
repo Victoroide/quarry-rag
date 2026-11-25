@@ -325,7 +325,7 @@ paths:
         '500':
           $ref: '#/components/responses/Error'
         '503':
-          $ref: '#/components/responses/Error'
+          $ref: '#/components/responses/RetryableError'
   /evaluation/fixtures:
     parameters:
       - $ref: '#/components/parameters/RequestID'
@@ -634,7 +634,7 @@ components:
           schema:
             $ref: '#/components/schemas/APIError'
     RetryableError:
-      description: 'Request failed; see [POST /query](api.md#post-query).'
+      description: 'Request failed and can be retried; see the endpoint error table in the [API Reference](api.md).'
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'

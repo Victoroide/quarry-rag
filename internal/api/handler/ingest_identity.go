@@ -142,6 +142,9 @@ func acceptIngestWith(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		rw.Header().Set("Retry-After", "30")
 		writeJSONError(rw, http.StatusServiceUnavailable, "queue", "ingest queue is full")
 		return result.Outcome, nil
+	case domain.AcceptFrozen:
+		writeFrozen(rw)
+		return result.Outcome, nil
 	case domain.AcceptNeedsSource, domain.AcceptNeedsPDFText:
 		return result.Outcome, nil
 	case domain.AcceptUploadExpired:
@@ -162,4 +165,9 @@ func acceptIngestWith(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		slog.ErrorContext(r.Context(), "encode ingestion response", "error", err)
 	}
 	return result.Outcome, nil
+}
+
+func writeFrozen(rw http.ResponseWriter) {
+	rw.Header().Set("Retry-After", "30")
+	writeJSONError(rw, http.StatusServiceUnavailable, "frozen", "document writes are paused for a vector migration")
 }

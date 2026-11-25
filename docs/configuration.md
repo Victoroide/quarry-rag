@@ -107,6 +107,7 @@ The table below lists the environment variables recognized by the service:
 | `CITATION_SUPPORT_ENDPOINT` | string | empty | Absolute verifier address | An empty value uses HTTP on `127.0.0.1:8091` at `/citation-support/v1`. An external address requires HTTPS and a bearer token. |
 | `CITATION_SUPPORT_TOKEN` | secret | empty | Bearer token | Authenticates the verifier request. Optional for literal loopback. |
 | `CITATION_SUPPORT_CALIBRATION_FILE` | path | empty | Local JSON file, up to 8 MiB | Loads the [held-out evaluation](development.md#citation-verifier-calibration) at startup. |
+| `VECTOR_GENERATION` | string | `""` | Empty, or 1 to 24 lowercase letters, digits or underscores starting with a letter; unavailable in offline fake mode | Vector target that this process serves. Empty selects the legacy target: the `chunk_vectors` table or the index named by `PINECONE_INDEX_NAME`. A named generation must be the active generation recorded by [`make reindex`](development.md#vector-reindex-scriptsreindex): startup fails when it is not active, when its recorded store or target differs from this configuration, or when its recorded provider, model or dimensions differ from `EMBEDDING_PROVIDER`, the selected model setting or `EMBEDDING_DIMENSIONS`. With `VECTOR_STORE=postgres` the generation selects the `chunk_vectors_<name>` table; with Pinecone, `PINECONE_INDEX_NAME` must name the generation's recorded index. Set the same value on every replica that shares an ingestion queue; a replica serving another generation cannot admit, claim or delete documents. |
 | `VECTOR_STORE` | string | `"pinecone"` | `pinecone` or `postgres` | Persistent vector backend; offline fake mode always uses memory. PostgreSQL vectors require the [deployment prerequisites](deployment.md#postgresql-vectors). |
 | `WORKER_QUEUE_SIZE` | integer | `1000` | 1 to 100000 | Maximum outstanding persisted ingestion jobs across replicas, including pending, delayed and running jobs. |
 
@@ -329,6 +330,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `013_vector_mutations.sql` | Records each document's vector format, published attempt and vector mutation state. |
 | `014_source_uploads.sql` | Adds an empty journal of original-file uploads, with a unique object key per bucket and a foreign key to the adopting document. It leaves existing rows in place and never infers ownership of earlier objects. |
 | `015_mixed_pdf_ocr.sql` | Records page manifests, versioned extraction provenance, and coverage. Adds a lease constraint for jobs that require a mixed-PDF worker. |
+| `016_vector_generations.sql` | Adds empty tables for vector generations, their per-document write ledger and a singleton recording the active generation (`legacy`) and an unset writer freeze. It leaves existing rows in place. |
 | `017_evaluation_fixtures.sql` | Adds durable receipts and UUID reservations for the [opt-in evaluation fixtures](development.md#evidence-evaluation). |
 | `018_evaluation_vector_identity.sql` | Binds new fixture receipts to their vector store and permits reservations for durably retired submissions. |
 | `019_evaluation_fixture_guards.sql` | Moves the reservation checks used by ordinary admission, leasing and removal into owner-defined predicates, so a restricted serving login needs no access to the receipt table. |
@@ -344,7 +346,7 @@ for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).
 See [document deletion](api.md#delete-documentsdoc_id) for fixture reservations.
 
-This release keeps production admissions on the untagged format and leaves the activation marker null. [Document deletion](api.md#checkpointed-deletion) keeps its existing contract until an operator sets the marker; the service never sets it. Drain in-progress worker mutations before rolling back the binary. While production data uses only the untagged format, the additive migrations and their checksums can stay in place.
+This release keeps production admissions on the untagged format and leaves the activation marker null. [Document deletion](api.md#checkpointed-deletion) keeps its existing contract until an operator sets the marker; the service never sets it. Drain in-progress worker mutations before rolling back the binary. While production data uses only the untagged format, the additive migrations and their checksums can stay in place. During a vector migration, follow the [rollback rules](deployment.md#changing-models-or-vector-stores). Older binaries ignore the writer freeze and the active-generation pin.
 
 The optional vector schema is initialized separately after base migrations, under the same advisory lock; see the [vector data model](architecture.md#postgresql-vector-schema).
 

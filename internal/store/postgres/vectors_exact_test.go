@@ -888,7 +888,7 @@ func TestExactScope(t *testing.T) {
 
 		explainFilter := func(store *VectorStore, filter domain.VectorFilter) string {
 			t.Helper()
-			sqlQ, sqlArgs, ok := searchSQL("[1,0,0]", 10, filter, store.exactScopeMax > 0)
+			sqlQ, sqlArgs, ok := searchSQL("chunk_vectors", "[1,0,0]", 10, filter, store.exactScopeMax > 0)
 			require.True(t, ok)
 			plan, expErr := explainVectorPlan(t.Context(), store.client, `SET LOCAL hnsw.iterative_scan = strict_order`, "EXPLAIN "+sqlQ, sqlArgs...)
 			require.NoError(t, expErr)
@@ -1295,11 +1295,11 @@ func TestExactScope(t *testing.T) {
 			{DocType: "brief", DocumentIDs: []string{rareDoc}},
 			{Collection: "rare", DocType: "brief", DocumentIDs: []string{rareDoc}},
 		} {
-			probeQ, probeArgs, ok := probeSQL(21, filter)
+			probeQ, probeArgs, ok := probeSQL("chunk_vectors", 21, filter)
 			require.True(t, ok)
-			exactQ, exactArgs, ok := exactSQL("[1,0,0]", 5, 21, filter)
+			exactQ, exactArgs, ok := exactSQL("chunk_vectors", "[1,0,0]", 5, 21, filter)
 			require.True(t, ok)
-			searchQ, searchArgs, ok := searchSQL("[1,0,0]", 5, filter, true)
+			searchQ, searchArgs, ok := searchSQL("chunk_vectors", "[1,0,0]", 5, filter, true)
 			require.True(t, ok)
 
 			// Default planner settings must avoid HNSW on probe/exact and keep Limit.

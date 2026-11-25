@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	neturl "net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -254,14 +255,27 @@ func TestDocumentCollectionsUpgradePreservesIdentity(t *testing.T) {
 
 func applyMigrationPrefix(t *testing.T, client *Client, through int) {
 	t.Helper()
+	applyMigrationsWhere(t, client, func(version int) bool { return version <= through })
+}
+
+// applyMigrationsExcept applies and records every embedded migration except
+// the listed versions, which reproduces a database migrated by a build that
+// predates them even when their numbers sit below later migrations.
+func applyMigrationsExcept(t *testing.T, client *Client, versions ...int) {
+	t.Helper()
+	applyMigrationsWhere(t, client, func(version int) bool { return !slices.Contains(versions, version) })
+}
+
+func applyMigrationsWhere(t *testing.T, client *Client, include func(version int) bool) {
+	t.Helper()
 	migrations, err := loadMigrations(testMigrationFiles)
 	require.NoError(t, err)
 	ctx := t.Context()
 	_, err = client.Pool.Exec(ctx, `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`)
 	require.NoError(t, err)
 	for _, m := range migrations {
-		if m.version > through {
-			break
+		if !include(m.version) {
+			continue
 		}
 		_, err = client.Pool.Exec(ctx, m.sql)
 		require.NoError(t, err)

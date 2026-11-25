@@ -71,10 +71,10 @@ func FuzzVectorQueryInputs(f *testing.F) {
 			scopeMax = 1
 		}
 
-		probeQ, probeArgs, probeOK := probeSQL(scopeMax+1, filter)
-		exactQ, exactArgs, exactOK := exactSQL(literal, topK, scopeMax+1, filter)
-		searchQ, searchArgs, searchOK := searchSQL(literal, topK, filter, true)
-		legacyQ, legacyArgs, legacyOK := searchSQL(literal, topK, filter, false)
+		probeQ, probeArgs, probeOK := probeSQL("chunk_vectors", scopeMax+1, filter)
+		exactQ, exactArgs, exactOK := exactSQL("chunk_vectors", literal, topK, scopeMax+1, filter)
+		searchQ, searchArgs, searchOK := searchSQL("chunk_vectors", literal, topK, filter, true)
+		legacyQ, legacyArgs, legacyOK := searchSQL("chunk_vectors", literal, topK, filter, false)
 
 		hasValidUUID := false
 		if filter.DocumentIDs != nil {

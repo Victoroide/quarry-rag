@@ -281,11 +281,11 @@ New untagged Pinecone and memory vectors store their claimed incarnation for ret
 
 ## Data Model
 
-Embedded SQL migrations define the relational schema and apply in numeric order at service startup. The diagram shows the core service metadata tables and columns. See the [grant catalog](grant-catalog.md) for authorization storage. The optional vector table is described below.
+Embedded SQL migrations define the relational schema and apply in numeric order at service startup. The diagram shows the core service metadata tables and columns. See the [grant catalog](grant-catalog.md) for authorization storage. The optional vector table and the vector generation records are described below.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/database-schema-dark.svg">
-  <img alt="Data model. The chunks, document_fingerprints, ingest_jobs and document_pdf_extractions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column. The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes." src="diagrams/database-schema-light.svg">
+  <img alt="Data model. The chunks, document_fingerprints, ingest_jobs and document_pdf_extractions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. The vector_generations table records each vector target and its embedding profile, vector_generation_documents holds the per-document write ledger of a generation and references vector_generations.name, and vector_state records the active generation and the writer freeze. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column. The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes." src="diagrams/database-schema-light.svg">
 </picture>
 
 ### Table Definitions
@@ -339,6 +339,18 @@ chunks and document status.
 
 When both LOCAL searches select exact ranking, top-up returns the broader
 search results in PostgreSQL order, including its collation for tied chunk IDs.
+
+### Vector Generations
+
+A vector generation names one vector target and the embedding profile it stores: provider, model, exact model revision, dimensions, distance metric and the extraction and chunking version of the stored chunks. Migration 012 records them in three tables. Generations are written only by [`make reindex`](development.md#vector-reindex-scriptsreindex).
+
+- **`vector_generations`**: One row per generation with its store (`postgres` or `pinecone`), target table or index, profile, profile origin (`recorded` or operator-`attested`) and state (`staging`, `verified`, `active` or `retired`). A verified row also stores the corpus digest and the verification report. A target belongs to at most one generation.
+- **`vector_generation_documents`**: The write ledger of a generation, one row per source document: the source revision and incarnation observed at the last completed write, the chunk keys written, and the counts copied and embedded. It has no foreign key to `documents`, so the keys of a deleted document remain known until the target is cleaned.
+- **`vector_state`**: A singleton naming the active generation (`legacy` until a reindex is activated) and recording the writer freeze with its time and owning generation.
+
+The `legacy` generation is the target that existed before generations: the fixed `chunk_vectors` table or the index named by `PINECONE_INDEX_NAME`. Another PostgreSQL generation stores its vectors in `chunk_vectors_<name>` with the same columns and indexes, so the live table is never altered in place. Deleting a document cascades to every generation table.
+
+Admission, job claims and deletions read `vector_state` first. They stop while writers are frozen and refuse to run on a replica whose configured [`VECTOR_GENERATION`](configuration.md#environment-variables) is not the active generation. Startup applies the same check and also compares the recorded target and embedding settings with its configuration.
 
 ## Lifecycle and Concurrency Model
 

@@ -223,6 +223,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Cleaner, err
 	if err != nil {
 		return nil, fmt.Errorf("postgres connect: %w", err)
 	}
+	pg.SetVectorGeneration(cfg.ActiveVectorGeneration())
 	migrationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	migrationErr := pg.RunMigrations(migrationCtx)
 	cancel()
@@ -280,6 +281,9 @@ func (c *Cleaner) delete(ctx context.Context, docID, incarnation string, qualifi
 	}
 	if c.offline != nil {
 		return c.deleteOffline(ctx, docID, incarnation, qualified)
+	}
+	if err := c.metadata.WritersOpen(ctx); err != nil {
+		return fmt.Errorf("deletions are paused: %w", err)
 	}
 	var vectors domain.VectorDeleter
 	if c.vectors != nil {

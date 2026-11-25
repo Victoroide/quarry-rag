@@ -65,6 +65,7 @@ type VectorStore struct {
 	client        *Client
 	dimensions    int
 	exactScopeMax int
+	table         string
 }
 
 var (
@@ -76,30 +77,60 @@ var (
 
 // NewVectorStore validates or initializes the optional schema under the migration advisory lock.
 // The client must have applied its base migrations before calling this function.
+// Job completion writes to the fixed chunk_vectors table.
 func NewVectorStore(ctx context.Context, client *Client, dimensions int, opts ...VectorOption) (*VectorStore, error) {
-	validDimensions, err := ValidateVectorDimensions(dimensions)
+	store, err := CreateGenerationVectorStore(ctx, client, dimensions, LegacyGeneration, opts...)
 	if err != nil {
 		return nil, err
 	}
-	vs := &VectorStore{client: client, dimensions: dimensions}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(vs)
-		}
+	store.RouteCompletion()
+	return store, nil
+}
+
+// CreateGenerationVectorStore creates the vector table of a generation and
+// returns a store over it. It never changes where this process completes jobs.
+func CreateGenerationVectorStore(ctx context.Context, client *Client, dimensions int, generation string, opts ...VectorOption) (*VectorStore, error) {
+	store, err := vectorStore(client, dimensions, generation, opts)
+	if err != nil {
+		return nil, err
 	}
-	if vs.exactScopeMax < 0 || vs.exactScopeMax > maxExactScopeLimit {
-		return nil, fmt.Errorf("postgres: exact scope limit must be between 0 and %d", maxExactScopeLimit)
-	}
-	if err := client.initVectors(ctx, dimensions); err != nil {
+	if err = client.initVectors(ctx, dimensions, store.table); err != nil {
 		return nil, fmt.Errorf("postgres: initialize vectors: %w", err)
 	}
-	if vs.exactScopeMax > 0 {
-		if err := client.ensureExactScopeIndexes(ctx); err != nil {
-			return nil, fmt.Errorf("postgres: ensure exact-scope indexes: %w", err)
+	if err = store.EnsureExactScopeIndexes(ctx); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+func vectorStore(client *Client, dimensions int, generation string, opts []VectorOption) (*VectorStore, error) {
+	if !ValidGenerationName(generation) {
+		return nil, fmt.Errorf("postgres: invalid vector generation %q", generation)
+	}
+	if _, err := ValidateVectorDimensions(dimensions); err != nil {
+		return nil, err
+	}
+	store := &VectorStore{client: client, dimensions: dimensions, table: VectorTable(generation)}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(store)
 		}
 	}
-	client.vectorDimensions.Store(validDimensions)
-	return vs, nil
+	if store.exactScopeMax < 0 || store.exactScopeMax > maxExactScopeLimit {
+		return nil, fmt.Errorf("postgres: exact scope limit must be between 0 and %d", maxExactScopeLimit)
+	}
+	return store, nil
+}
+
+// EnsureExactScopeIndexes prepares the indexes required by enabled exact search.
+func (s *VectorStore) EnsureExactScopeIndexes(ctx context.Context) error {
+	if s.exactScopeMax == 0 {
+		return nil
+	}
+	if err := s.client.ensureExactScopeIndexes(ctx, s.table); err != nil {
+		return fmt.Errorf("postgres: ensure exact-scope indexes: %w", err)
+	}
+	return nil
 }
 
 // ValidateVectorDimensions returns the bounded dimension supported by the pgvector index.
@@ -110,7 +141,44 @@ func ValidateVectorDimensions(dimensions int) (int32, error) {
 	return int32(dimensions), nil
 }
 
-func (c *Client) initVectors(ctx context.Context, dimensions int) error {
+// OpenGenerationVectorStore returns a store over an existing generation table
+// without creating or altering any schema.
+func OpenGenerationVectorStore(ctx context.Context, client *Client, dimensions int, generation string, opts ...VectorOption) (*VectorStore, error) {
+	store, err := vectorStore(client, dimensions, generation, opts)
+	if err != nil {
+		return nil, err
+	}
+	table := store.table
+	var stored int
+	var vectorType bool
+	err = client.Pool.QueryRow(ctx, `SELECT atttypmod, atttypid = to_regtype('vector') FROM pg_attribute WHERE attrelid = to_regclass(format('%I.%I', current_schema(), $1::text)) AND attname = 'embedding' AND NOT attisdropped`, table).Scan(&stored, &vectorType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: vector table %q does not exist", table)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: inspect vector table %q: %w", table, err)
+	}
+	if !vectorType || stored != dimensions {
+		return nil, fmt.Errorf("postgres: embedding dimension mismatch: existing %d, configured %d", stored, dimensions)
+	}
+	return store, nil
+}
+
+// RouteCompletion makes job completion write embeddings to this store's table.
+func (s *VectorStore) RouteCompletion() {
+	table := s.table
+	s.client.vectorTable.Store(&table)
+	s.client.vectorDimensions.Store(int32(s.dimensions)) // #nosec G115 -- Constructors bound dimensions to 2000.
+}
+
+func (c *Client) vectorTargetTable() string {
+	if table := c.vectorTable.Load(); table != nil {
+		return *table
+	}
+	return VectorTable(LegacyGeneration)
+}
+
+func (c *Client) initVectors(ctx context.Context, dimensions int, table string) error {
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -128,26 +196,27 @@ func (c *Client) initVectors(ctx context.Context, dimensions int) error {
 	if extensionErr := ensureVectorExtension(ctx, tx); extensionErr != nil {
 		return extensionErr
 	}
+	const relation = `to_regclass(format('%I.%I', current_schema(), $1::text))`
 	var exists bool
-	if relationErr := tx.QueryRow(ctx, `SELECT to_regclass(format('%I.chunk_vectors', current_schema())) IS NOT NULL`).Scan(&exists); relationErr != nil {
+	if relationErr := tx.QueryRow(ctx, `SELECT `+relation+` IS NOT NULL`, table).Scan(&exists); relationErr != nil {
 		return relationErr
 	}
 	if !exists {
-		if createErr := createVectorTable(ctx, tx, dimensions); createErr != nil {
+		if createErr := createVectorTable(ctx, tx, dimensions, table); createErr != nil {
 			return createErr
 		}
 	}
 	var storedDimensions int
 	var vectorType bool
 	if dimensionErr := tx.QueryRow(ctx, `SELECT atttypmod, atttypid=to_regtype('vector')
-		FROM pg_attribute WHERE attrelid=to_regclass(format('%I.chunk_vectors',current_schema()))
-		AND attname='embedding' AND NOT attisdropped`).Scan(&storedDimensions, &vectorType); dimensionErr != nil {
+		FROM pg_attribute WHERE attrelid=`+relation+`
+		AND attname='embedding' AND NOT attisdropped`, table).Scan(&storedDimensions, &vectorType); dimensionErr != nil {
 		return dimensionErr
 	}
 	if !vectorType || storedDimensions != dimensions {
 		return fmt.Errorf("embedding dimension mismatch: existing %d, configured %d", storedDimensions, dimensions)
 	}
-	if indexErr := ensureVectorIndexes(ctx, tx); indexErr != nil {
+	if indexErr := ensureVectorIndexes(ctx, tx, table); indexErr != nil {
 		return indexErr
 	}
 	return tx.Commit(ctx)
@@ -178,8 +247,8 @@ func ensureVectorExtension(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-func createVectorTable(ctx context.Context, tx pgx.Tx, dimensions int) error {
-	schema := fmt.Sprintf(`CREATE TABLE chunk_vectors (
+func createVectorTable(ctx context.Context, tx pgx.Tx, dimensions int, table string) error {
+	schema := fmt.Sprintf(`CREATE TABLE %s (
   chunk_id TEXT PRIMARY KEY,
   document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   chunk_index INTEGER NOT NULL,
@@ -190,16 +259,17 @@ func createVectorTable(ctx context.Context, tx pgx.Tx, dimensions int) error {
   quality TEXT,
   token_count INTEGER NOT NULL,
   embedding vector(%d) NOT NULL
- )`, dimensions)
+ )`, pgx.Identifier{table}.Sanitize(), dimensions)
 	_, err := tx.Exec(ctx, schema)
 	return err
 }
 
-func ensureVectorIndexes(ctx context.Context, tx pgx.Tx) error {
+func ensureVectorIndexes(ctx context.Context, tx pgx.Tx, table string) error {
+	embeddingIndex, documentIndex, collectionIndex := "idx_"+table+"_embedding", "idx_"+table+"_document_id", "idx_"+table+"_collection"
 	const check = `WITH expected(index_name, access_method, column_name, operator_class) AS (
-		VALUES ('idx_chunk_vectors_embedding','hnsw','embedding','vector_cosine_ops'),
-		       ('idx_chunk_vectors_document_id','btree','document_id','uuid_ops'),
-		       ('idx_chunk_vectors_collection','btree','collection','text_ops')
+		VALUES ($2::text,'hnsw','embedding','vector_cosine_ops'),
+		       ($3::text,'btree','document_id','uuid_ops'),
+		       ($4::text,'btree','collection','text_ops')
 	)
 	SELECT count(*) = (SELECT count(*) FROM expected)
 	FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid
@@ -208,19 +278,24 @@ func ensureVectorIndexes(ctx context.Context, tx pgx.Tx) error {
 	JOIN pg_opclass op ON op.oid=i.indclass[0]
 	JOIN expected e ON (idx.relname,am.amname,a.attname,op.opcname) =
 		(e.index_name,e.access_method,e.column_name,e.operator_class)
-	WHERE i.indrelid=to_regclass(format('%I.chunk_vectors',current_schema()))
+	WHERE i.indrelid=to_regclass(format('%I.%I',current_schema(),$1::text))
 	  AND i.indisvalid AND i.indisready AND i.indislive AND i.indnatts=1
 	  AND i.indpred IS NULL AND i.indexprs IS NULL`
 	var prepared bool
-	if err := tx.QueryRow(ctx, check).Scan(&prepared); err != nil || prepared {
+	if err := tx.QueryRow(ctx, check, table, embeddingIndex, documentIndex, collectionIndex).Scan(&prepared); err != nil || prepared {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_chunk_vectors_embedding ON chunk_vectors USING hnsw (embedding vector_cosine_ops);
- CREATE INDEX IF NOT EXISTS idx_chunk_vectors_document_id ON chunk_vectors(document_id);
- CREATE INDEX IF NOT EXISTS idx_chunk_vectors_collection ON chunk_vectors(collection)`); err != nil {
+	quoted := pgx.Identifier{table}.Sanitize()
+	indexes := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s USING hnsw (embedding vector_cosine_ops);
+ CREATE INDEX IF NOT EXISTS %s ON %s(document_id);
+ CREATE INDEX IF NOT EXISTS %s ON %s(collection)`,
+		pgx.Identifier{embeddingIndex}.Sanitize(), quoted,
+		pgx.Identifier{documentIndex}.Sanitize(), quoted,
+		pgx.Identifier{collectionIndex}.Sanitize(), quoted)
+	if _, err := tx.Exec(ctx, indexes); err != nil {
 		return err
 	}
-	if err := tx.QueryRow(ctx, check).Scan(&prepared); err != nil {
+	if err := tx.QueryRow(ctx, check, table, embeddingIndex, documentIndex, collectionIndex).Scan(&prepared); err != nil {
 		return err
 	}
 	if !prepared {
@@ -256,7 +331,7 @@ func vectorLiteral(embedding []float32, dimensions int) (string, error) {
 	return b.String(), nil
 }
 
-func insertVectors(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk, dimensions int) error {
+func insertVectors(ctx context.Context, tx pgx.Tx, table string, chunks []domain.Chunk, dimensions int) error {
 	literals := make([]string, len(chunks))
 	for i, ch := range chunks {
 		literal, err := vectorLiteral(ch.Embedding, dimensions)
@@ -274,7 +349,7 @@ func insertVectors(ctx context.Context, tx pgx.Tx, chunks []domain.Chunk, dimens
 		collection, _ := ch.Metadata["collection"].(string)
 		kind, _ := ch.Metadata["kind"].(string)
 		quality, _ := ch.Metadata["quality"].(string)
-		batch.Queue(`INSERT INTO chunk_vectors(chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,embedding)
+		batch.Queue(`INSERT INTO `+pgx.Identifier{table}.Sanitize()+`(chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,embedding)
    VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),NULLIF($8,''),$9,$10::text::vector)
    ON CONFLICT(chunk_id) DO UPDATE SET document_id=EXCLUDED.document_id,chunk_index=EXCLUDED.chunk_index,doc_type=EXCLUDED.doc_type,collection=EXCLUDED.collection,text=EXCLUDED.text,kind=EXCLUDED.kind,quality=EXCLUDED.quality,token_count=EXCLUDED.token_count,embedding=EXCLUDED.embedding`,
 			string(ch.ID), string(ch.DocumentID), ch.Index, docType, collection, ch.Text, kind, quality, ch.TokenCount, literals[i])
@@ -295,7 +370,7 @@ func (s *VectorStore) Upsert(ctx context.Context, namespace string, chunks []dom
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if err = insertVectors(ctx, tx, chunks, s.dimensions); err != nil {
+	if err = insertVectors(ctx, tx, s.table, chunks, s.dimensions); err != nil {
 		return fmt.Errorf("postgres: upsert vectors: %w", err)
 	}
 	return tx.Commit(ctx)
@@ -350,7 +425,7 @@ func (s *VectorStore) QueryFilteredDetailed(ctx context.Context, embedding []flo
 	}
 	// When probing, all ranking paths must use the probe's label eligibility.
 	useProbe := s.exactScopeMax > 0 && hasScopeFilter(filter)
-	searchQuery, searchArgs, ok := searchSQL(literal, topK, filter, useProbe)
+	searchQuery, searchArgs, ok := searchSQL(s.table, literal, topK, filter, useProbe)
 	if !ok {
 		return []domain.ScoredChunk{}, SearchReport{Status: SearchStatusOK}, nil
 	}
@@ -370,7 +445,7 @@ func (s *VectorStore) QueryFilteredDetailed(ctx context.Context, embedding []flo
 
 	if useProbe {
 		report.ProbeAttempted = true
-		probeQuery, probeArgs, _ := probeSQL(s.exactScopeMax+1, filter)
+		probeQuery, probeArgs, _ := probeSQL(s.table, s.exactScopeMax+1, filter)
 		var candidates int
 		if err = tx.QueryRow(ctx, probeQuery, probeArgs...).Scan(&candidates); err != nil {
 			return finishVectorSearch(ctx, report, nil, err)
@@ -382,7 +457,7 @@ func (s *VectorStore) QueryFilteredDetailed(ctx context.Context, embedding []flo
 			if candidates == 0 {
 				return finishVectorSearch(ctx, report, []domain.ScoredChunk{}, nil)
 			}
-			exactQuery, exactArgs, _ := exactSQL(literal, topK, s.exactScopeMax+1, filter)
+			exactQuery, exactArgs, _ := exactSQL(s.table, literal, topK, s.exactScopeMax+1, filter)
 			out, exactErr := scanScoredChunks(ctx, tx, exactQuery, exactArgs...)
 			return finishVectorSearch(ctx, report, out, exactErr)
 		}
@@ -487,7 +562,7 @@ func appendFilterPredicates(args []any, filter domain.VectorFilter, matchDocumen
 	return b.String(), args, true
 }
 
-func probeSQL(limit int, filter domain.VectorFilter) (query string, args []any, matches bool) {
+func probeSQL(table string, limit int, filter domain.VectorFilter) (query string, args []any, matches bool) {
 	predicates, args, ok := appendFilterPredicates(nil, filter, true)
 	if !ok {
 		return "", nil, false
@@ -499,14 +574,14 @@ func probeSQL(limit int, filter domain.VectorFilter) (query string, args []any, 
 	args = append(args, limit)
 	query = fmt.Sprintf(`SELECT count(*) FROM (
  SELECT 1
- FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'%s
+ FROM %s v JOIN documents d ON d.id=v.document_id AND d.status='completed'%s
  WHERE TRUE%s
  LIMIT $%d
-) s`, join, predicates, len(args))
+) s`, pgx.Identifier{table}.Sanitize(), join, predicates, len(args))
 	return query, args, true
 }
 
-func exactSQL(literal string, topK, scopeLimit int, filter domain.VectorFilter) (query string, args []any, matches bool) {
+func exactSQL(table, literal string, topK, scopeLimit int, filter domain.VectorFilter) (query string, args []any, matches bool) {
 	predicates, args, ok := appendFilterPredicates([]any{literal}, filter, true)
 	if !ok {
 		return "", nil, false
@@ -525,22 +600,22 @@ func exactSQL(literal string, topK, scopeLimit int, filter domain.VectorFilter) 
 	query = fmt.Sprintf(`WITH candidates AS MATERIALIZED (
  SELECT v.chunk_id,v.embedding <=> $1::text::vector AS distance,
         COALESCE(d.incarnation,d.id)::text AS observed_incarnation
- FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'%s
- WHERE TRUE%s
- LIMIT $%d
+ FROM %[1]s v JOIN documents d ON d.id=v.document_id AND d.status='completed'%[5]s
+ WHERE TRUE%[2]s
+ LIMIT $%[3]d
 ),
 ranked AS (
  SELECT chunk_id,distance,observed_incarnation
  FROM candidates
- ORDER BY distance,chunk_id%s
+ ORDER BY distance,chunk_id%[4]s
 )
 SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-r.distance,r.observed_incarnation
-FROM ranked r JOIN chunk_vectors v ON v.chunk_id=r.chunk_id
-ORDER BY r.distance,v.chunk_id`, join, predicates, scopeArg, limitClause)
+FROM ranked r JOIN %[1]s v ON v.chunk_id=r.chunk_id
+ORDER BY r.distance,v.chunk_id`, pgx.Identifier{table}.Sanitize(), predicates, scopeArg, limitClause, join)
 	return query, args, true
 }
 
-func searchSQL(literal string, topK int, filter domain.VectorFilter, matchDocumentLabels bool) (query string, args []any, matches bool) {
+func searchSQL(table, literal string, topK int, filter domain.VectorFilter, matchDocumentLabels bool) (query string, args []any, matches bool) {
 	predicates, args, ok := appendFilterPredicates([]any{literal}, filter, matchDocumentLabels)
 	if !ok {
 		return "", nil, false
@@ -551,7 +626,7 @@ func searchSQL(literal string, topK int, filter domain.VectorFilter, matchDocume
 	}
 	query = `SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.embedding <=> $1::text::vector AS distance,
  COALESCE(d.incarnation,d.id)::text AS observed_incarnation
- FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'` + join + ` WHERE TRUE` + predicates
+ FROM ` + pgx.Identifier{table}.Sanitize() + ` v JOIN documents d ON d.id=v.document_id AND d.status='completed'` + join + ` WHERE TRUE` + predicates
 	if topK > 0 {
 		args = append(args, topK)
 		query += fmt.Sprintf(" ORDER BY distance LIMIT $%d", len(args))
@@ -620,7 +695,7 @@ func (s *VectorStore) DeleteByDocID(ctx context.Context, docID string) error {
 	if err != nil {
 		return fmt.Errorf("postgres: invalid document ID: %w", err)
 	}
-	_, err = s.client.execRemoval(ctx, `DELETE FROM chunk_vectors WHERE document_id=$1`, parsed.String())
+	_, err = s.client.execRemoval(ctx, `DELETE FROM `+pgx.Identifier{s.table}.Sanitize()+` WHERE document_id=$1`, parsed.String())
 	return err
 }
 
@@ -629,12 +704,111 @@ func (s *VectorStore) DeleteAllVectorsInNamespace(ctx context.Context, namespace
 	if namespace != "" {
 		return s.DeleteByDocID(ctx, namespace)
 	}
-	_, err := s.client.Pool.Exec(ctx, `DELETE FROM chunk_vectors`)
+	_, err := s.client.Pool.Exec(ctx, `DELETE FROM `+pgx.Identifier{s.table}.Sanitize())
 	return err
 }
 
 // Ping verifies that the vector table is available for search.
 func (s *VectorStore) Ping(ctx context.Context) error {
-	_, err := s.client.Pool.Exec(ctx, `SELECT 1 FROM chunk_vectors LIMIT 0`)
+	_, err := s.client.Pool.Exec(ctx, `SELECT 1 FROM `+pgx.Identifier{s.table}.Sanitize()+` LIMIT 0`)
 	return err
+}
+
+// MaxFetchIDs bounds the keys of one Fetch or DeleteIDs call.
+const MaxFetchIDs = 1000
+
+func parseVectorText(text string) ([]float32, error) {
+	text = strings.TrimSpace(text)
+	if len(text) < 2 || text[0] != '[' || text[len(text)-1] != ']' {
+		return nil, fmt.Errorf("unrecognized vector text")
+	}
+	parts := strings.Split(text[1:len(text)-1], ",")
+	out := make([]float32, len(parts))
+	for i, part := range parts {
+		value, err := strconv.ParseFloat(strings.TrimSpace(part), 32)
+		if err != nil {
+			return nil, fmt.Errorf("unrecognized vector value: %w", err)
+		}
+		out[i] = float32(value)
+	}
+	return out, nil
+}
+
+// Fetch returns the stored vectors for the supplied keys. Missing keys are absent from the result.
+func (s *VectorStore) Fetch(ctx context.Context, ids []string) (map[string]domain.Chunk, error) {
+	out := make(map[string]domain.Chunk, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	if len(ids) > MaxFetchIDs {
+		return nil, fmt.Errorf("postgres: fetch accepts at most %d keys", MaxFetchIDs)
+	}
+	rows, err := s.client.Pool.Query(ctx, `SELECT chunk_id,document_id::text,chunk_index,doc_type,collection,text,kind,quality,token_count,embedding::text
+ FROM `+pgx.Identifier{s.table}.Sanitize()+` WHERE chunk_id = ANY($1)`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: fetch vectors: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var chunk domain.Chunk
+		var id, docType, collection, embedding string
+		var kind, quality *string
+		if err = rows.Scan(&id, &chunk.DocumentID, &chunk.Index, &docType, &collection, &chunk.Text, &kind, &quality, &chunk.TokenCount, &embedding); err != nil {
+			return nil, fmt.Errorf("postgres: read vector: %w", err)
+		}
+		chunk.ID = domain.ChunkID(id)
+		if chunk.Embedding, err = parseVectorText(embedding); err != nil {
+			return nil, fmt.Errorf("postgres: decode vector %s: %w", id, err)
+		}
+		chunk.Metadata = map[string]any{"doc_type": docType, "collection": collection}
+		if kind != nil {
+			chunk.Metadata["kind"] = *kind
+		}
+		if quality != nil {
+			chunk.Metadata["quality"] = *quality
+		}
+		out[id] = chunk
+	}
+	return out, rows.Err()
+}
+
+// ListIDs returns up to limit keys after the cursor in ascending order and the
+// cursor for the next page, which is empty at the end.
+func (s *VectorStore) ListIDs(ctx context.Context, after string, limit int) (ids []string, next string, err error) {
+	if limit < 1 || limit > 10000 {
+		return nil, "", errors.New("postgres: page size must be between 1 and 10000")
+	}
+	rows, err := s.client.Pool.Query(ctx, `SELECT chunk_id FROM `+pgx.Identifier{s.table}.Sanitize()+` WHERE chunk_id > $1 ORDER BY chunk_id LIMIT $2`, after, limit)
+	if err != nil {
+		return nil, "", fmt.Errorf("postgres: list vector keys: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, "", fmt.Errorf("postgres: read vector key: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	if len(ids) == limit {
+		next = ids[len(ids)-1]
+	}
+	return ids, next, nil
+}
+
+// DeleteIDs removes vectors by key. Missing keys are ignored.
+func (s *VectorStore) DeleteIDs(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if len(ids) > MaxFetchIDs {
+		return fmt.Errorf("postgres: delete accepts at most %d keys", MaxFetchIDs)
+	}
+	if _, err := s.client.Pool.Exec(ctx, `DELETE FROM `+pgx.Identifier{s.table}.Sanitize()+` WHERE chunk_id = ANY($1)`, ids); err != nil {
+		return fmt.Errorf("postgres: delete vectors: %w", err)
+	}
+	return nil
 }

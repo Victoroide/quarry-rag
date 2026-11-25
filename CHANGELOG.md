@@ -36,6 +36,7 @@ Notable changes are grouped by release.
 - Evidence-only queries return scoped excerpts without answer generation over JSON, SSE, the Go client and MCP.
 - Pinecone queries can opt into bounded recovery of live chunks displaced by stale index hits.
 - Optional source upload journal (`SOURCE_UPLOAD_JOURNAL=true`, migration 014) that records each original file's owner in PostgreSQL before it is written to S3, and `make reconcile ARGS="-source-uploads"`, which inventories and, with `-apply`, reclaims originals that no document adopted, including versions in versioned buckets, while preserving held versions and referenced objects.
+- `VECTOR_GENERATION` selects the vector target recorded for a migration and pins every replica of a shared ingestion queue to the active generation (migration 012). While writers are frozen for a migration, ingestion and deletion return 503 `frozen`, and `make cleanup` and `make reconcile -apply` stop.
 - Authenticated document status and inventory can include stable incarnations on request. [Document deletion](docs/api.md#delete-documentsdoc_id) returns `412` for reserved selectors and `400` for malformed queries.
 - Optional embedding input profiles enforce model-specific allowances, split overlong ingestion chunks and reject overlong queries before embedding.
 - Optional exact cosine search for small filtered pgvector scopes (`PGVECTOR_EXACT_SCOPE_MAX`, disabled by default) with bounded single-snapshot probing and `quarry_pgvector_search_total` metrics.

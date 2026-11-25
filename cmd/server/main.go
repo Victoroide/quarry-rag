@@ -94,6 +94,9 @@ func run() error {
 		return fmt.Errorf("startup: migrations: %w", migrationErr)
 	}
 	logger.Info("postgres connected")
+	if pinErr := pinVectorGeneration(startupCtx, cfg, pgClient); pinErr != nil {
+		return fmt.Errorf("startup: %w", pinErr)
+	}
 
 	// Select vector store, embedder, and LLM. FAKE MODE (GO_RAG_FAKE_MODE) wires
 	// deterministic offline implementations so the full HTTP API can be exercised
@@ -119,7 +122,7 @@ func run() error {
 		amb.SetClient(tracing.WrapConverser(llm.NewFakeConverser(), "offline", cfg.BedrockFallbackModel))
 	} else {
 		if cfg.VectorStore == "postgres" {
-			pgVectors, vectorErr := pgstore.NewVectorStore(startupCtx, pgClient, cfg.EmbeddingDimensions, pgstore.WithExactScopeMax(cfg.PGVectorExactScopeMax))
+			pgVectors, vectorErr := newPostgresVectors(startupCtx, cfg, pgClient)
 			if vectorErr != nil {
 				return fmt.Errorf("startup: postgres vectors: %w", vectorErr)
 			}

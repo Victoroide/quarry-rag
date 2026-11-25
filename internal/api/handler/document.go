@@ -78,8 +78,24 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 		}
 		incarnation, qualified, valid := deletionIncarnation(r.Header)
 
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), domain.WriteRequestTimeout)
 		defer cancel()
+		if gate, ok := cs.(domain.WriterGate); ok {
+			if gateErr := gate.WritersOpen(ctx); gateErr != nil {
+				switch {
+				case errors.Is(gateErr, domain.ErrWritersFrozen):
+					writeFrozen(w)
+				case errors.Is(gateErr, domain.ErrGenerationMismatch):
+					w.Header().Set("Retry-After", "30")
+					writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
+				default:
+					slog.ErrorContext(ctx, "check document writers", "document_id", docIDStr, "error", gateErr)
+					w.Header().Set("Retry-After", "30")
+					writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+				}
+				return
+			}
+		}
 		docID := domain.DocumentID(docIDStr)
 		if guard, ok := cs.(domain.LegacyDeletionGuard); ok && options.legacyReservations && !qualified {
 			// The activation lock decides the contract. A request that loses the race

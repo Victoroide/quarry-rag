@@ -32,6 +32,7 @@ const (
 	AcceptForbidden
 	// AcceptUnauthorized reports a subject credential that expired before durable acceptance.
 	AcceptUnauthorized
+	AcceptFrozen
 )
 
 // ContentDedup controls whether uploads participate in collection-wide content matching.

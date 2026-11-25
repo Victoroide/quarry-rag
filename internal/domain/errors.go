@@ -13,3 +13,10 @@ var ErrEmbeddingModelLimit = errors.New("embedding model rejected the input leng
 
 // ErrEmbeddingDenied indicates that the provider refused permission to embed.
 var ErrEmbeddingDenied = errors.New("embedding provider denied the request")
+
+// ErrWritersFrozen indicates that document writes are paused for a vector migration.
+var ErrWritersFrozen = errors.New("document writes are frozen for a vector migration")
+
+// ErrGenerationMismatch indicates that this replica serves a vector generation
+// other than the active one.
+var ErrGenerationMismatch = errors.New("replica vector generation is not the active generation")
