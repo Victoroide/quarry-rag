@@ -188,10 +188,14 @@ func run() error {
 	}
 
 	// Build ingestion pipeline stages.
+	persistOptions := []pipeline.PersistOption{pipeline.WithVisibilityWait(cfg.IndexVisibilityTimeout)}
+	if cfg.IndexVisibilityMode == "lsn" {
+		persistOptions = append(persistOptions, pipeline.WithLSNVisibility())
+	}
 	ingestStages := []pipeline.Stage{
 		pipeline.NewChunkStageWithEmbeddingProfile(chk, cfg.EmbeddingInputProfile),
 		pipeline.NewEmbedStage(emb, cfg.EmbedConcurrency),
-		pipeline.NewPersistStage(vectorStore, pipeline.WithVisibilityWait(cfg.IndexVisibilityTimeout)),
+		pipeline.NewPersistStage(vectorStore, persistOptions...),
 	}
 
 	serviceMetrics := metrics.NewService(metrics.CachedGauge(10*time.Second, func() (float64, error) {

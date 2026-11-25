@@ -61,3 +61,20 @@ func TestLoadContentDedupPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadIndexVisibilityMode(t *testing.T) {
+	t.Setenv("GO_RAG_FAKE_MODE", "true")
+	t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
+	for setting, want := range map[string]string{"": "sample", "sample": "sample", "lsn": "lsn", "LSN": ""} {
+		t.Run(setting, func(t *testing.T) {
+			t.Setenv("INDEX_VISIBILITY_MODE", setting)
+			cfg, err := Load()
+			if want == "" {
+				require.ErrorContains(t, err, "INDEX_VISIBILITY_MODE")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, want, cfg.IndexVisibilityMode)
+		})
+	}
+}

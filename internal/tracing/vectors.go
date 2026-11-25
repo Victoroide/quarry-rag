@@ -26,8 +26,15 @@ func WrapVectorStore(inner domain.VectorStore, system string) domain.VectorStore
 	if _, transactional := inner.(domain.TransactionalVectorStore); transactional {
 		return &transactionalVectorStore{wrapped}
 	}
-	if refill, ok := inner.(domain.VisibilityRefillStore); ok {
+	refill, canRefill := inner.(domain.VisibilityRefillStore)
+	writer, canWrite := inner.(domain.VisibilityWriter)
+	switch {
+	case canRefill && canWrite:
+		return &hostedVisibilityStore{&visibilityRefillStore{wrapped, refill}, writer}
+	case canRefill:
 		return &visibilityRefillStore{wrapped, refill}
+	case canWrite:
+		return &visibilityWriterStore{wrapped, writer}
 	}
 	return wrapped
 }
@@ -59,6 +66,27 @@ func (s *visibilityRefillStore) QueryFilteredBudgeted(ctx context.Context, embed
 	return chunks, used, err
 }
 
+// visibilityWriterStore keeps the write receipts of a store that does not refill.
+type visibilityWriterStore struct {
+	*vectorStore
+	writer domain.VisibilityWriter
+}
+
+func (s *visibilityWriterStore) UpsertWithVisibility(ctx context.Context, namespace string, chunks []domain.Chunk) (domain.VisibilityProbe, error) {
+	return s.upsertWithVisibility(ctx, s.writer, namespace, chunks)
+}
+
+// hostedVisibilityStore keeps both optional hosted capabilities, which are
+// enabled independently: refill at query time and receipts at ingestion.
+type hostedVisibilityStore struct {
+	*visibilityRefillStore
+	writer domain.VisibilityWriter
+}
+
+func (s *hostedVisibilityStore) UpsertWithVisibility(ctx context.Context, namespace string, chunks []domain.Chunk) (domain.VisibilityProbe, error) {
+	return s.upsertWithVisibility(ctx, s.writer, namespace, chunks)
+}
+
 func (s *vectorStore) begin(ctx context.Context, operation, kind string) (context.Context, trace.Span) {
 	return start(ctx, "vector."+operation, kind, trace.SpanKindClient, attribute.String("db.system.name", s.system), attribute.String("db.operation.name", operation))
 }
@@ -70,6 +98,15 @@ func (s *vectorStore) Upsert(ctx context.Context, namespace string, chunks []dom
 	err := s.VectorStore.Upsert(ctx, namespace, chunks)
 	RecordError(span, err)
 	return err
+}
+
+func (s *vectorStore) upsertWithVisibility(ctx context.Context, writer domain.VisibilityWriter, namespace string, chunks []domain.Chunk) (domain.VisibilityProbe, error) {
+	ctx, span := s.begin(ctx, "upsert", "tool")
+	defer span.End()
+	span.SetAttributes(attribute.Int("quarry.vector.records", len(chunks)))
+	probe, err := writer.UpsertWithVisibility(ctx, namespace, chunks)
+	RecordError(span, err)
+	return probe, err
 }
 
 func (s *vectorStore) query(ctx context.Context, topK int, call func(context.Context) ([]domain.ScoredChunk, error)) ([]domain.ScoredChunk, error) {

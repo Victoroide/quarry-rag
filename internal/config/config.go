@@ -119,6 +119,7 @@ type Config struct {
 	IngestContentDedup domain.ContentDedup
 
 	IndexVisibilityTimeout time.Duration
+	IndexVisibilityMode    string
 
 	AWSSessionToken    string
 	AWSMaxAttempts     int
@@ -177,6 +178,7 @@ func Load() (*Config, error) {
 		RerankModelARN:            os.Getenv("RERANK_MODEL_ARN"),
 		OCRProvider:               envOrDefault("OCR_PROVIDER", "none"),
 		IngestContentDedup:        domain.ContentDedup(envOrDefault("INGEST_CONTENT_DEDUP", string(domain.ContentDedupCollection))),
+		IndexVisibilityMode:       envOrDefault("INDEX_VISIBILITY_MODE", "sample"),
 	}
 	cfg.SubjectAuthority = SubjectAuthorityConfig{
 		Issuer:   os.Getenv("AUTHZ_ISSUER"),
@@ -511,6 +513,11 @@ func (c *Config) validate() error {
 	}
 	if c.IndexVisibilityTimeout < 0 || c.IndexVisibilityTimeout > 5*time.Minute || c.IndexVisibilityTimeout >= c.IngestJobTimeout {
 		return fmt.Errorf("config: INDEX_VISIBILITY_TIMEOUT must be between 0s and 5m and below INGEST_JOB_TIMEOUT")
+	}
+	switch c.IndexVisibilityMode {
+	case "", "sample", "lsn":
+	default:
+		return fmt.Errorf("config: INDEX_VISIBILITY_MODE must be sample or lsn")
 	}
 	if c.ShutdownDrainDelay < 0 || c.ShutdownDrainDelay > time.Minute {
 		return fmt.Errorf("config: SHUTDOWN_DRAIN_DELAY must be between 0s and 60s")

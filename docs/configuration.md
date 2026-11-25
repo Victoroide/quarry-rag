@@ -42,8 +42,9 @@ The table below lists the environment variables recognized by the service:
 | `HTTP_IDLE_TIMEOUT` | duration | `60s` | Positive | Idle keep-alive connection timeout. |
 | `HTTP_READ_TIMEOUT` | duration | `60s` | 5s to 30m | Maximum time to read a complete HTTP request, including the body. |
 | `HTTP_WRITE_TIMEOUT` | duration | `QUERY_TIMEOUT + 15s` | Greater than `QUERY_TIMEOUT` | Response write deadline; defaults to 75s with the default query budget. |
-| `INDEX_VISIBILITY_TIMEOUT` | duration | `30s` | 0s to 5m; less than `INGEST_JOB_TIMEOUT` | Pinecone only: maximum wait after vector writes for search to return the document's last embedded chunk; zero disables waiting. Timeout logs a warning and allows completion. |
-| `HOSTED_VISIBILITY_REFILL` | bool | `false` | Boolean | Enable [visibility refill](architecture.md#hosted-visibility-refill) for Pinecone queries. |
+| `INDEX_VISIBILITY_MODE` | string | `sample` | `sample`, `lsn` | In Pinecone, `sample` searches for the last embedded chunk, and `lsn` checks the serverless index's write receipts and query watermark. |
+| `INDEX_VISIBILITY_TIMEOUT` | duration | `30s` | 0s to 5m; less than `INGEST_JOB_TIMEOUT` | Maximum Pinecone visibility wait after vector writes. Zero disables waiting. A timeout logs a warning and allows completion. |
+| `HOSTED_VISIBILITY_REFILL` | bool | `false` | Boolean | Enable [visibility refill](architecture.md#hosted-visibility-refill) for Pinecone queries. Independent of `INDEX_VISIBILITY_MODE`. |
 | `HOSTED_VISIBILITY_EXTRA_REQUESTS` | integer | `1` | Non-negative | Maximum additional Pinecone requests per enabled query. Zero keeps the current-chunk checks and allows no additional requests. |
 | `INGEST_CONTENT_DEDUP` | string | `collection` | `collection` or `off` | Selects the [document identity policy](api.md#document-identity) for new uploads. See [rollout and rollback](deployment.md#content-deduplication-rollout). |
 | `INGEST_JOB_TIMEOUT` | duration | `15m` | 1m to 2h; greater than lease | Maximum processing time per attempt. |
@@ -319,10 +320,10 @@ Metrics use Prometheus text format:
   success and `fallback` for errors, invalid results or an expired `RERANK_TIMEOUT`.
   Disabled reranking, empty candidate lists and queries canceled or timed out during
   reranking are not counted.
-- `quarry_index_visibility_waits_total{result}` counts visibility waits by outcome:
-  `visible` when search returns the document's last vector, and `timeout` when the
-  wait expires or worker shutdown ends it first. Disabled waits and canceled
-  attempts are not counted. The `persist` stage duration includes the wait.
+- `quarry_index_visibility_waits_total{result}` counts started visibility waits.
+  `visible` means the sample was found. `writes_indexed` and `unknown` are LSN
+  probe outcomes. `timeout` counts expired waits and interrupted worker shutdowns.
+  The `persist` stage duration includes the wait.
 - `quarry_pgvector_search_total{strategy,status}` counts PostgreSQL vector
   searches by `strategy` (`exact`, `hnsw`, `probe`) and `status` (`ok`,
   `partial`, `timeout`, `canceled`, `error`). On `hnsw`, `partial` indicates fewer

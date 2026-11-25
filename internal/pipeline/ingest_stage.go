@@ -101,6 +101,7 @@ func (s *EmbedStage) Run(ctx context.Context, ic *IngestContext) error {
 type PersistStage struct {
 	vectorStore       domain.VectorStore
 	visibilityTimeout time.Duration
+	lsnVisibility     bool
 }
 
 // PersistOption configures vector persistence.
@@ -109,6 +110,11 @@ type PersistOption func(*PersistStage)
 // WithVisibilityWait bounds the wait for search visibility; zero disables it.
 func WithVisibilityWait(timeout time.Duration) PersistOption {
 	return func(s *PersistStage) { s.visibilityTimeout = timeout }
+}
+
+// WithLSNVisibility checks acknowledged write progress instead of sampling matches.
+func WithLSNVisibility() PersistOption {
+	return func(s *PersistStage) { s.lsnVisibility = true }
 }
 
 // NewPersistStage creates a PersistStage.
@@ -125,6 +131,7 @@ func (s *PersistStage) ID() StageID { return StagePersist }
 
 // Run writes labeled vectors to the default namespace and waits for search visibility when configured.
 func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
+	ic.IndexObservation = domain.IndexObservation{}
 	// Labels are supplied by callers and never inferred from document content.
 	docType := ic.DocType
 	if docType == "" {
@@ -151,17 +158,23 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 	}
 
 	// Upsert vectors to the default namespace with doc_id metadata.
-	if err := s.vectorStore.Upsert(ctx, "", ic.Chunks); err != nil {
+	var probe domain.VisibilityProbe
+	var err error
+	if writer, ok := s.vectorStore.(domain.VisibilityWriter); s.lsnVisibility && s.visibilityTimeout > 0 && ok {
+		probe, err = writer.UpsertWithVisibility(ctx, "", ic.Chunks)
+	} else {
+		err = s.vectorStore.Upsert(ctx, "", ic.Chunks)
+	}
+	if err != nil {
 		return fmt.Errorf("persist_stage: upsert to default namespace: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	slog.DebugContext(ctx, "document vectors persisted", "document_id", ic.DocumentID, "doc_type", docType, "chunks", len(ic.Chunks))
-	return s.waitForVisibility(ctx, ic)
-}
-
-func (s *PersistStage) waitForVisibility(ctx context.Context, ic *IngestContext) error {
-	store, ok := s.vectorStore.(domain.FilteredVectorStore)
-	if s.visibilityTimeout <= 0 || !ok {
+	if s.visibilityTimeout <= 0 {
+		ic.observeIndex(domain.VisibilityDisabled)
 		return nil
 	}
 	var target domain.Chunk
@@ -172,10 +185,42 @@ func (s *PersistStage) waitForVisibility(ctx context.Context, ic *IngestContext)
 			embedded++
 		}
 	}
-	if embedded == 0 {
+	if !s.lsnVisibility {
+		probe = s.sampleProbe(ic.DocumentID, target.ID, min(embedded, 10))
+	}
+	if embedded == 0 || probe == nil {
+		ic.observeIndex(domain.VisibilityUnknown)
 		return nil
 	}
+	return s.waitForVisibility(ctx, ic, target.Embedding, probe)
+}
 
+func (ic *IngestContext) observeIndex(result domain.IndexVisibility) {
+	now := time.Now().UTC()
+	ic.IndexObservation = domain.IndexObservation{Visibility: result, ObservedAt: &now}
+}
+
+func (s *PersistStage) sampleProbe(docID domain.DocumentID, target domain.ChunkID, topK int) domain.VisibilityProbe {
+	store, ok := s.vectorStore.(domain.FilteredVectorStore)
+	if !ok {
+		return nil
+	}
+	filter := domain.VectorFilter{DocumentIDs: []string{string(docID)}}
+	return func(ctx context.Context, embedding []float32) (domain.IndexVisibility, error) {
+		chunks, err := store.QueryFiltered(ctx, embedding, topK, filter)
+		if err != nil {
+			return "", err
+		}
+		for _, chunk := range chunks {
+			if chunk.Chunk.ID == target {
+				return domain.VisibilitySampleSeen, nil
+			}
+		}
+		return "", nil
+	}
+}
+
+func (s *PersistStage) waitForVisibility(ctx context.Context, ic *IngestContext, embedding []float32, probe domain.VisibilityProbe) error {
 	start := time.Now()
 	waitCtx, cancel := context.WithTimeout(ctx, s.visibilityTimeout)
 	defer cancel()
@@ -188,27 +233,30 @@ func (s *PersistStage) waitForVisibility(ctx context.Context, ic *IngestContext)
 			}
 		}()
 	}
-	filter := domain.VectorFilter{DocumentIDs: []string{string(ic.DocumentID)}}
 	backoff := 200 * time.Millisecond
 	var probeErr error
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if waitCtx.Err() != nil {
+		if waitCtx.Err() != nil || visibilityStopped(ic.Stopping) {
 			break
 		}
-		chunks, err := store.QueryFiltered(waitCtx, target.Embedding, min(embedded, 10), filter)
+		result, err := probe(waitCtx, embedding)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err == nil {
-			for _, chunk := range chunks {
-				if chunk.Chunk.ID == target.ID {
-					metrics.FromContext(ctx).IndexVisibility.WithLabelValues("visible").Inc()
-					return nil
-				}
+		if visibilityStopped(ic.Stopping) || (s.lsnVisibility && waitCtx.Err() != nil) {
+			break
+		}
+		if err == nil && result != "" {
+			ic.observeIndex(result)
+			label := string(result)
+			if result == domain.VisibilitySampleSeen {
+				label = "visible"
 			}
+			metrics.FromContext(ctx).IndexVisibility.WithLabelValues(label).Inc()
+			return nil
 		}
 		if waitCtx.Err() != nil {
 			break
@@ -222,6 +270,14 @@ func (s *PersistStage) waitForVisibility(ctx context.Context, ic *IngestContext)
 		}
 		backoff = min(2*backoff, 2*time.Second)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	result := domain.VisibilityTimeout
+	if visibilityStopped(ic.Stopping) {
+		result = domain.VisibilityUnknown
+	}
+	ic.observeIndex(result)
 	metrics.FromContext(ctx).IndexVisibility.WithLabelValues("timeout").Inc()
 	attrs := []any{"document_id", ic.DocumentID, "waited_ms", time.Since(start).Milliseconds()}
 	if probeErr != nil {
@@ -229,4 +285,13 @@ func (s *PersistStage) waitForVisibility(ctx context.Context, ic *IngestContext)
 	}
 	slog.WarnContext(ctx, "document vectors not yet searchable", attrs...)
 	return nil
+}
+
+func visibilityStopped(stopping <-chan struct{}) bool {
+	select {
+	case <-stopping:
+		return true
+	default:
+		return false
+	}
 }

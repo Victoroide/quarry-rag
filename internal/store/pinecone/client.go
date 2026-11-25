@@ -37,6 +37,7 @@ type Client struct {
 	timeout     time.Duration
 	maxAttempts int
 	dims        int
+	visibility  *visibilityPlane
 	closeOnce   sync.Once
 	closeErr    error
 }
@@ -63,11 +64,19 @@ func newPineconeClient(ctx context.Context, cfg *config.Config, pc *pinecone.Cli
 	if cfg.HostedVisibilityRefill {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(queryAttemptCredentials{}))
 	}
+	var visibility *visibilityPlane
+	if cfg.IndexVisibilityMode == "lsn" {
+		visibility, err = newVisibilityPlane(idx, cfg.PineconeAPIKey)
+		if err != nil {
+			return nil, err
+		}
+	}
 	defaultConn, err := pc.Index(pinecone.NewIndexConnParams{Host: idx.Host}, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("pinecone: connect to default namespace: %w", err)
 	}
 	p := newClient(pc, cfg, defaultConn)
+	p.visibility = visibility
 	slog.InfoContext(ctx, "pinecone connected", "index", cfg.PineconeIndexName, "host", idx.Host, "dimensions", *idx.Dimension)
 	return p, nil
 }
@@ -96,6 +105,12 @@ func (p *Client) conn(namespace string) (indexConn, func(), error) {
 
 // Upsert inserts or updates vectors in the specified namespace.
 func (p *Client) Upsert(ctx context.Context, namespace string, chunks []domain.Chunk) error {
+	_, err := p.UpsertWithVisibility(ctx, namespace, chunks)
+	return err
+}
+
+// UpsertWithVisibility inserts vectors and returns an attempt-bound probe when enabled and supported.
+func (p *Client) UpsertWithVisibility(ctx context.Context, namespace string, chunks []domain.Chunk) (domain.VisibilityProbe, error) {
 	vectors := make([]*pinecone.Vector, 0, len(chunks))
 	sizes := make([]int, 0, len(chunks))
 	for _, c := range chunks {
@@ -113,25 +128,32 @@ func (p *Client) Upsert(ctx context.Context, namespace string, chunks []domain.C
 		}
 		encoded, err := json.Marshal(mdMap)
 		if err != nil {
-			return fmt.Errorf("pinecone: serialize metadata for chunk %s: %w", c.ID, err)
+			return nil, fmt.Errorf("pinecone: serialize metadata for chunk %s: %w", c.ID, err)
 		}
 		if len(encoded) > maxMetadataBytes {
-			return fmt.Errorf("%w: chunk %s (%d bytes)", ErrMetadataTooLarge, c.ID, len(encoded))
+			return nil, fmt.Errorf("%w: chunk %s (%d bytes)", ErrMetadataTooLarge, c.ID, len(encoded))
 		}
 		md, err := structpb.NewStruct(mdMap)
 		if err != nil {
-			return fmt.Errorf("pinecone: build metadata for chunk %s: %w", c.ID, err)
+			return nil, fmt.Errorf("pinecone: build metadata for chunk %s: %w", c.ID, err)
 		}
 		size := 4*len(c.Embedding) + len(c.ID) + proto.Size(md) + 32
 		if size > maxUpsertBytes {
-			return fmt.Errorf("pinecone: chunk %s exceeds the upsert byte limit", c.ID)
+			return nil, fmt.Errorf("pinecone: chunk %s exceeds the upsert byte limit", c.ID)
 		}
 		vectors = append(vectors, &pinecone.Vector{Id: string(c.ID), Values: &c.Embedding, Metadata: md})
 		sizes = append(sizes, size)
 	}
 	if len(vectors) == 0 {
-		return nil
+		return nil, nil
 	}
+	if p.visibility != nil {
+		return p.upsertForVisibility(ctx, namespace, vectors)
+	}
+	return nil, p.upsertGRPC(ctx, namespace, vectors, sizes)
+}
+
+func (p *Client) upsertGRPC(ctx context.Context, namespace string, vectors []*pinecone.Vector, sizes []int) error {
 	conn, release, err := p.conn(namespace)
 	if err != nil {
 		return err

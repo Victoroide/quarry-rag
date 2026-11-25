@@ -21,6 +21,11 @@ func (d *Driver) Upsert(ctx context.Context, namespace string, chunks []domain.C
 	return d.client.Upsert(ctx, namespace, chunks)
 }
 
+// UpsertWithVisibility returns the visibility probe for these writes when available.
+func (d *Driver) UpsertWithVisibility(ctx context.Context, namespace string, chunks []domain.Chunk) (domain.VisibilityProbe, error) {
+	return d.client.UpsertWithVisibility(ctx, namespace, chunks)
+}
+
 // Query searches for similar vectors in the specified namespace.
 func (d *Driver) Query(ctx context.Context, namespace string, embedding []float32, topK int, docTypeFilter string) ([]domain.ScoredChunk, error) {
 	return d.client.Query(ctx, namespace, embedding, topK, docTypeFilter)
