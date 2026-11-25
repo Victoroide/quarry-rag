@@ -1,4 +1,4 @@
-.PHONY: build test lint vet ci up down logs cleanup reconcile validate fuzz diagrams diagrams-check
+.PHONY: build test lint vet ci image-check up down logs cleanup reconcile validate fuzz diagrams diagrams-check
 
 FUZZTIME ?= 30s
 
@@ -27,6 +27,12 @@ ci:
 	$(MAKE) test
 	$(MAKE) diagrams-check
 	docker build --target runtime -t quarry-rag:prod .
+
+# Build the runtime image for both published platforms and check each of them.
+image-check:
+	set -e; dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; \
+	docker buildx build --target runtime --platform linux/amd64,linux/arm64 --output "type=oci,dest=$$dir/runtime-image.tar" .; \
+	.github/scripts/image-check.sh "$$dir/runtime-image.tar"
 
 # Start the full stack
 up:
