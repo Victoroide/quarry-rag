@@ -47,6 +47,8 @@ Unit tests cover domain functions, data parsing, HTTP behavior and pipeline logi
 go test -short -race -count=1 ./...
 ```
 
+The `internal/api/handler` tests use `awaitSignal` to wait for asynchronous events up to the test deadline. The stream disconnect fixture waits for the provider to acknowledge readiness before canceling the client. Queue and health probe concurrency checks use `testing/synctest` to observe blocked goroutines before their timers expire.
+
 Scope of unit tests:
 - **Chunker**: Validates word window boundaries, token estimates, HTML sanitization, and SHA-256 fingerprints. `bounds_test.go` checks the clamp result for each raw window and checks aggregate bytes and chunk count for each effective window and text family.
 - **Extractor (`test/unit/extractor_test.go`, `internal/extractor/*_test.go`, `internal/api/handler/ingest_detect_test.go`)**: Covers synthetic PDF, DOCX and plain text, content detection and extension mismatches, stable extraction error codes, decoded-text and XML limits, parser isolation, and cancellation.

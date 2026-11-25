@@ -318,19 +318,49 @@ func TestQueryStreamPreEventErrorsRemainJSON(t *testing.T) {
 	requireQueryResponseHeaders(t, rec, http.StatusGatewayTimeout, "application/json")
 }
 
-func TestQueryStreamDisconnectCancelsUpstream(t *testing.T) {
-	canceled := make(chan struct{})
-	c := &queryStreamConverser{call: func(ctx context.Context, fn func(string) error) (*bedrockruntime.ConverseOutput, error) {
-		if err := fn("partial"); err != nil {
-			return nil, err
+var errTestEnded = errors.New("test ended before the upstream request was canceled")
+
+// nextStreamEvent returns the name of the next event on the stream.
+func nextStreamEvent(t *testing.T, scanner *bufio.Scanner) string {
+	t.Helper()
+	for scanner.Scan() {
+		if name, ok := strings.CutPrefix(scanner.Text(), "event: "); ok {
+			return name
 		}
-		<-ctx.Done()
-		close(canceled)
-		return nil, ctx.Err()
+	}
+	t.Fatalf("stream ended before the next event: %v", scanner.Err())
+	return ""
+}
+
+// streamDisconnect serves a streamed query whose upstream is run, drops the
+// client once it has read the named events and returns how the upstream
+// ended. waitForDisconnect signals that the upstream is ready for the client
+// to disconnect, then waits for cancellation. The test can also release the
+// upstream during cleanup so that a missing cancellation cannot block shutdown.
+func streamDisconnect(t *testing.T, events []string, run func(publish func(string) error, waitForDisconnect func() error) error) error {
+	t.Helper()
+	ready := make(chan struct{})
+	ended := make(chan error, 1)
+	testEnded := make(chan struct{})
+	c := &queryStreamConverser{call: func(ctx context.Context, publish func(string) error) (*bedrockruntime.ConverseOutput, error) {
+		err := run(publish, func() error {
+			close(ready)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-testEnded:
+				return errTestEnded
+			}
+		})
+		ended <- err
+		return nil, err
 	}}
-	srv := httptest.NewServer(streamQueryHandler(streamQueryConfig(), true, c))
+	cfg := streamQueryConfig()
+	cfg.QueryTimeout, cfg.SynthesisTimeout = time.Hour, time.Hour
+	srv := httptest.NewServer(streamQueryHandler(cfg, true, c))
 	defer srv.Close()
-	ctx, cancel := context.WithCancel(t.Context())
+	defer close(testEnded)
+	ctx, cancel := context.WithCancel(testBudget(t))
 	defer cancel()
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, strings.NewReader(`{"query":"archive","mode":"global"}`))
 	require.NoError(t, err)
@@ -340,15 +370,34 @@ func TestQueryStreamDisconnectCancelsUpstream(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	scanner := bufio.NewScanner(resp.Body)
-	require.True(t, scanner.Scan())
-	require.Equal(t, "event: context", scanner.Text())
+	for _, name := range events {
+		require.Equal(t, name, nextStreamEvent(t, scanner))
+	}
+	awaitSignal(t, ready, "the upstream request to be ready for the disconnect")
 	cancel()
 	require.NoError(t, resp.Body.Close())
-	select {
-	case <-canceled:
-	case <-time.After(time.Second):
-		t.Fatal("disconnect did not cancel upstream")
-	}
+	return awaitSignal(t, ended, "the upstream request to end after the disconnect")
+}
+
+func TestQueryStreamDisconnectCancelsUpstream(t *testing.T) {
+	t.Run("while synthesizing", func(t *testing.T) {
+		err := streamDisconnect(t, []string{"context", "delta"}, func(publish func(string) error, waitForDisconnect func() error) error {
+			if err := publish("partial"); err != nil {
+				return err
+			}
+			return waitForDisconnect()
+		})
+		require.ErrorIs(t, err, context.Canceled)
+	})
+	t.Run("before the next delta", func(t *testing.T) {
+		err := streamDisconnect(t, []string{"context"}, func(publish func(string) error, waitForDisconnect func() error) error {
+			if err := waitForDisconnect(); !errors.Is(err, context.Canceled) {
+				return err
+			}
+			return publish("late")
+		})
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 func TestQueryStreamThroughMiddlewareAndAuthentication(t *testing.T) {
@@ -383,7 +432,7 @@ func TestQueryStreamThroughMiddlewareAndAuthentication(t *testing.T) {
 	completed := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r); close(completed) }))
 	defer srv.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	ctx, cancel := context.WithCancel(testBudget(t))
 	defer cancel()
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/query", strings.NewReader(`{"query":"archive","mode":"global"}`))
 	require.NoError(t, err)
@@ -397,17 +446,9 @@ func TestQueryStreamThroughMiddlewareAndAuthentication(t *testing.T) {
 	require.True(t, scanner.Scan())
 	require.Equal(t, "event: context", scanner.Text())
 	require.NotEmpty(t, resp.Header.Get("X-Request-ID"))
-	select {
-	case <-called:
-	case <-ctx.Done():
-		t.Fatal("stream did not reach synthesis")
-	}
+	awaitSignal(t, called, "the stream to reach synthesis")
 	cancel()
-	select {
-	case <-completed:
-	case <-time.After(time.Second):
-		t.Fatal("middleware did not complete")
-	}
+	awaitSignal(t, completed, "the middleware chain to complete")
 	var collected bytes.Buffer
 	require.NoError(t, service.Registry.WriteText(&collected))
 	require.Contains(t, collected.String(), `quarry_http_requests_total{route="POST /query",code="200"} 1`)
@@ -434,11 +475,7 @@ func TestQueryStreamAdmissionAndSynthesisTimeout(t *testing.T) {
 		defer close(finished)
 		h(httptest.NewRecorder(), streamQueryRequest(ctx, `{"query":"archive","mode":"global"}`))
 	}()
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("first query did not start")
-	}
+	awaitSignal(t, entered, "the first query to start")
 	rec := httptest.NewRecorder()
 	h(rec, streamQueryRequest(t.Context(), `{"query":"archive","mode":"global"}`))
 	deadlineAssertError(t, rec, 503, "overloaded")
