@@ -295,7 +295,7 @@ func TestPutFailureIsReported(t *testing.T) {
 }
 
 func TestDeleteVersionTargetsOneVersion(t *testing.T) {
-	for _, version := range []string{"", "v1", "null"} {
+	for _, version := range []string{"v1", "null"} {
 		t.Run("version="+version, func(t *testing.T) {
 			requests := make(chan *http.Request, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -314,11 +314,155 @@ func TestDeleteVersionTargetsOneVersion(t *testing.T) {
 			if got := r.URL.Query().Get("versionId"); got != version {
 				t.Fatalf("versionId = %q, want %q", got, version)
 			}
-			if r.URL.Query().Has("versionId") != (version != "") {
-				t.Fatalf("versionId presence = %v for %q", r.URL.Query().Has("versionId"), version)
-			}
 			if got := r.Header.Get("x-amz-expected-bucket-owner"); got != "123456789012" {
 				t.Fatalf("owner = %q", got)
+			}
+		})
+	}
+}
+
+func TestDeleteVersionRequiresAnID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client := s3EndpointClient(t, server.URL, "")
+	if err := client.DeleteVersion(t.Context(), "documents/a/key.pdf", ""); !errors.Is(err, ErrVersionIDMissing) {
+		t.Fatalf("error = %v, want ErrVersionIDMissing", err)
+	}
+}
+
+const versionListing = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult>
+  <Name>owned-bucket</Name><Prefix>documents/a/key.pdf</Prefix><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>
+  <DeleteMarker><Key>documents/a/key.pdf</Key><VersionId>marker</VersionId><IsLatest>true</IsLatest></DeleteMarker>
+  <Version><Key>documents/a/key.pdf</Key><VersionId>second</VersionId><IsLatest>false</IsLatest><Size>20</Size></Version>
+  <Version><Key>documents/a/key.pdf</Key><VersionId>null</VersionId><IsLatest>false</IsLatest><Size>10</Size></Version>
+  <Version><Key>documents/a/key.pdf.bak</Key><VersionId>other</VersionId><IsLatest>true</IsLatest><Size>99</Size></Version>
+</ListVersionsResult>`
+
+func TestListVersionsReturnsOnlyTheExactKey(t *testing.T) {
+	requests := make(chan *http.Request, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, versionListing)
+	}))
+	defer server.Close()
+	client := s3EndpointClient(t, server.URL, "123456789012")
+	versions, complete, err := client.ListVersions(t.Context(), "documents/a/key.pdf", 10)
+	if err != nil || !complete {
+		t.Fatalf("complete = %v, error = %v", complete, err)
+	}
+	got := map[string]ObjectVersion{}
+	for _, v := range versions {
+		got[v.ID] = v
+	}
+	want := map[string]ObjectVersion{
+		"marker": {ID: "marker", DeleteMarker: true},
+		"second": {ID: "second", Size: 20},
+		"null":   {ID: "null", Size: 10},
+	}
+	if len(got) != len(want) || got["marker"] != want["marker"] || got["second"] != want["second"] || got["null"] != want["null"] {
+		t.Fatalf("versions = %+v, want %+v", got, want)
+	}
+	r := <-requests
+	if r.Method != http.MethodGet || !r.URL.Query().Has("versions") || r.URL.Query().Get("prefix") != "documents/a/key.pdf" {
+		t.Fatalf("request = %s %s", r.Method, r.URL.String())
+	}
+	if r.Header.Get("x-amz-expected-bucket-owner") != "123456789012" {
+		t.Fatalf("owner = %q", r.Header.Get("x-amz-expected-bucket-owner"))
+	}
+}
+
+func TestListVersionsFollowsPagesAndBoundsTheResult(t *testing.T) {
+	page := func(marker string, truncated bool, ids ...string) string {
+		var body strings.Builder
+		body.WriteString(`<ListVersionsResult><Name>owned-bucket</Name>`)
+		if truncated {
+			body.WriteString("<IsTruncated>true</IsTruncated><NextKeyMarker>documents/a/key.pdf</NextKeyMarker><NextVersionIdMarker>" + marker + "</NextVersionIdMarker>")
+		} else {
+			body.WriteString("<IsTruncated>false</IsTruncated>")
+		}
+		for _, id := range ids {
+			body.WriteString("<Version><Key>documents/a/key.pdf</Key><VersionId>" + id + "</VersionId><IsLatest>false</IsLatest><Size>1</Size></Version>")
+		}
+		body.WriteString("</ListVersionsResult>")
+		return body.String()
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Get("version-id-marker") == "v2" {
+			_, _ = io.WriteString(w, page("", false, "v3"))
+			return
+		}
+		_, _ = io.WriteString(w, page("v2", true, "v1", "v2"))
+	}))
+	defer server.Close()
+	client := s3EndpointClient(t, server.URL, "")
+	versions, complete, err := client.ListVersions(t.Context(), "documents/a/key.pdf", 10)
+	if err != nil || !complete || len(versions) != 3 {
+		t.Fatalf("versions = %+v, complete = %v, error = %v", versions, complete, err)
+	}
+	versions, complete, err = client.ListVersions(t.Context(), "documents/a/key.pdf", 2)
+	if err != nil || complete || len(versions) != 2 {
+		t.Fatalf("bounded versions = %+v, complete = %v, error = %v", versions, complete, err)
+	}
+}
+
+func TestListVersionsReportsFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) }))
+	defer server.Close()
+	if _, _, err := s3EndpointClient(t, server.URL, "").ListVersions(t.Context(), "documents/a/key.pdf", 10); err == nil {
+		t.Fatal("denied listing accepted")
+	}
+}
+
+func TestVersionLockReadsRetentionAndLegalHold(t *testing.T) {
+	until := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		headers map[string]string
+		status  int
+		want    ObjectLock
+		missing bool
+		failed  bool
+	}{
+		"unlocked":  {status: http.StatusOK},
+		"legal":     {status: http.StatusOK, headers: map[string]string{"x-amz-object-lock-legal-hold": "ON"}, want: ObjectLock{LegalHold: true}},
+		"released":  {status: http.StatusOK, headers: map[string]string{"x-amz-object-lock-legal-hold": "OFF"}},
+		"retention": {status: http.StatusOK, headers: map[string]string{"x-amz-object-lock-mode": "COMPLIANCE", "x-amz-object-lock-retain-until-date": until.Format(time.RFC3339)}, want: ObjectLock{RetainUntil: until}},
+		"missing":   {status: http.StatusNotFound, missing: true},
+		"denied":    {status: http.StatusForbidden, failed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			requests := make(chan *http.Request, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r
+				for key, value := range tc.headers {
+					w.Header().Set(key, value)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
+			lock, err := s3EndpointClient(t, server.URL, "").VersionLock(t.Context(), "documents/a/key.pdf", "v1")
+			r := <-requests
+			if r.Method != http.MethodHead || r.URL.Query().Get("versionId") != "v1" {
+				t.Fatalf("request = %s %s", r.Method, r.URL.String())
+			}
+			switch {
+			case tc.missing:
+				if !errors.Is(err, ErrVersionNotFound) {
+					t.Fatalf("error = %v, want ErrVersionNotFound", err)
+				}
+			case tc.failed:
+				if err == nil || errors.Is(err, ErrVersionNotFound) {
+					t.Fatalf("error = %v, want a lookup failure", err)
+				}
+			default:
+				if err != nil || lock.LegalHold != tc.want.LegalHold || !lock.RetainUntil.Equal(tc.want.RetainUntil) {
+					t.Fatalf("lock = %+v, error = %v, want %+v", lock, err, tc.want)
+				}
 			}
 		})
 	}
