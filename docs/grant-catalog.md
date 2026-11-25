@@ -80,6 +80,8 @@ Proceed when the ACL lists only the schema owner and each login returns
 ```sql
 GRANT USAGE ON SCHEMA public TO quarry_service, quarry_operator, quarry_auditor;
 GRANT SELECT ON public.schema_migrations TO quarry_service;
+GRANT EXECUTE ON FUNCTION public.vector_bind_legacy(text, text, text),
+  public.vector_writer_state() TO quarry_service;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.documents, public.chunks,
   public.ingest_jobs, public.document_fingerprints TO quarry_service;
 GRANT SELECT, INSERT, UPDATE ON public.document_pdf_extractions TO quarry_service;
@@ -124,8 +126,20 @@ go run ./scripts/grant-catalog -migrate -vector-dimensions 256
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.chunk_vectors TO quarry_service;
 ```
 
-The serving process validates the provisioned vector dimensions and indexes
-without requiring ownership or schema creation privileges.
+The metadata owner applies the vector function grants after migrating a new or
+existing corpus. On first startup, the serving process opens the configured
+target and binds its identity through the owner-installed initialization
+function. Subsequent startups validate the recorded binding. The writer-state
+function lets serving transactions participate in the freeze. Restrict direct
+generation table access, freezes, verification approval and activation to the
+maintenance login.
+
+Before starting serving replicas for a promoted pgvector generation, the
+metadata owner grants the same table privileges on that generation's
+`chunk_vectors_<generation>` table. If exact-scope search is enabled, prepare
+its indexes with the owner login before switching replicas. The serving
+process validates the provisioned dimension and indexes without requiring
+ownership or schema creation privileges.
 
 After renaming a corpus schema, reconnect with the new schema first in the
 search path. Catalog entry points and document cleanup stay with the renamed

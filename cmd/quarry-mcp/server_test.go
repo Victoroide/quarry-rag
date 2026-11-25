@@ -581,6 +581,29 @@ func TestIngestQueueFullIsRetryableToolError(t *testing.T) {
 	require.Equal(t, "503 queue: ingest queue is full; retry after 30s", result.Content[0].(*mcp.TextContent).Text)
 }
 
+func TestFrozenWritesAreRetryableToolErrors(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":"frozen","message":"document writes are paused for a vector migration"}`)
+	}))
+	defer s.Close()
+	cs := connectServer(t, config{baseURL: s.URL, timeout: time.Second})
+	for _, call := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"quarry_ingest_text", map[string]any{"content": "synthetic text", "document_id": "00000000-0000-4000-8000-000000000001"}},
+		{"quarry_delete_document", map[string]any{"document_id": "00000000-0000-4000-8000-000000000001"}},
+	} {
+		result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: call.tool, Arguments: call.args})
+		require.NoError(t, err)
+		require.True(t, result.IsError, call.tool)
+		require.Equal(t, "503 frozen: document writes are paused for a vector migration; retry after 30s", result.Content[0].(*mcp.TextContent).Text)
+	}
+}
+
 func TestCollectionTools(t *testing.T) {
 	var queries, lists atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

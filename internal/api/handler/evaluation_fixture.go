@@ -170,6 +170,9 @@ func deleteFixture(w http.ResponseWriter, r *http.Request, cs domain.ChunkStore,
 		return err
 	})
 	if err != nil {
+		if fixtureWritePaused(w, err) {
+			return
+		}
 		slog.ErrorContext(ctx, "delete fixture", "document_id", id, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to delete fixture")
 		return
@@ -191,6 +194,9 @@ func deleteFixture(w http.ResponseWriter, r *http.Request, cs domain.ChunkStore,
 func reconcileFixture(ctx context.Context, w http.ResponseWriter, store domain.EvaluationFixtureStore, id, receipt string) {
 	s, err := store.ReconcileEvaluationFixture(ctx, domain.DocumentID(id), receipt)
 	if err != nil {
+		if fixtureWritePaused(w, err) {
+			return
+		}
 		slog.ErrorContext(ctx, "reconcile fixture", "document_id", id, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to reconcile fixture")
 		return
@@ -204,6 +210,19 @@ func reconcileFixture(ctx context.Context, w http.ResponseWriter, store domain.E
 		fixtureHeaders(w, s.State, s.Incarnation)
 		writeJSONError(w, http.StatusConflict, "conflict", "fixture reconciliation requires the current receipt and incarnation")
 	}
+}
+
+func fixtureWritePaused(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, domain.ErrWritersFrozen):
+		writeFrozen(w)
+	case errors.Is(err, domain.ErrGenerationMismatch):
+		w.Header().Set("Retry-After", "30")
+		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
+	default:
+		return false
+	}
+	return true
 }
 
 func fixtureStoreUnavailable(w http.ResponseWriter, incarnation string) {

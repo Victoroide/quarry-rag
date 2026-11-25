@@ -80,26 +80,9 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), domain.WriteRequestTimeout)
 		defer cancel()
-		var release func()
-		var gateErr error
-		switch gate := cs.(type) {
-		case domain.WriterLocker:
-			release, gateErr = gate.AcquireWriter(ctx)
-		case domain.WriterGate:
-			gateErr = gate.WritersOpen(ctx)
-		}
+		release, gateErr := acquireDeleteWriter(ctx, cs)
 		if gateErr != nil {
-			switch {
-			case errors.Is(gateErr, domain.ErrWritersFrozen):
-				writeFrozen(w)
-			case errors.Is(gateErr, domain.ErrGenerationMismatch):
-				w.Header().Set("Retry-After", "30")
-				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
-			default:
-				slog.ErrorContext(ctx, "check document writers", "document_id", docIDStr, "error", gateErr)
-				w.Header().Set("Retry-After", "30")
-				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
-			}
+			writeDeleteGateError(ctx, w, docIDStr, gateErr)
 			return
 		}
 		if release != nil {
@@ -214,6 +197,31 @@ func writeDeleteResult(ctx context.Context, w http.ResponseWriter, docID string,
 	}
 }
 
+func acquireDeleteWriter(ctx context.Context, cs domain.ChunkStore) (func(), error) {
+	switch gate := cs.(type) {
+	case domain.WriterLocker:
+		return gate.AcquireWriter(ctx)
+	case domain.WriterGate:
+		return nil, gate.WritersOpen(ctx)
+	default:
+		return nil, nil
+	}
+}
+
+func writeDeleteGateError(ctx context.Context, w http.ResponseWriter, docIDStr string, gateErr error) {
+	switch {
+	case errors.Is(gateErr, domain.ErrWritersFrozen):
+		writeFrozen(w)
+	case errors.Is(gateErr, domain.ErrGenerationMismatch):
+		w.Header().Set("Retry-After", "30")
+		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
+	default:
+		slog.ErrorContext(ctx, "check document writers", "document_id", docIDStr, "error", gateErr)
+		w.Header().Set("Retry-After", "30")
+		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+	}
+}
+
 func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects cleanup.ObjectDeleter, options deleteOptions) http.HandlerFunc {
 	now := clockOrDefault(options.now)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -247,6 +255,18 @@ func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, ob
 			return
 		}
 		canonical := parsedID.String()
+		release, gateErr := acquireDeleteWriter(r.Context(), cs)
+		if gateErr != nil {
+			if (errors.Is(gateErr, context.Canceled) || errors.Is(gateErr, context.DeadlineExceeded)) && !subject.ValidAt(now()) {
+				writeDeleteResult(r.Context(), w, canonical, domain.ErrUnauthorized)
+				return
+			}
+			writeDeleteGateError(r.Context(), w, docIDStr, gateErr)
+			return
+		}
+		if release != nil {
+			defer release()
+		}
 		err = cleanup.RemoveScoped(r.Context(), deleter, pcDriver, objects, options.targets, subject.Principal, subject.ExpiresAt, domain.DocumentID(canonical), incarnation)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			if !subject.ValidAt(now()) {

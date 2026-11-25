@@ -28,14 +28,20 @@ type indexConn interface {
 	UpsertVectors(context.Context, []*pinecone.Vector) (uint32, error)
 	QueryByVectorValues(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error)
 	DeleteVectorsByFilter(context.Context, *structpb.Struct) error
-	DeleteVectorsById(context.Context, []string) error
+	DeleteVectorsByID(context.Context, []string) error
 	DeleteAllVectorsInNamespace(context.Context) error
 	FetchVectors(context.Context, []string) (*pinecone.FetchVectorsResponse, error)
 	ListVectors(context.Context, *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error)
 	Close() error
 }
 
-var _ indexConn = (*pinecone.IndexConnection)(nil)
+type sdkIndexConn struct{ *pinecone.IndexConnection }
+
+func (c sdkIndexConn) DeleteVectorsByID(ctx context.Context, ids []string) error {
+	return c.DeleteVectorsById(ctx, ids)
+}
+
+var _ indexConn = sdkIndexConn{}
 
 type queryAttemptKey struct{}
 

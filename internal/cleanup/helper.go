@@ -232,12 +232,23 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Cleaner, err
 	}
 	cleaner.metadata = pg
 	cleaner.targets = Targets{SourceBucket: cfg.S3Bucket}
+	var host string
 	if cfg.VectorStore != "postgres" {
 		cleaner.vectors, err = pcstore.NewPineconeClient(ctx, cfg)
 		if err != nil {
 			return nil, errors.Join(fmt.Errorf("pinecone connect: %w", err), pg.Close(ctx))
 		}
 		cleaner.targets.VectorIndex = cfg.PineconeIndexName
+		host = cleaner.vectors.Host()
+	}
+	store, target := cfg.VectorTarget()
+	if cfg.VectorStore == "postgres" {
+		err = pg.PinCleanupVectorGeneration(ctx, cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings())
+	} else {
+		err = pg.PinExistingVectorGeneration(ctx, cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings())
+	}
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("pin the cleanup target: %w", err), cleaner.Close(ctx))
 	}
 	if cfg.S3Bucket != "" {
 		cleaner.objects, err = s3store.New(ctx, cfg)
@@ -282,9 +293,14 @@ func (c *Cleaner) delete(ctx context.Context, docID, incarnation string, qualifi
 	if c.offline != nil {
 		return c.deleteOffline(ctx, docID, incarnation, qualified)
 	}
-	if err := c.metadata.WritersOpen(ctx); err != nil {
-		return fmt.Errorf("deletions are paused: %w", err)
+	release, err := c.metadata.AcquireWriter(ctx)
+	if err != nil {
+		if errors.Is(err, domain.ErrWritersFrozen) || errors.Is(err, domain.ErrGenerationMismatch) {
+			return fmt.Errorf("deletions are paused: %w", err)
+		}
+		return fmt.Errorf("check document writers: %w", err)
 	}
+	defer release()
 	var vectors domain.VectorDeleter
 	if c.vectors != nil {
 		vectors = c.vectors
@@ -293,7 +309,7 @@ func (c *Cleaner) delete(ctx context.Context, docID, incarnation string, qualifi
 	if !qualified && c.reserve {
 		// The activation lock decides the contract, so an activation that wins the
 		// race continues as an activated ID-only request.
-		err := RemoveLegacy(ctx, c.metadata, vectors, c.objects, c.targets, id)
+		err = RemoveLegacy(ctx, c.metadata, vectors, c.objects, c.targets, id)
 		if !errors.Is(err, domain.ErrDeletionActivated) {
 			return err
 		}

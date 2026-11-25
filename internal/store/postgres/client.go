@@ -21,7 +21,7 @@ type Client struct {
 	Pool             *pgxpool.Pool
 	vectorDimensions atomic.Int64
 	vectorTable      atomic.Pointer[string]
-	generationName   atomic.Pointer[string]
+	vectorPin        atomic.Pointer[vectorPin]
 	vectorStateReady atomic.Bool
 	writerSlots      chan struct{}
 }

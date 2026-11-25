@@ -29,12 +29,13 @@ var ErrListingUnsupported = errors.New("pinecone: the index does not support lis
 type IndexConn = indexConn
 
 // NewClientForIndex builds a client over an already opened index connection.
-// Migration tools use it with a named target index, and tests use it with an
-// in-memory index.
-func NewClientForIndex(index IndexConn, cfg *config.Config) *Client {
+// The connection is taken to filter on every ownership field, as the in-memory
+// index does, so document cleanup can use metadata filters.
+func NewClientForIndex(index IndexConn, cfg *config.Config, host string) *Client {
 	return &Client{
-		cfg: cfg, defaultConn: index, batchSize: cfg.PineconeUpsertBatchSize,
-		timeout: cfg.PineconeTimeout, maxAttempts: cfg.PineconeMaxAttempts, dims: cfg.EmbeddingDimensions,
+		cfg: cfg, host: host, defaultConn: index, ownershipFilters: ownershipFilters{document: true, revision: true, attempt: true},
+		batchSize: cfg.PineconeUpsertBatchSize,
+		timeout:   cfg.PineconeTimeout, maxAttempts: cfg.PineconeMaxAttempts, dims: cfg.EmbeddingDimensions,
 		dial: func(string) (indexConn, error) { return index, nil },
 	}
 }

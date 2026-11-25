@@ -129,3 +129,21 @@ func TestMalformedSuccessIsAnError(t *testing.T) {
 		assert.NotContains(t, err.Error(), strings.Repeat("synthetic question", 2))
 	}
 }
+
+func TestFrozenWritesAreRetryableAPIErrors(t *testing.T) {
+	c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(t, w, map[string]string{"error": "frozen", "message": "document writes are paused for a vector migration"})
+	})
+	_, err := c.Ingest(t.Context(), client.IngestRequest{Content: "synthetic text"})
+	var apiErr *client.APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+	assert.Equal(t, "frozen", apiErr.Code)
+	assert.Equal(t, 30*time.Second, apiErr.RetryAfter)
+	_, err = c.DeleteDocument(t.Context(), "00000000-0000-4000-8000-000000000001")
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "frozen", apiErr.Code)
+	assert.Equal(t, 30*time.Second, apiErr.RetryAfter)
+}

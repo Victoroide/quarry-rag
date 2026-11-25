@@ -182,6 +182,8 @@ make cleanup IDS="<document-uuid-1> <document-uuid-2>"
 
 A bare UUID addresses the live document, which is the only form that works before the database activates [checkpointed deletion](api.md#checkpointed-deletion). `UUID@incarnation` addresses only the lifetime read earlier with `include_incarnation=true`. The incarnation must be one canonical UUID; an empty, repeated or malformed value stops the command before any deletion, and it is never treated as a bare UUID. With `GO_RAG_FAKE_MODE` the vectors live in the running service, so the command sends each deletion once to that service on `SERVER_PORT` with the configured service token.
 
+PostgreSQL cleanup binds an existing `chunk_vectors` table on first use and refuses when it is missing; Pinecone cleanup and applied reconciliation require the binding a serving replica records.
+
 ### Orphan Reconciliation (`scripts/reconcile`)
 
 Use the service environment configuration, including `DATABASE_URL`,
@@ -355,9 +357,12 @@ This mode skips orphan cleanup. It walks completed, assigned documents that are
 not yet readable in ascending UUID order and prints only counts: `examined`,
 `verified`, `quarantined` and `changed`, plus `resume_after`, the last document
 it finished. A document with an unresolved vector mutation is skipped until the
-mutation settles. A dry run reads only PostgreSQL. With `-apply`, a document is
-verified from its current stored chunks. On `VECTOR_STORE=postgres` the vector
-table must hold exactly those chunks. On the hosted index every current chunk
+mutation settles. A dry run reads only PostgreSQL. With `-apply`, both the
+PostgreSQL and hosted paths pin the configured `VECTOR_GENERATION` and target
+profile against PostgreSQL's active binding and hold the writer barrier for the
+pass, refusing while writers are frozen or when the active generation differs.
+Each document is verified from its current stored chunks. On `VECTOR_STORE=postgres`
+the active generation's vector table must hold exactly those chunks. On the hosted index every current chunk
 must exist under its stored identifier with its `doc_id`, `chunk_index`, `text`
 and `token_count`, and in the format the document was written in, without a
 conflicting `document_incarnation`. The command then labels those vectors
@@ -389,6 +394,62 @@ The calibration file contains `model`, `blinded_native_labels`, `development_doc
 Each `held_out` entry has `documents`, the actual `evidence_count` from the request, an optional `label` and an optional `category`. Use `benign_contrast` and `bilingual_paraphrase` for the corresponding labeled examples. Preserve each raw verifier result in `prediction` with its predicted `claim_language`, `evidence_languages`, and `scores`, including results with incorrect language identification. Omit the prediction when the verifier returned no usable result. An unlabeled example can still have a prediction.
 
 Run `go run ./scripts/citationsupport -input /path/to/calibration.json` and publish the output with the frozen evaluation. The gate requires labels and in-profile assessments for at least half the eligible examples in the reference group. For each candidate profile, `confirmed_supported_precision` counts every supported prediction issued by that profile, including incoming language misroutes. `reference_confirmed_supported_precision` counts only those it issued on the matching reference languages and evidence mode. Both metrics count every supported prediction in their population as a trial, including unlabeled examples, and count only confirmed supports as successes. Each one-sided 95% exact lower bound must reach 0.90. The report also publishes the issuer's labeled supported count, assessed coverage and per-class recall for the qualified live policy by reference pair. Keep profiles disabled when the evidence is missing or fails qualification.
+
+### Vector Reindex (`scripts/reindex`)
+
+Moves completed documents to a new vector target, a vector generation, without changing document or chunk identities. PostgreSQL stays the source of truth: the command reads documents, chunks, document types and collections from it and never writes the `documents`, `chunks`, `document_fingerprints` or `ingest_jobs` tables. The [deployment guide](deployment.md#changing-models-or-vector-stores) gives the order of operations; this section is the command reference.
+
+Use the live deployment's `DATABASE_URL`, `VECTOR_STORE`, `VECTOR_GENERATION` and Pinecone settings to identify the source. For staging with model calls, configure the embedding provider for the target profile. The database must already have migration 016 and an active target binding. Without `-apply` every mode only reads. The command reports JSON on stdout and exits with a nonzero status on errors.
+
+```sh
+make reindex ARGS="-generation g2 -profile profile.json"
+make reindex ARGS="-generation g2 -profile profile.json -apply -max-embed-calls 50000"
+```
+
+**Target.** `-generation` accepts 1 to 24 lowercase letters, digits or underscores, starting with a letter. A PostgreSQL target uses its own `chunk_vectors_<generation>` table. Pinecone needs `-target-store pinecone` and `-target-index` naming an existing, ready cosine index of the profile's dimension. `-target-store` defaults to `VECTOR_STORE`. The command protects the live target recorded in PostgreSQL, even when the legacy profile is unknown, and requires the configured source to match it. Each generation keeps one store, target and profile.
+
+**Profile.** `-profile` names a JSON object. Unknown, duplicate and missing fields are rejected.
+
+| Field | Meaning |
+|---|---|
+| `provider` | `bedrock` or `openai`. |
+| `model` | Model identifier as sent to the provider. |
+| `model_revision` | Full versioned Bedrock foundation model ID, or the immutable deployment assertion in `EMBEDDING_MODEL_REVISION`. |
+| `dimensions` | 256, 512 or 1024 for Bedrock; 1 to 4096 for OpenAI-compatible providers; at most 2000 for PostgreSQL. |
+| `metric` | `cosine`. |
+| `extraction_chunk_version` | Configured text identity, formed as `<EXTRACTION_CHUNK_VERSION>/size=<CHUNK_TOKEN_SIZE>/overlap=<CHUNK_OVERLAP>/ocr=<OCR_PROVIDER>/doc=<mask>/docx=<mask>`. When configured, the embedding input profile appends an `/input=` fingerprint of its limits and tokenizer. Inventory reports the expected identity when it differs from the profile. A known profile with different text settings requires a separate re-extraction from the original files. |
+
+The story masks sum the selected story values. For DOC, footnotes, endnotes, headers, footers and comments have values 1, 2, 4, 8 and 16. The DOC body is always included and contributes zero. For DOCX, body, footnotes, endnotes, headers, footers and comments have values 1, 2, 4, 8, 16 and 32. The default masks are DOC 0 and DOCX 7.
+
+**Modes.**
+
+| Invocation | Effect |
+|---|---|
+| none | Inventory: counts documents, chunks and checkpoints, reports blockers and the embedding calls staging could need. Opens no vector store and constructs no embedding provider. |
+| `-apply` | Stage: register the generation, create the target table when PostgreSQL, and write vectors. |
+| `-verify` | Compare the target with PostgreSQL and the current target. With `-apply` and the freeze, record a passing result. |
+| `-freeze` | Pause admission, job claims, deletions and maintenance. With `-apply`, wait until the freeze settles. |
+| `-thaw` | Resume writers. |
+| `-activate` | Make a verified generation the one every replica must serve. |
+| `-attest-source` | Record the profile the operator states for the legacy target. |
+
+At most one of the mode flags can be given, and each write needs `-apply`.
+
+**Copy or compute.** Reuse requires a recorded or attested source profile in the same embedding space and a retrievable, finite, nonzero vector of the declared dimension for the same document, position and text. When source vectors are unavailable or unsuitable, staging can recompute them from the stored chunks within the embedding budget. Each charged Bedrock call uses one transport attempt. Both attestation and model calls require the full profile to match the configured deployment. Document type and collection come from PostgreSQL. Pinecone generations record the resolved physical host alongside the index name. Inventory displays the recorded host without opening the index. A credential rotation may retain the same host. Reusing or replacing an index name at a different host fails the identity check.
+
+**Bounds and cost.** `-max-embed-calls` defaults to 0. Staging stops before writing a document that exceeds the available budget. `-max-documents` (1000) counts scanned documents, including current checkpoints, and limits orphan cleanup. `-max-chunks` (100000) bounds chunk loads, writes and key scans. `-max-bytes` (128 MiB) bounds stored chunk text loaded into the command. `-batch` (100), `-page` (100) and `-timeout` (30 minutes) bound requests and elapsed time. For staging, pass the returned `next_after` as `-after`. If the frozen rollback key scan stopped, also pass `next_prune_after` as `-prune-after` during the same freeze. Verification requires all checks to fit within one invocation.
+
+**Checkpoints.** Every staged document has a ledger row keyed to the generation and a source revision, which hashes the document's incarnation, type, collection, owning tenant when assigned, and chunk keys, positions, token counts and text. The row records the intent before the first write, so an interruption never strands a key; vectors are upserted by chunk key; stale keys of a changed document are removed; and completion is recorded last. A document deleted, failed, being deleted or held is pruned from the target. A document deleted and recreated under the same UUID has a new incarnation and is restaged. A document whose `chunk_count` differs from its stored chunks is reported as inconsistent and blocks completion. Staged Pinecone records name the document incarnation, which retrieval requires, and carry `tenant_id` when the document is assigned in the grant catalog; a source record that names another incarnation or tenant is recomputed. A completed document stored in the tagged vector format has revision-qualified physical keys that a copy by chunk key cannot reproduce, so it blocks staging and verification. Documents without stored original files are counted in the inventory; the command never reads them.
+
+Staging, applied verification and activation have exclusive ownership of a target while they run. Use a PostgreSQL connection that preserves the server session for those operations. An unacknowledged mutation blocks subsequent staging and approval after a disconnect. Use `-confirm-target-drained` with staging only after establishing that the outstanding request can no longer change the target, then resume from the beginning of the incomplete document or key page. If the request cannot be resolved, stage a fresh isolated target.
+
+**Verification.** Counts alone prove nothing, so `-verify` walks every eligible document and requires, for every expected chunk key, a target record with the profile's dimension and PostgreSQL's document, position, text, token count, type and collection (and, on Pinecone, the document incarnation and the owning tenant when assigned), and no record outside the expected set. It then runs matched queries: for a deterministic sample of `-sample-size` stored chunks it queries the current target and the staged target with vectors independent of the staged records, scoped to the chunk's document and up to `-scope-documents` (5) others of its collection, and compares the top `-top-k` (10) results. It never sends an unscoped query. Thresholds have no defaults and must be declared: `-sample-size`, `-min-recall` (mean overlap with the current target's results) and `-max-p95` (95th percentile target query latency). The target passes only with 100% key and profile coverage, no out-of-scope record, no result outside a query's scope, the declared recall and latency, and a full sample. A target that cannot list its keys, such as a pod-based Pinecone index, cannot pass. A hosted index may lag its writes, so allow it to converge before verifying. The report lists every failure.
+
+For recorded profiles in the same embedding space, verification uses the current target's vector on both stores after checking the sampled chunk's document, position and text. For different spaces or an unattested legacy target, run verification without `-apply` to get `sample.chunk_ids`, `sample.source_profile_hash` and `profile_hash`. When the legacy profile is unknown, run verification with the live replicas' serving encoder settings, including the exact model revision and effective text settings. The resulting `sample.source_profile_query_only` means the hash identifies the query encoder. The baseline still queries the bound live target, and all current staging checkpoints must show that every vector was recomputed.
+
+Embed each selected chunk's stored text independently with the source query encoder and the recorded target encoder. Supply the results as a JSON object via `-query-fixtures`. Set `source_profile_hash` and `target_profile_hash` to the reported hashes, and key `queries` by chunk ID. Each entry contains `text_sha256` (the lowercase hex SHA-256 of the stored text) and the numeric `source` and `target` embeddings. Verification bounds the fixture file by `-max-bytes` and makes no provider calls. If the sample changes during catch-up, regenerate the fixtures for the new sample before recording approval.
+
+**Freeze and activation.** `-freeze -apply -generation g2` drains admitted work at the admission, claim, deletion and maintenance barriers before recording the freeze. The command then waits until no job holds a live lease, no deletion receipt is open and `-quiesce` (at least 60 seconds) has elapsed. An applied verification revokes the previous approval at the start. Each sampled query needs usable scoped results from the current target, and approval requires a complete scan and sample under the same freeze. `-activate -apply` requires a current approval and the same digest of every eligible document and revision. Traffic moves when replicas start with `VECTOR_GENERATION` naming the new generation.
 
 ### Language Evaluation (`scripts/langeval`)
 

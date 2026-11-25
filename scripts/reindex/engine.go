@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -15,7 +14,8 @@ import (
 // corpus reads the completed documents that PostgreSQL holds authoritatively.
 type corpus interface {
 	DocumentRevisions(ctx context.Context, after string, limit int) ([]pgstore.DocumentRevision, error)
-	LoadDocumentSnapshot(ctx context.Context, id string) (*pgstore.DocumentSnapshot, error)
+	HasDocumentsAfter(ctx context.Context, after string) (bool, error)
+	LoadDocumentSnapshotBounded(ctx context.Context, id string, maxChunks int, maxBytes int64) (*pgstore.DocumentSnapshot, error)
 }
 
 // ledger records durable per-document progress for one target generation.
@@ -24,6 +24,7 @@ type ledger interface {
 	BeginGenerationDocument(ctx context.Context, generation, documentID string, chunkIDs []string) ([]string, error)
 	CompleteGenerationDocument(ctx context.Context, generation, documentID, revision, incarnation string, chunkIDs []string, copied, embedded int) error
 	OrphanedGenerationDocuments(ctx context.Context, generation string, limit int) ([]pgstore.Checkpoint, error)
+	HasOrphanedGenerationDocuments(ctx context.Context, generation string) (bool, error)
 	ForgetGenerationDocument(ctx context.Context, generation, documentID string) error
 }
 
@@ -61,20 +62,26 @@ func decideCopy(source *domain.EmbeddingProfile, target domain.EmbeddingProfile)
 const deleteBatch = 1000
 
 type stageReport struct {
-	Generation   string   `json:"generation"`
-	Scanned      int      `json:"scanned_documents"`
-	Skipped      int      `json:"current_documents"`
-	Staged       int      `json:"staged_documents"`
-	Vanished     int      `json:"vanished_documents"`
-	Inconsistent []string `json:"inconsistent_documents"`
-	Pruned       int      `json:"pruned_documents"`
-	Chunks       int      `json:"staged_chunks"`
-	Copied       int      `json:"copied_chunks"`
-	Embedded     int      `json:"embedded_chunks"`
-	Bytes        int64    `json:"staged_bytes"`
-	Complete     bool     `json:"complete"`
-	Stopped      string   `json:"stopped,omitempty"`
-	NextAfter    string   `json:"next_after,omitempty"`
+	Generation     string   `json:"generation"`
+	Scanned        int      `json:"scanned_documents"`
+	Skipped        int      `json:"current_documents"`
+	Staged         int      `json:"staged_documents"`
+	Vanished       int      `json:"vanished_documents"`
+	Inconsistent   []string `json:"inconsistent_documents"`
+	Unsupported    []string `json:"unsupported_documents"`
+	Pruned         int      `json:"pruned_documents"`
+	PrunedKeys     int      `json:"pruned_keys"`
+	ScannedKeys    int      `json:"scanned_target_keys"`
+	Chunks         int      `json:"staged_chunks"`
+	Copied         int      `json:"copied_chunks"`
+	Embedded       int      `json:"embedded_chunks"`
+	Bytes          int64    `json:"staged_bytes"`
+	Complete       bool     `json:"complete"`
+	Stopped        string   `json:"stopped,omitempty"`
+	NextAfter      string   `json:"next_after,omitempty"`
+	NextPruneAfter string   `json:"next_prune_after,omitempty"`
+	loadedChunks   int
+	loadedBytes    int64
 }
 
 // errStop ends a run cleanly at a bound without staging a partial document.
@@ -91,6 +98,8 @@ type stager struct {
 	generation string
 	profile    domain.EmbeddingProfile
 	opts       options
+	fence      *pgstore.GenerationFence
+	retired    *pgstore.Client
 	// copyFrom serves reusable vectors; nil forces every vector to be computed.
 	copyFrom vectorReader
 	embed    domain.EmbeddingProvider
@@ -115,10 +124,10 @@ func validVector(v []float32, dimensions int) error {
 }
 
 func (s *stager) run(ctx context.Context) (stageReport, error) {
-	rep := stageReport{Generation: s.generation, Inconsistent: []string{}}
-	after := s.opts.After
-	for {
-		page, err := s.corpus.DocumentRevisions(ctx, after, s.opts.Page)
+	rep := stageReport{Generation: s.generation, Inconsistent: []string{}, Unsupported: []string{}, NextAfter: s.opts.After, NextPruneAfter: s.opts.PruneAfter}
+	for rep.Scanned < s.opts.MaxDocuments {
+		limit := min(s.opts.Page, s.opts.MaxDocuments-rep.Scanned)
+		page, err := s.corpus.DocumentRevisions(ctx, rep.NextAfter, limit)
 		if err != nil {
 			return rep, err
 		}
@@ -131,45 +140,69 @@ func (s *stager) run(ctx context.Context) (stageReport, error) {
 			return rep, err
 		}
 		for _, rev := range page {
-			after = rev.ID
-			rep.NextAfter = after
 			rep.Scanned++
 			cp := prior[rev.ID]
-			if cp.Complete && cp.SourceRevision == rev.Revision && cp.Incarnation == rev.Incarnation {
-				rep.Skipped++
-				continue
-			}
-			if rev.DeclaredChunks != rev.Chunks {
+			switch {
+			case rev.DeclaredChunks != rev.Chunks:
 				rep.Inconsistent = append(rep.Inconsistent, rev.ID)
-				continue
-			}
-			if rep.Staged >= s.opts.MaxDocuments {
-				rep.Stopped = "document limit"
-				return rep, nil
-			}
-			if stageErr := s.stageDocument(ctx, rev, &rep); stageErr != nil {
-				var stop errStop
-				if errors.As(stageErr, &stop) {
-					rep.Stopped = string(stop)
-					return rep, nil
+			case rev.ScopedVectors:
+				rep.Unsupported = append(rep.Unsupported, rev.ID)
+			case cp.Complete && cp.SourceRevision == rev.Revision && cp.Incarnation == rev.Incarnation:
+				rep.Skipped++
+			default:
+				if stageErr := s.stageDocument(ctx, rev, &rep); stageErr != nil {
+					stageErr = stopStage(&rep, fmt.Errorf("document %s: %w", rev.ID, stageErr))
+					return rep, stageErr
 				}
-				return rep, fmt.Errorf("document %s: %w", rev.ID, stageErr)
 			}
+			rep.NextAfter = rev.ID
 		}
-		if len(page) < s.opts.Page {
+		if len(page) < limit {
 			break
 		}
 	}
-	rep.NextAfter = ""
+	if rep.Scanned == s.opts.MaxDocuments {
+		more, err := s.corpus.HasDocumentsAfter(ctx, rep.NextAfter)
+		if err != nil {
+			return rep, err
+		}
+		if more {
+			rep.Stopped = "document limit"
+			return rep, nil
+		}
+	}
 	if err := s.prune(ctx, &rep); err != nil {
+		err = stopStage(&rep, err)
 		return rep, err
 	}
-	rep.Complete = len(rep.Inconsistent) == 0
+	if s.retired != nil {
+		if err := s.pruneRetired(ctx, &rep); err != nil {
+			err = stopStage(&rep, err)
+			return rep, err
+		}
+	}
+	rep.NextAfter = ""
+	rep.Complete = len(rep.Inconsistent) == 0 && len(rep.Unsupported) == 0
 	return rep, nil
 }
 
+func stopStage(rep *stageReport, err error) error {
+	var stop errStop
+	if errors.As(err, &stop) {
+		rep.Stopped = string(stop)
+		return nil
+	}
+	return err
+}
+
 func (s *stager) stageDocument(ctx context.Context, rev pgstore.DocumentRevision, rep *stageReport) error {
-	snap, err := s.corpus.LoadDocumentSnapshot(ctx, rev.ID)
+	snap, err := s.corpus.LoadDocumentSnapshotBounded(ctx, rev.ID, s.opts.MaxChunks-rep.loadedChunks, s.opts.MaxBytes-rep.loadedBytes)
+	if errors.Is(err, pgstore.ErrSnapshotLimit) {
+		if rep.Staged == 0 {
+			return fmt.Errorf("document alone exceeds -max-chunks or -max-bytes: %w", err)
+		}
+		return errStop("chunk or byte limit")
+	}
 	if err != nil {
 		return err
 	}
@@ -177,21 +210,19 @@ func (s *stager) stageDocument(ctx context.Context, rev pgstore.DocumentRevision
 		rep.Vanished++
 		return nil
 	}
+	rep.loadedChunks += len(snap.Chunks)
+	rep.loadedBytes += snap.TextBytes
 	if snap.DeclaredChunks != len(snap.Chunks) {
 		rep.Inconsistent = append(rep.Inconsistent, rev.ID)
 		return nil
 	}
-	var bytes int64
+	if snap.ScopedVectors {
+		rep.Unsupported = append(rep.Unsupported, rev.ID)
+		return nil
+	}
 	ids := make([]string, len(snap.Chunks))
 	for i, c := range snap.Chunks {
 		ids[i] = string(c.ID)
-		bytes += int64(len(c.Text))
-	}
-	if rep.Chunks+len(ids) > s.opts.MaxChunks || rep.Bytes+bytes > s.opts.MaxBytes {
-		if rep.Staged == 0 {
-			return fmt.Errorf("document alone exceeds -max-chunks or -max-bytes (%d chunks, %d bytes)", len(ids), bytes)
-		}
-		return errStop("chunk or byte limit")
 	}
 	chunks, copied, embedded, err := s.vectors(ctx, snap)
 	if err != nil {
@@ -201,15 +232,27 @@ func (s *stager) stageDocument(ctx context.Context, rev pgstore.DocumentRevision
 	if err != nil {
 		return err
 	}
-	for start := 0; start < len(chunks); start += s.opts.Batch {
-		if err = s.target.Upsert(ctx, "", chunks[start:min(start+s.opts.Batch, len(chunks))]); err != nil {
-			return fmt.Errorf("write vectors: %w", err)
+	var stale []string
+	current := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		current[id] = true
+	}
+	for _, id := range recorded {
+		if !current[id] {
+			stale = append(stale, id)
 		}
 	}
-	var stale []string
-	for _, id := range recorded {
-		if !slices.Contains(ids, id) {
-			stale = append(stale, id)
+	if len(ids)+len(stale) > s.opts.MaxChunks-rep.Chunks-rep.PrunedKeys {
+		if rep.Staged == 0 {
+			return errors.New("document and its stale keys alone exceed -max-chunks")
+		}
+		return errStop("chunk or byte limit")
+	}
+	for start := 0; start < len(chunks); start += s.opts.Batch {
+		if err = s.write(ctx, func() error {
+			return s.target.Upsert(ctx, "", chunks[start:min(start+s.opts.Batch, len(chunks))])
+		}); err != nil {
+			return fmt.Errorf("write vectors: %w", err)
 		}
 	}
 	if deleteErr := s.deleteKeys(ctx, stale); deleteErr != nil {
@@ -220,15 +263,25 @@ func (s *stager) stageDocument(ctx context.Context, rev pgstore.DocumentRevision
 	}
 	rep.Staged++
 	rep.Chunks += len(ids)
-	rep.Bytes += bytes
+	rep.Bytes += snap.TextBytes
+	rep.PrunedKeys += len(stale)
 	rep.Copied += copied
 	rep.Embedded += embedded
 	return nil
 }
 
+func (s *stager) write(ctx context.Context, write func() error) error {
+	if s.fence == nil {
+		return write()
+	}
+	return s.fence.Write(ctx, write)
+}
+
 func (s *stager) deleteKeys(ctx context.Context, ids []string) error {
 	for start := 0; start < len(ids); start += deleteBatch {
-		if err := s.target.DeleteIDs(ctx, ids[start:min(start+deleteBatch, len(ids))]); err != nil {
+		if err := s.write(ctx, func() error {
+			return s.target.DeleteIDs(ctx, ids[start:min(start+deleteBatch, len(ids))])
+		}); err != nil {
 			return fmt.Errorf("remove stale vectors: %w", err)
 		}
 	}
@@ -250,7 +303,7 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 		reusable = make(map[string]domain.Chunk, len(ids))
 		for start := 0; start < len(ids); start += 100 {
 			part, fetchErr := s.copyFrom.Fetch(ctx, ids[start:min(start+100, len(ids))])
-			if fetchErr != nil {
+			if hardSourceError(ctx, fetchErr) {
 				return nil, 0, 0, fmt.Errorf("read source vectors: %w", fetchErr)
 			}
 			for id, c := range part {
@@ -261,10 +314,14 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 	var missing []int
 	for i, c := range snap.Chunks {
 		c.Metadata = chunkMetadata(snap, c)
+		// A target record names the document incarnation it was written for, so
+		// that retrieval can discard a record that outlived its document.
+		c.VectorIncarnation = snap.Incarnation
 		chunks[i] = c
 		src, ok := reusable[string(c.ID)]
 		srcTenant, _ := src.Metadata[domain.VectorTenantKey].(string)
 		if ok && src.DocumentID == c.DocumentID && src.Text == c.Text && src.Index == c.Index &&
+			(src.VectorIncarnation == "" || src.VectorIncarnation == snap.Incarnation) &&
 			(srcTenant == "" || srcTenant == snap.TenantID) &&
 			validVector(src.Embedding, s.profile.Dimensions) == nil {
 			chunks[i].Embedding = src.Embedding
@@ -294,6 +351,10 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 	return chunks, copied, embedded, nil
 }
 
+func hardSourceError(ctx context.Context, err error) bool {
+	return err != nil && (ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, pgstore.ErrGenerationDrift))
+}
+
 // chunkMetadata derives the stored labels from PostgreSQL, the authority for
 // document type and collection, and from the chunk text.
 func chunkMetadata(snap *pgstore.DocumentSnapshot, c domain.Chunk) map[string]any {
@@ -311,7 +372,15 @@ func chunkMetadata(snap *pgstore.DocumentSnapshot, c domain.Chunk) map[string]an
 // prune removes target keys of documents that are no longer eligible sources.
 func (s *stager) prune(ctx context.Context, rep *stageReport) error {
 	for {
-		orphans, err := s.ledger.OrphanedGenerationDocuments(ctx, s.generation, 100)
+		remaining := s.opts.MaxDocuments - rep.Scanned - rep.Pruned
+		if remaining == 0 {
+			more, err := s.ledger.HasOrphanedGenerationDocuments(ctx, s.generation)
+			if err != nil || !more {
+				return err
+			}
+			return errStop("orphan document limit")
+		}
+		orphans, err := s.ledger.OrphanedGenerationDocuments(ctx, s.generation, min(s.opts.Page, remaining))
 		if err != nil {
 			return err
 		}
@@ -319,6 +388,9 @@ func (s *stager) prune(ctx context.Context, rep *stageReport) error {
 			return nil
 		}
 		for _, o := range orphans {
+			if len(o.ChunkIDs) > s.opts.MaxChunks-rep.Chunks-rep.PrunedKeys {
+				return errStop("orphan key limit")
+			}
 			if deleteErr := s.deleteKeys(ctx, o.ChunkIDs); deleteErr != nil {
 				return deleteErr
 			}
@@ -326,6 +398,33 @@ func (s *stager) prune(ctx context.Context, rep *stageReport) error {
 				return forgetErr
 			}
 			rep.Pruned++
+			rep.PrunedKeys += len(o.ChunkIDs)
+		}
+	}
+}
+
+func (s *stager) pruneRetired(ctx context.Context, rep *stageReport) error {
+	for {
+		limit := min(deleteBatch, s.opts.MaxChunks-rep.ScannedKeys)
+		if limit == 0 {
+			return errStop("target key scan limit")
+		}
+		keys, next, err := s.target.ListIDs(ctx, rep.NextPruneAfter, limit)
+		if err != nil {
+			return fmt.Errorf("list retired target keys: %w", err)
+		}
+		extra, err := s.retired.UnexpectedChunkKeys(ctx, keys)
+		if err != nil {
+			return err
+		}
+		if deleteErr := s.deleteKeys(ctx, extra); deleteErr != nil {
+			return deleteErr
+		}
+		rep.PrunedKeys += len(extra)
+		rep.ScannedKeys += len(keys)
+		rep.NextPruneAfter = next
+		if next == "" {
+			return nil
 		}
 	}
 }

@@ -472,6 +472,8 @@ paths:
           $ref: '#/components/responses/EvaluationFixturePrecondition'
         '500':
           $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/RetryableError'
   /documents/{doc_id}/file:
     parameters:
       - $ref: '#/components/parameters/RequestID'

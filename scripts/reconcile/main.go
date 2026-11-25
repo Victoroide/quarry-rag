@@ -97,15 +97,19 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	return opts, nil
 }
 
-// requireWritableForApply stops maintenance writes while a vector migration freezes writers.
-func requireWritableForApply(ctx context.Context, gate domain.WriterGate, opts options) error {
+// acquireMaintenanceWriter holds the freeze barrier through an applied pass.
+func acquireMaintenanceWriter(ctx context.Context, gate domain.WriterLocker, opts options) (func(), error) {
 	if !opts.Apply {
-		return nil
+		return func() {}, nil
 	}
-	if err := gate.WritersOpen(ctx); err != nil {
-		return fmt.Errorf("maintenance writes are paused: %w", err)
+	release, err := gate.AcquireWriter(ctx)
+	if err != nil {
+		if errors.Is(err, domain.ErrWritersFrozen) || errors.Is(err, domain.ErrGenerationMismatch) {
+			return nil, fmt.Errorf("maintenance writes are paused: %w", err)
+		}
+		return nil, fmt.Errorf("check document writers: %w", err)
 	}
-	return nil
+	return release, nil
 }
 
 func main() {
@@ -131,6 +135,9 @@ func run() error {
 		return err
 	}
 	scopedLocal := opts.BackfillScoped && cfg.VectorStore == "postgres"
+	if !scopedLocal && opts.Apply && cfg.VectorStore != "pinecone" {
+		return errors.New("applied reconciliation requires Pinecone as the active vector store")
+	}
 	if !scopedLocal && ((!opts.BackfillCollections && !opts.BackfillScoped) || opts.Apply) && (cfg.FakeMode || cfg.PineconeAPIKey == "" || cfg.PineconeIndexName == "") {
 		return errors.New("reconciliation requires a configured hosted vector index")
 	}
@@ -147,10 +154,40 @@ func run() error {
 			slog.Error("close document store", "error", closeErr)
 		}
 	}()
-	pg.SetVectorGeneration(cfg.ActiveVectorGeneration())
-	if gateErr := requireWritableForApply(ctx, pg, opts); gateErr != nil {
-		return gateErr
+	return reconcileConfigured(ctx, cfg, pg, opts)
+}
+
+func runMaintenance(ctx context.Context, gate domain.WriterLocker, opts options, work func() error) error {
+	release, err := acquireMaintenanceWriter(ctx, gate, opts)
+	if err != nil {
+		return err
 	}
+	defer release()
+	return work()
+}
+
+func pinAndRunMaintenance(ctx, pinCtx context.Context, cfg *config.Config, pg *pgstore.Client, host string, opts options, work func() error) error {
+	if opts.Apply {
+		store, target := cfg.VectorTarget()
+		if err := pg.PinExistingVectorGeneration(pinCtx, cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings()); err != nil {
+			return fmt.Errorf("pin the maintenance target: %w", err)
+		}
+	}
+	return runMaintenance(ctx, pg, opts, work)
+}
+
+func runScopedLocal(ctx context.Context, cfg *config.Config, pg *pgstore.Client, vectors scopedVectors, opts options, out io.Writer) error {
+	return pinAndRunMaintenance(ctx, ctx, cfg, pg, "", opts, func() error {
+		result, backfillErr := backfillScoped(ctx, pg, vectors, opts)
+		if backfillErr != nil {
+			return backfillErr
+		}
+		return json.NewEncoder(out).Encode(result)
+	})
+}
+
+func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Client, opts options) error {
+	var err error
 	if opts.BackfillScoped && !opts.Apply {
 		result, backfillErr := backfillScoped(ctx, pg, nil, opts)
 		if backfillErr != nil {
@@ -158,12 +195,8 @@ func run() error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(result)
 	}
-	if scopedLocal {
-		result, backfillErr := backfillScoped(ctx, pg, pgvectorVectors{pg}, opts)
-		if backfillErr != nil {
-			return backfillErr
-		}
-		return json.NewEncoder(os.Stdout).Encode(result)
+	if opts.BackfillScoped && cfg.VectorStore == "postgres" {
+		return runScopedLocal(ctx, cfg, pg, pgvectorVectors{pg}, opts, os.Stdout)
 	}
 	var collectionDocuments []collectionDocument
 	if opts.BackfillCollections {
@@ -198,6 +231,12 @@ func run() error {
 			slog.Error("close index connection", "error", closeErr)
 		}
 	}()
+	return pinAndRunMaintenance(ctx, startupCtx, cfg, pg, idx.Host, opts, func() error {
+		return reconcileIndex(ctx, conn, pg, collectionDocuments, opts)
+	})
+}
+
+func reconcileIndex(ctx context.Context, conn *pinecone.IndexConnection, pg *pgstore.Client, collectionDocuments []collectionDocument, opts options) error {
 	if opts.BackfillScoped {
 		result, backfillErr := backfillScoped(ctx, pg, hostedVectors{conn}, opts)
 		if backfillErr != nil {

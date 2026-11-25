@@ -26,6 +26,9 @@ type DocumentRevision struct {
 	Chunks         int
 	TextBytes      int64
 	Revision       string
+	// ScopedVectors marks a document whose vectors use the tagged format, with
+	// revision-qualified physical keys that a copy by logical key cannot reproduce.
+	ScopedVectors bool
 }
 
 // DocumentSnapshot is one completed document read from a single snapshot.
@@ -42,7 +45,8 @@ const eligibleDocument = `d.status = 'completed'
 const documentTenantSQL = `CASE WHEN d.grant_catalog_assigned THEN COALESCE(grant_catalog_document_tenant(d.id, COALESCE(d.incarnation, d.id))::text, '') ELSE '' END`
 
 const revisionSQL = `SELECT d.id::text, COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, d.chunk_count, c.n, c.bytes,
- encode(sha256(convert_to(jsonb_build_array('v3', COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, c.n, c.fingerprint)::text, 'UTF8')), 'hex')
+ encode(sha256(convert_to(jsonb_build_array('v3', COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, c.n, c.fingerprint)::text, 'UTF8')), 'hex'),
+ d.scoped_vectors
  FROM eligible d CROSS JOIN LATERAL (
   SELECT count(*)::int AS n, COALESCE(sum(octet_length(text)),0) AS bytes,
    string_agg(id::text || ':' || chunk_index::text || ':' || token_count::text || ':' ||
@@ -51,7 +55,7 @@ const revisionSQL = `SELECT d.id::text, COALESCE(d.incarnation, d.id)::text, d.d
  ) c`
 
 func scanRevision(rows pgx.Row, r *DocumentRevision) error {
-	return rows.Scan(&r.ID, &r.Incarnation, &r.DocType, &r.Collection, &r.TenantID, &r.DeclaredChunks, &r.Chunks, &r.TextBytes, &r.Revision)
+	return rows.Scan(&r.ID, &r.Incarnation, &r.DocType, &r.Collection, &r.TenantID, &r.DeclaredChunks, &r.Chunks, &r.TextBytes, &r.Revision, &r.ScopedVectors)
 }
 
 // DocumentRevisions lists completed documents after a document ID in ascending order.

@@ -34,6 +34,48 @@ func TestEmbeddedMigrationsIncludeIndexVisibilityAndMixedPDF(t *testing.T) {
 	require.Equal(t, "015_mixed_pdf_ocr.sql", names[15])
 }
 
+func TestVectorGenerationMigrationSharesPublishedInventory(t *testing.T) {
+	migrations, err := loadMigrations(migrationFiles)
+	require.NoError(t, err)
+	names := make(map[int]string, len(migrations))
+	for _, m := range migrations {
+		names[m.version] = m.name
+	}
+	require.Equal(t, "012_index_visibility.sql", names[12])
+	require.Equal(t, "016_vector_generations.sql", names[16])
+}
+
+func TestVectorGenerationMigrationUpgradesPublishedVisibilitySchema(t *testing.T) {
+	c := migrationTestClient(t, startTestDatabase(t))
+	applyMigrationPrefix(t, c, 12)
+	ctx := t.Context()
+	id := uuid.NewString()
+	leaseToken := uuid.NewString()
+	observedAt := time.Now().UTC().Truncate(time.Second)
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id,content,index_visibility,index_visibility_observed_at)
+		VALUES($1,'preserved source','sample_seen',$2)`, id, observedAt)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO ingest_jobs(document_id,lease_token) VALUES($1,$2)`, id, leaseToken)
+	require.NoError(t, err)
+
+	var checksum string
+	var appliedAt time.Time
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT checksum,applied_at FROM schema_migrations WHERE version=12`).Scan(&checksum, &appliedAt))
+	require.NoError(t, c.RunMigrations(ctx))
+	requireRecordedMigrations(t, c)
+	var preserved bool
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT checksum=$1 AND applied_at=$2 FROM schema_migrations WHERE version=12`, checksum, appliedAt).Scan(&preserved))
+	require.True(t, preserved)
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT d.index_visibility='sample_seen' AND d.index_visibility_observed_at=$2 AND j.lease_token=$3
+		FROM documents d JOIN ingest_jobs j ON j.document_id=d.id WHERE d.id=$1`, id, observedAt, leaseToken).Scan(&preserved))
+	require.True(t, preserved)
+	state, err := c.VectorState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, LegacyGeneration, state.Active)
+	require.Empty(t, state.LegacyStore)
+	require.False(t, state.Frozen)
+}
+
 func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	url := startTestDatabase(t)
 	c := migrationTestClient(t, url)

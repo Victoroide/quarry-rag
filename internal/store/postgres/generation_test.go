@@ -106,6 +106,14 @@ func TestFreezeGatesAdmissionClaimsAndDeletes(t *testing.T) {
 	job, err := c.ClaimJob(t.Context(), "worker", time.Minute, 5)
 	require.NoError(t, err)
 	require.Nil(t, job, "a frozen queue yields no work")
+	fixtureID, receipt := fixtureShapedID(), uuid.NewString()
+	_, err = c.ReconcileEvaluationFixture(t.Context(), fixtureID, receipt)
+	require.ErrorIs(t, err, domain.ErrWritersFrozen)
+	_, err = c.DeleteEvaluationFixture(t.Context(), fixtureID, receipt, uuid.NewString(), "pinecone:bound", func(context.Context) error {
+		t.Fatal("a frozen fixture deletion must not sweep vectors")
+		return nil
+	})
+	require.ErrorIs(t, err, domain.ErrWritersFrozen)
 
 	require.NoError(t, c.ThawWriters(t.Context()))
 	require.NoError(t, c.WritersOpen(t.Context()))
@@ -270,6 +278,19 @@ func TestQuiesceCountsRunningLeases(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, status.OpenDeletions)
 	require.False(t, status.Quiet())
+
+	legacyID := uuid.NewString()
+	_, err = c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'legacy_reservation','legacy')`, legacyID, uuid.NewString())
+	require.NoError(t, err)
+	status, err = c.WriterQuiesce(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, 2, status.OpenDeletions)
+	require.False(t, status.Quiet())
+	_, err = c.Pool.Exec(t.Context(), `UPDATE document_deletions SET finalized=TRUE WHERE document_id=$1`, legacyID)
+	require.NoError(t, err)
+	status, err = c.WriterQuiesce(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, status.OpenDeletions)
 }
 
 func TestReplicaOnAnotherGenerationCannotWrite(t *testing.T) {
@@ -290,7 +311,7 @@ func TestPinVectorGeneration(t *testing.T) {
 	c := jobsDatabase(t)
 	want := generationProfile()
 	pin := func(generation, store, target string, profile domain.EmbeddingProfile) error {
-		return c.PinVectorGeneration(t.Context(), generation, store, target, profile)
+		return c.PinVectorGeneration(t.Context(), generation, store, target, "", profile)
 	}
 	require.NoError(t, pin(LegacyGeneration, "postgres", "chunk_vectors", want), "an unregistered legacy target is accepted")
 	require.ErrorIs(t, pin("g2", "postgres", VectorTable("g2"), want), domain.ErrGenerationMismatch, "g2 is not active")
@@ -312,6 +333,30 @@ func TestPinVectorGeneration(t *testing.T) {
 		mutate(&drifted)
 		require.ErrorIs(t, pin(LegacyGeneration, "postgres", "chunk_vectors", drifted), ErrGenerationDrift, name)
 	}
+}
+
+func TestPinMaintenanceVectorGeneration(t *testing.T) {
+	c, _ := vectorDatabase(t)
+	ctx := t.Context()
+	want := generationProfile()
+
+	// Existing-binding mode refuses even when chunk_vectors exists, keeping Pinecone maintenance strict.
+	require.ErrorIs(t, c.PinExistingVectorGeneration(ctx, LegacyGeneration, "postgres", "chunk_vectors", "", want), ErrGenerationDrift)
+	require.ErrorIs(t, c.PinCleanupVectorGeneration(ctx, LegacyGeneration, "pinecone", "corpus", "corpus-host", want), ErrGenerationDrift)
+
+	state, err := c.VectorState(ctx)
+	require.NoError(t, err)
+	require.Empty(t, state.LegacyStore)
+
+	// Cleanup mode binds legacy postgres/chunk_vectors once the physical table exists.
+	require.NoError(t, c.PinCleanupVectorGeneration(ctx, LegacyGeneration, "postgres", "chunk_vectors", "", want))
+	state, err = c.VectorState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "postgres", state.LegacyStore)
+	require.Equal(t, "chunk_vectors", state.LegacyTarget)
+
+	// Once bound to postgres, Pinecone existing-binding maintenance refuses drift.
+	require.ErrorIs(t, c.PinExistingVectorGeneration(ctx, LegacyGeneration, "pinecone", "corpus", "corpus-host", want), ErrGenerationDrift)
 }
 
 func verifiedGeneration(t *testing.T, c *Client, name, digest string) {
@@ -379,9 +424,8 @@ func TestActivationRetiresThePreviousGenerationAndPinsReplicas(t *testing.T) {
 
 	require.NoError(t, c.ThawWriters(t.Context()))
 	require.ErrorIs(t, c.WritersOpen(t.Context()), domain.ErrGenerationMismatch, "the legacy replica is pinned out")
-	c.SetVectorGeneration("g2")
+	require.NoError(t, c.PinVectorGeneration(t.Context(), "g2", "postgres", VectorTable("g2"), "", generationProfile()))
 	require.NoError(t, c.WritersOpen(t.Context()))
-	require.NoError(t, c.PinVectorGeneration(t.Context(), "g2", "postgres", VectorTable("g2"), generationProfile()))
 }
 
 func TestCheckpointLedger(t *testing.T) {
@@ -697,4 +741,31 @@ func TestOrphansFollowSourceEligibility(t *testing.T) {
 		got = append(got, o.ChunkIDs...)
 	}
 	require.ElementsMatch(t, []string{"failed", "deleting", "removed"}, got, "a completed document being deleted is not eligible either")
+}
+
+func TestVectorRowsMatchUsesPinnedGenerationTable(t *testing.T) {
+	c, legacy := vectorDatabase(t)
+	ctx := t.Context()
+	g2, err := CreateGenerationVectorStore(ctx, c, 3, "g2")
+	require.NoError(t, err)
+	docID := uuid.NewString()
+	chunkID := uuid.NewString()
+	_, err = c.Pool.Exec(ctx, `INSERT INTO documents(id,content,status,chunk_count) VALUES($1,'body','completed',1)`, docID)
+	require.NoError(t, err)
+	doc := BackfillDocument{DocumentID: docID, ChunkIDs: []string{chunkID}}
+	require.NoError(t, legacy.Upsert(ctx, "", []domain.Chunk{{ID: domain.ChunkID(chunkID), DocumentID: domain.DocumentID(docID), Index: 0, Embedding: []float32{1, 0, 0}}}))
+
+	matches, err := c.VectorRowsMatch(ctx, doc)
+	require.NoError(t, err)
+	require.True(t, matches)
+
+	c.SetVectorGeneration("g2")
+	matches, err = c.VectorRowsMatch(ctx, doc)
+	require.NoError(t, err)
+	require.False(t, matches, "active generation g2 must not read legacy chunk_vectors")
+
+	require.NoError(t, g2.Upsert(ctx, "", []domain.Chunk{{ID: domain.ChunkID(chunkID), DocumentID: domain.DocumentID(docID), Index: 0, Embedding: []float32{1, 0, 0}}}))
+	matches, err = c.VectorRowsMatch(ctx, doc)
+	require.NoError(t, err)
+	require.True(t, matches)
 }

@@ -158,10 +158,10 @@ func dataModel() diagram {
 		{ID: "source_uploads", Title: "source_uploads", Columns: []column{
 			{"id", "UUID", "PK", ""}, {"document_id", "UUID", "", ""}, {"collection", "TEXT", "", ""}, {"bucket", "TEXT", "", ""}, {"object_key", "TEXT", "", ""}, {"state", "TEXT", "", ""}, {"version_id", "TEXT", "", ""}, {"acknowledged_at", "TIMESTAMPTZ", "", ""}, {"write_state", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"expires_at", "TIMESTAMPTZ", "", ""}, {"linked_document_id", "UUID", "FK", "documents.id"}, {"linked_at", "TIMESTAMPTZ", "", ""}, {"claim", "UUID", "", ""}, {"claim_until", "TIMESTAMPTZ", "", ""}, {"claimed_at", "TIMESTAMPTZ", "", ""}, {"checks", "INTEGER", "", ""}, {"last_checked_at", "TIMESTAMPTZ", "", ""}, {"next_check_at", "TIMESTAMPTZ", "", ""}, {"reason", "TEXT", "", ""}}},
 		{ID: "vector_generations", Title: "vector_generations", Columns: []column{
-			{"name", "TEXT", "PK", ""}, {"store", "TEXT", "", ""}, {"target", "TEXT", "", ""}, {"profile", "JSONB", "", ""}, {"profile_hash", "TEXT", "", ""}, {"profile_origin", "TEXT", "", ""}, {"state", "TEXT", "", ""}, {"corpus_digest", "TEXT", "", ""}, {"verification", "JSONB", "", ""}, {"verified_at", "TIMESTAMPTZ", "", ""}, {"ever_active", "BOOLEAN", "", ""}, {"pending_write", "BOOLEAN", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
+			{"name", "TEXT", "PK", ""}, {"store", "TEXT", "", ""}, {"target", "TEXT", "", ""}, {"host", "TEXT", "", ""}, {"profile", "JSONB", "", ""}, {"profile_hash", "TEXT", "", ""}, {"profile_origin", "TEXT", "", ""}, {"state", "TEXT", "", ""}, {"corpus_digest", "TEXT", "", ""}, {"verification", "JSONB", "", ""}, {"verified_at", "TIMESTAMPTZ", "", ""}, {"ever_active", "BOOLEAN", "", ""}, {"pending_write", "BOOLEAN", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "vector_generation_documents", Title: "vector_generation_documents", Columns: []column{
 			{"generation", "TEXT", "FK", "vector_generations.name"}, {"document_id", "UUID", "", ""}, {"source_revision", "TEXT", "", ""}, {"incarnation", "UUID", "", ""}, {"chunk_ids", "TEXT[]", "", ""}, {"complete", "BOOLEAN", "", ""}, {"copied", "INTEGER", "", ""}, {"embedded", "INTEGER", "", ""}, {"checkpointed_at", "TIMESTAMPTZ", "", ""}}},
-		{ID: "vector_state", Title: "vector_state", Columns: []column{{"singleton", "BOOLEAN", "PK", ""}, {"active_generation", "TEXT", "", ""}, {"frozen", "BOOLEAN", "", ""}, {"frozen_at", "TIMESTAMPTZ", "", ""}, {"freeze_generation", "TEXT", "", ""}, {"legacy_store", "TEXT", "", ""}, {"legacy_target", "TEXT", "", ""}}},
+		{ID: "vector_state", Title: "vector_state", Columns: []column{{"singleton", "BOOLEAN", "PK", ""}, {"active_generation", "TEXT", "", ""}, {"active_profile_hash", "TEXT", "", ""}, {"frozen", "BOOLEAN", "", ""}, {"frozen_at", "TIMESTAMPTZ", "", ""}, {"freeze_generation", "TEXT", "", ""}, {"legacy_store", "TEXT", "", ""}, {"legacy_target", "TEXT", "", ""}, {"legacy_host", "TEXT", "", ""}}},
 	}
 	d.Description += " The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes."
 	for _, v := range []struct {
@@ -184,7 +184,7 @@ func dataModel() diagram {
 }
 
 func repositoryTree(dirs []string) diagram {
-	d := diagram{Name: "repository-layout", Title: "Repository layout", MaxW: 840, MaxH: 1000}
+	d := diagram{Name: "repository-layout", Title: "Repository layout", MaxW: 840, MaxH: 1020}
 	for _, path := range dirs {
 		n := node{ID: path, Title: filepath.Base(path) + "/", Lines: []string{directoryDescriptions[path]}, Borderless: true}
 		flow := []string{"cmd/server", "internal/api", "internal/pipeline", "internal/retriever", "internal/llm", "internal/store"}

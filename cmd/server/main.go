@@ -94,9 +94,6 @@ func run() error {
 		return fmt.Errorf("startup: migrations: %w", migrationErr)
 	}
 	logger.Info("postgres connected")
-	if pinErr := pinVectorGeneration(startupCtx, cfg, pgClient); pinErr != nil {
-		return fmt.Errorf("startup: %w", pinErr)
-	}
 
 	// Select vector store, embedder, and LLM. FAKE MODE (GO_RAG_FAKE_MODE) wires
 	// deterministic offline implementations so the full HTTP API can be exercised
@@ -111,6 +108,7 @@ func run() error {
 	)
 
 	if cfg.FakeMode {
+		pgClient.SetVectorGeneration(cfg.ActiveVectorGeneration())
 		if profileErr := llm.ValidateSynthesisProfile(cfg); profileErr != nil {
 			return fmt.Errorf("startup: synthesis profile: %w", profileErr)
 		}
@@ -126,10 +124,13 @@ func run() error {
 			if vectorErr != nil {
 				return fmt.Errorf("startup: postgres vectors: %w", vectorErr)
 			}
+			if pinErr := pinVectorGeneration(startupCtx, cfg, pgClient, ""); pinErr != nil {
+				return fmt.Errorf("startup: %w", pinErr)
+			}
 			vectorStore = pgVectors
-			fixtureVectorIdentity = "postgres"
+			fixtureVectorIdentity = domain.FixtureVectorIdentity("postgres", "", "")
 		} else {
-			pcClient, pcErr := pcstore.NewPineconeClient(startupCtx, cfg)
+			pcClient, pcErr := openPineconeVectors(startupCtx, cfg, pgClient, pcstore.NewPineconeClient)
 			if pcErr != nil {
 				return fmt.Errorf("startup: pinecone: %w", pcErr)
 			}
