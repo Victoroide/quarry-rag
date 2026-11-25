@@ -98,7 +98,7 @@ Failing inputs are saved under the affected package's `testdata/fuzz/<Target>/` 
 | [Dependency review](../.github/workflows/dependency-review.yml) | Pull requests | Review dependency changes; reject vulnerabilities of high severity or above. |
 | [Scorecard](../.github/workflows/scorecard.yml) | Pushes to `main`, weekly, branch protection changes and manual dispatch | Publish Scorecard results, retain the SARIF artifact for five days and upload it to code scanning. |
 | [Release](../.github/workflows/release.yml) | Version tags matching `v*.*.*` | Builds archives and the runtime image, signs provenance, and publishes the release only after both builds and attestations succeed. |
-| [Release check](../.github/workflows/release-check.yml) | Pull requests changing Go sources, module dependencies, the Dockerfile or release scripts and workflows | Checks script behavior, builds archives and verifies checksums and bundled licenses. |
+| [Release check](../.github/workflows/release-check.yml) | Pull requests | Checks [release packaging](#releases) when release inputs may have changed. Cancels superseded checks for the same pull request. |
 | [Fuzz](../.github/workflows/fuzz.yml) | Weekly and manual dispatch | Fuzz each target separately; upload failing inputs as artifacts retained for 14 days. |
 
 ## Releases
@@ -117,13 +117,25 @@ tags whose CHANGELOG section is missing or empty.
 Tags containing a hyphen publish a prerelease. Asset names and verification
 commands are documented in [Deployment](deployment.md#releases).
 
+Pull request preflight checks the packaging fixtures once and verifies the real
+archives in two parallel target groups. Each group checks its archives,
+checksums, executables, README and target-specific licenses. **Check release
+archives** checks that the two manifests cover every command and target exactly
+once. This applies to additions, renames and deletions of packaged inputs such
+as migrations and license notices, as well as changes whose effect is uncertain.
+
 To check packaging locally without publishing:
 
 ```sh
 bash .github/scripts/release-test.sh
-.github/scripts/build-release.sh v0.0.0-check "$(mktemp -d)"
+dist=$(mktemp -d)
+.github/scripts/build-release.sh v0.0.0-check "$dist"
+.github/scripts/check-release.sh archives v0.0.0-check "$dist"
 actionlint .github/workflows/release.yml .github/workflows/release-check.yml
 ```
+
+To check a subset, append the same `os/arch` arguments to both archive commands.
+A version tag uses the full target set.
 
 ---
 
