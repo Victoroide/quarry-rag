@@ -95,13 +95,27 @@ Failing inputs are saved under the affected package's `testdata/fuzz/<Target>/` 
 
 | Workflow | Trigger | Checks |
 |---|---|---|
-| [CI](../.github/workflows/ci.yml) | Pushes to `main` and pull requests | Lint; Test with race detection; Build service and runtime image; Check reachable vulnerabilities; Check vector diagrams. |
+| [CI](../.github/workflows/ci.yml) | Pushes to `main` and pull requests | Lint; Test with race detection; Build service and runtime image for both published platforms and check them; Check reachable vulnerabilities; Check vector diagrams. |
 | [CodeQL](../.github/workflows/codeql.yml) | Pushes to `main`, pull requests targeting `main` and a daily schedule at 04:31 UTC | Analyze Go for security issues. |
 | [Dependency review](../.github/workflows/dependency-review.yml) | Pull requests | Review dependency changes; reject vulnerabilities of high severity or above. |
 | [Scorecard](../.github/workflows/scorecard.yml) | Pushes to `main`, weekly, branch protection changes and manual dispatch | Publish Scorecard results, retain the SARIF artifact for five days and upload it to code scanning. |
 | [Release](../.github/workflows/release.yml) | Version tags matching `v*.*.*` | Builds archives and the runtime image, signs provenance, and publishes the release only after both builds and attestations succeed. |
 | [Release check](../.github/workflows/release-check.yml) | Pull requests | Checks [release packaging](#releases) when release inputs may have changed. Cancels superseded checks for the same pull request. |
 | [Fuzz](../.github/workflows/fuzz.yml) | Daily and manual dispatch | Exercise every discovered target for five seconds per target, with two minutes per target on Mondays and by default on manual dispatch. Longer campaigns group targets by package and split jobs at the runner time limit. Manual dispatch accepts a per-target duration up to 5h56m. Failing inputs are retained for 14 days. |
+
+### Runtime Image Job
+
+The image job builds the `runtime` target for `linux/amd64` and `linux/arm64` without publishing it. It checks the effective filesystem of each image after applying its layers. The server must be the sole entry point, match the target architecture and be executable by UID/GID `10001:10001`. The check also requires CA certificates and timezone data, and compares every installed license and notice against the project's license and the files collected for that target from the pinned build environment.
+
+The job compiles every package with `go build ./...` only for events the CodeQL analysis does not build: pull requests that target another branch and any other trigger. Pushes to `main` and pull requests targeting `main` rely on the CodeQL build.
+
+Layers are restored from the `ci-runtime` scope of the GitHub Actions cache on every event and exported to it only by pushes to `main`. Release builds neither read nor write that scope. The `test` and `lint` Dockerfile targets are not part of CI.
+
+Run the same check locally with a builder that supports multi-platform OCI exports:
+
+```sh
+make image-check
+```
 
 ## Releases
 

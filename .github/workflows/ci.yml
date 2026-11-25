@@ -65,17 +65,45 @@ jobs:
     name: Build service and runtime image
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # The CodeQL workflow compiles every package on these two events. Other
+      # events compile them here.
+      PACKAGES_ANALYZED: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.base_ref == 'main')) && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: env.PACKAGES_ANALYZED != 'true'
         with:
           go-version-file: go.mod
       - name: Build packages
+        if: env.PACKAGES_ANALYZED != 'true'
         run: go build ./...
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        id: buildx
+      - name: Create runtime image output directory
+        run: mkdir -p "$RUNNER_TEMP/runtime-image"
       - name: Build runtime image
-        run: docker build --target runtime --tag quarry-rag:ci .
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=${{ runner.temp }}/runtime-image/runtime-image.tar
+          provenance: false
+          cache-from: type=gha,scope=ci-runtime
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=ci-runtime' || '' }}
+      - name: Check runtime image
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          docker buildx build --builder "$BUILDER" --target verify-runtime \
+            --build-context "runtime-output=$RUNNER_TEMP/runtime-image" \
+            --output type=cacheonly --progress plain .
 
   govulncheck:
     name: Check reachable vulnerabilities
