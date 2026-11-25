@@ -80,21 +80,30 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), domain.WriteRequestTimeout)
 		defer cancel()
-		if gate, ok := cs.(domain.WriterGate); ok {
-			if gateErr := gate.WritersOpen(ctx); gateErr != nil {
-				switch {
-				case errors.Is(gateErr, domain.ErrWritersFrozen):
-					writeFrozen(w)
-				case errors.Is(gateErr, domain.ErrGenerationMismatch):
-					w.Header().Set("Retry-After", "30")
-					writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
-				default:
-					slog.ErrorContext(ctx, "check document writers", "document_id", docIDStr, "error", gateErr)
-					w.Header().Set("Retry-After", "30")
-					writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
-				}
-				return
+		var release func()
+		var gateErr error
+		switch gate := cs.(type) {
+		case domain.WriterLocker:
+			release, gateErr = gate.AcquireWriter(ctx)
+		case domain.WriterGate:
+			gateErr = gate.WritersOpen(ctx)
+		}
+		if gateErr != nil {
+			switch {
+			case errors.Is(gateErr, domain.ErrWritersFrozen):
+				writeFrozen(w)
+			case errors.Is(gateErr, domain.ErrGenerationMismatch):
+				w.Header().Set("Retry-After", "30")
+				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
+			default:
+				slog.ErrorContext(ctx, "check document writers", "document_id", docIDStr, "error", gateErr)
+				w.Header().Set("Retry-After", "30")
+				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 			}
+			return
+		}
+		if release != nil {
+			defer release()
 		}
 		docID := domain.DocumentID(docIDStr)
 		if guard, ok := cs.(domain.LegacyDeletionGuard); ok && options.legacyReservations && !qualified {

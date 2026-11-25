@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 
+	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	"github.com/google/uuid"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type vectorRef struct {
@@ -206,14 +204,4 @@ func fetchReferences(ctx context.Context, idx vectorIndex, ids []string) ([]vect
 	return refs, nil
 }
 
-func listUnsupported(err error) bool {
-	if status.Code(err) == codes.Unimplemented {
-		return true
-	}
-	if status.Code(err) != codes.InvalidArgument && status.Code(err) != codes.FailedPrecondition {
-		return false
-	}
-	message := strings.ToLower(status.Convert(err).Message())
-	return strings.Contains(message, "list") && (strings.Contains(message, "not supported") ||
-		(strings.Contains(message, "only supported") && strings.Contains(message, "serverless")))
-}
+func listUnsupported(err error) bool { return pcstore.ListingUnsupported(err) }

@@ -41,12 +41,14 @@ const (
 type Config struct {
 	ServerPort string
 
-	LLMProvider          string
-	EmbeddingProvider    string
-	OpenAIBaseURL        string
-	OpenAIAPIKey         string
-	OpenAIChatModel      string
-	OpenAIEmbeddingModel string
+	LLMProvider            string
+	EmbeddingProvider      string
+	EmbeddingModelRevision string
+	ExtractionChunkVersion string
+	OpenAIBaseURL          string
+	OpenAIAPIKey           string
+	OpenAIChatModel        string
+	OpenAIEmbeddingModel   string
 
 	AWSRegion      string
 	AWSAccessKeyID string
@@ -202,6 +204,8 @@ func Load() (*Config, error) {
 		PineconeIndexName:         os.Getenv("PINECONE_INDEX_NAME"),
 		VectorStore:               envOrDefault("VECTOR_STORE", "pinecone"),
 		VectorGeneration:          os.Getenv("VECTOR_GENERATION"),
+		EmbeddingModelRevision:    os.Getenv("EMBEDDING_MODEL_REVISION"),
+		ExtractionChunkVersion:    os.Getenv("EXTRACTION_CHUNK_VERSION"),
 		S3Bucket:                  os.Getenv("S3_BUCKET"),
 		SynthesisModel:            envOrDefault("SYNTHESIS_MODEL", "fallback"),
 		SynthesisInputProfile:     os.Getenv("SYNTHESIS_INPUT_PROFILE"),
@@ -491,12 +495,8 @@ func (c *Config) validate() error {
 	if c.MaxUploadBytes < 1 || c.MaxUploadBytes > 100<<20 {
 		return fmt.Errorf("config: MAX_UPLOAD_BYTES must be between 1 and 104857600")
 	}
-	if c.EmbeddingProvider == "openai" {
-		if c.EmbeddingDimensions < 1 || c.EmbeddingDimensions > 4096 {
-			return fmt.Errorf("config: EMBEDDING_DIMENSIONS must be between 1 and 4096")
-		}
-	} else if c.EmbeddingDimensions != 256 && c.EmbeddingDimensions != 512 && c.EmbeddingDimensions != 1024 {
-		return fmt.Errorf("config: EMBEDDING_DIMENSIONS must be 256, 512 or 1024")
+	if err := ValidateEmbeddingDimensions(c.EmbeddingProvider, c.EmbeddingDimensions); err != nil {
+		return err
 	}
 	if c.PineconeUpsertBatchSize < 1 || c.PineconeUpsertBatchSize > 1000 {
 		return fmt.Errorf("config: PINECONE_UPSERT_BATCH_SIZE must be between 1 and 1000")
@@ -713,4 +713,52 @@ func (c *Config) ActiveVectorGeneration() string {
 		return domain.LegacyGeneration
 	}
 	return c.VectorGeneration
+}
+
+// VectorTarget names the store and the table or index this process serves.
+func (c *Config) VectorTarget() (store, target string) {
+	if c.VectorStore == "postgres" {
+		return "postgres", domain.VectorTable(c.ActiveVectorGeneration())
+	}
+	return "pinecone", c.PineconeIndexName
+}
+
+// ValidateEmbeddingDimensions checks whether the provider can produce the requested shape.
+func ValidateEmbeddingDimensions(provider string, dimensions int) error {
+	if provider == domain.EmbeddingProviderOpenAI {
+		if dimensions < 1 || dimensions > domain.MaxProfileDimensions {
+			return fmt.Errorf("config: EMBEDDING_DIMENSIONS must be between 1 and %d", domain.MaxProfileDimensions)
+		}
+	} else if dimensions != 256 && dimensions != 512 && dimensions != 1024 {
+		return fmt.Errorf("config: EMBEDDING_DIMENSIONS must be 256, 512 or 1024")
+	}
+	return nil
+}
+
+// EmbeddingSettings identifies the embedding request and effective text settings.
+func (c *Config) EmbeddingSettings() domain.EmbeddingProfile {
+	model := c.BedrockEmbedModel
+	revision := c.EmbeddingModelRevision
+	if c.EmbeddingProvider == domain.EmbeddingProviderOpenAI {
+		model = c.OpenAIEmbeddingModel
+	} else if base, version, ok := strings.Cut(model, ":"); ok && strings.Contains(base, ".") {
+		if _, err := strconv.ParseUint(version, 10, 64); err == nil {
+			revision = model
+		}
+	}
+	return domain.EmbeddingProfile{Provider: c.EmbeddingProvider, Model: model, ModelRevision: revision,
+		Dimensions: c.EmbeddingDimensions, Metric: domain.MetricCosine, ExtractionChunkVersion: c.TextProfile()}
+}
+
+// TextProfile combines the extraction release with settings that affect the stored text.
+func (c *Config) TextProfile() string {
+	if c.ExtractionChunkVersion == "" {
+		return ""
+	}
+	identity := fmt.Sprintf("%s/size=%d/overlap=%d/ocr=%s/doc=%d/docx=%d", c.ExtractionChunkVersion,
+		c.ChunkTokenSize, c.ChunkOverlap, c.OCRProvider, c.DOCStories, c.DOCXStories)
+	if c.EmbeddingInputProfile != nil {
+		identity += "/input=" + c.EmbeddingInputProfile.ChunkingFingerprint()
+	}
+	return identity
 }

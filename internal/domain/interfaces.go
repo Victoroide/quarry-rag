@@ -57,3 +57,9 @@ const WriteRequestTimeout = 60 * time.Second
 type WriterGate interface {
 	WritersOpen(ctx context.Context) error
 }
+
+// WriterLocker keeps an admitted deletion or maintenance operation visible
+// to the freeze until its storage effects have finished.
+type WriterLocker interface {
+	AcquireWriter(ctx context.Context) (release func(), err error)
+}

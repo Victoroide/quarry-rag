@@ -97,8 +97,8 @@ func CreateGenerationVectorStore(ctx context.Context, client *Client, dimensions
 	if err = client.initVectors(ctx, dimensions, store.table); err != nil {
 		return nil, fmt.Errorf("postgres: initialize vectors: %w", err)
 	}
-	if err = store.EnsureExactScopeIndexes(ctx); err != nil {
-		return nil, err
+	if indexErr := store.EnsureExactScopeIndexes(ctx); indexErr != nil {
+		return nil, indexErr
 	}
 	return store, nil
 }
@@ -159,7 +159,7 @@ func OpenGenerationVectorStore(ctx context.Context, client *Client, dimensions i
 		return nil, fmt.Errorf("postgres: inspect vector table %q: %w", table, err)
 	}
 	if !vectorType || stored != dimensions {
-		return nil, fmt.Errorf("postgres: embedding dimension mismatch: existing %d, configured %d", stored, dimensions)
+		return nil, fmt.Errorf("%w: postgres embedding dimension mismatch: existing %d, configured %d", ErrGenerationDrift, stored, dimensions)
 	}
 	return store, nil
 }
@@ -168,7 +168,7 @@ func OpenGenerationVectorStore(ctx context.Context, client *Client, dimensions i
 func (s *VectorStore) RouteCompletion() {
 	table := s.table
 	s.client.vectorTable.Store(&table)
-	s.client.vectorDimensions.Store(int32(s.dimensions)) // #nosec G115 -- Constructors bound dimensions to 2000.
+	s.client.vectorDimensions.Store(int64(s.dimensions))
 }
 
 func (c *Client) vectorTargetTable() string {
@@ -778,7 +778,7 @@ func (s *VectorStore) ListIDs(ctx context.Context, after string, limit int) (ids
 	if limit < 1 || limit > 10000 {
 		return nil, "", errors.New("postgres: page size must be between 1 and 10000")
 	}
-	rows, err := s.client.Pool.Query(ctx, `SELECT chunk_id FROM `+pgx.Identifier{s.table}.Sanitize()+` WHERE chunk_id > $1 ORDER BY chunk_id LIMIT $2`, after, limit)
+	rows, err := s.client.Pool.Query(ctx, `SELECT chunk_id FROM `+pgx.Identifier{s.table}.Sanitize()+` WHERE chunk_id > $1 ORDER BY chunk_id LIMIT $2`, after, limit+1)
 	if err != nil {
 		return nil, "", fmt.Errorf("postgres: list vector keys: %w", err)
 	}
@@ -793,8 +793,9 @@ func (s *VectorStore) ListIDs(ctx context.Context, after string, limit int) (ids
 	if err := rows.Err(); err != nil {
 		return nil, "", err
 	}
-	if len(ids) == limit {
-		next = ids[len(ids)-1]
+	if len(ids) > limit {
+		ids = ids[:limit]
+		next = ids[limit-1]
 	}
 	return ids, next, nil
 }

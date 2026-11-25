@@ -194,6 +194,54 @@ func TestFreezeWaitsForAdmissionsInFlight(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestFreezeWaitsForABlockedJobClaim(t *testing.T) {
+	c := jobsDatabase(t)
+	id := jobsAccept(t, c, "queued before freezing")
+	_, err := c.RegisterGeneration(t.Context(), Generation{Name: "g2", Store: "postgres", Target: VectorTable("g2"), Profile: generationProfile(), Origin: OriginRecorded})
+	require.NoError(t, err)
+	tx, err := c.Pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	_, err = tx.Exec(t.Context(), "LOCK TABLE ingest_jobs IN SHARE MODE")
+	require.NoError(t, err)
+	var holder int
+	require.NoError(t, tx.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&holder))
+	type claim struct {
+		job *domain.Job
+		err error
+	}
+	claimed := make(chan claim, 1)
+	go func() {
+		job, claimErr := c.ClaimJob(t.Context(), "old-replica", time.Minute, 3)
+		claimed <- claim{job, claimErr}
+	}()
+	require.Eventually(t, func() bool {
+		var waiting bool
+		queryErr := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+ WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%UPDATE ingest_jobs j SET state=%')`, holder).Scan(&waiting)
+		return queryErr == nil && waiting
+	}, 5*time.Second, 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+	require.Error(t, c.FreezeWriters(ctx, "g2"), "freeze cannot publish while the lease update is blocked")
+	state, err := c.VectorState(t.Context())
+	require.NoError(t, err)
+	require.False(t, state.Frozen)
+	require.NoError(t, tx.Commit(t.Context()))
+	got := <-claimed
+	require.NoError(t, got.err)
+	require.NotNil(t, got.job)
+	require.Equal(t, id, got.job.Document.ID)
+	require.NoError(t, c.FreezeWriters(t.Context(), "g2"))
+	quiet, err := c.WriterQuiesce(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, quiet.RunningJobs)
+	require.NoError(t, c.RecordVerification(t.Context(), "g2", "digest", json.RawMessage(`{}`)))
+	require.ErrorContains(t, c.ActivateGeneration(t.Context(), "g2", "digest", 0), "1 in-flight jobs")
+	require.NoError(t, c.FailJob(t.Context(), *got.job, "finished"))
+	require.NoError(t, c.ActivateGeneration(t.Context(), "g2", "digest", 0))
+}
+
 func TestQuiesceCountsRunningLeases(t *testing.T) {
 	c := jobsDatabase(t)
 	jobsAccept(t, c, "claimed before the freeze")
@@ -257,6 +305,8 @@ func TestPinVectorGeneration(t *testing.T) {
 		"provider":   func(p *domain.EmbeddingProfile) { p.Provider = domain.EmbeddingProviderOpenAI },
 		"model":      func(p *domain.EmbeddingProfile) { p.Model = "other-model" },
 		"dimensions": func(p *domain.EmbeddingProfile) { p.Dimensions = 4 },
+		"revision":   func(p *domain.EmbeddingProfile) { p.ModelRevision = "other-revision" },
+		"text":       func(p *domain.EmbeddingProfile) { p.ExtractionChunkVersion = "other-text" },
 	} {
 		drifted := want
 		mutate(&drifted)
@@ -343,13 +393,17 @@ func TestCheckpointLedger(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, seen)
 
-	require.NoError(t, c.BeginGenerationDocument(t.Context(), "g2", doc, []string{"a", "b"}))
+	recorded, err := c.BeginGenerationDocument(t.Context(), "g2", doc, []string{"b", "a"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"a", "b"}, recorded)
 	seen, err = c.GenerationCheckpoints(t.Context(), "g2", []string{doc})
 	require.NoError(t, err)
 	require.Equal(t, Checkpoint{DocumentID: doc, ChunkIDs: []string{"a", "b"}}, seen[doc])
 
 	// A second intent widens the possibly written set so that no key is forgotten.
-	require.NoError(t, c.BeginGenerationDocument(t.Context(), "g2", doc, []string{"b", "c"}))
+	recorded, err = c.BeginGenerationDocument(t.Context(), "g2", doc, []string{"b", "c"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"a", "b", "c"}, recorded)
 	seen, err = c.GenerationCheckpoints(t.Context(), "g2", []string{doc})
 	require.NoError(t, err)
 	require.Equal(t, []string{"a", "b", "c"}, seen[doc].ChunkIDs)
@@ -375,7 +429,8 @@ func TestCheckpointLedger(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, orphans)
 
-	require.Error(t, c.BeginGenerationDocument(t.Context(), "absent", doc, []string{"a"}))
+	_, err = c.BeginGenerationDocument(t.Context(), "absent", doc, []string{"a"})
+	require.Error(t, err)
 	require.Error(t, c.CompleteGenerationDocument(t.Context(), "g2", doc, "rev", uuid.NewString(), []string{"a"}, 0, 0), "completion needs a prior intent")
 	require.Error(t, c.CompleteGenerationDocument(t.Context(), "g2", doc, "rev", "", []string{"a"}, 0, 0), "completion records the observed incarnation")
 }
@@ -384,7 +439,8 @@ func TestCheckpointWritesInvalidateVerificationAndRefuseLiveTargets(t *testing.T
 	c := jobsDatabase(t)
 	verifiedGeneration(t, c, "g2", "digest")
 	doc := uuid.NewString()
-	require.NoError(t, c.BeginGenerationDocument(t.Context(), "g2", doc, []string{"a"}))
+	_, err := c.BeginGenerationDocument(t.Context(), "g2", doc, []string{"a"})
+	require.NoError(t, err)
 	got, err := c.Generation(t.Context(), "g2")
 	require.NoError(t, err)
 	require.Equal(t, StateStaging, got.State, "a write after verification invalidates it")
@@ -393,7 +449,8 @@ func TestCheckpointWritesInvalidateVerificationAndRefuseLiveTargets(t *testing.T
 
 	require.NoError(t, c.RecordVerification(t.Context(), "g2", "digest", json.RawMessage(`{}`)))
 	require.NoError(t, c.ActivateGeneration(t.Context(), "g2", "digest", 0))
-	require.ErrorIs(t, c.BeginGenerationDocument(t.Context(), "g2", doc, []string{"a"}), ErrLiveTarget)
+	_, err = c.BeginGenerationDocument(t.Context(), "g2", doc, []string{"a"})
+	require.ErrorIs(t, err, ErrLiveTarget)
 	require.ErrorIs(t, c.CompleteGenerationDocument(t.Context(), "g2", doc, "rev", uuid.NewString(), []string{"a"}, 0, 0), ErrLiveTarget)
 	require.ErrorIs(t, c.ForgetGenerationDocument(t.Context(), "g2", doc), ErrLiveTarget)
 }
@@ -521,6 +578,45 @@ func TestSourceCorpusRevisionsFollowStoredContent(t *testing.T) {
 	require.Nil(t, snapshot, "a document that is no longer completed has no snapshot")
 }
 
+func TestSourceCorpusIncludesTenantForOwnedDocuments(t *testing.T) {
+	f := newOwnedFixture(t)
+	req := ownedRequest(f.owner, "team", "owned corpus text")
+	require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)
+	job := f.claim(t)
+	done, err := f.c.CompleteJob(t.Context(), *job, []domain.Chunk{chunkFor(req.Document.ID, 0)}, domain.IndexObservation{})
+	require.NoError(t, err)
+	require.True(t, done)
+
+	unownedID := uuid.NewString()
+	_, err = f.c.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,status,collection,doc_type,chunk_count) VALUES($1,'unowned','completed','','note',1)`, unownedID)
+	require.NoError(t, err)
+	_, err = f.c.Pool.Exec(t.Context(), `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,'text',1)`, uuid.NewString(), unownedID)
+	require.NoError(t, err)
+
+	page, err := f.c.DocumentRevisions(t.Context(), "", 10)
+	require.NoError(t, err)
+	byID := map[string]DocumentRevision{}
+	for _, rev := range page {
+		byID[rev.ID] = rev
+	}
+	require.Equal(t, f.tenant, byID[string(req.Document.ID)].TenantID)
+	require.Empty(t, byID[unownedID].TenantID)
+	snap, err := f.c.LoadDocumentSnapshot(t.Context(), string(req.Document.ID))
+	require.NoError(t, err)
+	require.NotNil(t, snap)
+	require.Equal(t, f.tenant, snap.TenantID)
+
+	beforeRev := byID[unownedID].Revision
+	f.importBatch(t, func(b map[string]any) {
+		b["assignments"] = []grantEntry{grantAssignment(t, f.c, f.tenant, f.owner.ID, unownedID)}
+	})
+	snap, err = f.c.LoadDocumentSnapshot(t.Context(), unownedID)
+	require.NoError(t, err)
+	require.NotNil(t, snap)
+	require.Equal(t, f.tenant, snap.TenantID)
+	require.NotEqual(t, beforeRev, snap.Revision, "assigning a document updates its source revision")
+}
+
 func TestSourceCorpusSkipsDocumentsBeingDeleted(t *testing.T) {
 	c := jobsDatabase(t)
 	var ids []string
@@ -571,4 +667,34 @@ func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
 	require.NoError(t, c.RunMigrations(t.Context()))
 	require.NoError(t, c.FreezeWriters(t.Context(), "g2"))
 	require.ErrorIs(t, c.WritersOpen(t.Context()), domain.ErrWritersFrozen)
+}
+
+func TestOrphansFollowSourceEligibility(t *testing.T) {
+	c := jobsDatabase(t)
+	_, err := c.RegisterGeneration(t.Context(), stagingGeneration("g2"))
+	require.NoError(t, err)
+	ids := map[string]string{}
+	for _, name := range []string{"current", "failed", "deleting", "removed"} {
+		id := uuid.NewString()
+		ids[name] = id
+		status := "completed"
+		if name == "failed" {
+			status = "failed"
+		}
+		if name != "removed" {
+			_, err = c.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,status) VALUES($1,'body',$2)`, id, status)
+			require.NoError(t, err)
+		}
+		_, err = c.BeginGenerationDocument(t.Context(), "g2", id, []string{name})
+		require.NoError(t, err)
+	}
+	_, err = c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'quarantine','local')`, ids["deleting"], uuid.NewString())
+	require.NoError(t, err)
+	orphans, err := c.OrphanedGenerationDocuments(t.Context(), "g2", 10)
+	require.NoError(t, err)
+	var got []string
+	for _, o := range orphans {
+		got = append(got, o.ChunkIDs...)
+	}
+	require.ElementsMatch(t, []string{"failed", "deleting", "removed"}, got, "a completed document being deleted is not eligible either")
 }

@@ -64,6 +64,7 @@ type Profile struct {
 	maxBytes, maxCharacters, maxTokens int
 	tokenizer                          *cl100kTokenizer
 	fingerprint                        string
+	chunkingFingerprint                string
 }
 
 // Usage carries an exact token count when a verified tokenizer ran.
@@ -126,6 +127,14 @@ func Load(path string, target Target) (*Profile, error) {
 	}
 	digest := sha256.Sum256(canonical)
 	profile.fingerprint = hex.EncodeToString(digest[:])
+	// Chunk boundaries depend on the allowances and tokenizer, independent of
+	// the name of the embedding model that uses them.
+	chunking := sha256.New()
+	_, _ = fmt.Fprintf(chunking, "%d/%d/%d", profile.maxBytes, profile.maxCharacters, profile.maxTokens)
+	if spec.Tokenizer != nil {
+		_, _ = fmt.Fprintf(chunking, "/%q/%q/%q/%q", spec.Tokenizer.Type, spec.Tokenizer.Version, spec.Tokenizer.Digest, cl100kSplitVersion)
+	}
+	profile.chunkingFingerprint = hex.EncodeToString(chunking.Sum(nil))
 	return profile, nil
 }
 
@@ -166,6 +175,9 @@ func readLocalFile(path string, limit int64) ([]byte, error) {
 
 // Fingerprint identifies the model revision, allowances and tokenizer version and digest.
 func (p *Profile) Fingerprint() string { return p.fingerprint }
+
+// ChunkingFingerprint identifies the input limits and tokenizer that affect chunk boundaries.
+func (p *Profile) ChunkingFingerprint() string { return p.chunkingFingerprint }
 
 // SplitLimits supplies necessary byte and character bounds for candidate chunks.
 // Zero means unbounded. Exact token limits also bound bytes by vocabulary width.

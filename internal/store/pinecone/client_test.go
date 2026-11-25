@@ -26,7 +26,23 @@ type fakeIndexConn struct {
 	filterDelete func(context.Context, *structpb.Struct) error
 	deleteIDs    func(context.Context, []string) error
 	deleteAll    func(context.Context) error
+	fetch        func(context.Context, []string) (*pinecone.FetchVectorsResponse, error)
+	list         func(context.Context, *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error)
 	closed       int
+}
+
+//revive:disable-next-line:var-naming SDK method name.
+func (f *fakeIndexConn) FetchVectors(ctx context.Context, ids []string) (*pinecone.FetchVectorsResponse, error) {
+	if f.fetch != nil {
+		return f.fetch(ctx, ids)
+	}
+	return &pinecone.FetchVectorsResponse{}, nil
+}
+func (f *fakeIndexConn) ListVectors(ctx context.Context, req *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error) {
+	if f.list != nil {
+		return f.list(ctx, req)
+	}
+	return &pinecone.ListVectorsResponse{}, nil
 }
 
 func (f *fakeIndexConn) UpsertVectors(ctx context.Context, vectors []*pinecone.Vector) (uint32, error) {

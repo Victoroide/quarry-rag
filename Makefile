@@ -1,4 +1,4 @@
-.PHONY: build test lint vet ci image-check up down logs cleanup reconcile validate fuzz diagrams diagrams-check
+.PHONY: build test lint vet ci image-check up down logs cleanup reconcile reindex validate fuzz diagrams diagrams-check
 
 FUZZTIME ?= 30s
 
@@ -50,6 +50,10 @@ cleanup:
 
 reconcile:
 	go run ./scripts/reconcile $(ARGS)
+
+# Inventory, stage, verify and activate a vector generation.
+reindex:
+	go run ./scripts/reindex $(ARGS)
 
 validate:
 	go run ./scripts/validate/main.go
