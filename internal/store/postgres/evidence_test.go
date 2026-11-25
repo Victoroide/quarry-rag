@@ -2,30 +2,21 @@ package postgres
 
 import (
 	"context"
-	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
+const utf8ClientOptions = "client_encoding=UTF8"
+
 func TestEvidenceVisibilityMatchesUTF8BytesOnLatin1Database(t *testing.T) {
 	ctx := t.Context()
-	baseURL := startTestDatabase(t)
-	admin, err := NewClient(ctx, baseURL)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, admin.Close(context.Background())) })
-	_, err = admin.Pool.Exec(ctx, `CREATE DATABASE latin_evidence TEMPLATE template0 ENCODING 'LATIN1' LC_COLLATE 'C' LC_CTYPE 'C'`)
-	require.NoError(t, err)
-	dsn, err := url.Parse(baseURL)
-	require.NoError(t, err)
-	dsn.Path = "/latin_evidence"
-	params := dsn.Query()
-	params.Set("client_encoding", "UTF8")
-	dsn.RawQuery = params.Encode()
-	c, err := NewClient(ctx, dsn.String())
+	dsn := withFixtureOptions(t, pgtest.SiblingLatin1(t, startTestDatabase(t)), utf8ClientOptions)
+	c, err := NewClient(ctx, dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
 	require.NoError(t, c.RunMigrations(ctx))

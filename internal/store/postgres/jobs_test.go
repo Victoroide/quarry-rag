@@ -415,7 +415,7 @@ func TestConcurrentDuplicateAtQueueCapacity(t *testing.T) {
 	}
 	require.Eventually(t, func() bool {
 		var count int
-		queryErr := c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted`).Scan(&count)
+		queryErr := c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`).Scan(&count)
 		return queryErr == nil && count >= 2
 	}, time.Second, time.Millisecond)
 	require.NoError(t, lock.Commit(t.Context()))

@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,15 +31,9 @@ func newGrantFixture() grantFixture {
 
 func TestGrantCatalog(t *testing.T) {
 	clusterURL := startTestDatabase(t)
-	cluster := migrationTestClient(t, clusterURL)
 	newDatabase := func(t *testing.T) string {
 		t.Helper()
-		connection, err := url.Parse(clusterURL)
-		require.NoError(t, err)
-		name := "catalog_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		grantExec(t, cluster, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
-		connection.Path = "/" + name
-		return connection.String()
+		return pgtest.Sibling(t, clusterURL)
 	}
 	t.Run("fresh_and_populated", func(t *testing.T) {
 		testGrantCatalogFreshAndUpgrade(t, newDatabase)
@@ -387,29 +381,30 @@ func assertReservationState(t *testing.T, c *Client, id, incarnation, expected s
 }
 
 func testGrantCatalogRoleBoundary(t *testing.T, databaseURL string) {
+	roles := newGrantRoles(t, databaseURL, "catalog_operator", "catalog_service", "catalog_auditor")
 	admin := migrationTestClient(t, databaseURL)
 	applyMigrationPrefix(t, admin, 10)
-	grantExec(t, admin, `CREATE ROLE catalog_operator; CREATE ROLE catalog_service; CREATE ROLE catalog_auditor;
-		ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO catalog_auditor, catalog_service;
-		ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO catalog_operator, catalog_service`)
+	grantExec(t, admin, roles.sql(`CREATE ROLE {catalog_operator}; CREATE ROLE {catalog_service}; CREATE ROLE {catalog_auditor};
+		ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO {catalog_auditor}, {catalog_service};
+		ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO {catalog_operator}, {catalog_service}`))
 	require.NoError(t, admin.RunMigrations(t.Context()))
-	grantExec(t, admin, `GRANT EXECUTE ON FUNCTION grant_catalog_import_batch(text,boolean) TO catalog_operator;
-		GRANT SELECT ON grant_catalog_policy_audit TO catalog_auditor;
-		GRANT SELECT ON schema_migrations TO catalog_service;
-		GRANT SELECT, INSERT, UPDATE, DELETE ON documents, ingest_jobs, document_fingerprints TO catalog_service`)
-	operator := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION catalog_operator")
-	service := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION catalog_service; SET plan_cache_mode = force_generic_plan")
-	auditor := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION catalog_auditor")
+	grantExec(t, admin, roles.sql(`GRANT EXECUTE ON FUNCTION grant_catalog_import_batch(text,boolean) TO {catalog_operator};
+		GRANT SELECT ON grant_catalog_policy_audit TO {catalog_auditor};
+		GRANT SELECT ON schema_migrations TO {catalog_service};
+		GRANT SELECT, INSERT, UPDATE, DELETE ON documents, ingest_jobs, document_fingerprints TO {catalog_service}`))
+	operator := grantRoleClient(t, databaseURL, roles.sql("SET SESSION AUTHORIZATION {catalog_operator}"))
+	service := grantRoleClient(t, databaseURL, roles.sql("SET SESSION AUTHORIZATION {catalog_service}; SET plan_cache_mode = force_generic_plan"))
+	auditor := grantRoleClient(t, databaseURL, roles.sql("SET SESSION AUTHORIZATION {catalog_auditor}"))
 	require.NoError(t, service.RunMigrations(t.Context()))
 	var operatorImport, auditorImport, auditorAudit, operatorAudit, servingAccess, servingImport, operatorHelper bool
-	require.NoError(t, admin.Pool.QueryRow(t.Context(), `SELECT
-		has_function_privilege('catalog_operator','grant_catalog_import_batch(text,boolean)','execute'),
-		has_function_privilege('catalog_auditor','grant_catalog_import_batch(text,boolean)','execute'),
-		has_table_privilege('catalog_auditor','grant_catalog_policy_audit','select'),
-		has_table_privilege('catalog_operator','grant_catalog_policy_audit','select'),
-		has_table_privilege('catalog_service','grant_catalog_document_access','select'),
-		has_function_privilege('catalog_service','grant_catalog_import_batch(text,boolean)','execute'),
-		has_function_privilege('catalog_operator','grant_catalog_parse_import(jsonb)','execute')`).
+	require.NoError(t, admin.Pool.QueryRow(t.Context(), roles.sql(`SELECT
+		has_function_privilege('{catalog_operator}','grant_catalog_import_batch(text,boolean)','execute'),
+		has_function_privilege('{catalog_auditor}','grant_catalog_import_batch(text,boolean)','execute'),
+		has_table_privilege('{catalog_auditor}','grant_catalog_policy_audit','select'),
+		has_table_privilege('{catalog_operator}','grant_catalog_policy_audit','select'),
+		has_table_privilege('{catalog_service}','grant_catalog_document_access','select'),
+		has_function_privilege('{catalog_service}','grant_catalog_import_batch(text,boolean)','execute'),
+		has_function_privilege('{catalog_operator}','grant_catalog_parse_import(jsonb)','execute')`)).
 		Scan(&operatorImport, &auditorImport, &auditorAudit, &operatorAudit, &servingAccess, &servingImport, &operatorHelper))
 	require.True(t, operatorImport && auditorAudit)
 	require.False(t, auditorImport || operatorAudit || servingAccess || servingImport || operatorHelper)
@@ -424,7 +419,7 @@ func testGrantCatalogRoleBoundary(t *testing.T, databaseURL string) {
 	require.NoError(t, err)
 	var login string
 	require.NoError(t, admin.Pool.QueryRow(t.Context(), `SELECT operator FROM grant_catalog_policy_audit`).Scan(&login))
-	require.Equal(t, "catalog_operator", login)
+	require.Equal(t, roles.name("catalog_operator"), login)
 	for _, login := range []*Client{operator, service} {
 		for _, query := range []string{
 			`SELECT * FROM grant_catalog_policy_audit`,
@@ -439,7 +434,7 @@ func testGrantCatalogRoleBoundary(t *testing.T, databaseURL string) {
 	require.ErrorContains(t, err, "batch ID conflict")
 	require.False(t, replay.Replayed)
 
-	grantExec(t, admin, `GRANT SELECT ON grant_catalog_document_access TO catalog_service`)
+	grantExec(t, admin, roles.sql(`GRANT SELECT ON grant_catalog_document_access TO {catalog_service}`))
 	assertGrantCount(t, service, "document_access", 0)
 	_, err = importTestBatch(t.Context(), service, b, false)
 	require.Error(t, err, "a scoped reader cannot execute policy mutations")
@@ -482,7 +477,7 @@ func testGrantCatalogRoleBoundary(t *testing.T, databaseURL string) {
 		var deletedInc, deletedBy string
 		require.NoError(t, admin.Pool.QueryRow(t.Context(), `SELECT incarnation::text,operator FROM grant_catalog_policy_audit WHERE revision=3`).Scan(&deletedInc, &deletedBy))
 		require.Equal(t, beforeInc, deletedInc)
-		require.Equal(t, "catalog_service", deletedBy)
+		require.Equal(t, roles.name("catalog_service"), deletedBy)
 	})
 }
 
@@ -554,6 +549,34 @@ func importTestBatch(ctx context.Context, c *Client, batch map[string]any, dryRu
 		return GrantImportResult{}, err
 	}
 	return c.ImportGrantBatch(ctx, bytes.NewReader(body), dryRun)
+}
+
+// grantRoles names the cluster-wide roles one test uses. Every test shares
+// the service, so each role gets a name no other test has and is dropped
+// with the test.
+type grantRoles map[string]string
+
+func newGrantRoles(t *testing.T, databaseURL string, purposes ...string) grantRoles {
+	t.Helper()
+	roles := make(grantRoles, len(purposes))
+	for _, purpose := range purposes {
+		roles[purpose] = pgtest.Role(t, databaseURL, purpose)
+	}
+	return roles
+}
+
+// sql replaces each {purpose} in statement with the role's name, which is
+// valid both as an identifier and inside a string literal.
+func (r grantRoles) sql(statement string) string {
+	pairs := make([]string, 0, 2*len(r))
+	for purpose, name := range r {
+		pairs = append(pairs, "{"+purpose+"}", name)
+	}
+	return strings.NewReplacer(pairs...).Replace(statement)
+}
+
+func (r grantRoles) name(purpose string) string {
+	return r[purpose]
 }
 
 func grantExec(t *testing.T, c *Client, query string, args ...any) {

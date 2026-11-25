@@ -1,13 +1,9 @@
 package pgtest
 
 import (
-	"fmt"
-	"os"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/testcontainers/testcontainers-go"
 )
 
 func queryOne(t *testing.T, url, query string) {
@@ -26,25 +22,16 @@ func queryOne(t *testing.T, url, query string) {
 	}
 }
 
-// configuredSession is the session the caller chose before any test ran.
-var configuredSession = os.Getenv(sessionEnv)
-
 func TestStartServesQueries(t *testing.T) {
 	if testing.Short() {
-		t.Skip("requires a Docker daemon")
+		t.Skip("requires a Docker daemon or the test services")
 	}
 	queryOne(t, Start(t), "SELECT 1")
-	if configuredSession != "" {
-		return
-	}
-	if got, prefix := testcontainers.SessionID(), fmt.Sprintf("quarry-%d-", os.Getpid()); !strings.HasPrefix(got, prefix) {
-		t.Fatalf("session %q does not belong to this process, want prefix %q", got, prefix)
-	}
 }
 
 func TestStartVectorCreatesTheExtension(t *testing.T) {
 	if testing.Short() {
-		t.Skip("requires a Docker daemon")
+		t.Skip("requires a Docker daemon or the test services")
 	}
 	url := StartVector(t)
 	conn, err := pgx.Connect(t.Context(), url)

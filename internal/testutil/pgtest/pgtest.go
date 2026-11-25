@@ -1,80 +1,75 @@
-// Package pgtest starts disposable PostgreSQL containers for tests.
+// Package pgtest provides empty PostgreSQL databases for tests.
+//
+// Without configuration every fixture is a disposable container that is
+// removed when the test ends. When QUARRY_TEST_POSTGRES_ADMIN_DSN and
+// QUARRY_TEST_PGVECTOR_ADMIN_DSN both name a running service, a fixture is
+// instead a new empty database, created from the empty template, on the
+// matching service and dropped when the test ends. Setting only one of them,
+// a malformed address or an unreachable service fails the test rather than
+// falling back to containers.
 package pgtest
 
 import (
-	"context"
-	"errors"
+	"os"
 	"testing"
-	"time"
 
 	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 const image = "postgres:16.13-alpine3.23"
 
 const vectorImage = "pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f"
 
-// reaperShutdownRetry repeats a start that failed because Docker was removing
-// the reaper that exited after an idle period, until the library can create a
-// new one. See reaperShuttingDown.
-var reaperShutdownRetry = retryPolicy{window: time.Minute, first: 250 * time.Millisecond, limit: 2 * time.Second}
+// server describes one kind of database server a fixture can live on.
+type server struct {
+	// name identifies the server in messages.
+	name string
+	// image is the container started when no service is configured.
+	image string
+	// adminEnv names the variable that holds the service administrator
+	// address.
+	adminEnv string
+	// extension is the extension the server must offer, if any.
+	extension string
+}
 
-// Start runs a PostgreSQL container and returns its connection URL once the
-// server accepts connections. The container is removed when the test ends.
+var (
+	plainServer  = server{name: "PostgreSQL", image: image, adminEnv: "QUARRY_TEST_POSTGRES_ADMIN_DSN"}
+	vectorServer = server{name: "pgvector", image: vectorImage, adminEnv: "QUARRY_TEST_PGVECTOR_ADMIN_DSN", extension: "vector"}
+)
+
+// Start returns the connection URL of a new empty database on an ordinary
+// PostgreSQL server. It is removed when the test ends, after the cleanup
+// functions registered later, so clients close their pools first.
 func Start(t testing.TB) string {
-	return start(t, image)
+	t.Helper()
+	return start(t, plainServer)
 }
 
-// StartVector runs PostgreSQL with pgvector available for extension creation.
+// StartVector returns the connection URL of a new empty database on a server
+// where the vector extension can be created. Container customizers apply when
+// starting a disposable container. A shared service must be configured before use.
 func StartVector(t testing.TB, opts ...testcontainers.ContainerCustomizer) string {
-	return start(t, vectorImage, opts...)
+	t.Helper()
+	return start(t, vectorServer, opts...)
 }
 
-func start(t testing.TB, containerImage string, opts ...testcontainers.ContainerCustomizer) string {
+func start(t testing.TB, s server, opts ...testcontainers.ContainerCustomizer) string {
 	t.Helper()
 	if testing.Short() {
-		t.Skip("requires a Docker daemon")
+		t.Skip("requires a Docker daemon or the test services")
 	}
-	if err := isolateReaper(); err != nil {
-		t.Fatalf("isolate reaper session: %v", err)
-	}
-	ctx := context.Background()
-	// The image opens its port for a temporary server during initialization,
-	// so readiness also waits for the second startup log line.
-	options := []testcontainers.ContainerCustomizer{
-		postgres.WithDatabase("rag"),
-		postgres.WithUsername("rag"),
-		postgres.WithPassword("rag"),
-		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute,
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
-			wait.ForListeningPort("5432/tcp"),
-		),
-	}
-	options = append(options, opts...)
-	var container *postgres.PostgresContainer
-	err := reaperShutdownRetry.run(ctx, func() error {
-		var runErr error
-		container, runErr = postgres.Run(ctx, containerImage, options...)
-		if runErr != nil {
-			// A start that fails after creating the container returns it,
-			// and a retry would otherwise leave it behind.
-			runErr = errors.Join(runErr, testcontainers.TerminateContainer(container))
-		}
-		return runErr
-	})
+	return startBackend(t, s, opts...)
+}
+
+func startBackend(t testing.TB, s server, opts ...testcontainers.ContainerCustomizer) string {
+	t.Helper()
+	admins, err := loadServices(os.LookupEnv)
 	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
+		t.Fatalf("test database services: %v", err)
 	}
-	t.Cleanup(func() {
-		if termErr := container.Terminate(context.Background()); termErr != nil {
-			t.Errorf("terminate postgres container: %v", termErr)
-		}
-	})
-	url, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("postgres connection string: %v", err)
+	if admins == nil {
+		return startContainer(t, s, opts...)
 	}
-	return url
+	return startService(t, s, admins[s.adminEnv])
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"fmt"
+	neturl "net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -400,6 +401,8 @@ func TestModifiedMigrationIsRejected(t *testing.T) {
 	require.ErrorContains(t, err, "migration 001 was modified after it was applied")
 }
 
+const migrationWaiterOptions = "statement_timeout=20&lock_timeout=20"
+
 func TestMigrationsWaitForAdvisoryLock(t *testing.T) {
 	client := migrationTestClient(t, startTestDatabase(t))
 	tx, err := client.Pool.Begin(t.Context())
@@ -407,8 +410,7 @@ func TestMigrationsWaitForAdvisoryLock(t *testing.T) {
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	_, err = tx.Exec(t.Context(), `SELECT pg_advisory_xact_lock($1)`, int64(0x7175617272790001))
 	require.NoError(t, err)
-	url := client.Pool.Config().ConnString() + "&statement_timeout=20&lock_timeout=20"
-	waiter := migrationTestClient(t, url)
+	waiter := migrationTestClient(t, withFixtureOptions(t, client.Pool.Config().ConnString(), migrationWaiterOptions))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -428,6 +430,48 @@ func TestMigrationsWaitForAdvisoryLock(t *testing.T) {
 	require.NoError(t, conn.QueryRow(t.Context(), `SHOW lock_timeout`).Scan(&lockTimeout))
 	require.Equal(t, "20ms", statementTimeout)
 	require.Equal(t, "20ms", lockTimeout)
+}
+
+func withFixtureOptions(t testing.TB, address, options string) string {
+	t.Helper()
+	dsn, err := neturl.Parse(address)
+	require.NoError(t, err)
+	// pgx applies the last value for a key and reads a literal + as data.
+	// Append the encoded options to preserve the original query bytes.
+	if dsn.RawQuery != "" && !strings.HasSuffix(dsn.RawQuery, "&") {
+		dsn.RawQuery += "&"
+	}
+	dsn.RawQuery += options
+	return dsn.String()
+}
+
+func TestWithFixtureOptionsKeepsConnectionOptions(t *testing.T) {
+	const address = "postgres://cluster_admin@127.0.0.1/owned?password=fixture%20secret&options=-c%20search_path%3Dpublic&statement_timeout=100&lock_timeout=100&client_encoding=LATIN1"
+	before, err := pgx.ParseConfig(address)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name    string
+		options string
+		want    map[string]string
+	}{
+		{"migration waiter", migrationWaiterOptions, map[string]string{"statement_timeout": "20", "lock_timeout": "20"}},
+		{"LATIN1 client", utf8ClientOptions, map[string]string{"client_encoding": "UTF8"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after, err := pgx.ParseConfig(withFixtureOptions(t, address, tc.options))
+			require.NoError(t, err)
+			require.Equal(t, before.Password, after.Password)
+			require.Equal(t, before.RuntimeParams["options"], after.RuntimeParams["options"])
+			for key, want := range tc.want {
+				require.Equal(t, want, after.RuntimeParams[key], key)
+			}
+		})
+	}
+	t.Run("empty query", func(t *testing.T) {
+		after, err := pgx.ParseConfig(withFixtureOptions(t, "postgres://cluster_admin@127.0.0.1/owned", utf8ClientOptions))
+		require.NoError(t, err)
+		require.Equal(t, "UTF8", after.RuntimeParams["client_encoding"])
+	})
 }
 
 func TestFailedMigrationRollsBack(t *testing.T) {

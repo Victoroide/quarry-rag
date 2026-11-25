@@ -12,6 +12,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -38,21 +39,30 @@ func publishedSQL(t *testing.T, guide, marker string) string {
 
 // restrictedDatabase migrates as the owner and returns a client limited to the
 // published grants for the serving login.
-func restrictedDatabase(t *testing.T) (owner, serving *Client) {
+func restrictedDatabase(t *testing.T) (owner, serving *Client, roles grantRoles) {
 	t.Helper()
 	owner = jobsDatabase(t)
-	return owner, publishedServingClient(t, owner)
+	serving, roles = publishedServingClient(t, owner)
+	return owner, serving, roles
 }
 
-func publishedServingClient(t *testing.T, owner *Client) *Client {
+func publishedServingClient(t *testing.T, owner *Client) (*Client, grantRoles) {
 	t.Helper()
-	for _, role := range servingRoles {
-		_, err := owner.Pool.Exec(t.Context(), "CREATE ROLE "+role)
-		require.NoError(t, err)
+	roles := newGrantRoles(t, owner.Pool.Config().ConnString(), servingRoles...)
+	for _, purpose := range servingRoles {
+		grantExec(t, owner, "CREATE ROLE "+pgx.Identifier{roles.name(purpose)}.Sanitize())
 	}
-	_, err := owner.Pool.Exec(t.Context(), publishedSQL(t, "grant-catalog.md", "GRANT USAGE ON SCHEMA public"))
-	require.NoError(t, err)
-	return roleClient(t, owner, "quarry_service")
+	grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "GRANT USAGE ON SCHEMA public"))
+	return roleClient(t, owner, roles.name("quarry_service")), roles
+}
+
+func publishedServingSQL(t *testing.T, roles grantRoles, guide, marker string) string {
+	t.Helper()
+	pairs := make([]string, 0, 2*len(servingRoles))
+	for _, purpose := range servingRoles {
+		pairs = append(pairs, purpose, pgx.Identifier{roles.name(purpose)}.Sanitize())
+	}
+	return strings.NewReplacer(pairs...).Replace(publishedSQL(t, guide, marker))
 }
 
 func roleClient(t *testing.T, owner *Client, role string) *Client {
@@ -97,7 +107,7 @@ func TestPublishedServingRoleProcessesOrdinaryDocuments(t *testing.T) {
 	_, err := owner.Pool.Exec(ctx, `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`)
 	require.NoError(t, err)
 	require.NoError(t, owner.RunMigrations(ctx))
-	serving := publishedServingClient(t, owner)
+	serving, _ := publishedServingClient(t, owner)
 
 	t.Run("UUIDv4 lease", func(t *testing.T) {
 		ctx := t.Context()
@@ -132,7 +142,7 @@ func TestPublishedServingRoleProcessesOrdinaryDocuments(t *testing.T) {
 }
 
 func TestPublishedServingRoleKeepsReservationGuards(t *testing.T) {
-	owner, serving := restrictedDatabase(t)
+	owner, serving, _ := restrictedDatabase(t)
 	ctx := t.Context()
 	id, receipt := fixtureShapedID(), uuid.NewString()
 	accepted, err := owner.AcceptDocument(ctx, fixtureRequest(id, receipt, "pinecone:bound"))
@@ -170,6 +180,39 @@ func TestPublishedServingRoleKeepsReservationGuards(t *testing.T) {
 	var pgErr *pgconn.PgError
 	require.True(t, errors.As(err, &pgErr), "the retired identifier stays reserved: %v", err)
 	require.Equal(t, "23505", pgErr.Code)
+}
+
+func TestPublishedServingRolesAreCleanedUpBetweenFixtures(t *testing.T) {
+	if _, configured := os.LookupEnv("QUARRY_TEST_POSTGRES_ADMIN_DSN"); !configured {
+		t.Skip("requires a shared PostgreSQL test service")
+	}
+	observer := migrationTestClient(t, startTestDatabase(t))
+	seen := make(map[string]bool)
+	for range 2 {
+		var roles grantRoles
+		t.Run("fixture", func(t *testing.T) {
+			var serving *Client
+			_, serving, roles = restrictedDatabase(t)
+			var login string
+			require.NoError(t, serving.Pool.QueryRow(t.Context(), `SELECT current_user`).Scan(&login))
+			require.Equal(t, roles.name("quarry_service"), login)
+			for _, purpose := range servingRoles {
+				name := roles.name(purpose)
+				require.False(t, seen[name], "role %s was reused by a later fixture", name)
+				seen[name] = true
+				var exists bool
+				require.NoError(t, observer.Pool.QueryRow(t.Context(),
+					`SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = $1)`, name).Scan(&exists))
+				require.True(t, exists, "fixture role %s was not created", name)
+			}
+		})
+		for _, name := range roles {
+			var exists bool
+			require.NoError(t, observer.Pool.QueryRow(t.Context(),
+				`SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = $1)`, name).Scan(&exists))
+			require.False(t, exists, "fixture role %s survived cleanup", name)
+		}
+	}
 }
 
 func TestClaimBeforeFixtureMigration(t *testing.T) {

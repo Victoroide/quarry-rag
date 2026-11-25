@@ -15,19 +15,20 @@ import (
 )
 
 func testGrantCatalogQuotedACLs(t *testing.T, databaseURL string) {
+	roles := newGrantRoles(t, databaseURL, "quoted_catalog_reader", "quoted_catalog_inherited", "sales_corpus_owner", "regional_corpus_owner")
 	admin := migrationTestClient(t, databaseURL)
-	grantExec(t, admin, `CREATE EXTENSION IF NOT EXISTS pgcrypto;
-		CREATE ROLE quoted_catalog_reader;
-		CREATE ROLE quoted_catalog_inherited;
-		GRANT quoted_catalog_inherited TO quoted_catalog_reader;
-		CREATE ROLE sales_corpus_owner;
-		CREATE ROLE regional_corpus_owner;
-		CREATE SCHEMA "SalesLedger" AUTHORIZATION sales_corpus_owner;
-		CREATE SCHEMA "RegionalLedger" AUTHORIZATION regional_corpus_owner;
-		CREATE SCHEMA regionalledger`)
+	grantExec(t, admin, roles.sql(`CREATE EXTENSION IF NOT EXISTS pgcrypto;
+		CREATE ROLE {quoted_catalog_reader};
+		CREATE ROLE {quoted_catalog_inherited};
+		GRANT {quoted_catalog_inherited} TO {quoted_catalog_reader};
+		CREATE ROLE {sales_corpus_owner};
+		CREATE ROLE {regional_corpus_owner};
+		CREATE SCHEMA "SalesLedger" AUTHORIZATION {sales_corpus_owner};
+		CREATE SCHEMA "RegionalLedger" AUTHORIZATION {regional_corpus_owner};
+		CREATE SCHEMA regionalledger`))
 	for _, fixture := range []struct{ schema, owner string }{
-		{"SalesLedger", "sales_corpus_owner"},
-		{"RegionalLedger", "regional_corpus_owner"},
+		{"SalesLedger", roles.name("sales_corpus_owner")},
+		{"RegionalLedger", roles.name("regional_corpus_owner")},
 	} {
 		t.Run(fixture.schema, func(t *testing.T) {
 			ctx := t.Context()
@@ -37,44 +38,44 @@ func testGrantCatalogQuotedACLs(t *testing.T, databaseURL string) {
 			applyMigrationPrefix(t, corpus, 10)
 			id := uuid.NewString()
 			insertGrantSource(t, corpus, id)
-			grantExec(t, corpus, `CREATE TABLE grant_catalog_metrics (value INTEGER);
+			grantExec(t, corpus, roles.sql(`CREATE TABLE grant_catalog_metrics (value INTEGER);
 				CREATE FUNCTION grant_catalog_parse_import(text) RETURNS text LANGUAGE sql RETURN $1;
-				GRANT SELECT ON grant_catalog_metrics TO quoted_catalog_reader;
-				GRANT EXECUTE ON FUNCTION grant_catalog_parse_import(text) TO quoted_catalog_reader;
-				ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO quoted_catalog_reader;
-				ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO quoted_catalog_reader`)
-			grantExec(t, admin, "GRANT USAGE ON SCHEMA "+schema+" TO quoted_catalog_reader")
+				GRANT SELECT ON grant_catalog_metrics TO {quoted_catalog_reader};
+				GRANT EXECUTE ON FUNCTION grant_catalog_parse_import(text) TO {quoted_catalog_reader};
+				ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO {quoted_catalog_reader};
+				ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO {quoted_catalog_reader}`))
+			grantExec(t, admin, roles.sql("GRANT USAGE ON SCHEMA "+schema+" TO {quoted_catalog_reader}"))
 			require.NoError(t, corpus.RunMigrations(ctx))
 			requireRecordedMigrations(t, corpus)
 			require.Len(t, grantSource(t, corpus, id), 64)
 			var importAccess, parserAccess, auditAccess, metricsAccess, overloadAccess bool
-			require.NoError(t, admin.Pool.QueryRow(ctx, `SELECT
-				has_function_privilege('quoted_catalog_reader', format('%I.grant_catalog_import_batch(text,boolean)',$1::text),'EXECUTE'),
-				has_function_privilege('quoted_catalog_reader', format('%I.grant_catalog_parse_import(jsonb)',$1::text),'EXECUTE'),
-				has_table_privilege('quoted_catalog_reader', format('%I.grant_catalog_policy_audit',$1::text),'SELECT'),
-				has_table_privilege('quoted_catalog_reader', format('%I.grant_catalog_metrics',$1::text),'SELECT'),
-				has_function_privilege('quoted_catalog_reader', format('%I.grant_catalog_parse_import(text)',$1::text),'EXECUTE')`, fixture.schema).
+			require.NoError(t, admin.Pool.QueryRow(ctx, roles.sql(`SELECT
+				has_function_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_import_batch(text,boolean)',$1::text),'EXECUTE'),
+				has_function_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_parse_import(jsonb)',$1::text),'EXECUTE'),
+				has_table_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_policy_audit',$1::text),'SELECT'),
+				has_table_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_metrics',$1::text),'SELECT'),
+				has_function_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_parse_import(text)',$1::text),'EXECUTE')`), fixture.schema).
 				Scan(&importAccess, &parserAccess, &auditAccess, &metricsAccess, &overloadAccess))
 			require.False(t, importAccess || parserAccess || auditAccess)
 			require.True(t, metricsAccess && overloadAccess)
 
-			grantExec(t, corpus, `GRANT EXECUTE ON FUNCTION grant_catalog_import_batch(text,boolean) TO quoted_catalog_reader`)
-			reader := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION quoted_catalog_reader; SET search_path TO "+schema)
+			grantExec(t, corpus, roles.sql(`GRANT EXECUTE ON FUNCTION grant_catalog_import_batch(text,boolean) TO {quoted_catalog_reader}`))
+			reader := grantRoleClient(t, databaseURL, roles.sql("SET SESSION AUTHORIZATION {quoted_catalog_reader}; SET search_path TO "+schema))
 			batch := testGrantBatch(0)
 			batch["tenants"] = []grantEntry{{"tenant_id": uuid.NewString()}}
-			for _, grantee := range []string{"PUBLIC", "quoted_catalog_reader", "quoted_catalog_inherited"} {
+			for _, grantee := range []string{"PUBLIC", roles.name("quoted_catalog_reader"), roles.name("quoted_catalog_inherited")} {
 				grantExec(t, admin, "GRANT CREATE ON SCHEMA "+schema+" TO "+grantee)
 				var canCreate bool
-				require.NoError(t, admin.Pool.QueryRow(ctx, `SELECT has_schema_privilege('quoted_catalog_reader',oid,'CREATE')
-					FROM pg_namespace WHERE nspname=$1::text`, fixture.schema).Scan(&canCreate))
+				require.NoError(t, admin.Pool.QueryRow(ctx, roles.sql(`SELECT has_schema_privilege('{quoted_catalog_reader}',oid,'CREATE')
+					FROM pg_namespace WHERE nspname=$1::text`), fixture.schema).Scan(&canCreate))
 				require.True(t, canCreate)
 				_, err := importTestBatch(ctx, reader, batch, true)
 				require.ErrorContains(t, err, "catalog schema must restrict CREATE to its owner")
 				grantExec(t, admin, "REVOKE CREATE ON SCHEMA "+schema+" FROM "+grantee)
 			}
 			var createAccess bool
-			require.NoError(t, admin.Pool.QueryRow(ctx, `SELECT has_schema_privilege('quoted_catalog_reader',oid,'CREATE')
-				FROM pg_namespace WHERE nspname=$1::text`, fixture.schema).Scan(&createAccess))
+			require.NoError(t, admin.Pool.QueryRow(ctx, roles.sql(`SELECT has_schema_privilege('{quoted_catalog_reader}',oid,'CREATE')
+				FROM pg_namespace WHERE nspname=$1::text`), fixture.schema).Scan(&createAccess))
 			require.False(t, createAccess)
 			_, err := importTestBatch(ctx, reader, batch, true)
 			require.NoError(t, err)
@@ -84,11 +85,12 @@ func testGrantCatalogQuotedACLs(t *testing.T, databaseURL string) {
 
 func testGrantCatalogRename(t *testing.T, databaseURL string) {
 	ctx := t.Context()
+	roles := newGrantRoles(t, databaseURL, "rename_catalog_owner", "replacement_catalog_owner")
 	admin := migrationTestClient(t, databaseURL)
-	grantExec(t, admin, `CREATE EXTENSION IF NOT EXISTS pgcrypto;
-		CREATE ROLE rename_catalog_owner; CREATE ROLE replacement_catalog_owner;
-		CREATE SCHEMA rename_corpus AUTHORIZATION rename_catalog_owner`)
-	before := grantRoleClient(t, databaseURL, `SET SESSION AUTHORIZATION rename_catalog_owner; SET search_path TO rename_corpus`)
+	grantExec(t, admin, roles.sql(`CREATE EXTENSION IF NOT EXISTS pgcrypto;
+		CREATE ROLE {rename_catalog_owner}; CREATE ROLE {replacement_catalog_owner};
+		CREATE SCHEMA rename_corpus AUTHORIZATION {rename_catalog_owner}`))
+	before := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {rename_catalog_owner}; SET search_path TO rename_corpus`))
 	require.NoError(t, before.RunMigrations(ctx))
 	f := newGrantFixture()
 	insertGrantSource(t, before, f.document)
@@ -98,10 +100,10 @@ func testGrantCatalogRename(t *testing.T, databaseURL string) {
 	require.NoError(t, err)
 	beforeSnapshot := grantSource(t, before, f.document)
 
-	grantExec(t, admin, `ALTER SCHEMA rename_corpus RENAME TO "Renamed Ledger";
-		CREATE SCHEMA rename_corpus AUTHORIZATION replacement_catalog_owner`)
-	renamed := grantRoleClient(t, databaseURL, `SET SESSION AUTHORIZATION rename_catalog_owner; SET search_path TO "Renamed Ledger", rename_corpus`)
-	replaced := grantRoleClient(t, databaseURL, `SET SESSION AUTHORIZATION replacement_catalog_owner; SET search_path TO rename_corpus`)
+	grantExec(t, admin, roles.sql(`ALTER SCHEMA rename_corpus RENAME TO "Renamed Ledger";
+		CREATE SCHEMA rename_corpus AUTHORIZATION {replacement_catalog_owner}`))
+	renamed := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {rename_catalog_owner}; SET search_path TO "Renamed Ledger", rename_corpus`))
+	replaced := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {replacement_catalog_owner}; SET search_path TO rename_corpus`))
 	require.NoError(t, renamed.RunMigrations(ctx))
 	require.NoError(t, replaced.RunMigrations(ctx))
 	grantExec(t, replaced, `INSERT INTO documents (id,content) VALUES ($1,'independent corpus')`, f.document)
