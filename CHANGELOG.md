@@ -27,6 +27,7 @@ Notable changes are grouped by release.
 
 ### Changed
 
+- Release archives are checked for platform coverage and package contents before publication. See [release packaging](docs/development.md#releases).
 - The file download API and Go client describe `expires_in` as the requested lifetime and explain why access can end earlier.
 - The no-evidence answer follows `Accept-Language` for English, Spanish, Portuguese, French, German and Italian and sets `Content-Language`.
 - Documentation keeps each operational fact in one document and links to it elsewhere.

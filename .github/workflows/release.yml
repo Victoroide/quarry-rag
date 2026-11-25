@@ -32,6 +32,8 @@ jobs:
         run: .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > /dev/null
       - name: Build archives and checksums
         run: .github/scripts/build-release.sh "$GITHUB_REF_NAME" dist
+      - name: Verify release archives and checksums
+        run: .github/scripts/check-release.sh archives "$GITHUB_REF_NAME" dist
       - name: Attest archives and checksums
         id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -43,7 +45,10 @@ jobs:
       - name: Prepare provenance bundle
         env:
           BUNDLE: ${{ steps.attest.outputs.bundle-path }}
-        run: jq -c . "$BUNDLE" > "dist/quarry-rag_${GITHUB_REF_NAME#v}.intoto.jsonl"
+        run: |
+          bundle="dist/quarry-rag_${GITHUB_REF_NAME#v}.intoto.jsonl"
+          jq -ec . "$BUNDLE" > "$bundle"
+          test -s "$bundle"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-archives
