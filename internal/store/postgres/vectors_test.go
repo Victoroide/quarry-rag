@@ -10,6 +10,8 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -97,11 +99,38 @@ func TestVectorSearchCanUseHNSW(t *testing.T) {
 	require.Contains(t, strings.Join(plan, "\n"), "idx_chunk_vectors_embedding")
 }
 
+func filteredVectorFixtureAddress(t *testing.T, address string) string {
+	t.Helper()
+	return withFixtureOptions(t, address, "enable_seqscan=off&enable_sort=off")
+}
+
+func TestFilteredVectorFixtureOptions(t *testing.T) {
+	const address = "postgres://fixture@127.0.0.1/quarry_test_owned"
+	for _, test := range []struct {
+		name   string
+		suffix string
+	}{
+		{name: "empty query"},
+		{name: "existing query", suffix: "?application_name=vector_fixture"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before, err := pgx.ParseConfig(address + test.suffix)
+			require.NoError(t, err)
+			after, err := pgx.ParseConfig(filteredVectorFixtureAddress(t, address+test.suffix))
+			require.NoError(t, err)
+			assert.Equal(t, before.Database, after.Database)
+			assert.Equal(t, before.RuntimeParams["application_name"], after.RuntimeParams["application_name"])
+			assert.Equal(t, "off", after.RuntimeParams["enable_seqscan"])
+			assert.Equal(t, "off", after.RuntimeParams["enable_sort"])
+		})
+	}
+}
+
 func TestVectorFilteredSearchFillsLimit(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires a Docker daemon")
 	}
-	c, err := NewClient(t.Context(), pgtest.StartVector(t)+"&enable_seqscan=off&enable_sort=off")
+	c, err := NewClient(t.Context(), filteredVectorFixtureAddress(t, pgtest.StartVector(t)))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
 	require.NoError(t, c.RunMigrations(t.Context()))
@@ -227,7 +256,7 @@ func TestCompleteJobVectorsAtomic(t *testing.T) {
 	}()
 	require.Eventually(t, func() bool {
 		var waiting bool
-		queryErr := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event='advisory' AND pid<>pg_backend_pid())`).Scan(&waiting)
+		queryErr := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND pid<>pg_backend_pid())`).Scan(&waiting)
 		return queryErr == nil && waiting
 	}, 5*time.Second, 10*time.Millisecond)
 	var count int

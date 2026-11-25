@@ -228,7 +228,7 @@ func raceAdmissions(t *testing.T, c *Client, first, second domain.AcceptRequest)
 	go accept(other, second, right)
 	require.Eventually(t, func() bool {
 		var waiting int
-		readErr := c.Pool.QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted`).Scan(&waiting)
+		readErr := c.Pool.QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`).Scan(&waiting)
 		return readErr == nil && waiting == 2
 	}, 5*time.Second, 10*time.Millisecond)
 	require.NoError(t, lock.Commit(ctx))
@@ -276,7 +276,7 @@ func TestFailedRetryRollsBackOnCancellation(t *testing.T) {
 	}()
 	require.Eventually(t, func() bool {
 		var waiting bool
-		readErr := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation='ingest_jobs'::regclass AND mode='RowExclusiveLock' AND NOT granted)`).Scan(&waiting)
+		readErr := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation='ingest_jobs'::regclass AND mode='RowExclusiveLock' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))`).Scan(&waiting)
 		return readErr == nil && waiting
 	}, 5*time.Second, 10*time.Millisecond)
 	cancel()

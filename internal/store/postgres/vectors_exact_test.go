@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -30,20 +29,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-func isolatedVectorDatabaseURL(t *testing.T, admin *Client, baseURL string) string {
+func isolatedVectorDatabase(t *testing.T, baseURL string, clientOpts ...Option) (client *Client, dbURL string) {
 	t.Helper()
-	name := "vec_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	_, err := admin.Pool.Exec(t.Context(), `CREATE DATABASE `+name)
-	require.NoError(t, err)
-	dsn, err := url.Parse(baseURL)
-	require.NoError(t, err)
-	dsn.Path = "/" + name
-	return dsn.String()
-}
-
-func isolatedVectorDatabase(t *testing.T, admin *Client, baseURL string, clientOpts ...Option) (client *Client, dbURL string) {
-	t.Helper()
-	dbURL = isolatedVectorDatabaseURL(t, admin, baseURL)
+	dbURL = pgtest.Sibling(t, baseURL)
 	client, err := NewClient(t.Context(), dbURL, clientOpts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, client.Close(context.Background())) })
@@ -162,12 +150,9 @@ func TestExactScope(t *testing.T) {
 		[]string{"localedef", "--no-archive", "-i", "es_ES", "-f", "UTF-8", "es_ES.utf8"},
 		tcexec.WithUser("root"),
 	)))
-	admin, err := NewClient(t.Context(), baseURL)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, admin.Close(context.Background())) })
 
 	t.Run("OptionsValidation", func(t *testing.T) {
-		c, _ := isolatedVectorDatabase(t, admin, baseURL)
+		c, _ := isolatedVectorDatabase(t, baseURL)
 		for _, invalid := range []int{-1, 100001} {
 			_, storeErr := NewVectorStore(t.Context(), c, 3, WithExactScopeMax(invalid))
 			require.Error(t, storeErr)
@@ -180,7 +165,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("ThresholdBoundariesAndParity", func(t *testing.T) {
-		c, _ := isolatedVectorDatabase(t, admin, baseURL)
+		c, _ := isolatedVectorDatabase(t, baseURL)
 		const threshold = 10
 		const topK = 5
 		v, storeErr := NewVectorStore(t.Context(), c, 3, WithExactScopeMax(threshold))
@@ -272,7 +257,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("OneDocumentWithManyChunksAndFilterCombinations", func(t *testing.T) {
-		c, _ := isolatedVectorDatabase(t, admin, baseURL)
+		c, _ := isolatedVectorDatabase(t, baseURL)
 		v, storeErr := NewVectorStore(t.Context(), c, 3, WithExactScopeMax(10))
 		require.NoError(t, storeErr)
 
@@ -371,7 +356,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("StaleDocumentLabelsAndCollectionMove", func(t *testing.T) {
-		c, _ := isolatedVectorDatabase(t, admin, baseURL)
+		c, _ := isolatedVectorDatabase(t, baseURL)
 		movedDoc := uuid.NewString()
 		eligibleDoc := uuid.NewString()
 		seedCompletedDocument(t, c, movedDoc, "report", "archive")
@@ -570,13 +555,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("LocalTopUpUsesDatabaseCollation", func(t *testing.T) {
-		_, err := admin.Pool.Exec(t.Context(), `CREATE DATABASE numeric_scope TEMPLATE template0
-			LOCALE_PROVIDER icu ICU_LOCALE 'en-u-kn-true'`)
-		require.NoError(t, err)
-		dsn, err := url.Parse(baseURL)
-		require.NoError(t, err)
-		dsn.Path = "/numeric_scope"
-		c, err := NewClient(t.Context(), dsn.String())
+		c, err := NewClient(t.Context(), pgtest.SiblingNumericCollation(t, baseURL))
 		require.NoError(t, err)
 		t.Cleanup(c.Pool.Close)
 		require.NoError(t, c.RunMigrations(t.Context()))
@@ -624,7 +603,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("IndexRolloutDisabledAndConcurrentPrebuild", func(t *testing.T) {
-		c, dbURL := isolatedVectorDatabase(t, admin, baseURL)
+		c, dbURL := isolatedVectorDatabase(t, baseURL)
 		// Initialize base vector schema with feature disabled (exactScopeMax=0).
 		disabledStore, storeErr := NewVectorStore(t.Context(), c, 3)
 		require.NoError(t, storeErr)
@@ -749,14 +728,15 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("IndexRolloutServingRoleDuringOwnerPrebuild", func(t *testing.T) {
-		c, dbURL := isolatedVectorDatabase(t, admin, baseURL)
+		c, dbURL := isolatedVectorDatabase(t, baseURL)
 		_, err := NewVectorStore(t.Context(), c, 3)
 		require.NoError(t, err)
-		_, err = c.Pool.Exec(t.Context(), `CREATE ROLE exact_scope_service;
-			GRANT USAGE ON SCHEMA public TO exact_scope_service;
-			GRANT SELECT, INSERT, UPDATE, DELETE ON chunk_vectors TO exact_scope_service`)
+		role := pgx.Identifier{pgtest.Role(t, dbURL, "exact_scope_service")}.Sanitize()
+		_, err = c.Pool.Exec(t.Context(), `CREATE ROLE `+role+`;
+			GRANT USAGE ON SCHEMA public TO `+role+`;
+			GRANT SELECT, INSERT, UPDATE, DELETE ON chunk_vectors TO `+role)
 		require.NoError(t, err)
-		service := grantRoleClient(t, dbURL, "SET SESSION AUTHORIZATION exact_scope_service")
+		service := grantRoleClient(t, dbURL, "SET SESSION AUTHORIZATION "+role)
 
 		writer, err := c.Pool.Begin(t.Context())
 		require.NoError(t, err)
@@ -778,7 +758,7 @@ func TestExactScope(t *testing.T) {
 		}()
 
 		const progress = `SELECT EXISTS (SELECT FROM pg_stat_progress_create_index
-			WHERE index_relid = to_regclass('public.idx_chunk_vectors_collection_doc_type'))`
+			WHERE datname = current_database() AND index_relid = to_regclass('public.idx_chunk_vectors_collection_doc_type'))`
 		require.Eventually(t, func() bool {
 			var building bool
 			queryErr := c.Pool.QueryRow(buildCtx, progress).Scan(&building)
@@ -814,7 +794,7 @@ func TestExactScope(t *testing.T) {
 			{"extra_key", `CREATE INDEX idx_chunk_vectors_doc_type_document_id ON chunk_vectors(doc_type, document_id, token_count DESC)`, "incompatible definition"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				c, _ := isolatedVectorDatabase(t, admin, baseURL)
+				c, _ := isolatedVectorDatabase(t, baseURL)
 				_, initErr := NewVectorStore(t.Context(), c, 3)
 				require.NoError(t, initErr)
 				_, ddlErr := c.Pool.Exec(t.Context(), tc.ddl)
@@ -827,7 +807,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("IndexRolloutResolvesVectorTableSchema", func(t *testing.T) {
-		c, dbURL := isolatedVectorDatabase(t, admin, baseURL)
+		c, dbURL := isolatedVectorDatabase(t, baseURL)
 		_, initErr := NewVectorStore(t.Context(), c, 3)
 		require.NoError(t, initErr)
 		_, ddlErr := c.Pool.Exec(t.Context(), `CREATE SCHEMA "vector scope";
@@ -854,7 +834,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("DenseDistractorsRareCollectionAndApproximateRecall", func(t *testing.T) {
-		c, dbURL := isolatedVectorDatabase(t, admin, baseURL)
+		c, dbURL := isolatedVectorDatabase(t, baseURL)
 		hnswStore, storeErr := NewVectorStore(t.Context(), c, 3)
 		require.NoError(t, storeErr)
 		exactStore, storeErr := NewVectorStore(t.Context(), c, 3, WithExactScopeMax(20))
@@ -945,13 +925,8 @@ func TestExactScope(t *testing.T) {
 
 		// Compare approximate HNSW when the planner chooses idx_chunk_vectors_embedding
 		// (enable_seqscan=off&enable_sort=off) and under default planner selection.
-		hnswForcedURL, parseErr := url.Parse(dbURL)
-		require.NoError(t, parseErr)
-		hq := hnswForcedURL.Query()
-		hq.Set("enable_seqscan", "off")
-		hq.Set("enable_sort", "off")
-		hnswForcedURL.RawQuery = hq.Encode()
-		hnswForcedClient, fErr := NewClient(t.Context(), hnswForcedURL.String())
+		hnswForcedURL := withFixtureOptions(t, dbURL, "enable_seqscan=off&enable_sort=off")
+		hnswForcedClient, fErr := NewClient(t.Context(), hnswForcedURL)
 		require.NoError(t, fErr)
 		t.Cleanup(func() { require.NoError(t, hnswForcedClient.Close(context.Background())) })
 		hnswForcedStore, storeErr := NewVectorStore(t.Context(), hnswForcedClient, 3)
@@ -1003,7 +978,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("ShortHNSWResultWithoutExhaustion", func(t *testing.T) {
-		c, _ := isolatedVectorDatabase(t, admin, baseURL)
+		c, _ := isolatedVectorDatabase(t, baseURL)
 		docID := uuid.NewString()
 		seedCompletedDocument(t, c, docID, "report", "small")
 		v, storeErr := NewVectorStore(t.Context(), c, 3)
@@ -1022,7 +997,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("ProbeReportingAndShortCircuits", func(t *testing.T) {
-		c, dbURL := isolatedVectorDatabase(t, admin, baseURL)
+		c, dbURL := isolatedVectorDatabase(t, baseURL)
 		docID := uuid.NewString()
 		seedCompletedDocument(t, c, docID, "report", "populated")
 		vs, storeErr := NewVectorStore(t.Context(), c, 3, WithExactScopeMax(10))
@@ -1146,14 +1121,8 @@ func TestExactScope(t *testing.T) {
 
 	t.Run("PreservesPoolIsolationWhenSkippingProbe", func(t *testing.T) {
 		tracer := &transactionSettingsTracer{}
-		baseIsoURL := isolatedVectorDatabaseURL(t, admin, baseURL)
-		isoURL, parseErr := url.Parse(baseIsoURL)
-		require.NoError(t, parseErr)
-		q := isoURL.Query()
-		q.Set("default_transaction_isolation", "serializable")
-		isoURL.RawQuery = q.Encode()
-
-		setupClient, scErr := NewClient(t.Context(), isoURL.String())
+		isoURL := withFixtureOptions(t, pgtest.Sibling(t, baseURL), "default_transaction_isolation=serializable")
+		setupClient, scErr := NewClient(t.Context(), isoURL)
 		require.NoError(t, scErr)
 		t.Cleanup(func() { require.NoError(t, setupClient.Close(context.Background())) })
 		require.NoError(t, setupClient.RunMigrations(t.Context()))
@@ -1165,7 +1134,7 @@ func TestExactScope(t *testing.T) {
 			{ID: "iso-1", DocumentID: domain.DocumentID(docID), Index: 0, Text: "serializable", Embedding: []float32{1, 0, 0}, Metadata: map[string]any{"doc_type": "report", "collection": "iso"}},
 		}))
 
-		c, cErr := NewClient(t.Context(), isoURL.String(), WithQueryTracer(tracer))
+		c, cErr := NewClient(t.Context(), isoURL, WithQueryTracer(tracer))
 		require.NoError(t, cErr)
 		t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
 
@@ -1200,7 +1169,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("RejectsInvalidVectorsInBothStrategies", func(t *testing.T) {
-		c, _ := isolatedVectorDatabase(t, admin, baseURL)
+		c, _ := isolatedVectorDatabase(t, baseURL)
 		docID := uuid.NewString()
 		seedCompletedDocument(t, c, docID, "report", "small")
 		base, storeErr := NewVectorStore(t.Context(), c, 3)
@@ -1244,7 +1213,7 @@ func TestExactScope(t *testing.T) {
 
 	t.Run("ConcurrentDeletionConsistentSnapshot", func(t *testing.T) {
 		tracer := &probePauseTracer{}
-		c, _ := isolatedVectorDatabase(t, admin, baseURL, WithQueryTracer(tracer))
+		c, _ := isolatedVectorDatabase(t, baseURL, WithQueryTracer(tracer))
 
 		for _, tc := range []struct {
 			name      string
@@ -1287,7 +1256,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("ExplainShapesAndIndexUsage", func(t *testing.T) {
-		c, _ := isolatedVectorDatabase(t, admin, baseURL)
+		c, _ := isolatedVectorDatabase(t, baseURL)
 		vs, storeErr := NewVectorStore(t.Context(), c, 3, WithExactScopeMax(20))
 		require.NoError(t, storeErr)
 		seedSearchVectors(t, c, 2000, 100)
@@ -1361,7 +1330,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("CancellationTimeoutsAndPoolDefaults", func(t *testing.T) {
-		setupClient, dbURL := isolatedVectorDatabase(t, admin, baseURL)
+		setupClient, dbURL := isolatedVectorDatabase(t, baseURL)
 		baseSetup, storeErr := NewVectorStore(t.Context(), setupClient, 3)
 		require.NoError(t, storeErr)
 
@@ -1428,13 +1397,8 @@ func TestExactScope(t *testing.T) {
 		})
 
 		t.Run("in-flight caller cancel under conflicting lock", func(t *testing.T) {
-			parsedURL, parseErr := url.Parse(dbURL)
-			require.NoError(t, parseErr)
-			q := parsedURL.Query()
-			q.Set("statement_timeout", "5000")
-			q.Set("application_name", "cancel-wait-worker")
-			parsedURL.RawQuery = q.Encode()
-			waitClient, wcErr := NewClient(t.Context(), parsedURL.String())
+			waitURL := withFixtureOptions(t, dbURL, "statement_timeout=5000&application_name=cancel-wait-worker")
+			waitClient, wcErr := NewClient(t.Context(), waitURL)
 			require.NoError(t, wcErr)
 			t.Cleanup(func() { require.NoError(t, waitClient.Close(context.Background())) })
 			vs, vErr := NewVectorStore(t.Context(), waitClient, 3, WithExactScopeMax(20))
@@ -1460,7 +1424,8 @@ func TestExactScope(t *testing.T) {
 
 			require.Eventually(t, func() bool {
 				var waiting bool
-				err := setupClient.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='cancel-wait-worker' AND wait_event_type='Lock')`).Scan(&waiting)
+				err := setupClient.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+					WHERE datname=current_database() AND application_name='cancel-wait-worker' AND wait_event_type='Lock')`).Scan(&waiting)
 				return err == nil && waiting
 			}, 5*time.Second, 10*time.Millisecond)
 			cancel()
@@ -1497,16 +1462,8 @@ func TestExactScope(t *testing.T) {
 				{"es_ES exact-probed", "es_ES.utf8", 20, SearchStrategyProbe},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					parsedURL, parseErr := url.Parse(dbURL)
-					require.NoError(t, parseErr)
-					q := parsedURL.Query()
-					q.Set("statement_timeout", "250")
-					q.Set("lc_messages", tc.locale)
-					q.Set("hnsw.iterative_scan", "relaxed_order")
-					q.Set("hnsw.max_scan_tuples", "7777")
-					parsedURL.RawQuery = q.Encode()
-
-					timeoutClient, cErr := NewClient(t.Context(), parsedURL.String())
+					options := "statement_timeout=250&hnsw.iterative_scan=relaxed_order&hnsw.max_scan_tuples=7777&lc_messages=" + tc.locale
+					timeoutClient, cErr := NewClient(t.Context(), withFixtureOptions(t, dbURL, options))
 					require.NoError(t, cErr)
 					t.Cleanup(func() { require.NoError(t, timeoutClient.Close(context.Background())) })
 					vs, vErr := NewVectorStore(t.Context(), timeoutClient, 3, WithExactScopeMax(tc.scopeMax))
@@ -1584,7 +1541,7 @@ func TestExactScope(t *testing.T) {
 	})
 
 	t.Run("IntegrationWithRetrieverAndTelemetry", func(t *testing.T) {
-		c, _ := isolatedVectorDatabase(t, admin, baseURL)
+		c, _ := isolatedVectorDatabase(t, baseURL)
 		vs, storeErr := NewVectorStore(t.Context(), c, 3, WithExactScopeMax(20))
 		require.NoError(t, storeErr)
 

@@ -3,13 +3,13 @@ package postgres
 import (
 	"context"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
@@ -32,29 +32,58 @@ func TestMixedPDFServingRoleGrants(t *testing.T) {
 	t.Run("upgrade from index visibility", func(t *testing.T) { testMixedPDFServingRoleGrants(t, true) })
 }
 
-func testMixedPDFServingRoleGrants(t *testing.T, upgrade bool) {
+// TestMixedPDFServingRolesAreCleanedUpBetweenFixtures repeats both cases on one
+// shared cluster. Each fixture must own four distinct roles that exist while
+// it runs and are gone once it ends.
+func TestMixedPDFServingRolesAreCleanedUpBetweenFixtures(t *testing.T) {
+	if _, configured := os.LookupEnv("QUARRY_TEST_POSTGRES_ADMIN_DSN"); !configured {
+		t.Skip("requires a shared PostgreSQL test service")
+	}
+	observer := migrationTestClient(t, startTestDatabase(t))
+	roleExists := func(name string) bool {
+		var exists bool
+		require.NoError(t, observer.Pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = $1)`, name).Scan(&exists))
+		return exists
+	}
+	seen := make(map[string]bool)
+	for _, upgrade := range []bool{false, true, false} {
+		var roles grantRoles
+		t.Run("fixture", func(t *testing.T) {
+			roles = testMixedPDFServingRoleGrants(t, upgrade)
+			require.Len(t, roles, 1+len(servingRoles))
+			for _, name := range roles {
+				require.False(t, seen[name], "role %s was reused by a later fixture", name)
+				seen[name] = true
+				require.True(t, roleExists(name), "fixture role %s was not created", name)
+			}
+		})
+		for _, name := range roles {
+			require.False(t, roleExists(name), "fixture role %s survived cleanup", name)
+		}
+	}
+}
+
+func testMixedPDFServingRoleGrants(t *testing.T, upgrade bool) grantRoles {
 	t.Helper()
 	databaseURL := startTestDatabase(t)
+	roles := newGrantRoles(t, databaseURL, append([]string{"quarry_metadata_owner"}, servingRoles...)...)
+	quoted := func(purpose string) string { return pgx.Identifier{roles.name(purpose)}.Sanitize() }
 	admin := migrationTestClient(t, databaseURL)
-	grantExec(t, admin, `CREATE EXTENSION IF NOT EXISTS pgcrypto;
-		CREATE ROLE quarry_metadata_owner; CREATE ROLE quarry_service;
-		CREATE ROLE quarry_operator; CREATE ROLE quarry_auditor;
-		ALTER SCHEMA public OWNER TO quarry_metadata_owner;
-		REVOKE CREATE ON SCHEMA public FROM PUBLIC`)
-	owner := grantRoleClient(t, databaseURL, `SET SESSION AUTHORIZATION quarry_metadata_owner`)
+	grantExec(t, admin, `CREATE EXTENSION IF NOT EXISTS pgcrypto`)
+	for _, purpose := range append([]string{"quarry_metadata_owner"}, servingRoles...) {
+		grantExec(t, admin, "CREATE ROLE "+quoted(purpose))
+	}
+	grantExec(t, admin, "ALTER SCHEMA public OWNER TO "+quoted("quarry_metadata_owner"))
+	grantExec(t, admin, `REVOKE CREATE ON SCHEMA public FROM PUBLIC`)
+	owner := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION "+quoted("quarry_metadata_owner"))
 	if upgrade {
 		applyMigrationPrefix(t, owner, 12)
 	}
 	require.NoError(t, owner.RunMigrations(t.Context()))
 	requireRecordedMigrations(t, owner)
-	guide, err := os.ReadFile("../../../docs/grant-catalog.md")
-	require.NoError(t, err)
-	_, grants, found := strings.Cut(string(guide), "```sql\nGRANT USAGE ON SCHEMA public")
-	require.True(t, found, "serving grants are missing from the role provisioning guide")
-	grants, _, found = strings.Cut(grants, "\n```")
-	require.True(t, found, "role provisioning SQL block has no closing fence")
-	grantExec(t, owner, "GRANT USAGE ON SCHEMA public"+grants)
-	serving := grantRoleClient(t, databaseURL, `SET SESSION AUTHORIZATION quarry_service`)
+	grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "GRANT USAGE ON SCHEMA public"))
+	serving := grantRoleClient(t, databaseURL, "SET SESSION AUTHORIZATION "+quoted("quarry_service"))
 	ctx := t.Context()
 	require.NoError(t, serving.RunMigrations(ctx))
 	legacy := jobsAccept(t, serving, "ordinary queued document")
@@ -88,6 +117,7 @@ func testMixedPDFServingRoleGrants(t *testing.T, upgrade bool) {
 	require.NoError(t, err)
 	require.NotNil(t, summary)
 	require.Equal(t, domain.PDFComplete, summary.PDFCoverage)
+	return roles
 }
 
 func TestMixedPDFClaimAndCheckpoint(t *testing.T) {
@@ -138,7 +168,7 @@ func TestMixedPDFClaimAndCheckpoint(t *testing.T) {
 	go func() { done <- c.StorePDFOCR(canceled, *first, checkpoint) }()
 	require.Eventually(t, func() bool {
 		var waiting bool
-		queryErr := c.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT TRUE FROM documents d JOIN ingest_jobs j%')`).Scan(&waiting)
+		queryErr := c.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT TRUE FROM documents d JOIN ingest_jobs j%')`).Scan(&waiting)
 		return queryErr == nil && waiting
 	}, 2*time.Second, 10*time.Millisecond)
 	cancel()

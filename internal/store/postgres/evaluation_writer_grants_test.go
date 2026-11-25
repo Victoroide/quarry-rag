@@ -11,7 +11,7 @@ import (
 )
 
 func TestEvaluationWriterNeedsPublishedReceiptGrants(t *testing.T) {
-	owner, serving := restrictedDatabase(t)
+	owner, serving, roles := restrictedDatabase(t)
 	ctx := t.Context()
 	id, receipt := fixtureShapedID(), uuid.NewString()
 	_, err := serving.AcceptDocument(ctx, fixtureRequest(id, receipt, "postgres"))
@@ -19,7 +19,7 @@ func TestEvaluationWriterNeedsPublishedReceiptGrants(t *testing.T) {
 	_, err = serving.ReadEvaluationFixture(ctx, id, receipt)
 	requireSQLState(t, err, "42501")
 
-	_, err = owner.Pool.Exec(ctx, publishedSQL(t, "development.md", "evaluation_fixtures"))
+	_, err = owner.Pool.Exec(ctx, publishedServingSQL(t, roles, "development.md", "evaluation_fixtures"))
 	require.NoError(t, err)
 	accepted, err := serving.AcceptDocument(ctx, fixtureRequest(id, receipt, "postgres"))
 	require.NoError(t, err)

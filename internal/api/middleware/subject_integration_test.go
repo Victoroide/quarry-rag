@@ -23,6 +23,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -38,9 +39,10 @@ func (f subjectLookupFunc) ResolvePrincipal(ctx context.Context, issuer, subject
 
 func TestSubjectCredentialsWithGrantCatalog(t *testing.T) {
 	if testing.Short() {
-		t.Skip("requires a Docker daemon")
+		t.Skip("requires a Docker daemon or the test services")
 	}
-	owner, err := postgres.NewClient(t.Context(), pgtest.Start(t))
+	address := pgtest.Start(t)
+	owner, err := postgres.NewClient(t.Context(), address)
 	require.NoError(t, err)
 	t.Cleanup(owner.Pool.Close)
 	require.NoError(t, owner.RunMigrations(t.Context()))
@@ -65,13 +67,15 @@ func TestSubjectCredentialsWithGrantCatalog(t *testing.T) {
 	require.NoError(t, err)
 
 	// The verifier only needs the active-principal view, as does a restricted serving login.
-	_, err = owner.Pool.Exec(t.Context(), `CREATE ROLE fixture_subject_reader;
-		GRANT USAGE ON SCHEMA public TO fixture_subject_reader;
-		GRANT SELECT ON grant_catalog_active_principals TO fixture_subject_reader`)
+	role := pgtest.Role(t, address, "fixture_subject_reader")
+	quotedRole := pgx.Identifier{role}.Sanitize()
+	_, err = owner.Pool.Exec(t.Context(), `CREATE ROLE `+quotedRole+`;
+		GRANT USAGE ON SCHEMA public TO `+quotedRole+`;
+		GRANT SELECT ON grant_catalog_active_principals TO `+quotedRole)
 	require.NoError(t, err)
 	servingConfig, err := pgxpool.ParseConfig(owner.Pool.Config().ConnString())
 	require.NoError(t, err)
-	servingConfig.ConnConfig.RuntimeParams["role"] = "fixture_subject_reader"
+	servingConfig.ConnConfig.RuntimeParams["role"] = role
 	servingConfig.ConnConfig.Tracer = tracing.NewQueryTracer()
 	pool, err := pgxpool.NewWithConfig(t.Context(), servingConfig)
 	require.NoError(t, err)

@@ -16,17 +16,18 @@ import (
 
 func testGrantCatalogSchemaIsolation(t *testing.T, databaseURL string) {
 	ctx := t.Context()
+	roles := newGrantRoles(t, databaseURL, "corpus_first_owner", "corpus_second_owner", "corpus_fresh_owner", "corpus_serving")
 	admin := migrationTestClient(t, databaseURL)
 	require.NoError(t, admin.RunMigrations(ctx))
-	grantExec(t, admin, `CREATE ROLE corpus_first_owner; CREATE ROLE corpus_second_owner;
-		CREATE ROLE corpus_fresh_owner; CREATE ROLE corpus_serving;
-		CREATE SCHEMA corpus_first AUTHORIZATION corpus_first_owner;
-		CREATE SCHEMA corpus_second AUTHORIZATION corpus_second_owner;
-		CREATE SCHEMA corpus_fresh AUTHORIZATION corpus_fresh_owner;
-		GRANT SELECT ON public.schema_migrations, public.documents TO corpus_fresh_owner`)
-	first := grantRoleClient(t, databaseURL, `SET SESSION AUTHORIZATION corpus_first_owner; SET search_path TO corpus_first, public`)
-	second := grantRoleClient(t, databaseURL, `SET SESSION AUTHORIZATION corpus_second_owner; SET search_path TO corpus_second, public`)
-	fresh := grantRoleClient(t, databaseURL, `SET SESSION AUTHORIZATION corpus_fresh_owner; SET search_path TO corpus_fresh, public`)
+	grantExec(t, admin, roles.sql(`CREATE ROLE {corpus_first_owner}; CREATE ROLE {corpus_second_owner};
+		CREATE ROLE {corpus_fresh_owner}; CREATE ROLE {corpus_serving};
+		CREATE SCHEMA corpus_first AUTHORIZATION {corpus_first_owner};
+		CREATE SCHEMA corpus_second AUTHORIZATION {corpus_second_owner};
+		CREATE SCHEMA corpus_fresh AUTHORIZATION {corpus_fresh_owner};
+		GRANT SELECT ON public.schema_migrations, public.documents TO {corpus_fresh_owner}`))
+	first := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {corpus_first_owner}; SET search_path TO corpus_first, public`))
+	second := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {corpus_second_owner}; SET search_path TO corpus_second, public`))
+	fresh := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {corpus_fresh_owner}; SET search_path TO corpus_fresh, public`))
 	require.NoError(t, fresh.RunMigrations(ctx))
 	var ownHistory, ownDocuments bool
 	require.NoError(t, admin.Pool.QueryRow(ctx, `SELECT to_regclass('corpus_fresh.schema_migrations') IS NOT NULL,
@@ -67,9 +68,9 @@ func testGrantCatalogSchemaIsolation(t *testing.T, databaseURL string) {
 		_, err = importTestBatch(ctx, fixture.client, b, false)
 		require.NoError(t, err)
 	}
-	grantExec(t, admin, `GRANT USAGE ON SCHEMA corpus_second TO corpus_serving;
-		GRANT SELECT ON corpus_second.schema_migrations, corpus_second.documents TO corpus_serving`)
-	serving := grantRoleClient(t, databaseURL, `SET SESSION AUTHORIZATION corpus_serving; SET search_path TO corpus_second, public`)
+	grantExec(t, admin, roles.sql(`GRANT USAGE ON SCHEMA corpus_second TO {corpus_serving};
+		GRANT SELECT ON corpus_second.schema_migrations, corpus_second.documents TO {corpus_serving}`))
+	serving := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {corpus_serving}; SET search_path TO corpus_second, public`))
 	require.NoError(t, serving.RunMigrations(ctx))
 	var content string
 	require.NoError(t, serving.Pool.QueryRow(ctx, `SELECT content FROM documents WHERE id=$1`, id).Scan(&content))
@@ -233,9 +234,10 @@ func testGrantCatalogPendingRefreshAndLockedReplay(t *testing.T, databaseURL str
 func TestGrantCatalogRestrictedVectorStartup(t *testing.T) {
 	owner, _ := vectorDatabase(t)
 	ctx := t.Context()
-	grantExec(t, owner, `CREATE ROLE catalog_vector_service; GRANT SELECT ON schema_migrations TO catalog_vector_service;
-		GRANT SELECT, INSERT, UPDATE, DELETE ON documents, ingest_jobs, document_fingerprints, chunks, chunk_vectors TO catalog_vector_service`)
-	service := grantRoleClient(t, owner.Pool.Config().ConnString(), "SET SESSION AUTHORIZATION catalog_vector_service")
+	roles := newGrantRoles(t, owner.Pool.Config().ConnString(), "catalog_vector_service")
+	grantExec(t, owner, roles.sql(`CREATE ROLE {catalog_vector_service}; GRANT SELECT ON schema_migrations TO {catalog_vector_service};
+		GRANT SELECT, INSERT, UPDATE, DELETE ON documents, ingest_jobs, document_fingerprints, chunks, chunk_vectors TO {catalog_vector_service}`))
+	service := grantRoleClient(t, owner.Pool.Config().ConnString(), roles.sql("SET SESSION AUTHORIZATION {catalog_vector_service}"))
 	require.NoError(t, service.RunMigrations(ctx))
 	store, err := NewVectorStore(ctx, service, 3)
 	require.NoError(t, err)
