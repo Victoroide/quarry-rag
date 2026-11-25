@@ -1,9 +1,46 @@
 # Grant catalog
 
-The grant catalog stages tenant-bound access in the metadata database. Quarry
-serves HTTP, Go client and MCP requests under the existing service credentials.
-ownership imports remain pending until document validation can publish
-readiness.
+The grant catalog stages tenant-bound access in the metadata database. Ownership
+imports remain pending until document validation can publish readiness.
+
+## Subject identity
+
+Public routes use service authentication. The staged verifier is available
+internally for handlers that enforce grants. It requires one valid
+`X-Service-Token` and one `Authorization` bearer header. Each header must
+contain a single credential.
+
+The verifier accepts RFC 9068 access tokens with an `at+jwt` media type, an
+RS256 signature and a local `kid`. The issuer must match exactly and the
+audience must be the configured value, as a string or a single-element array.
+The subject, client ID, token ID, issued-at and expiry claims are required.
+Tokens have a positive lifetime of up to five minutes. Admission checks allow
+up to 30 seconds of clock skew and honor `nbf` when present. Disclosure checks
+use the exact expiry without skew. The same valid token can be used for more
+than one request. Compact tokens are limited to 8 KiB. Keep the Quarry audience
+reserved for delegated subject tokens at the issuer and exclude client-credentials
+grants from issuing tokens for it. Keep issuer subject identifiers stable.
+
+The operator supplies a regular local JWKS file with a top-level `keys` array
+and an RFC 3339 `expires_at` timestamp. The file must be at most 64 KiB and
+contain at most 16 public RSA signing keys of at least 2,048 bits with distinct
+`kid` values. Keep the file and its directory writable only by the trusted
+operator. On Windows, enforce those write restrictions with filesystem ACLs.
+Export the public RSA `kty`, `n`, `e` and `kid` fields. When present,
+`use`, `alg` and `key_ops` must identify RS256 signature verification. Rotate by
+atomically replacing the file on each replica. Include both keys during overlap,
+then remove the retired key. A missing, unreadable, invalid or expired file
+makes the authority unavailable. After resolving the principal, the gate
+checks that the current key set is still valid and contains the signing key.
+
+Use TLS between clients and trusted ingress, with protected transport from
+ingress to Quarry. The verified, case-sensitive issuer and subject select the
+active provisioned principal and its tenant in PostgreSQL. Caller-supplied
+headers, token roles and email have no effect on that lookup. The internal
+gate returns generic `401` for invalid credentials, `403` for an absent or
+disabled principal and `503` for unavailable authority. The gate carries only
+the internal principal, tenant and exact expiry into the request context and
+bounds that context's deadline at the credential expiry.
 
 ## Database roles
 

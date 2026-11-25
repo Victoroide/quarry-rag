@@ -32,6 +32,8 @@ fuzz:
 	go test -run='^$$' -fuzz='^FuzzCountOpenAIChatTokens$$' -fuzztime="$(FUZZTIME)" ./internal/llm
 	go test -run='^$$' -fuzz='^FuzzDecodeJSONObject$$' -fuzztime="$(FUZZTIME)" ./internal/api/handler
 	go test -run='^$$' -fuzz='^FuzzDecodeGrantBatch$$' -fuzztime="$(FUZZTIME)" ./internal/store/postgres
+	go test -run='^$$' -fuzz='^FuzzSubjectCredentialParsing$$' -fuzztime="$(FUZZTIME)" ./internal/subjectauth
+	go test -run='^$$' -fuzz='^FuzzSubjectTrustAndClaims$$' -fuzztime="$(FUZZTIME)" ./internal/subjectauth
 	go test -run='^$$' -fuzz='^FuzzVerifyCitations$$' -fuzztime="$(FUZZTIME)" ./internal/pipeline
 
 # Run host quality gates before building the runtime image.

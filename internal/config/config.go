@@ -91,6 +91,8 @@ type Config struct {
 	// ServiceToken is merged with ServiceTokens to protect service routes.
 	ServiceToken string
 
+	SubjectAuthority SubjectAuthorityConfig
+
 	S3ExpectedBucketOwner string
 
 	PineconeUpsertBatchSize       int
@@ -147,6 +149,9 @@ type Config struct {
 // Load reads configuration from environment variables, applies defaults,
 // and validates required fields.
 func Load() (*Config, error) {
+	if mode := os.Getenv("AUTHZ_MODE"); mode != "" && mode != "service" {
+		return nil, fmt.Errorf("config: AUTHZ_MODE must be service")
+	}
 	cfg := &Config{
 		MetricsAddr:               os.Getenv("METRICS_ADDR"),
 		ServerPort:                envOrDefault("SERVER_PORT", "8081"),
@@ -172,6 +177,11 @@ func Load() (*Config, error) {
 		RerankModelARN:            os.Getenv("RERANK_MODEL_ARN"),
 		OCRProvider:               envOrDefault("OCR_PROVIDER", "none"),
 		IngestContentDedup:        domain.ContentDedup(envOrDefault("INGEST_CONTENT_DEDUP", string(domain.ContentDedupCollection))),
+	}
+	cfg.SubjectAuthority = SubjectAuthorityConfig{
+		Issuer:   os.Getenv("AUTHZ_ISSUER"),
+		Audience: os.Getenv("AUTHZ_AUDIENCE"),
+		JWKSFile: os.Getenv("AUTHZ_JWKS_FILE"),
 	}
 	cfg.LLMProvider = envOrDefault("LLM_PROVIDER", "bedrock")
 	cfg.EmbeddingProvider = envOrDefault("EMBEDDING_PROVIDER", "bedrock")
