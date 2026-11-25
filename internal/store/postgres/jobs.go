@@ -75,7 +75,7 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 		return result, err
 	}
-	if gateErr := c.gate(ctx, tx, ""); gateErr != nil {
+	if gateErr := c.gate(ctx, tx); gateErr != nil {
 		if errors.Is(gateErr, domain.ErrWritersFrozen) {
 			result.Outcome = domain.AcceptFrozen
 			return result, nil
@@ -509,11 +509,11 @@ func (c *Client) claimJobLease(ctx context.Context, statement string, args []any
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if gateErr := c.gate(ctx, tx, "FOR SHARE"); gateErr != nil {
+	if gateErr := c.gate(ctx, tx); gateErr != nil {
 		return gateErr
 	}
-	if err = scan(tx.QueryRow(ctx, statement, args...)); err != nil {
-		return err
+	if scanErr := scan(tx.QueryRow(ctx, statement, args...)); scanErr != nil {
+		return scanErr
 	}
 	return tx.Commit(ctx)
 }

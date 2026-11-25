@@ -70,7 +70,11 @@ func (f *fixture) stager(t *testing.T, generation string, target vectorTarget, m
 
 func registerGeneration(t *testing.T, pg *pgstore.Client, name, store, target, model string) {
 	t.Helper()
-	_, err := pg.RegisterGeneration(t.Context(), pgstore.Generation{Name: name, Store: store, Target: target, Profile: testProfile(model), Origin: pgstore.OriginRecorded})
+	host := ""
+	if store == "pinecone" {
+		host = target + "-host"
+	}
+	_, err := pg.RegisterGeneration(t.Context(), pgstore.Generation{Name: name, Store: store, Target: target, Host: host, Profile: testProfile(model), Origin: pgstore.OriginRecorded})
 	require.NoError(t, err)
 }
 
@@ -129,7 +133,7 @@ func TestMigratePostgresToPineconeCopiesVectorsAndKeepsIdentity(t *testing.T) {
 
 	again, err := s.run(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, stageReport{Generation: "g2", Scanned: 4, Skipped: 4, Inconsistent: []string{}, Complete: true}, again, "a completed run is idempotent")
+	require.Equal(t, stageReport{Generation: "g2", Scanned: 4, Skipped: 4, Inconsistent: []string{}, Unsupported: []string{}, Complete: true}, again, "a completed run is idempotent")
 	require.Equal(t, f.completedChunks(), index.Len())
 }
 
@@ -287,6 +291,31 @@ func TestOnlyValidSourceVectorsAreReused(t *testing.T) {
 	requireTargetMatches(t, pg, pineconeStore{client}, sourceModel)
 }
 
+func TestSourceLabelsNeverReachTheTarget(t *testing.T) {
+	pg := vectorDB(t)
+	legacy, err := pgstore.NewVectorStore(t.Context(), pg, testDims)
+	require.NoError(t, err)
+	f := &fixture{pg: pg, legacy: legacy, chunks: map[string][]domain.Chunk{}}
+	d := newDoc("alpha", "report", "A chunk that predates collection labels.", "A chunk labeled with an obsolete scope.")
+	chunks := insertDoc(t, pg, d)
+	f.docs = append(f.docs, d)
+	stub := stubReader{chunks: map[string]domain.Chunk{}}
+	for i, c := range sourceChunks(d, chunks, sourceModel) {
+		if i == 0 {
+			delete(c.Metadata, "collection")
+		} else {
+			c.Metadata["collection"], c.Metadata["doc_type"] = "obsolete", "obsolete"
+		}
+		stub.chunks[string(c.ID)] = c
+	}
+	client, _ := memoryPinecone()
+	registerGeneration(t, pg, "g2", "pinecone", "quarry-g2", sourceModel)
+	rep, err := f.stager(t, "g2", pineconeStore{client}, sourceModel, stub, nil).run(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 2, rep.Copied, "the vectors are reused while the labels come from PostgreSQL")
+	requireTargetMatches(t, pg, pineconeStore{client}, sourceModel)
+}
+
 func TestProtectedTargetIsNeverWritten(t *testing.T) {
 	f := newFixture(t)
 	client, index := memoryPinecone()
@@ -312,11 +341,15 @@ func TestRunsStopAtBoundsAndResume(t *testing.T) {
 	require.Equal(t, 3, rep.Staged)
 	require.False(t, rep.Complete)
 	require.NotEmpty(t, rep.NextAfter)
+	revisions, err := f.pg.DocumentRevisions(t.Context(), "", 4)
+	require.NoError(t, err)
+	require.Equal(t, revisions[2].ID, rep.NextAfter)
+	s.opts.After = rep.NextAfter
 	rep, err = s.run(t.Context())
 	require.NoError(t, err)
 	require.True(t, rep.Complete)
 	require.Equal(t, 1, rep.Staged)
-	require.Equal(t, 3, rep.Skipped)
+	require.Zero(t, rep.Skipped)
 	requireTargetMatches(t, f.pg, pineconeStore{client}, sourceModel)
 
 	t.Run("chunks", func(t *testing.T) {
@@ -473,6 +506,10 @@ func (t faultyTarget) DeleteIDs(ctx context.Context, ids []string) error {
 // and requires the converged target to equal the corpus exactly.
 func restartMatrix(t *testing.T, f *fixture, open func(t *testing.T, generation string) (vectorTarget, func()), copyFrom vectorReader, embedder domain.EmbeddingProvider, model string) {
 	t.Helper()
+	identity := relationalState(t, f.pg)
+	defer func() {
+		require.Equal(t, identity, relationalState(t, f.pg), "UUIDs, chunk indices, scope, fingerprints and status survive every interruption")
+	}()
 	// Remove one document first so that every run also has a stale key to clean up.
 	crossed := 0
 	for failAt := 1; ; failAt++ {
@@ -543,4 +580,41 @@ func TestRestartAtEveryBoundaryWhenReembedding(t *testing.T) {
 		registerGeneration(t, f.pg, generation, "pinecone", "idx-"+generation, "model-b")
 		return pineconeStore{client}, func() {}
 	}, nil, embedder, "model-b")
+}
+
+// cancelingTarget cancels the run's context once it has written a number of batches.
+type cancelingTarget struct {
+	vectorTarget
+	cancel context.CancelFunc
+	after  int
+	writes int
+}
+
+func (c *cancelingTarget) Upsert(ctx context.Context, ns string, chunks []domain.Chunk) error {
+	err := c.vectorTarget.Upsert(ctx, ns, chunks)
+	c.writes++
+	if c.writes == c.after {
+		c.cancel()
+	}
+	return err
+}
+
+func TestRunStopsWhenTheJobDeadlinePassesAndResumes(t *testing.T) {
+	f := newFixture(t)
+	client, _ := memoryPinecone()
+	registerGeneration(t, f.pg, "g2", "pinecone", "quarry-g2", sourceModel)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s := f.stager(t, "g2", &cancelingTarget{vectorTarget: pineconeStore{client}, cancel: cancel, after: 2}, sourceModel, f.legacy, nil)
+	_, err := s.run(ctx)
+	require.ErrorContains(t, err, "context canceled")
+	complete, incomplete, countErr := f.pg.CountGenerationDocuments(t.Context(), "g2")
+	require.NoError(t, countErr)
+	require.Positive(t, complete+incomplete, "progress made before the deadline is durable")
+
+	resumed := f.stager(t, "g2", pineconeStore{client}, sourceModel, f.legacy, nil)
+	rep, err := resumed.run(t.Context())
+	require.NoError(t, err)
+	require.True(t, rep.Complete)
+	requireTargetMatches(t, f.pg, pineconeStore{client}, sourceModel)
 }

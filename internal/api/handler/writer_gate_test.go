@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -113,6 +115,110 @@ func TestCheckpointedDeletionHonorsTheWriterGate(t *testing.T) {
 			require.Equal(t, tc.status, rec.Code, rec.Body.String())
 			require.Len(t, store.deletes, tc.deleted, "the coordinator must not start while writers are paused")
 			require.Zero(t, store.modeReads-tc.deleted, "the deletion mode is read only after the gate opens")
+		})
+	}
+}
+
+type gatedLegacyStore struct {
+	*guardedStore
+	gate   error
+	events []string
+}
+
+func (s *gatedLegacyStore) AcquireWriter(context.Context) (func(), error) {
+	s.events = append(s.events, "acquire")
+	if s.gate != nil {
+		return nil, s.gate
+	}
+	return func() { s.events = append(s.events, "release") }, nil
+}
+
+func (s *gatedLegacyStore) WithLegacyDeletion(ctx context.Context, id domain.DocumentID, fn func(domain.LegacyDocumentStore) error) error {
+	s.events = append(s.events, "legacy")
+	return s.guardedStore.WithLegacyDeletion(ctx, id, fn)
+}
+
+func TestLegacyReservationDeletionHonorsTheWriterGate(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		gate        error
+		status      int
+		wantEvents  []string
+		wantGuarded int
+	}{
+		{name: "open", status: http.StatusOK, wantEvents: []string{"acquire", "legacy", "release"}, wantGuarded: 1},
+		{name: "frozen", gate: domain.ErrWritersFrozen, status: http.StatusServiceUnavailable, wantEvents: []string{"acquire"}},
+		{name: "other generation", gate: domain.ErrGenerationMismatch, status: http.StatusServiceUnavailable, wantEvents: []string{"acquire"}},
+		{name: "gate failure", gate: errors.New("database unavailable"), status: http.StatusServiceUnavailable, wantEvents: []string{"acquire"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &gatedLegacyStore{guardedStore: &guardedStore{checkpointedStore: &checkpointedStore{}}, gate: tc.gate}
+			rec := serveDeletion(t, store, http.Header{}, WithLegacyReservations())
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			require.Equal(t, tc.wantEvents, store.events)
+			require.Equal(t, tc.wantGuarded, store.guarded)
+			require.Zero(t, store.legacy)
+			require.Empty(t, store.deletes)
+		})
+	}
+}
+
+type gatedScopedStore struct {
+	*scopedMockStore
+	gate   error
+	events []string
+}
+
+func (s *gatedScopedStore) AcquireWriter(context.Context) (func(), error) {
+	s.events = append(s.events, "acquire")
+	if s.gate != nil {
+		return nil, s.gate
+	}
+	return func() { s.events = append(s.events, "release") }, nil
+}
+
+func (s *gatedScopedStore) BeginScopedDeletion(ctx context.Context, principal domain.Principal, validUntil time.Time, id domain.DocumentID, ops domain.DeleteOperations) (incarnation string, complete bool, err error) {
+	s.events = append(s.events, "begin")
+	return s.scopedMockStore.BeginScopedDeletion(ctx, principal, validUntil, id, ops)
+}
+
+func (s *gatedScopedStore) ResumeScopedDeletion(ctx context.Context, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
+	s.events = append(s.events, "resume")
+	return s.scopedMockStore.ResumeScopedDeletion(ctx, id, incarnation, ops)
+}
+
+func TestScopedDeletionHonorsTheWriterGate(t *testing.T) {
+	tenant := uuid.NewString()
+	owner := domain.Principal{ID: uuid.NewString(), TenantID: tenant}
+	for _, tc := range []struct {
+		name       string
+		gate       error
+		status     int
+		body       string
+		wantEvents []string
+	}{
+		{name: "open", status: http.StatusOK, wantEvents: []string{"acquire", "begin", "resume", "release"}},
+		{name: "frozen", gate: domain.ErrWritersFrozen, status: http.StatusServiceUnavailable, body: frozenBody, wantEvents: []string{"acquire"}},
+		{name: "other generation", gate: domain.ErrGenerationMismatch, status: http.StatusServiceUnavailable, body: `{"error":"unavailable","message":"this replica does not serve the active vector generation"}`, wantEvents: []string{"acquire"}},
+		{name: "gate failure", gate: errors.New("database unavailable"), status: http.StatusServiceUnavailable, body: `{"error":"unavailable","message":"document store unavailable"}`, wantEvents: []string{"acquire"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &gatedScopedStore{scopedMockStore: newScopedMockStore(owner), gate: tc.gate}
+			docID := uuid.NewString()
+			store.docs[docID] = &scopedMemoryEntry{
+				owner:   owner,
+				summary: domain.DocumentSummary{ID: docID, Incarnation: uuid.NewString(), Status: "completed"},
+			}
+			h := DeleteHandler(store, nil, nil, WithScopedDeletion())
+			rec := serveScoped(h, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute))
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			require.Equal(t, tc.wantEvents, store.events)
+			if tc.body != "" {
+				require.JSONEq(t, tc.body, rec.Body.String())
+			}
+			if tc.status == http.StatusServiceUnavailable {
+				require.Equal(t, "30", rec.Header().Get("Retry-After"))
+			}
 		})
 	}
 }

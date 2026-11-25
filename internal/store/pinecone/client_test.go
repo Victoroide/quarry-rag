@@ -31,7 +31,6 @@ type fakeIndexConn struct {
 	closed       int
 }
 
-//revive:disable-next-line:var-naming SDK method name.
 func (f *fakeIndexConn) FetchVectors(ctx context.Context, ids []string) (*pinecone.FetchVectorsResponse, error) {
 	if f.fetch != nil {
 		return f.fetch(ctx, ids)
@@ -67,8 +66,7 @@ func (f *fakeIndexConn) DeleteVectorsByFilter(ctx context.Context, filter *struc
 	return nil
 }
 
-//revive:disable-next-line:var-naming SDK method name.
-func (f *fakeIndexConn) DeleteVectorsById(ctx context.Context, ids []string) error {
+func (f *fakeIndexConn) DeleteVectorsByID(ctx context.Context, ids []string) error {
 	if f.deleteIDs != nil {
 		return f.deleteIDs(ctx, ids)
 	}

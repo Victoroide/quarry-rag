@@ -23,6 +23,50 @@ type fileCleanupStore struct {
 	deletions int
 }
 
+type blockingObjectDelete struct {
+	started, finish chan struct{}
+}
+
+func (d blockingObjectDelete) Delete(ctx context.Context, _ string) error {
+	close(d.started)
+	select {
+	case <-d.finish:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestFreezeWaitsForAnAdmittedCleanup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pg.Close(context.Background())) })
+	require.NoError(t, pg.RunMigrations(t.Context()))
+	id := domain.DocumentID(uuid.NewString())
+	key := "document-source"
+	require.NoError(t, pg.InsertDocument(t.Context(), domain.Document{ID: id, S3Key: &key}))
+	objects := blockingObjectDelete{make(chan struct{}), make(chan struct{})}
+	cleaner := &Cleaner{metadata: pg, objects: objects}
+	result := make(chan error, 1)
+	go func() { result <- cleaner.Delete(t.Context(), string(id)) }()
+	select {
+	case <-objects.started:
+	case err := <-result:
+		t.Fatalf("cleanup finished without deleting the object: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup did not reach object deletion")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+	require.Error(t, pg.FreezeWriters(ctx, "g2"))
+	close(objects.finish)
+	require.NoError(t, <-result)
+	require.NoError(t, pg.FreezeWriters(t.Context(), "g2"))
+}
+
 func (s *fileCleanupStore) DeleteDocument(context.Context, domain.DocumentID) error {
 	s.deletions++
 	return nil
@@ -64,10 +108,12 @@ func TestPostgresCleanupWithoutPinecone(t *testing.T) {
 	require.NoError(t, metadata.RunMigrations(t.Context()))
 	vectors, err := pgstore.NewVectorStore(t.Context(), metadata, 3)
 	require.NoError(t, err)
+	cfg := &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL, EmbeddingDimensions: 3}
+	require.NoError(t, metadata.PinVectorGeneration(t.Context(), pgstore.LegacyGeneration, "postgres", "chunk_vectors", "", cfg.EmbeddingSettings()))
 	id := domain.DocumentID(uuid.NewString())
 	require.NoError(t, metadata.InsertDocument(t.Context(), domain.Document{ID: id}))
 	require.NoError(t, vectors.Upsert(t.Context(), "", []domain.Chunk{{ID: "synthetic-cleanup", DocumentID: id, Embedding: []float32{1, 0, 0}}}))
-	cleaner, err := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL})
+	cleaner, err := New(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
 	require.NoError(t, cleaner.Delete(t.Context(), string(id)))
@@ -366,10 +412,14 @@ func TestCleanerPausesDuringAVectorMigration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
 	require.NoError(t, metadata.RunMigrations(t.Context()))
+	_, err = pgstore.NewVectorStore(t.Context(), metadata, 3)
+	require.NoError(t, err)
+	cfg := &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL, EmbeddingDimensions: 3}
+	require.NoError(t, metadata.PinVectorGeneration(t.Context(), pgstore.LegacyGeneration, "postgres", "chunk_vectors", "", cfg.EmbeddingSettings()))
 	id := domain.DocumentID(uuid.NewString())
 	require.NoError(t, metadata.InsertDocument(t.Context(), domain.Document{ID: id}))
 
-	cleaner, err := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL})
+	cleaner, err := New(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
 	require.NoError(t, metadata.FreezeWriters(t.Context(), "g2"))
@@ -378,11 +428,9 @@ func TestCleanerPausesDuringAVectorMigration(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, doc, "a paused deletion leaves the document")
 
-	other, err := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL, VectorGeneration: "g2"})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, other.Close(context.Background())) })
+	_, err = New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL, VectorGeneration: "g2"})
+	require.ErrorIs(t, err, domain.ErrGenerationMismatch, "a tool configured for another generation cannot open for deletion")
 	require.NoError(t, metadata.ThawWriters(t.Context()))
-	require.ErrorIs(t, other.Delete(t.Context(), string(id)), domain.ErrGenerationMismatch, "a tool configured for another generation cannot delete")
 
 	require.NoError(t, cleaner.Delete(t.Context(), string(id)))
 }
@@ -421,4 +469,50 @@ func TestCheckpointedCleanerPausesDuringAVectorMigration(t *testing.T) {
 
 	require.NoError(t, metadata.ThawWriters(t.Context()))
 	require.NoError(t, cleaner.DeleteIncarnation(t.Context(), string(id), incarnation))
+}
+
+func TestLegacyReservationCleanerAcquiresWriterBeforeGuard(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	databaseURL := pgtest.StartVector(t)
+	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
+	require.NoError(t, metadata.RunMigrations(t.Context()))
+	_, err = pgstore.NewVectorStore(t.Context(), metadata, 3)
+	require.NoError(t, err)
+	cfg := &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL, EmbeddingDimensions: 3}
+	require.NoError(t, metadata.PinVectorGeneration(t.Context(), pgstore.LegacyGeneration, "postgres", "chunk_vectors", "", cfg.EmbeddingSettings()))
+	id := domain.DocumentID(uuid.NewString())
+	key := "document-source"
+	require.NoError(t, metadata.InsertDocument(t.Context(), domain.Document{ID: id, S3Key: &key}))
+
+	cleaner, err := New(t.Context(), cfg, WithLegacyReservations())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
+	require.NoError(t, metadata.FreezeWriters(t.Context(), "g2"))
+	require.ErrorIs(t, cleaner.Delete(t.Context(), string(id)), domain.ErrWritersFrozen)
+	doc, err := metadata.GetDocument(t.Context(), id)
+	require.NoError(t, err)
+	require.NotNil(t, doc, "a paused deletion returns before the legacy guard")
+
+	require.NoError(t, metadata.ThawWriters(t.Context()))
+	objects := blockingObjectDelete{make(chan struct{}), make(chan struct{})}
+	cleaner.objects = objects
+	result := make(chan error, 1)
+	go func() { result <- cleaner.Delete(t.Context(), string(id)) }()
+	select {
+	case <-objects.started:
+	case delErr := <-result:
+		t.Fatalf("cleanup finished without deleting the object: %v", delErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup did not reach object deletion")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+	require.Error(t, metadata.FreezeWriters(ctx, "g2"))
+	close(objects.finish)
+	require.NoError(t, <-result)
+	require.NoError(t, metadata.FreezeWriters(t.Context(), "g2"))
 }

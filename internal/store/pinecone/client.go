@@ -3,7 +3,6 @@ package pinecone
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +35,7 @@ const cleanupPageSize = 4_000_000 / (maxMetadataBytes + 2048)
 // All namespaces share one connection.
 type Client struct {
 	client                *pinecone.Client
+	host                  string
 	cfg                   *config.Config
 	defaultConn           indexConn
 	ownershipMu           sync.Mutex
@@ -89,7 +89,8 @@ func newPineconeClient(ctx context.Context, cfg *config.Config, pc *pinecone.Cli
 	p := newClient(pc, cfg, defaultConn)
 	p.visibility = visibility
 	// Fixture writes use the default namespace of the resolved index.
-	p.fixtureVectorIdentity = fmt.Sprintf("pinecone:%x", sha256.Sum256([]byte(cfg.PineconeIndexName+"\x00"+idx.Host)))
+	p.fixtureVectorIdentity = domain.FixtureVectorIdentity("pinecone", cfg.PineconeIndexName, idx.Host)
+	p.host = idx.Host
 	p.discoverOwnership = func(ctx context.Context) (ownershipFilters, error) {
 		return indexedOwnershipFields(ctx, idx, defaultConn)
 	}
@@ -179,16 +180,19 @@ func (p *Client) cleanupOwnership(ctx context.Context) (ownershipFilters, error)
 
 func newClient(pc *pinecone.Client, cfg *config.Config, root *pinecone.IndexConnection) *Client {
 	return &Client{
-		client: pc, cfg: cfg, defaultConn: root, batchSize: cfg.PineconeUpsertBatchSize,
+		client: pc, cfg: cfg, defaultConn: sdkIndexConn{root}, batchSize: cfg.PineconeUpsertBatchSize,
 		timeout: cfg.PineconeTimeout, maxAttempts: cfg.PineconeMaxAttempts, dims: cfg.EmbeddingDimensions,
 		dial: func(namespace string) (indexConn, error) {
-			return root.WithNamespace(namespace), nil
+			return sdkIndexConn{root.WithNamespace(namespace)}, nil
 		},
 	}
 }
 
 // FixtureVectorIdentity identifies the concrete default index used for fixtures.
 func (p *Client) FixtureVectorIdentity() string { return p.fixtureVectorIdentity }
+
+// Host returns the physical index host resolved at startup.
+func (p *Client) Host() string { return p.host }
 
 func (p *Client) conn(namespace string) (indexConn, func(), error) {
 	if namespace == "" {
@@ -358,7 +362,7 @@ func (p *Client) Delete(ctx context.Context, namespace string, ids []string) err
 	for start := 0; start < len(ids); start += 1000 {
 		batch := ids[start:min(start+1000, len(ids))]
 		if err := p.mutate(ctx, true, func(attemptCtx context.Context) error {
-			return ignoreNotFound(conn.DeleteVectorsById(attemptCtx, batch))
+			return ignoreNotFound(conn.DeleteVectorsByID(attemptCtx, batch))
 		}); err != nil {
 			return fmt.Errorf("pinecone: delete %d vectors from namespace %q: %w", len(batch), namespace, err)
 		}

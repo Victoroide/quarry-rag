@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
@@ -50,11 +51,10 @@ func run() error {
 			slog.Error("close document store", "error", closeErr)
 		}
 	}()
-	pg.SetVectorGeneration(cfg.ActiveVectorGeneration())
 	if migrationErr := requireMigration(ctx, pg); migrationErr != nil {
 		return migrationErr
 	}
-	return execute(ctx, newDeps(cfg, pg), opts, os.Stdout)
+	return execute(ctx, newDeps(cfg, pg), opts, os.Stdout, 2*time.Second)
 }
 
 // requireMigration fails when the schema predates vector generations; the tool never migrates.
@@ -64,15 +64,24 @@ func requireMigration(ctx context.Context, pg *pgstore.Client) error {
 		return err
 	}
 	if !present {
-		return errors.New("migration 012 is not applied; start a release that contains it before reindexing")
+		return errors.New("migration 016 is not applied; start a release that contains it before reindexing")
 	}
 	return nil
 }
 
 // execute runs one invocation. Without -apply it only reads.
-func execute(ctx context.Context, d deps, opts options, out io.Writer) error {
-	if opts.action() == actionAttest {
+func execute(ctx context.Context, d deps, opts options, out io.Writer, poll time.Duration) error {
+	switch opts.action() {
+	case actionThaw:
+		return d.thaw(ctx, opts, out)
+	case actionAttest:
 		return d.attest(ctx, opts, out)
+	case actionFreeze:
+		return d.freeze(ctx, opts, out, poll)
+	case actionActivate:
+		return d.activate(ctx, opts, out)
+	case actionVerify:
+		return d.verify(ctx, opts, d.resolve(opts), out)
 	}
 	profile, err := d.loadTargetProfile(opts)
 	if err != nil {

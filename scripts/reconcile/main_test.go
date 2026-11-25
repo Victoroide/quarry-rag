@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -245,15 +248,60 @@ func TestReconcileDeleteErrorsAreReported(t *testing.T) {
 
 type fakeGate struct{ err error }
 
-func (g fakeGate) WritersOpen(context.Context) error { return g.err }
+func (g fakeGate) AcquireWriter(context.Context) (func(), error) { return func() {}, g.err }
 
 func TestMaintenanceWritesRespectTheWriterGate(t *testing.T) {
 	frozen := fakeGate{err: domain.ErrWritersFrozen}
-	require.NoError(t, requireWritableForApply(t.Context(), frozen, options{}), "a dry run only reads")
-	require.NoError(t, requireWritableForApply(t.Context(), fakeGate{}, options{Apply: true}))
-	err := requireWritableForApply(t.Context(), frozen, options{Apply: true})
+	_, err := acquireMaintenanceWriter(t.Context(), frozen, options{})
+	require.NoError(t, err, "a dry run only reads")
+	_, err = acquireMaintenanceWriter(t.Context(), fakeGate{}, options{Apply: true})
+	require.NoError(t, err)
+	_, err = acquireMaintenanceWriter(t.Context(), frozen, options{Apply: true})
 	require.ErrorIs(t, err, domain.ErrWritersFrozen)
 	require.ErrorContains(t, err, "paused")
-	err = requireWritableForApply(t.Context(), fakeGate{err: domain.ErrGenerationMismatch}, options{Apply: true, BackfillCollections: true})
+	_, err = acquireMaintenanceWriter(t.Context(), fakeGate{err: domain.ErrGenerationMismatch}, options{Apply: true, BackfillCollections: true})
 	require.ErrorIs(t, err, domain.ErrGenerationMismatch)
+	_, err = acquireMaintenanceWriter(t.Context(), fakeGate{err: domain.ErrGenerationMismatch}, options{Apply: true, BackfillScoped: true})
+	require.ErrorIs(t, err, domain.ErrGenerationMismatch)
+}
+
+func TestFreezeWaitsForAnAppliedReconcilePass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pg.Close(context.Background())) })
+	require.NoError(t, pg.RunMigrations(t.Context()))
+	index := &reconcileFakeIndex{counts: map[string]uint32{missingID: 1}}
+	started, finish := make(chan struct{}), make(chan struct{})
+	deleted := make(chan error, 1)
+	opts := options{Apply: true, Limit: 10, Page: 1}
+	go func() {
+		deleted <- runMaintenance(t.Context(), pg, opts, func() error {
+			_, err := reconcile(t.Context(), index, func(ctx context.Context, name string) error {
+				close(started)
+				select {
+				case <-finish:
+					return index.deleteNamespace(ctx, name)
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}, noDocuments, opts, &bytes.Buffer{})
+			return err
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-deleted:
+		t.Fatalf("reconcile completed before deleting the namespace: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconcile did not reach namespace deletion")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+	require.Error(t, pg.FreezeWriters(ctx, "g2"))
+	close(finish)
+	require.NoError(t, <-deleted)
+	require.NoError(t, pg.FreezeWriters(t.Context(), "g2"))
 }

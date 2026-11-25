@@ -52,6 +52,9 @@ func (c *Client) ReconcileEvaluationFixture(ctx context.Context, id domain.Docum
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 		return s, err
 	}
+	if gateErr := c.gate(ctx, tx); gateErr != nil {
+		return s, gateErr
+	}
 	if lockErr := lockFixtureDocument(ctx, tx, string(id)); lockErr != nil {
 		return s, lockErr
 	}
@@ -84,6 +87,9 @@ func (c *Client) DeleteEvaluationFixture(ctx context.Context, id domain.Document
 		return "", err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if gateErr := c.gate(ctx, tx); gateErr != nil {
+		return "", gateErr
+	}
 
 	args := []any{string(id), receipt, incarnation}
 	var done bool

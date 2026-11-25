@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -30,7 +32,7 @@ func (s *stores) index(name string) *pcstore.MemoryIndex {
 	return s.indexes[name]
 }
 
-func (s *stores) open(ctx context.Context, spec targetSpec) (vectorTarget, func(), error) {
+func (s *stores) open(ctx context.Context, spec targetSpec) (target vectorTarget, closeTarget func(), host string, openErr error) {
 	s.opened++
 	switch spec.Store {
 	case "postgres":
@@ -41,11 +43,11 @@ func (s *stores) open(ctx context.Context, spec targetSpec) (vectorTarget, func(
 		} else {
 			store, err = pgstore.OpenGenerationVectorStore(ctx, s.pg, spec.Dimensions, spec.Generation)
 		}
-		return store, func() {}, err
+		return store, func() {}, "", err
 	case "pinecone":
-		return pineconeStore{pcstore.NewClientForIndex(s.index(spec.Target), testConfig())}, func() {}, nil
+		return pineconeStore{pcstore.NewClientForIndex(s.index(spec.Target), testConfig(), spec.Target+"-host")}, func() {}, spec.Target + "-host", nil
 	}
-	return nil, nil, fmt.Errorf("unsupported store %q", spec.Store)
+	return nil, nil, "", fmt.Errorf("unsupported store %q", spec.Store)
 }
 
 type harness struct {
@@ -69,8 +71,10 @@ func liveConfig(store string) *config.Config {
 	cfg := testConfig()
 	cfg.VectorStore = store
 	cfg.PineconeIndexName = "quarry"
-	cfg.EmbeddingProvider = domain.EmbeddingProviderBedrock
-	cfg.BedrockEmbedModel = sourceModel
+	cfg.EmbeddingProvider = domain.EmbeddingProviderOpenAI
+	cfg.OpenAIEmbeddingModel = sourceModel
+	cfg.EmbeddingModelRevision = "rev-1"
+	cfg.ExtractionChunkVersion = "chunk-1"
 	return cfg
 }
 
@@ -87,14 +91,19 @@ func newHarness(t *testing.T, f *fixture, liveStore string) *harness {
 		}}
 	if liveStore == "pinecone" {
 		live := h.stores.index("quarry")
-		client := pcstore.NewClientForIndex(live, testConfig())
+		client := pcstore.NewClientForIndex(live, testConfig(), "")
 		for _, d := range f.docs {
 			if d.Status == "completed" {
 				require.NoError(t, client.Upsert(t.Context(), "", sourceChunks(d, f.chunks[d.ID], sourceModel)))
 			}
 		}
 	}
-	f.pg.SetVectorGeneration(cfg.ActiveVectorGeneration())
+	store, target := cfg.VectorTarget()
+	host := ""
+	if store == "pinecone" {
+		host = target + "-host"
+	}
+	require.NoError(t, f.pg.PinVectorGeneration(t.Context(), cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings()))
 	return h
 }
 
@@ -113,15 +122,23 @@ func (h *harness) run(opts options) (map[string]any, error) {
 	if opts.MaxDocuments == 0 {
 		base := defaultOptions()
 		base.Generation, base.Profile, base.TargetStore, base.TargetIndex = opts.Generation, opts.Profile, opts.TargetStore, opts.TargetIndex
-		base.Apply, base.Attest, base.MaxEmbedCalls = opts.Apply, opts.Attest, opts.MaxEmbedCalls
+		base.Apply, base.Verify, base.Freeze, base.Thaw, base.Activate, base.Attest = opts.Apply, opts.Verify, opts.Freeze, opts.Thaw, opts.Activate, opts.Attest
+		base.MaxEmbedCalls, base.Quiesce, base.SampleSize, base.TopK, base.ScopeDocuments = opts.MaxEmbedCalls, opts.Quiesce, opts.SampleSize, opts.TopK, opts.ScopeDocuments
+		base.MinRecall, base.MaxP95 = opts.MinRecall, opts.MaxP95
+		base.QueryFixtures = opts.QueryFixtures
+		base.After, base.PruneAfter, base.ConfirmTargetDrained = opts.After, opts.PruneAfter, opts.ConfirmTargetDrained
 		opts = base
 	}
-	err := execute(h.t.Context(), h.deps, opts, &out)
+	err := execute(h.t.Context(), h.deps, opts, &out, 10*time.Millisecond)
 	var report map[string]any
 	if out.Len() > 0 {
 		require.NoError(h.t, json.Unmarshal(out.Bytes(), &report), out.String())
 	}
 	return report, err
+}
+
+func verifyOptions(generation string) options {
+	return options{Generation: generation, Verify: true, SampleSize: 6, TopK: 5, ScopeDocuments: 3, MinRecall: 0.5, MaxP95: time.Minute}
 }
 
 func TestDefaultInventoryWritesNothingAndCallsNoProvider(t *testing.T) {
@@ -273,8 +290,58 @@ func TestStageWithAnUnknownProfileRecomputesWithinTheBudget(t *testing.T) {
 	report, err = h.run(options{Generation: "g2", Profile: profile, TargetStore: "pinecone", TargetIndex: "quarry-g2", Apply: true, MaxEmbedCalls: 1000})
 	require.NoError(t, err)
 	require.Equal(t, true, report["complete"])
+	require.Zero(t, report["copied_chunks"])
 	require.EqualValues(t, f.completedChunks(), report["embedded_chunks"])
 	require.Equal(t, f.completedChunks(), h.embedCalls())
+
+	verify := verifyOptions("g2")
+	preview, err := h.run(verify)
+	require.ErrorIs(t, err, errNotVerified)
+	sample, ok := preview["sample"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, sample["source_profile_query_only"])
+	profileHash := testProfile(sourceModel).Hash()
+	require.Equal(t, profileHash, sample["source_profile_hash"])
+	fixtures := queryFixtures{SourceProfile: profileHash, TargetProfile: profileHash, Queries: map[string]queryVectors{}}
+	for _, doc := range f.docs {
+		if doc.Status != "completed" {
+			continue
+		}
+		for _, chunk := range f.chunks[doc.ID] {
+			fixtures.Queries[string(chunk.ID)] = queryVectors{
+				TextHash: fmt.Sprintf("%x", sha256.Sum256([]byte(chunk.Text))),
+				Source:   embedWith(sourceModel, chunk.Text),
+				Target:   embedWith(sourceModel, chunk.Text),
+			}
+		}
+	}
+	verify.QueryFixtures = filepath.Join(h.dir, "queries.json")
+	writeFixtures := func(input queryFixtures) {
+		t.Helper()
+		data, marshalErr := json.Marshal(input)
+		require.NoError(t, marshalErr)
+		require.NoError(t, os.WriteFile(verify.QueryFixtures, data, 0o600))
+	}
+	// A frozen verification may record approval only with the full sample.
+	require.NoError(t, f.pg.FreezeWriters(t.Context(), "g2"))
+	verify.Apply = true
+	writeFixtures(queryFixtures{SourceProfile: profileHash, TargetProfile: profileHash})
+	incomplete, err := h.run(verify)
+	require.ErrorIs(t, err, errNotVerified)
+	require.Equal(t, false, incomplete["recorded"])
+	_, err = h.run(options{Generation: "g2", Activate: true, Apply: true})
+	require.ErrorContains(t, err, "must be verified")
+	writeFixtures(fixtures)
+	verified, err := h.run(verify)
+	require.NoError(t, err)
+	require.Equal(t, true, verified["recorded"])
+	require.Equal(t, h.embedCalls(), f.completedChunks())
+	legacy, err := f.pg.Generation(t.Context(), domain.LegacyGeneration)
+	require.NoError(t, err)
+	require.Nil(t, legacy)
+	activated, err := h.run(options{Generation: "g2", Activate: true, Apply: true})
+	require.NoError(t, err)
+	require.Equal(t, "g2", activated["active_generation"])
 }
 
 func TestStageRefusesDriftedGenerations(t *testing.T) {

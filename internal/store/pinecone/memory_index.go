@@ -106,6 +106,10 @@ func matchesFilter(md, filter *structpb.Struct) (bool, error) {
 				if !found {
 					return false, nil
 				}
+			case "$exists":
+				if (have != nil) != want.GetBoolValue() {
+					return false, nil
+				}
 			default:
 				return false, fmt.Errorf("unsupported filter operator %q", operator)
 			}
@@ -204,10 +208,8 @@ func (m *MemoryIndex) ListVectors(_ context.Context, req *pinecone.ListVectorsRe
 	return res, nil
 }
 
-// DeleteVectorsById removes records; absent keys are ignored.
-//
-//revive:disable-next-line:var-naming SDK method name.
-func (m *MemoryIndex) DeleteVectorsById(_ context.Context, ids []string) error {
+// DeleteVectorsByID removes records; absent keys are ignored.
+func (m *MemoryIndex) DeleteVectorsByID(_ context.Context, ids []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, id := range ids {

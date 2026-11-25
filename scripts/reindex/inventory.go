@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 )
@@ -30,11 +31,13 @@ type targetReport struct {
 	Store  string `json:"store"`
 	Target string `json:"target"`
 	State  string `json:"state"`
+	Host   string `json:"host,omitempty"`
 }
 
 type sourceReport struct {
 	Store         string `json:"store"`
 	Target        string `json:"target"`
+	Host          string `json:"host,omitempty"`
 	Generation    string `json:"generation"`
 	ProfileKnown  bool   `json:"profile_known"`
 	ProfileOrigin string `json:"profile_origin,omitempty"`
@@ -51,6 +54,7 @@ type documentCounts struct {
 	Failed          int `json:"failed"`
 	Deleting        int `json:"deleting_or_held"`
 	Inconsistent    int `json:"inconsistent"`
+	TaggedVectors   int `json:"tagged_vectors"`
 	WithoutOriginal int `json:"completed_without_original"`
 }
 
@@ -77,18 +81,48 @@ func (d deps) loadTargetProfile(opts options) (domain.EmbeddingProfile, error) {
 }
 
 // sourceProfile returns the recorded or attested profile of the live generation, or nil.
-func (d deps) sourceProfile(ctx context.Context, live liveTarget) (*domain.EmbeddingProfile, string, error) {
-	row, err := d.pg.Generation(ctx, live.generation)
-	if err != nil || row == nil {
-		return nil, "", err
+func (d deps) sourceProfile(ctx context.Context, live liveTarget) (profile *domain.EmbeddingProfile, origin, resolvedHost string, err error) {
+	state, err := d.pg.VectorState(ctx)
+	if err != nil {
+		return nil, "", "", err
 	}
-	profile := row.Profile
-	return &profile, row.Origin, nil
+	if state.Active != live.generation {
+		return nil, "", "", fmt.Errorf("%w: configured source generation %q, active generation %q", pgstore.ErrGenerationDrift, live.generation, state.Active)
+	}
+	row, err := d.pg.Generation(ctx, live.generation)
+	if err != nil {
+		return nil, "", "", err
+	}
+	store, target, host := state.LegacyStore, state.LegacyTarget, state.LegacyHost
+	if row != nil {
+		store, target, host = row.Store, row.Target, row.Host
+	} else if live.generation != domain.LegacyGeneration {
+		return nil, "", "", fmt.Errorf("%w: active generation %q is not registered", pgstore.ErrGenerationDrift, live.generation)
+	}
+	if store == "" || target == "" {
+		return nil, "", "", fmt.Errorf("%w: start a serving replica to bind the physical legacy target", pgstore.ErrGenerationDrift)
+	}
+	if live.store != store || live.target != target {
+		return nil, "", "", fmt.Errorf("%w: configured source %s %q differs from the active %s %q", pgstore.ErrGenerationDrift, live.store, live.target, store, target)
+	}
+	if row == nil {
+		return nil, "", host, nil
+	}
+	return &row.Profile, row.Origin, host, nil
 }
 
 // blockers lists reasons the target cannot be staged, before anything is written.
 func (d deps) blockers(ctx context.Context, p targetPlan, profile domain.EmbeddingProfile) ([]string, error) {
 	var out []string
+	if err := config.ValidateEmbeddingDimensions(profile.Provider, profile.Dimensions); err != nil {
+		out = append(out, err.Error())
+	}
+	configuredText := d.cfg.TextProfile()
+	if configuredText == "" {
+		out = append(out, "EXTRACTION_CHUNK_VERSION is required to identify the configured text settings")
+	} else if configuredText != profile.ExtractionChunkVersion {
+		out = append(out, fmt.Sprintf("the profile's extraction_chunk_version must match the configured text identity %q", configuredText))
+	}
 	if p.store == "postgres" && profile.Dimensions > 2000 {
 		out = append(out, fmt.Sprintf("pgvector indexes support at most 2000 dimensions; the profile declares %d", profile.Dimensions))
 	}
@@ -100,6 +134,13 @@ func (d deps) blockers(ctx context.Context, p targetPlan, profile domain.Embeddi
 	} else if reason != "" {
 		out = append(out, "the target is protected from writes: "+reason)
 	}
+	var tagged int
+	if err := d.pg.Pool.QueryRow(ctx, `SELECT count(*) FROM documents WHERE status='completed' AND scoped_vectors`).Scan(&tagged); err != nil {
+		return nil, fmt.Errorf("count tagged vector documents: %w", err)
+	}
+	if tagged > 0 {
+		out = append(out, fmt.Sprintf("%d completed documents store tagged vectors, whose revision-qualified keys a copy by chunk key cannot reproduce", tagged))
+	}
 	row, err := d.pg.Generation(ctx, p.generation)
 	if err != nil {
 		return nil, err
@@ -110,7 +151,7 @@ func (d deps) blockers(ctx context.Context, p targetPlan, profile domain.Embeddi
 	if p.generation == domain.LegacyGeneration && row == nil {
 		out = append(out, "the legacy generation can be a target only after its profile is attested")
 	}
-	source, _, err := d.sourceProfile(ctx, p.live)
+	source, _, _, err := d.sourceProfile(ctx, p.live)
 	if err != nil {
 		return nil, err
 	}
@@ -131,12 +172,13 @@ func (d deps) inventory(ctx context.Context, opts options, p targetPlan, profile
 	}
 	if row != nil {
 		rep.Target.State = row.State
+		rep.Target.Host = row.Host
 	}
-	source, origin, err := d.sourceProfile(ctx, p.live)
+	source, origin, host, err := d.sourceProfile(ctx, p.live)
 	if err != nil {
 		return rep, err
 	}
-	rep.Source = sourceReport{Store: p.live.store, Target: p.live.target, Generation: p.live.generation, ProfileKnown: source != nil, ProfileOrigin: origin}
+	rep.Source = sourceReport{Store: p.live.store, Target: p.live.target, Host: host, Generation: p.live.generation, ProfileKnown: source != nil, ProfileOrigin: origin}
 	reuse, reason, decideErr := decideCopy(source, profile)
 	rep.Copy = copyReport{Eligible: reuse && decideErr == nil, Reason: reason}
 	if rep.Blockers, err = d.blockers(ctx, p, profile); err != nil {
@@ -209,6 +251,8 @@ func (d deps) scanPlan(ctx context.Context, opts options, p targetPlan, register
 			switch {
 			case rev.DeclaredChunks != rev.Chunks:
 				rep.Documents.Inconsistent++
+			case rev.ScopedVectors:
+				rep.Documents.TaggedVectors++
 			case seen && cp.Complete && cp.SourceRevision == rev.Revision && cp.Incarnation == rev.Incarnation:
 				rep.Ledger.Current++
 			default:

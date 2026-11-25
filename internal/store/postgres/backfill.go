@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // MaxBackfillBatch bounds the documents read in one candidate query.
@@ -83,9 +84,10 @@ func (c *Client) VectorRowsMatch(ctx context.Context, doc BackfillDocument) (boo
 	if len(doc.ChunkIDs) == 0 {
 		return false, nil
 	}
+	table := VectorTable(c.servingPin().generation)
 	var total, current int
 	err := c.Pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE chunk_id = ANY($2::text[]))
-		FROM chunk_vectors WHERE document_id=$1::uuid`, doc.DocumentID, doc.ChunkIDs).Scan(&total, &current)
+		FROM `+pgx.Identifier{table}.Sanitize()+` WHERE document_id=$1::uuid`, doc.DocumentID, doc.ChunkIDs).Scan(&total, &current)
 	if err != nil {
 		return false, fmt.Errorf("postgres: verify vector rows: %w", err)
 	}

@@ -6,11 +6,12 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func memoryClient(dims int) (*Client, *MemoryIndex) {
 	index := NewMemoryIndex(dims)
-	return NewClientForIndex(index, &config.Config{PineconeUpsertBatchSize: 100, PineconeTimeout: 1e9, PineconeMaxAttempts: 1, EmbeddingDimensions: dims}), index
+	return NewClientForIndex(index, &config.Config{PineconeUpsertBatchSize: 100, PineconeTimeout: 1e9, PineconeMaxAttempts: 1, EmbeddingDimensions: dims}, ""), index
 }
 
 func memoryChunk(id, doc string, vector []float32, docType, collection string) domain.Chunk {
@@ -90,4 +91,30 @@ func TestMemoryIndexQueryAppliesFiltersBeforeRanking(t *testing.T) {
 	got, err = client.QueryFiltered(t.Context(), []float32{1, 0}, 1, domain.VectorFilter{})
 	require.NoError(t, err)
 	require.Equal(t, domain.ChunkID("best"), got[0].Chunk.ID)
+}
+
+func TestMemoryIndexFilterHonorsTheExistenceOperator(t *testing.T) {
+	tagged, err := structpb.NewStruct(map[string]any{"doc_id": "doc-1", domain.VectorRevisionKey: "revision"})
+	require.NoError(t, err)
+	untagged, err := structpb.NewStruct(map[string]any{"doc_id": "doc-1"})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name     string
+		exists   bool
+		metadata *structpb.Struct
+		want     bool
+	}{
+		{"a tagged record satisfies exists", true, tagged, true},
+		{"an untagged record fails exists", true, untagged, false},
+		{"a tagged record fails not exists", false, tagged, false},
+		{"an untagged record satisfies not exists", false, untagged, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filter, filterErr := structpb.NewStruct(map[string]any{domain.VectorRevisionKey: map[string]any{"$exists": tc.exists}})
+			require.NoError(t, filterErr)
+			got, matchErr := matchesFilter(tc.metadata, filter)
+			require.NoError(t, matchErr)
+			require.Equal(t, tc.want, got)
+		})
+	}
 }

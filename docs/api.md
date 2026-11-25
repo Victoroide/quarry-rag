@@ -143,9 +143,10 @@ In-flight duplicates return 202 `processing` and completed duplicates return
 #### Writer pause
 
 While an operator [freezes writers](deployment.md#changing-models-or-vector-stores)
-for a vector migration, every ingestion request returns 503 with error category
-`frozen` and `Retry-After: 30`, including duplicates, and stores nothing. An
-upload's source object is removed. Queries, listings and downloads continue.
+for a vector migration, every ingestion and deletion request returns 503 with
+error category `frozen` and `Retry-After: 30`. An ingestion request stores
+nothing, including a duplicate, and removes an upload's source object; a
+deletion removes nothing. Queries, listings and downloads continue.
 
 #### Variant A: JSON Request
 

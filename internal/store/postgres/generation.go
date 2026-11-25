@@ -38,6 +38,8 @@ const (
 var (
 	// ErrGenerationDrift marks a generation whose recorded identity differs from the requested one.
 	ErrGenerationDrift = errors.New("vector generation identity drifted")
+	// ErrFixtureReceipts marks a target switch that would leave an active evaluation fixture without a worker authorized to use its receipt.
+	ErrFixtureReceipts = errors.New("active evaluation fixtures are bound to a different vector store")
 	// ErrLiveTarget marks a write aimed at the active vector generation.
 	ErrLiveTarget = errors.New("the active vector generation is protected from migration writes")
 )
@@ -53,6 +55,7 @@ type Generation struct {
 	Name         string
 	Store        string
 	Target       string
+	Host         string
 	Profile      domain.EmbeddingProfile
 	Origin       string
 	State        string
@@ -71,6 +74,7 @@ type VectorState struct {
 	FreezeGeneration string
 	LegacyStore      string
 	LegacyTarget     string
+	LegacyHost       string
 }
 
 // Quiesce reports whether stopped writers have settled.
@@ -107,6 +111,9 @@ func (g Generation) validate() error {
 	if g.Target == "" {
 		return errors.New("postgres: generation target is required")
 	}
+	if (g.Store == "pinecone") != (g.Host != "") {
+		return errors.New("postgres: a resolved host is required for Pinecone and applies only to Pinecone")
+	}
 	if g.Origin != OriginRecorded && g.Origin != OriginAttested {
 		return fmt.Errorf("postgres: generation origin must be %q or %q", OriginRecorded, OriginAttested)
 	}
@@ -116,15 +123,22 @@ func (g Generation) validate() error {
 	return nil
 }
 
-// SetVectorGeneration names the generation this replica serves. It must be
-// called before the replica admits or claims work.
-func (c *Client) SetVectorGeneration(name string) { c.generationName.Store(&name) }
+type vectorPin struct {
+	generation  string
+	profileHash string
+}
 
-func (c *Client) generation() string {
-	if name := c.generationName.Load(); name != nil {
-		return *name
+// SetVectorGeneration names the generation for clients without a serving
+// profile, such as fake-mode clients. A recorded profile requires a full pin.
+func (c *Client) SetVectorGeneration(name string) {
+	c.vectorPin.Store(&vectorPin{generation: name})
+}
+
+func (c *Client) servingPin() vectorPin {
+	if pin := c.vectorPin.Load(); pin != nil {
+		return *pin
 	}
-	return LegacyGeneration
+	return vectorPin{generation: LegacyGeneration}
 }
 
 type queryRower interface {
@@ -142,28 +156,29 @@ type GenerationLedger struct {
 	db ledgerDatabase
 }
 
-func (c *Client) gate(ctx context.Context, q queryRower, lock string) error {
+func (c *Client) gate(ctx context.Context, q queryRower) error {
+	mine := c.servingPin()
 	if !c.vectorStateReady.Load() {
-		// A schema older than migration 012 has no freeze to honor and only the legacy target.
+		// A schema older than migration 016 has no freeze to honor and only the legacy target.
 		var present bool
 		if err := q.QueryRow(ctx, `SELECT to_regclass('vector_state') IS NOT NULL`).Scan(&present); err != nil {
 			return fmt.Errorf("postgres: read vector state: %w", err)
 		}
 		if !present {
-			if mine := c.generation(); mine != LegacyGeneration {
-				return fmt.Errorf("%w: replica serves %q, but no generation is recorded", domain.ErrGenerationMismatch, mine)
+			if mine.generation != LegacyGeneration {
+				return fmt.Errorf("%w: replica serves %q, but no generation is recorded", domain.ErrGenerationMismatch, mine.generation)
 			}
 			return nil
 		}
 		c.vectorStateReady.Store(true)
 	}
-	var active string
+	var active, profileHash string
 	var frozen bool
-	if err := q.QueryRow(ctx, `SELECT active_generation, frozen FROM vector_state `+lock).Scan(&active, &frozen); err != nil {
+	if err := q.QueryRow(ctx, `SELECT active, frozen, profile_hash FROM vector_writer_state()`).Scan(&active, &frozen, &profileHash); err != nil {
 		return fmt.Errorf("postgres: read vector state: %w", err)
 	}
-	if mine := c.generation(); active != mine {
-		return fmt.Errorf("%w: replica serves %q, active is %q", domain.ErrGenerationMismatch, mine, active)
+	if active != mine.generation || profileHash != "" && profileHash != mine.profileHash {
+		return fmt.Errorf("%w: replica serves %q with profile %q, active is %q with profile %q", domain.ErrGenerationMismatch, mine.generation, mine.profileHash, active, profileHash)
 	}
 	if frozen {
 		return domain.ErrWritersFrozen
@@ -172,7 +187,7 @@ func (c *Client) gate(ctx context.Context, q queryRower, lock string) error {
 }
 
 // WritersOpen implements domain.WriterGate.
-func (c *Client) WritersOpen(ctx context.Context) error { return c.gate(ctx, c.Pool, "") }
+func (c *Client) WritersOpen(ctx context.Context) error { return c.gate(ctx, c.Pool) }
 
 var _ domain.WriterGate = (*Client)(nil)
 
@@ -204,7 +219,7 @@ func (c *Client) AcquireWriter(ctx context.Context) (func(), error) {
 		release()
 		return nil, err
 	}
-	if err = c.gate(ctx, tx, "FOR SHARE"); err != nil {
+	if err = c.gate(ctx, tx); err != nil {
 		release()
 		return nil, err
 	}
@@ -228,10 +243,10 @@ func readVectorState(ctx context.Context, q queryRower) (VectorState, error) {
 }
 
 const vectorStateColumns = `active_generation, frozen, frozen_at, COALESCE(freeze_generation, ''),
- COALESCE(legacy_store, ''), COALESCE(legacy_target, '')`
+ COALESCE(legacy_store, ''), COALESCE(legacy_target, ''), legacy_host`
 
 func scanVectorState(row pgx.Row, state *VectorState) error {
-	return row.Scan(&state.Active, &state.Frozen, &state.FrozenAt, &state.FreezeGeneration, &state.LegacyStore, &state.LegacyTarget)
+	return row.Scan(&state.Active, &state.Frozen, &state.FrozenAt, &state.FreezeGeneration, &state.LegacyStore, &state.LegacyTarget, &state.LegacyHost)
 }
 
 // Generation returns a registered generation, or nil when it is not registered.
@@ -243,8 +258,8 @@ func readGeneration(ctx context.Context, q queryRower, name, lock string) (*Gene
 	var g Generation
 	var profile []byte
 	var digest *string
-	err := q.QueryRow(ctx, `SELECT name, store, target, profile, profile_origin, state, corpus_digest, verified_at, COALESCE(verification, 'null'::jsonb), ever_active, pending_write
- FROM vector_generations WHERE name=$1 `+lock, name).Scan(&g.Name, &g.Store, &g.Target, &profile, &g.Origin, &g.State, &digest, &g.VerifiedAt, &g.Verification, &g.EverActive, &g.PendingWrite)
+	err := q.QueryRow(ctx, `SELECT name, store, target, host, profile, profile_origin, state, corpus_digest, verified_at, COALESCE(verification, 'null'::jsonb), ever_active, pending_write
+ FROM vector_generations WHERE name=$1 `+lock, name).Scan(&g.Name, &g.Store, &g.Target, &g.Host, &profile, &g.Origin, &g.State, &digest, &g.VerifiedAt, &g.Verification, &g.EverActive, &g.PendingWrite)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -275,13 +290,20 @@ func (c *Client) RegisterGeneration(ctx context.Context, g Generation) (Generati
 		return Generation{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if g.Name == LegacyGeneration {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
+			return Generation{}, fmt.Errorf("postgres: wait for admissions before attestation: %w", err)
+		}
+	}
 	state, err := lockVectorState(ctx, tx)
 	if err != nil {
 		return Generation{}, err
 	}
 	if state.LegacyStore != "" {
-		matchesLegacy := g.Store == state.LegacyStore && g.Target == state.LegacyTarget
-		if matchesLegacy != (g.Name == LegacyGeneration) {
+		sameName := g.Store == state.LegacyStore && g.Target == state.LegacyTarget
+		sameHost := g.Host == state.LegacyHost
+		if g.Name == LegacyGeneration && (!sameName || !sameHost) ||
+			g.Name != LegacyGeneration && (sameName || g.Host != "" && sameHost) {
 			return Generation{}, fmt.Errorf("%w: %s %q and the recorded legacy target belong to different generations", ErrGenerationDrift, g.Store, g.Target)
 		}
 	}
@@ -289,8 +311,9 @@ func (c *Client) RegisterGeneration(ctx context.Context, g Generation) (Generati
 	if state.Active == g.Name {
 		initial = StateActive
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO vector_generations(name, store, target, profile, profile_hash, profile_origin, state, ever_active)
- VALUES($1,$2,$3,$4,$5,$6,$7,$7='active') ON CONFLICT (name) DO NOTHING`, g.Name, g.Store, g.Target, profile, g.Profile.Hash(), g.Origin, initial); err != nil {
+	tag, err := tx.Exec(ctx, `INSERT INTO vector_generations(name, store, target, host, profile, profile_hash, profile_origin, state, ever_active)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8='active') ON CONFLICT (name) DO NOTHING`, g.Name, g.Store, g.Target, g.Host, profile, g.Profile.Hash(), g.Origin, initial)
+	if err != nil {
 		if isUniqueViolation(err) {
 			return Generation{}, fmt.Errorf("%w: target %s %q already belongs to another generation", ErrGenerationDrift, g.Store, g.Target)
 		}
@@ -300,8 +323,22 @@ func (c *Client) RegisterGeneration(ctx context.Context, g Generation) (Generati
 	if err != nil {
 		return Generation{}, err
 	}
-	if got.Store != g.Store || got.Target != g.Target || got.Profile.Hash() != g.Profile.Hash() {
+	if got.Store != g.Store || got.Target != g.Target || got.Host != g.Host || got.Profile.Hash() != g.Profile.Hash() {
 		return Generation{}, fmt.Errorf("%w: generation %q is already registered with a different store, target or profile", ErrGenerationDrift, g.Name)
+	}
+	if initial == StateActive && tag.RowsAffected() != 0 {
+		// The state lock drains synchronous mutations and prevents new claims.
+		// Existing lease holders must finish before publishing the profile.
+		var running bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM ingest_jobs WHERE state='running')`).Scan(&running); err != nil {
+			return Generation{}, fmt.Errorf("postgres: inspect job leases before attestation: %w", err)
+		}
+		if running {
+			return Generation{}, errors.New("postgres: wait for in-flight jobs before attesting the active generation")
+		}
+		if _, err = tx.Exec(ctx, `UPDATE vector_state SET active_profile_hash=$1`, g.Profile.Hash()); err != nil {
+			return Generation{}, fmt.Errorf("postgres: publish attested profile: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Generation{}, err
@@ -309,46 +346,80 @@ func (c *Client) RegisterGeneration(ctx context.Context, g Generation) (Generati
 	return *got, nil
 }
 
+type legacyBindMode uint8
+
+const (
+	legacyBindExisting legacyBindMode = iota
+	legacyBindAlways
+	legacyBindExistingPostgresTable
+)
+
 // PinVectorGeneration fails closed unless the replica's configured generation
 // is the active one and its target and embedding settings match the record.
-func (c *Client) PinVectorGeneration(ctx context.Context, generation, store, target string, configured domain.EmbeddingProfile) error {
+func (c *Client) PinVectorGeneration(ctx context.Context, generation, store, target, host string, configured domain.EmbeddingProfile) error {
+	return c.pinVectorGeneration(ctx, generation, store, target, host, configured, legacyBindAlways)
+}
+
+// PinExistingVectorGeneration pins maintenance to the binding established by serving startup.
+func (c *Client) PinExistingVectorGeneration(ctx context.Context, generation, store, target, host string, configured domain.EmbeddingProfile) error {
+	return c.pinVectorGeneration(ctx, generation, store, target, host, configured, legacyBindExisting)
+}
+
+// PinCleanupVectorGeneration pins document cleanup to the active binding, binding
+// an existing legacy chunk_vectors table on first PostgreSQL use.
+func (c *Client) PinCleanupVectorGeneration(ctx context.Context, generation, store, target, host string, configured domain.EmbeddingProfile) error {
+	return c.pinVectorGeneration(ctx, generation, store, target, host, configured, legacyBindExistingPostgresTable)
+}
+
+func (c *Client) pinVectorGeneration(ctx context.Context, generation, store, target, host string, configured domain.EmbeddingProfile, bindMode legacyBindMode) error {
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	state, err := lockVectorState(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if state.Active != generation {
-		return fmt.Errorf("%w: configured generation %q, active generation %q", domain.ErrGenerationMismatch, generation, state.Active)
-	}
-	row, err := readGeneration(ctx, tx, generation, "")
-	if err != nil {
-		return err
-	}
-	if row == nil && generation != LegacyGeneration {
-		return fmt.Errorf("%w: generation %q is not registered", domain.ErrGenerationMismatch, generation)
-	}
-	if row != nil {
-		if row.Store != store || row.Target != target {
-			return fmt.Errorf("%w: generation %q targets %s %q, configured %s %q", ErrGenerationDrift, generation, row.Store, row.Target, store, target)
-		}
-		if row.Profile.Hash() != configured.Hash() {
-			return fmt.Errorf("%w: generation %q records profile %s, configured %s", ErrGenerationDrift, generation, row.Profile.Hash(), configured.Hash())
-		}
-	}
-	if generation == LegacyGeneration {
-		if state.LegacyStore == "" {
-			if _, err = tx.Exec(ctx, `UPDATE vector_state SET legacy_store=$1, legacy_target=$2`, store, target); err != nil {
-				return fmt.Errorf("postgres: bind legacy vector target: %w", err)
+	switch bindMode {
+	case legacyBindAlways:
+		if generation == LegacyGeneration {
+			if _, err = tx.Exec(ctx, `SELECT vector_bind_legacy($1,$2,$3)`, store, target, host); err != nil {
+				return fmt.Errorf("postgres: bind legacy target: %w", err)
 			}
-		} else if state.LegacyStore != store || state.LegacyTarget != target {
-			return fmt.Errorf("%w: legacy targets %s %q, configured %s %q", ErrGenerationDrift, state.LegacyStore, state.LegacyTarget, store, target)
 		}
+	case legacyBindExistingPostgresTable:
+		if generation == LegacyGeneration && store == "postgres" && target == VectorTable(LegacyGeneration) {
+			if _, err = tx.Exec(ctx, `SELECT vector_bind_legacy('postgres','chunk_vectors','')
+FROM pg_attribute a
+WHERE a.attrelid = to_regclass(format('%I.chunk_vectors', current_schema()))
+  AND a.attname = 'embedding' AND NOT a.attisdropped AND a.atttypmod > 0
+  AND a.atttypid = to_regtype('vector')`); err != nil {
+				return fmt.Errorf("postgres: bind existing legacy vector table: %w", err)
+			}
+		}
+	case legacyBindExisting:
 	}
-	return tx.Commit(ctx)
+	var active, activeHash, recordedStore, recordedTarget, recordedHost string
+	err = tx.QueryRow(ctx, `SELECT active, profile_hash, store, target, host FROM vector_writer_state()`).
+		Scan(&active, &activeHash, &recordedStore, &recordedTarget, &recordedHost)
+	if err != nil {
+		return fmt.Errorf("postgres: read active vector target: %w", err)
+	}
+	if active != generation {
+		return fmt.Errorf("%w: configured generation %q, active generation %q", domain.ErrGenerationMismatch, generation, active)
+	}
+	if recordedStore == "" || recordedTarget == "" {
+		return fmt.Errorf("%w: start a serving replica to bind the physical target", ErrGenerationDrift)
+	}
+	if recordedStore != store || recordedTarget != target || recordedHost != host {
+		return fmt.Errorf("%w: generation %q targets %s %q (%s), configured %s %q (%s)", ErrGenerationDrift, generation, recordedStore, recordedTarget, recordedHost, store, target, host)
+	}
+	profileHash := configured.Hash()
+	if activeHash != "" && activeHash != profileHash {
+		return fmt.Errorf("%w: generation %q records profile %s, configured %s", ErrGenerationDrift, generation, activeHash, profileHash)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	c.vectorPin.Store(&vectorPin{generation: generation, profileHash: profileHash})
+	return nil
 }
 
 // FreezeWriters pauses admission, job claims and deletions for a migration.
@@ -367,6 +438,10 @@ func (c *Client) FreezeWriters(ctx context.Context, generation string) error {
 	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 		return fmt.Errorf("postgres: wait for admissions: %w", err)
+	}
+	// Admissions are blocked now, so no fixture can appear before the freeze is published.
+	if fixtureErr := requireServiceableFixtures(ctx, tx, generation); fixtureErr != nil {
+		return fixtureErr
 	}
 	tag, err := tx.Exec(ctx, `UPDATE vector_state SET frozen=TRUE, frozen_at=CASE WHEN frozen THEN frozen_at ELSE clock_timestamp() END, freeze_generation=$1
  WHERE NOT frozen OR freeze_generation=$1`, generation)
@@ -496,6 +571,37 @@ func (f *GenerationFence) RecordVerification(ctx context.Context, frozenAt time.
 	return tx.Commit(ctx)
 }
 
+// requireServiceableFixtures refuses to move serving to a generation that binds
+// a different physical store than an active evaluation fixture. The fixture's
+// jobs and its receipt-qualified deletion belong to workers attached to the
+// bound store, and the replicas of the previous generation are fenced after the
+// switch. An unknown legacy binding matches no store. Deleting a fixture by its
+// original receipt retires the reservation, so it no longer blocks the switch.
+// A generation that is unregistered or already active changes nothing.
+func requireServiceableFixtures(ctx context.Context, q queryRower, generation string) error {
+	state, err := readVectorState(ctx, q)
+	if err != nil {
+		return err
+	}
+	if state.Active == generation {
+		return nil
+	}
+	target, err := readGeneration(ctx, q, generation, "")
+	if err != nil || target == nil {
+		return err
+	}
+	var stranded int
+	err = q.QueryRow(ctx, `SELECT count(*) FROM evaluation_fixtures WHERE active_document_id IS NOT NULL AND vector_identity IS DISTINCT FROM $1`,
+		domain.FixtureVectorIdentity(target.Store, target.Target, target.Host)).Scan(&stranded)
+	if err != nil {
+		return fmt.Errorf("postgres: read evaluation fixture bindings: %w", err)
+	}
+	if stranded > 0 {
+		return fmt.Errorf("%w: %d active fixtures would lose their receipts on generation %q; thaw writers if they are frozen, delete each fixture by its original receipt and retry", ErrFixtureReceipts, stranded, generation)
+	}
+	return nil
+}
+
 func lockVectorState(ctx context.Context, tx pgx.Tx) (VectorState, error) {
 	var s VectorState
 	err := scanVectorState(tx.QueryRow(ctx, `SELECT `+vectorStateColumns+` FROM vector_state FOR UPDATE`), &s)
@@ -542,6 +648,9 @@ func (f *GenerationFence) Activate(ctx context.Context, corpusDigest string, win
 	if freezeErr := frozenFor(state, name); freezeErr != nil {
 		return freezeErr
 	}
+	if fixtureErr := requireServiceableFixtures(ctx, tx, name); fixtureErr != nil {
+		return fixtureErr
+	}
 	var settled bool
 	var running, open int
 	err = tx.QueryRow(ctx, `SELECT frozen_at + make_interval(secs=>$1) <= NOW(),
@@ -568,7 +677,7 @@ func (f *GenerationFence) Activate(ctx context.Context, corpusDigest string, win
 	if _, err = tx.Exec(ctx, `UPDATE vector_generations SET state='active', ever_active=TRUE, updated_at=NOW() WHERE name=$1`, name); err != nil {
 		return fmt.Errorf("postgres: activate generation %q: %w", name, err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE vector_state SET active_generation=$1`, name); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE vector_state SET active_generation=$1, active_profile_hash=$2`, name, target.Profile.Hash()); err != nil {
 		return fmt.Errorf("postgres: record active generation: %w", err)
 	}
 	return tx.Commit(ctx)

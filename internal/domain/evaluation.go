@@ -2,7 +2,9 @@ package domain
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -23,6 +25,16 @@ const (
 	FixtureRetired    = "retired"
 	FixtureWrongStore = "store_mismatch"
 )
+
+// FixtureVectorIdentity names the concrete vector store a fixture is bound to.
+// A PostgreSQL target is identified by the store alone, and a Pinecone target
+// by its index name and resolved host.
+func FixtureVectorIdentity(store, target, host string) string {
+	if store == "pinecone" {
+		return fmt.Sprintf("pinecone:%x", sha256.Sum256([]byte(target+"\x00"+host)))
+	}
+	return store
+}
 
 // ErrFixtureDeletionRequired directs an ordinary caller to receipt-qualified cleanup.
 var ErrFixtureDeletionRequired = errors.New("evaluation fixture requires its receipt and incarnation")

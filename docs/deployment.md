@@ -198,7 +198,7 @@ When replicas share an account quota expressed in concurrent requests, the large
 
 Apply this formula to `QUERY_CONCURRENCY` and `EMBED_CONCURRENCY` with the quotas of the models they call, and to `EXTRACT_CONCURRENCY` when the deployment sets its own cluster-wide upload limit. Each result must stay within the variable's [bounds](configuration.md#environment-variables); a result below 1 means the quota cannot support that many replicas. Retries run inside these limits, so they add requests but not concurrency.
 
-PostgreSQL connections also add up across replicas. Each replica opens one pool of at most `pool_max_conns` connections, set in [`DATABASE_URL`](configuration.md#environment-variables); startup migrations use this pool. Maintenance connections are administrative sessions plus the separate pools of `make cleanup` and `make reconcile`, each capped by the same setting. The total must fit within `max_connections` less the server's reserved slots, such as `superuser_reserved_connections`:
+PostgreSQL connections also add up across replicas. Each replica opens one pool of at most `pool_max_conns` connections, set in [`DATABASE_URL`](configuration.md#environment-variables); startup migrations use this pool. Maintenance connections are administrative sessions plus the separate pools of `make cleanup`, `make reconcile` and `make reindex`, each capped by the same setting. The total must fit within `max_connections` less the server's reserved slots, such as `superuser_reserved_connections`:
 
 `replicas × pool_max_conns + maintenance connections ≤ max_connections − reserved slots`
 
@@ -365,15 +365,67 @@ separate command. Repeat the catalog check before enabling exact search.
 ### Changing Models or Vector Stores
 
 A chat model change can reuse the existing vectors when the embedding model and
-its output dimensions stay the same. When changing the embedding model,
-re-embed the corpus into a matching index before switching query traffic, even
-if the dimensions stay the same.
+its output dimensions stay the same. Changing the embedding model, its revision
+or its dimensions, or changing the vector store, moves the corpus to a new
+vector generation: a target staged beside the live one that keeps every
+document and chunk identity, so saved allowlists, citations and fingerprints stay
+valid. A configuration change alone leaves completed documents in their current
+state and never copies them. Use the same vector store and embedding model
+across replicas sharing an ingestion queue. [`make reindex`](development.md#vector-reindex-scriptsreindex)
+is the command; this section gives the order.
 
-When changing only the vector store, migrate the existing vectors or re-ingest
-documents with new identities in the target store before switching query
-traffic. A configuration change leaves completed documents in their current
-state. Use the same vector store and embedding model across replicas sharing an
-ingestion queue.
+Before starting, run a release that contains migration 016 on every replica and
+worker. Earlier releases ignore the writer freeze and the active-generation pin,
+so finish that rollout first. Start a replica with the actual live configuration
+to bind the physical legacy target before invoking reindex. Provision the target:
+for Pinecone, a ready cosine index of the new
+dimension; for PostgreSQL, nothing, because the command creates
+`chunk_vectors_<generation>` and the database role needs the permissions
+described in [PostgreSQL vectors](#postgresql-vectors).
+
+1. Write the profile of the target: provider, model, exact revision,
+   dimensions, `cosine` and the extraction and chunk version of the stored
+   chunks. Use the extraction and chunk settings that produced the stored text.
+   Run the inventory and resolve every blocker.
+2. If you know what produced the legacy vectors, configure every legacy replica
+   with that profile and record it with `-attest-source -apply`. Attestation
+   waits for admitted transactions and rejects while running job attempts
+   remain. After attestation, only replicas pinned to that profile can admit or
+   claim work. If the historical profile is unknown, re-embed every stored
+   chunk and prepare independent query fixtures using the current serving
+   query encoder and the target encoder. Configure the replacement embedding
+   deployment for staging and supply `-max-embed-calls` whenever staging
+   needs to recompute vectors.
+3. Stage with `-apply` while the service keeps serving. Repeat until a run
+   reports `complete: true`. Resume a bounded run with the cursor it reports.
+4. Freeze writers for the target generation and wait for the settling time.
+   Reads continue; [writes pause](api.md#writer-pause). Freezing and activation
+   refuse a target in a different vector store than an active
+   [evaluation fixture](development.md#evidence-evaluation), because only workers
+   attached to the fixture's store can lease its job or delete it by receipt.
+   Delete each such fixture by its original receipt first. After a freeze,
+   thaw, delete and freeze again. A receipt with an unknown binding blocks as
+   well; resolve it as that section describes.
+5. Start staging again from the beginning and finish catch-up. Verify with declared
+   thresholds and `-apply` to record the result, then activate. Verification and
+   activation fail if anything changed after the catch-up. For different embedding
+   spaces or an unattested legacy target, [prepare matched query fixtures](development.md#vector-reindex-scriptsreindex).
+6. Deploy every replica sharing the queue with `VECTOR_GENERATION` set to the new
+   generation, the matching embedding deployment and extraction settings, and
+   `PINECONE_INDEX_NAME` for a Pinecone target. Apply any [serving grants](grant-catalog.md)
+   for the promoted table before starting those replicas. A replica on any other
+   generation, or with settings that differ from the recorded ones, cannot start
+   or cannot write.
+7. Resume writers with `-thaw -apply`.
+
+Keep the old target for rollback. Changes made after writes resumed exist only
+in the new target, so catch the old target up before switching back: freeze for
+the old generation, stage into it, verify, activate it and redeploy the old
+settings. Frozen catch-up also compares every retired target key with PostgreSQL
+to remove stale records written during its earlier active period.
+For an unattested legacy source, keep the original target intact and prepare a
+separate rollback generation with a known profile if you need to return to the
+previous serving encoder.
 
 ### AWS Credentials
 

@@ -26,7 +26,7 @@ import (
 const testDims = 4
 
 func testProfile(model string) domain.EmbeddingProfile {
-	return domain.EmbeddingProfile{Provider: domain.EmbeddingProviderBedrock, Model: model, ModelRevision: "rev-1", Dimensions: testDims, Metric: domain.MetricCosine, ExtractionChunkVersion: "chunk-1"}
+	return domain.EmbeddingProfile{Provider: domain.EmbeddingProviderOpenAI, Model: model, ModelRevision: "rev-1", Dimensions: testDims, Metric: domain.MetricCosine, ExtractionChunkVersion: (&config.Config{ExtractionChunkVersion: "chunk-1"}).TextProfile()}
 }
 
 // embedWith returns a deterministic vector that depends on the model, so two
@@ -124,7 +124,7 @@ func testConfig() *config.Config {
 
 func memoryPinecone() (*pcstore.Client, *pcstore.MemoryIndex) {
 	index := pcstore.NewMemoryIndex(testDims)
-	return pcstore.NewClientForIndex(index, testConfig()), index
+	return pcstore.NewClientForIndex(index, testConfig(), ""), index
 }
 
 func defaultOptions() options {
