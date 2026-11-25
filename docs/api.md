@@ -57,6 +57,8 @@ When `SERVICE_TOKEN` or `SERVICE_TOKENS` is configured, all mutating and sensiti
 
 Requests missing or presenting an empty or incorrect token receive `401 Unauthorized`. Each request hashes the header with SHA-256 and compares it against every configured digest in constant time, without stopping at a match. An empty combined token list is allowed only in offline mode and leaves service routes open. The `GET /livez`, `GET /readyz` and `GET /health` endpoints are public and do not require authentication. To change tokens without downtime, follow [Service Token Rotation](deployment.md#service-token-rotation).
 
+See [subject identity](grant-catalog.md#subject-identity) for the staged grant catalog verifier.
+
 ---
 
 ## Endpoints

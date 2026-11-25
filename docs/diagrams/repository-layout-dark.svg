@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 960" role="img" fill="#e6edf3">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 1000" role="img" fill="#e6edf3">
 <title>Repository layout</title>
-<desc>Repository layout, from the directory listing to depth three. client/ Go client for the HTTP API. cmd/ Executable entry points. cmd/quarry-mcp/ Local MCP server over stdio. cmd/server/ Wiring and graceful shutdown. docs/ Service documentation. docs/diagrams/ Architecture, schema and layout. docs/diagrams/src/ Diagram placement sources. internal/ Private service packages. internal/api/ HTTP router. internal/api/handler/ Request handlers. internal/api/middleware/ Authentication, logs and metrics. internal/awsconf/ AWS credentials and retry policy. internal/chunker/ Text windows and fingerprints. internal/cleanup/ Document deletion across stores. internal/config/ Configuration and validation. internal/domain/ Shared types and interfaces. internal/embedder/ Titan V2 and offline embeddings. internal/embeddinginput/ Model input profiles. internal/extractor/ File parsing and process isolation. internal/llm/ Answer routing and Converse. internal/logctx/ Request log attributes. internal/metrics/ Prometheus text metrics. internal/ocr/ Asynchronous PDF text detection. internal/pipeline/ Ingestion and query stages. internal/retriever/ LOCAL and GLOBAL retrieval. internal/store/ Storage adapters. internal/store/memory/ Offline vector index. internal/store/pinecone/ Hosted vector index. internal/store/postgres/ Documents, chunks and durable jobs. internal/store/s3/ Original files and signed downloads. internal/testutil/ Test support. internal/testutil/docxtest/ Word package fixtures. internal/testutil/pgtest/ Disposable database containers. internal/textutil/ Unicode normalization. internal/tracing/ OpenTelemetry export and span helpers. internal/wordprocessingml/ Word schema identifiers. internal/worker/ Leased ingestion and retry handling. scripts/ Operational commands. scripts/cleanup/ Delete selected documents. scripts/grant-catalog/ Import tenant grants. scripts/langeval/ Answer language and latency checks. scripts/reconcile/ Find and remove orphan vectors. scripts/simulate/ Exercise the service API. scripts/validate/ Check retrieval behavior. test/ Service test suites. test/integration/ Database and API integration. test/smoke/ Opt-in live service checks. test/unit/ Package behavior checks. tools/ Documentation support. tools/diagrams/ Vector image sources and checks. tools/diagrams/fonts/ Bundled typefaces and license. The highlight follows cmd/server, internal/api, internal/pipeline, internal/retriever, internal/llm and internal/store.</desc>
-<style>@keyframes n3{0%{opacity:0}1.818%{opacity:0}5.455%{opacity:1}12.727%{opacity:1}16.364%{opacity:0}100%{opacity:0}}@keyframes n8{0%{opacity:0}12.727%{opacity:0}16.364%{opacity:1}23.636%{opacity:1}27.273%{opacity:0}100%{opacity:0}}@keyframes n19{0%{opacity:0}45.455%{opacity:0}49.091%{opacity:1}56.364%{opacity:1}60%{opacity:0}100%{opacity:0}}@keyframes n23{0%{opacity:0}23.636%{opacity:0}27.273%{opacity:1}34.545%{opacity:1}38.182%{opacity:0}100%{opacity:0}}@keyframes n24{0%{opacity:0}34.545%{opacity:0}38.182%{opacity:1}45.455%{opacity:1}49.091%{opacity:0}100%{opacity:0}}@keyframes n25{0%{opacity:0}56.364%{opacity:0}60%{opacity:1}67.273%{opacity:1}70.909%{opacity:0}100%{opacity:0}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
+<desc>Repository layout, from the directory listing to depth three. client/ Go client for the HTTP API. cmd/ Executable entry points. cmd/quarry-mcp/ Local MCP server over stdio. cmd/server/ Wiring and graceful shutdown. docs/ Service documentation. docs/diagrams/ Architecture, schema and layout. docs/diagrams/src/ Diagram placement sources. internal/ Private service packages. internal/api/ HTTP router. internal/api/handler/ Request handlers. internal/api/middleware/ Authentication, logs and metrics. internal/awsconf/ AWS credentials and retry policy. internal/chunker/ Text windows and fingerprints. internal/cleanup/ Document deletion across stores. internal/config/ Configuration and validation. internal/credential/ Token files and JWT parsing. internal/domain/ Shared types and interfaces. internal/embedder/ Titan V2 and offline embeddings. internal/embeddinginput/ Model input profiles. internal/extractor/ File parsing and process isolation. internal/llm/ Answer routing and Converse. internal/logctx/ Request log attributes. internal/metrics/ Prometheus text metrics. internal/ocr/ Asynchronous PDF text detection. internal/pipeline/ Ingestion and query stages. internal/retriever/ LOCAL and GLOBAL retrieval. internal/store/ Storage adapters. internal/store/memory/ Offline vector index. internal/store/pinecone/ Hosted vector index. internal/store/postgres/ Documents, chunks and durable jobs. internal/store/s3/ Original files and signed downloads. internal/subjectauth/ Delegated access token verification. internal/testutil/ Test support. internal/testutil/docxtest/ Word package fixtures. internal/testutil/pgtest/ Disposable database containers. internal/textutil/ Unicode normalization. internal/tracing/ OpenTelemetry export and span helpers. internal/wordprocessingml/ Word schema identifiers. internal/worker/ Leased ingestion and retry handling. scripts/ Operational commands. scripts/cleanup/ Delete selected documents. scripts/grant-catalog/ Import tenant grants. scripts/langeval/ Answer language and latency checks. scripts/reconcile/ Find and remove orphan vectors. scripts/simulate/ Exercise the service API. scripts/validate/ Check retrieval behavior. test/ Service test suites. test/integration/ Database and API integration. test/smoke/ Opt-in live service checks. test/unit/ Package behavior checks. tools/ Documentation support. tools/diagrams/ Vector image sources and checks. tools/diagrams/fonts/ Bundled typefaces and license. The highlight follows cmd/server, internal/api, internal/pipeline, internal/retriever, internal/llm and internal/store.</desc>
+<style>@keyframes n3{0%{opacity:0}1.818%{opacity:0}5.455%{opacity:1}12.727%{opacity:1}16.364%{opacity:0}100%{opacity:0}}@keyframes n8{0%{opacity:0}12.727%{opacity:0}16.364%{opacity:1}23.636%{opacity:1}27.273%{opacity:0}100%{opacity:0}}@keyframes n20{0%{opacity:0}45.455%{opacity:0}49.091%{opacity:1}56.364%{opacity:1}60%{opacity:0}100%{opacity:0}}@keyframes n24{0%{opacity:0}23.636%{opacity:0}27.273%{opacity:1}34.545%{opacity:1}38.182%{opacity:0}100%{opacity:0}}@keyframes n25{0%{opacity:0}34.545%{opacity:0}38.182%{opacity:1}45.455%{opacity:1}49.091%{opacity:0}100%{opacity:0}}@keyframes n26{0%{opacity:0}56.364%{opacity:0}60%{opacity:1}67.273%{opacity:1}70.909%{opacity:0}100%{opacity:0}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
 <defs>
 <path id="r2c" d="M63 175L105 -102L206 -102L130 175L63 175"/>
 <path id="r2d" d="M390 -351L390 -270L70 -270L70 -351L390 -351"/>
@@ -15,6 +15,7 @@
 <path id="r47" d="M385 10Q288 10 215 -36Q142 -81 101 -165Q60 -249 60 -363Q60 -479 101 -563Q142 -646 214 -692Q286 -737 379 -737Q457 -737 519 -707Q582 -677 624 -624Q665 -570 678 -500L583 -500Q560 -569 508 -610Q457 -651 380 -651Q316 -651 264 -618Q211 -585 181 -521Q150 -457 150 -363Q150 -271 181 -207Q212 -143 265 -109Q318 -76 385 -76Q446 -76 492 -102Q539 -127 565 -174Q592 -221 593 -285L404 -285L404 -366L684 -366L684 -286Q684 -196 645 -129Q606 -63 539 -26Q472 10 385 10"/>
 <path id="r48" d="M88 0L88 -728L181 -728L181 -413L563 -413L563 -728L655 -728L655 0L563 0L563 -331L181 -331L181 0L88 0"/>
 <path id="r49" d="M181 -728L181 0L88 0L88 -728L181 -728"/>
+<path id="r4a" d="M266 10Q170 10 109 -47Q49 -104 49 -208L49 -247L142 -247L142 -208Q142 -142 176 -106Q210 -72 266 -72Q322 -72 356 -106Q390 -142 390 -208L390 -728L483 -728L483 -208Q483 -104 422 -47Q362 10 266 10"/>
 <path id="r4c" d="M88 0L88 -728L181 -728L181 -82L518 -82L518 0L88 0"/>
 <path id="r4d" d="M88 0L88 -728L220 -728L399 -269Q409 -242 424 -195Q439 -147 453 -103Q465 -146 480 -193Q496 -241 506 -269L683 -728L815 -728L815 0L724 0L724 -416Q724 -456 725 -514Q726 -572 728 -628Q708 -566 687 -507Q667 -448 654 -416L492 0L411 0L246 -416Q234 -446 214 -504Q194 -563 173 -627Q174 -575 175 -516Q176 -458 176 -416L176 0L88 0"/>
 <path id="r4f" d="M383 10Q290 10 216 -35Q144 -81 102 -164Q60 -248 60 -363Q60 -479 102 -563Q144 -646 216 -692Q290 -737 383 -737Q476 -737 549 -692Q622 -646 663 -563Q705 -479 705 -363Q705 -248 663 -164Q622 -81 549 -35Q476 10 383 10M383 -76Q448 -76 500 -109Q553 -142 584 -206Q615 -271 615 -363Q615 -457 584 -521Q553 -585 500 -618Q448 -651 383 -651Q317 -651 265 -618Q212 -585 181 -521Q150 -457 150 -363Q150 -271 181 -207Q212 -143 265 -109Q317 -76 383 -76"/>
@@ -73,6 +74,7 @@
 <path id="s67" d="M303 216Q204 216 145 180Q85 144 64 89L172 51Q185 74 213 97Q243 119 302 119Q361 119 397 91Q433 64 433 5L433 -98L422 -98Q412 -78 394 -57Q376 -36 346 -22Q315 -8 268 -8Q206 -8 154 -38Q104 -67 73 -126Q43 -186 43 -274Q43 -364 73 -426Q104 -488 155 -521Q206 -553 269 -553Q317 -553 349 -537Q380 -521 398 -498Q417 -475 427 -456L434 -456L434 -546L558 -546L558 1Q558 75 525 122Q492 169 434 192Q376 216 303 216M304 -108Q366 -108 399 -153Q433 -197 433 -275Q433 -353 400 -400Q367 -448 304 -448Q239 -448 206 -399Q173 -350 173 -275Q173 -200 207 -154Q240 -108 304 -108"/>
 <path id="s68" d="M194 -320L194 0L67 0L67 -728L192 -728L192 -445Q242 -553 358 -553Q442 -553 494 -499Q545 -445 545 -347L545 0L417 0L417 -328Q417 -382 389 -414Q361 -445 311 -445Q260 -445 227 -412Q194 -379 194 -320"/>
 <path id="s69" d="M67 0L67 -546L194 -546L194 0L67 0M131 -623Q101 -623 79 -643Q57 -664 57 -693Q57 -722 79 -742Q101 -762 131 -762Q162 -762 183 -742Q205 -722 205 -693Q205 -664 183 -643Q162 -623 131 -623"/>
+<path id="s6a" d="M67 -546L194 -546L194 32Q194 121 145 162Q95 204 5 204L-21 204L-21 100L-2 100Q35 100 51 83Q67 65 67 30L67 -546M130 -623Q100 -623 78 -643Q57 -664 57 -693Q57 -722 78 -742Q100 -762 130 -762Q161 -762 183 -742Q205 -722 205 -693Q205 -664 183 -643Q161 -623 130 -623"/>
 <path id="s6b" d="M67 0L67 -728L194 -728L194 -326L204 -326L400 -546L549 -546L338 -310L562 0L410 0L241 -234L194 -184L194 0L67 0"/>
 <path id="s6c" d="M194 -728L194 0L67 0L67 -728L194 -728"/>
 <path id="s6d" d="M67 0L67 -546L187 -546L190 -442Q212 -500 254 -527Q296 -555 345 -555Q450 -555 485 -436Q507 -495 555 -525Q602 -555 660 -555Q733 -555 783 -507Q833 -459 833 -368L833 0L706 0L706 -349Q706 -399 678 -423Q650 -446 611 -446Q565 -446 539 -417Q512 -389 512 -343L512 0L388 0L388 -355Q388 -396 362 -421Q336 -446 296 -446Q254 -446 224 -417Q194 -389 194 -334L194 0L67 0"/>
@@ -93,15 +95,15 @@
 <path d="M0 0L8 3.5L0 7Z" fill="#6e7681"/>
 </marker>
 </defs>
-<rect class="background" x="0" y="0" width="840" height="960" rx="14" fill="#0d1117"/>
+<rect class="background" x="0" y="0" width="840" height="1000" rx="14" fill="#0d1117"/>
 <g fill="none" stroke="#30363d" stroke-width="1" stroke-dasharray="4 4">
-<rect class="group" x="16" y="88" width="392" height="856" rx="14"/>
-<rect class="group" x="432" y="88" width="392" height="48" rx="14"/>
-<rect class="group" x="432" y="152" width="392" height="112" rx="14"/>
-<rect class="group" x="432" y="280" width="392" height="112" rx="14"/>
-<rect class="group" x="432" y="408" width="392" height="212" rx="14"/>
-<rect class="group" x="432" y="632" width="392" height="144" rx="14"/>
-<rect class="group" x="432" y="792" width="392" height="112" rx="14"/>
+<rect class="group" x="16" y="72" width="392" height="912" rx="14"/>
+<rect class="group" x="432" y="72" width="392" height="48" rx="14"/>
+<rect class="group" x="432" y="136" width="392" height="112" rx="14"/>
+<rect class="group" x="432" y="264" width="392" height="112" rx="14"/>
+<rect class="group" x="432" y="392" width="392" height="212" rx="14"/>
+<rect class="group" x="432" y="616" width="392" height="144" rx="14"/>
+<rect class="group" x="432" y="776" width="392" height="112" rx="14"/>
 </g>
 <g fill="none" stroke="#6e7681" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#arrow)">
 </g>
@@ -116,7 +118,7 @@
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#1c3a5e">
-<rect class="hit" x="469" y="225" width="342" height="30" rx="9" opacity="0" style="animation:n3 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
+<rect class="hit" x="469" y="209" width="342" height="30" rx="9" opacity="0" style="animation:n3 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
@@ -129,7 +131,7 @@
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#1c3a5e">
-<rect class="hit" x="53" y="125" width="342" height="26" rx="9" opacity="0" style="animation:n8 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
+<rect class="hit" x="53" y="109" width="342" height="26" rx="9" opacity="0" style="animation:n8 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
@@ -146,15 +148,6 @@
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
-</g>
-<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
-</g>
-<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
-</g>
-<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
-</g>
-<g fill="#1c3a5e">
-<rect class="hit" x="53" y="433" width="342" height="26" rx="9" opacity="0" style="animation:n19 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
@@ -165,17 +158,30 @@
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#1c3a5e">
-<rect class="hit" x="53" y="545" width="342" height="26" rx="9" opacity="0" style="animation:n23 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
+<rect class="hit" x="53" y="445" width="342" height="26" rx="9" opacity="0" style="animation:n20 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
+</g>
+<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
+</g>
+<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
+</g>
+<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#1c3a5e">
-<rect class="hit" x="53" y="573" width="342" height="26" rx="9" opacity="0" style="animation:n24 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
+<rect class="hit" x="53" y="557" width="342" height="26" rx="9" opacity="0" style="animation:n24 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#1c3a5e">
-<rect class="hit" x="53" y="601" width="342" height="26" rx="9" opacity="0" style="animation:n25 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
+<rect class="hit" x="53" y="585" width="342" height="26" rx="9" opacity="0" style="animation:n25 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
+</g>
+<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
+</g>
+<g fill="#1c3a5e">
+<rect class="hit" x="53" y="613" width="342" height="26" rx="9" opacity="0" style="animation:n26 11s cubic-bezier(0.45,0,0.55,1) infinite"/>
+</g>
+<g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
 <g fill="#161b22" stroke="#30363d" stroke-width="1.25">
 </g>
@@ -267,7 +273,7 @@
 <use href="#s48" x="13279"/>
 <use href="#s33" x="14397"/>
 </g>
-<g transform="translate(456 117) scale(0.014)">
+<g transform="translate(456 101) scale(0.014)">
 <use href="#s63"/>
 <use href="#s6c" x="583"/>
 <use href="#s69" x="844"/>
@@ -276,7 +282,7 @@
 <use href="#s74" x="2309"/>
 <use href="#s2f" x="2662"/>
 </g>
-<g fill="#9198a1" transform="translate(509.966 117) scale(0.012)">
+<g fill="#9198a1" transform="translate(509.966 101) scale(0.012)">
 <use href="#r47"/>
 <use href="#r6f" x="746"/>
 <use href="#r63" x="1627"/>
@@ -299,13 +305,13 @@
 <use href="#r50" x="11519"/>
 <use href="#r49" x="12158"/>
 </g>
-<g transform="translate(456 181) scale(0.014)">
+<g transform="translate(456 165) scale(0.014)">
 <use href="#s63"/>
 <use href="#s6d" x="583"/>
 <use href="#s64" x="1483"/>
 <use href="#s2f" x="2107"/>
 </g>
-<g fill="#9198a1" transform="translate(502.193 181) scale(0.012)">
+<g fill="#9198a1" transform="translate(502.193 165) scale(0.012)">
 <use href="#r45"/>
 <use href="#r78" x="601"/>
 <use href="#r65" x="1147"/>
@@ -328,7 +334,7 @@
 <use href="#r74" x="10266"/>
 <use href="#r73" x="10593"/>
 </g>
-<g transform="translate(480 213) scale(0.014)">
+<g transform="translate(480 197) scale(0.014)">
 <use href="#s71"/>
 <use href="#s75" x="624"/>
 <use href="#s61" x="1236"/>
@@ -341,7 +347,7 @@
 <use href="#s70" x="5141"/>
 <use href="#s2f" x="5765"/>
 </g>
-<g fill="#9198a1" transform="translate(577.408 213) scale(0.012)">
+<g fill="#9198a1" transform="translate(577.408 197) scale(0.012)">
 <use href="#r4c"/>
 <use href="#r6f" x="565"/>
 <use href="#r63" x="1165"/>
@@ -366,7 +372,7 @@
 <use href="#r69" x="12535"/>
 <use href="#r6f" x="12777"/>
 </g>
-<g transform="translate(480 245) scale(0.014)">
+<g transform="translate(480 229) scale(0.014)">
 <use href="#s73"/>
 <use href="#s65" x="549"/>
 <use href="#s72" x="1141"/>
@@ -375,7 +381,7 @@
 <use href="#s72" x="2716"/>
 <use href="#s2f" x="3113"/>
 </g>
-<g fill="#9198a1" transform="translate(540.282 245) scale(0.012)">
+<g fill="#9198a1" transform="translate(540.282 229) scale(0.012)">
 <use href="#r57"/>
 <use href="#r69" x="985"/>
 <use href="#r72" x="1228"/>
@@ -402,14 +408,14 @@
 <use href="#r77" x="12817"/>
 <use href="#r6e" x="13636"/>
 </g>
-<g transform="translate(456 309) scale(0.014)">
+<g transform="translate(456 293) scale(0.014)">
 <use href="#s64"/>
 <use href="#s6f" x="624"/>
 <use href="#s63" x="1233"/>
 <use href="#s73" x="1815"/>
 <use href="#s2f" x="2365"/>
 </g>
-<g fill="#9198a1" transform="translate(505.803 309) scale(0.012)">
+<g fill="#9198a1" transform="translate(505.803 293) scale(0.012)">
 <use href="#r53"/>
 <use href="#r65" x="642"/>
 <use href="#r72" x="1225"/>
@@ -431,7 +437,7 @@
 <use href="#r6f" x="9723"/>
 <use href="#r6e" x="10323"/>
 </g>
-<g transform="translate(480 341) scale(0.014)">
+<g transform="translate(480 325) scale(0.014)">
 <use href="#s64"/>
 <use href="#s69" x="624"/>
 <use href="#s61" x="886"/>
@@ -442,7 +448,7 @@
 <use href="#s73" x="3957"/>
 <use href="#s2f" x="4506"/>
 </g>
-<g fill="#9198a1" transform="translate(559.785 341) scale(0.012)">
+<g fill="#9198a1" transform="translate(559.785 325) scale(0.012)">
 <use href="#r41"/>
 <use href="#r72" x="690"/>
 <use href="#r63" x="1066"/>
@@ -472,13 +478,13 @@
 <use href="#r75" x="14403"/>
 <use href="#r74" x="14995"/>
 </g>
-<g transform="translate(504 373) scale(0.014)">
+<g transform="translate(504 357) scale(0.014)">
 <use href="#s73"/>
 <use href="#s72" x="549"/>
 <use href="#s63" x="946"/>
 <use href="#s2f" x="1529"/>
 </g>
-<g fill="#9198a1" transform="translate(542.106 373) scale(0.012)">
+<g fill="#9198a1" transform="translate(542.106 357) scale(0.012)">
 <use href="#r44"/>
 <use href="#r69" x="722"/>
 <use href="#r61" x="964"/>
@@ -503,7 +509,7 @@
 <use href="#r65" x="12129"/>
 <use href="#r73" x="12712"/>
 </g>
-<g transform="translate(40 117) scale(0.014)">
+<g transform="translate(40 101) scale(0.014)">
 <use href="#s69"/>
 <use href="#s6e" x="262"/>
 <use href="#s74" x="874"/>
@@ -514,7 +520,7 @@
 <use href="#s6c" x="3401"/>
 <use href="#s2f" x="3663"/>
 </g>
-<g fill="#9198a1" transform="translate(107.781 117) scale(0.012)">
+<g fill="#9198a1" transform="translate(107.781 101) scale(0.012)">
 <use href="#r50"/>
 <use href="#r72" x="639"/>
 <use href="#r69" x="1015"/>
@@ -538,13 +544,13 @@
 <use href="#r65" x="10768"/>
 <use href="#r73" x="11351"/>
 </g>
-<g transform="translate(64 145) scale(0.014)">
+<g transform="translate(64 129) scale(0.014)">
 <use href="#s61"/>
 <use href="#s70" x="574"/>
 <use href="#s69" x="1198"/>
 <use href="#s2f" x="1460"/>
 </g>
-<g fill="#9198a1" transform="translate(101.225 145) scale(0.012)">
+<g fill="#9198a1" transform="translate(101.225 129) scale(0.012)">
 <use href="#r48"/>
 <use href="#r54" x="743"/>
 <use href="#r54" x="1389"/>
@@ -556,7 +562,7 @@
 <use href="#r65" x="4849"/>
 <use href="#r72" x="5432"/>
 </g>
-<g transform="translate(88 173) scale(0.014)">
+<g transform="translate(88 157) scale(0.014)">
 <use href="#s68"/>
 <use href="#s61" x="612"/>
 <use href="#s6e" x="1187"/>
@@ -566,7 +572,7 @@
 <use href="#s72" x="3275"/>
 <use href="#s2f" x="3672"/>
 </g>
-<g fill="#9198a1" transform="translate(155.774 173) scale(0.012)">
+<g fill="#9198a1" transform="translate(155.774 157) scale(0.012)">
 <use href="#r52"/>
 <use href="#r65" x="644"/>
 <use href="#r71" x="1227"/>
@@ -583,7 +589,7 @@
 <use href="#r72" x="7331"/>
 <use href="#r73" x="7707"/>
 </g>
-<g transform="translate(88 201) scale(0.014)">
+<g transform="translate(88 185) scale(0.014)">
 <use href="#s6d"/>
 <use href="#s69" x="900"/>
 <use href="#s64" x="1162"/>
@@ -596,7 +602,7 @@
 <use href="#s65" x="5074"/>
 <use href="#s2f" x="5665"/>
 </g>
-<g fill="#9198a1" transform="translate(183.672 201) scale(0.012)">
+<g fill="#9198a1" transform="translate(183.672 185) scale(0.012)">
 <use href="#r41"/>
 <use href="#r75" x="690"/>
 <use href="#r74" x="1281"/>
@@ -627,7 +633,7 @@
 <use href="#r63" x="14120"/>
 <use href="#r73" x="14691"/>
 </g>
-<g transform="translate(64 229) scale(0.014)">
+<g transform="translate(64 213) scale(0.014)">
 <use href="#s61"/>
 <use href="#s77" x="574"/>
 <use href="#s73" x="1414"/>
@@ -637,7 +643,7 @@
 <use href="#s66" x="3766"/>
 <use href="#s2f" x="4155"/>
 </g>
-<g fill="#9198a1" transform="translate(138.952 229) scale(0.012)">
+<g fill="#9198a1" transform="translate(138.952 213) scale(0.012)">
 <use href="#r41"/>
 <use href="#r57" x="690"/>
 <use href="#r53" x="1675"/>
@@ -667,7 +673,7 @@
 <use href="#r63" x="14346"/>
 <use href="#r79" x="14917"/>
 </g>
-<g transform="translate(64 257) scale(0.014)">
+<g transform="translate(64 241) scale(0.014)">
 <use href="#s63"/>
 <use href="#s68" x="583"/>
 <use href="#s75" x="1195"/>
@@ -677,7 +683,7 @@
 <use href="#s72" x="3580"/>
 <use href="#s2f" x="3977"/>
 </g>
-<g fill="#9198a1" transform="translate(136.368 257) scale(0.012)">
+<g fill="#9198a1" transform="translate(136.368 241) scale(0.012)">
 <use href="#r54"/>
 <use href="#r65" x="646"/>
 <use href="#r78" x="1229"/>
@@ -705,7 +711,7 @@
 <use href="#r74" x="13517"/>
 <use href="#r73" x="13844"/>
 </g>
-<g transform="translate(64 285) scale(0.014)">
+<g transform="translate(64 269) scale(0.014)">
 <use href="#s63"/>
 <use href="#s6c" x="583"/>
 <use href="#s65" x="844"/>
@@ -715,7 +721,7 @@
 <use href="#s70" x="3234"/>
 <use href="#s2f" x="3858"/>
 </g>
-<g fill="#9198a1" transform="translate(134.707 285) scale(0.012)">
+<g fill="#9198a1" transform="translate(134.707 269) scale(0.012)">
 <use href="#r44"/>
 <use href="#r6f" x="722"/>
 <use href="#r63" x="1321"/>
@@ -745,7 +751,7 @@
 <use href="#r65" x="14481"/>
 <use href="#r73" x="15064"/>
 </g>
-<g transform="translate(64 313) scale(0.014)">
+<g transform="translate(64 297) scale(0.014)">
 <use href="#s63"/>
 <use href="#s6f" x="583"/>
 <use href="#s6e" x="1191"/>
@@ -754,7 +760,7 @@
 <use href="#s67" x="2454"/>
 <use href="#s2f" x="3079"/>
 </g>
-<g fill="#9198a1" transform="translate(123.804 313) scale(0.012)">
+<g fill="#9198a1" transform="translate(123.804 297) scale(0.012)">
 <use href="#r43"/>
 <use href="#r6f" x="730"/>
 <use href="#r6e" x="1330"/>
@@ -782,7 +788,45 @@
 <use href="#r6f" x="12114"/>
 <use href="#r6e" x="12713"/>
 </g>
-<g transform="translate(64 341) scale(0.014)">
+<g transform="translate(64 325) scale(0.014)">
+<use href="#s63"/>
+<use href="#s72" x="583"/>
+<use href="#s65" x="979"/>
+<use href="#s64" x="1571"/>
+<use href="#s65" x="2195"/>
+<use href="#s6e" x="2786"/>
+<use href="#s74" x="3398"/>
+<use href="#s69" x="3751"/>
+<use href="#s61" x="4013"/>
+<use href="#s6c" x="4587"/>
+<use href="#s2f" x="4849"/>
+</g>
+<g fill="#9198a1" transform="translate(148.577 325) scale(0.012)">
+<use href="#r54"/>
+<use href="#r6f" x="646"/>
+<use href="#r6b" x="1245"/>
+<use href="#r65" x="1794"/>
+<use href="#r6e" x="2377"/>
+<use href="#r66" x="3249"/>
+<use href="#r69" x="3619"/>
+<use href="#r6c" x="3861"/>
+<use href="#r65" x="4104"/>
+<use href="#r73" x="4687"/>
+<use href="#r61" x="5496"/>
+<use href="#r6e" x="6057"/>
+<use href="#r64" x="6648"/>
+<use href="#r4a" x="7542"/>
+<use href="#r57" x="8112"/>
+<use href="#r54" x="9098"/>
+<use href="#r70" x="10024"/>
+<use href="#r61" x="10637"/>
+<use href="#r72" x="11198"/>
+<use href="#r73" x="11575"/>
+<use href="#r69" x="12103"/>
+<use href="#r6e" x="12345"/>
+<use href="#r67" x="12936"/>
+</g>
+<g transform="translate(64 353) scale(0.014)">
 <use href="#s64"/>
 <use href="#s6f" x="624"/>
 <use href="#s6d" x="1233"/>
@@ -791,7 +835,7 @@
 <use href="#s6e" x="2969"/>
 <use href="#s2f" x="3581"/>
 </g>
-<g fill="#9198a1" transform="translate(130.831 341) scale(0.012)">
+<g fill="#9198a1" transform="translate(130.831 353) scale(0.012)">
 <use href="#r53"/>
 <use href="#r68" x="642"/>
 <use href="#r61" x="1233"/>
@@ -817,7 +861,7 @@
 <use href="#r65" x="12210"/>
 <use href="#r73" x="12793"/>
 </g>
-<g transform="translate(64 369) scale(0.014)">
+<g transform="translate(64 381) scale(0.014)">
 <use href="#s65"/>
 <use href="#s6d" x="591"/>
 <use href="#s62" x="1492"/>
@@ -828,7 +872,7 @@
 <use href="#s72" x="4546"/>
 <use href="#s2f" x="4943"/>
 </g>
-<g fill="#9198a1" transform="translate(149.904 369) scale(0.012)">
+<g fill="#9198a1" transform="translate(149.904 381) scale(0.012)">
 <use href="#r54"/>
 <use href="#r69" x="646"/>
 <use href="#r74" x="888"/>
@@ -857,7 +901,7 @@
 <use href="#r67" x="14267"/>
 <use href="#r73" x="14880"/>
 </g>
-<g transform="translate(64 397) scale(0.014)">
+<g transform="translate(64 409) scale(0.014)">
 <use href="#s65"/>
 <use href="#s6d" x="591"/>
 <use href="#s62" x="1492"/>
@@ -874,7 +918,7 @@
 <use href="#s74" x="7564"/>
 <use href="#s2f" x="7917"/>
 </g>
-<g fill="#9198a1" transform="translate(191.535 397) scale(0.012)">
+<g fill="#9198a1" transform="translate(191.535 409) scale(0.012)">
 <use href="#r4d"/>
 <use href="#r6f" x="903"/>
 <use href="#r64" x="1503"/>
@@ -894,7 +938,7 @@
 <use href="#r65" x="8310"/>
 <use href="#r73" x="8893"/>
 </g>
-<g transform="translate(64 425) scale(0.014)">
+<g transform="translate(64 437) scale(0.014)">
 <use href="#s65"/>
 <use href="#s78" x="591"/>
 <use href="#s74" x="1160"/>
@@ -906,7 +950,7 @@
 <use href="#s72" x="4029"/>
 <use href="#s2f" x="4426"/>
 </g>
-<g fill="#9198a1" transform="translate(142.657 425) scale(0.012)">
+<g fill="#9198a1" transform="translate(142.657 437) scale(0.012)">
 <use href="#r46"/>
 <use href="#r69" x="590"/>
 <use href="#r6c" x="833"/>
@@ -938,13 +982,13 @@
 <use href="#r6f" x="14613"/>
 <use href="#r6e" x="15212"/>
 </g>
-<g transform="translate(64 453) scale(0.014)">
+<g transform="translate(64 465) scale(0.014)">
 <use href="#s6c"/>
 <use href="#s6c" x="262"/>
 <use href="#s6d" x="523"/>
 <use href="#s2f" x="1424"/>
 </g>
-<g fill="#9198a1" transform="translate(100.295 453) scale(0.012)">
+<g fill="#9198a1" transform="translate(100.295 465) scale(0.012)">
 <use href="#r41"/>
 <use href="#r6e" x="690"/>
 <use href="#r73" x="1281"/>
@@ -970,7 +1014,7 @@
 <use href="#r73" x="12978"/>
 <use href="#r65" x="13506"/>
 </g>
-<g transform="translate(64 481) scale(0.014)">
+<g transform="translate(64 493) scale(0.014)">
 <use href="#s6c"/>
 <use href="#s6f" x="262"/>
 <use href="#s67" x="871"/>
@@ -979,7 +1023,7 @@
 <use href="#s78" x="2432"/>
 <use href="#s2f" x="3000"/>
 </g>
-<g fill="#9198a1" transform="translate(122.368 481) scale(0.012)">
+<g fill="#9198a1" transform="translate(122.368 493) scale(0.012)">
 <use href="#r52"/>
 <use href="#r65" x="644"/>
 <use href="#r71" x="1227"/>
@@ -1001,7 +1045,7 @@
 <use href="#r65" x="9251"/>
 <use href="#r73" x="9834"/>
 </g>
-<g transform="translate(64 509) scale(0.014)">
+<g transform="translate(64 521) scale(0.014)">
 <use href="#s6d"/>
 <use href="#s65" x="900"/>
 <use href="#s74" x="1492"/>
@@ -1011,7 +1055,7 @@
 <use href="#s73" x="3086"/>
 <use href="#s2f" x="3635"/>
 </g>
-<g fill="#9198a1" transform="translate(131.255 509) scale(0.012)">
+<g fill="#9198a1" transform="translate(131.255 521) scale(0.012)">
 <use href="#r50"/>
 <use href="#r72" x="639"/>
 <use href="#r6f" x="1015"/>
@@ -1034,13 +1078,13 @@
 <use href="#r63" x="10445"/>
 <use href="#r73" x="11016"/>
 </g>
-<g transform="translate(64 537) scale(0.014)">
+<g transform="translate(64 549) scale(0.014)">
 <use href="#s6f"/>
 <use href="#s63" x="609"/>
 <use href="#s72" x="1191"/>
 <use href="#s2f" x="1588"/>
 </g>
-<g fill="#9198a1" transform="translate(102.934 537) scale(0.012)">
+<g fill="#9198a1" transform="translate(102.934 549) scale(0.012)">
 <use href="#r41"/>
 <use href="#r73" x="690"/>
 <use href="#r79" x="1218"/>
@@ -1070,7 +1114,7 @@
 <use href="#r6f" x="14643"/>
 <use href="#r6e" x="15242"/>
 </g>
-<g transform="translate(64 565) scale(0.014)">
+<g transform="translate(64 577) scale(0.014)">
 <use href="#s70"/>
 <use href="#s69" x="624"/>
 <use href="#s70" x="886"/>
@@ -1081,7 +1125,7 @@
 <use href="#s65" x="3236"/>
 <use href="#s2f" x="3828"/>
 </g>
-<g fill="#9198a1" transform="translate(133.948 565) scale(0.012)">
+<g fill="#9198a1" transform="translate(133.948 577) scale(0.012)">
 <use href="#r49"/>
 <use href="#r6e" x="269"/>
 <use href="#r67" x="859"/>
@@ -1106,7 +1150,7 @@
 <use href="#r65" x="11707"/>
 <use href="#r73" x="12290"/>
 </g>
-<g transform="translate(64 593) scale(0.014)">
+<g transform="translate(64 605) scale(0.014)">
 <use href="#s72"/>
 <use href="#s65" x="397"/>
 <use href="#s74" x="988"/>
@@ -1118,7 +1162,7 @@
 <use href="#s72" x="3770"/>
 <use href="#s2f" x="4167"/>
 </g>
-<g fill="#9198a1" transform="translate(138.692 593) scale(0.012)">
+<g fill="#9198a1" transform="translate(138.692 605) scale(0.012)">
 <use href="#r4c"/>
 <use href="#r4f" x="565"/>
 <use href="#r43" x="1330"/>
@@ -1143,7 +1187,7 @@
 <use href="#r61" x="12961"/>
 <use href="#r6c" x="13522"/>
 </g>
-<g transform="translate(64 621) scale(0.014)">
+<g transform="translate(64 633) scale(0.014)">
 <use href="#s73"/>
 <use href="#s74" x="549"/>
 <use href="#s6f" x="902"/>
@@ -1151,7 +1195,7 @@
 <use href="#s65" x="1908"/>
 <use href="#s2f" x="2500"/>
 </g>
-<g fill="#9198a1" transform="translate(115.696 621) scale(0.012)">
+<g fill="#9198a1" transform="translate(115.696 633) scale(0.012)">
 <use href="#r53"/>
 <use href="#r74" x="642"/>
 <use href="#r6f" x="969"/>
@@ -1168,7 +1212,7 @@
 <use href="#r72" x="7242"/>
 <use href="#r73" x="7618"/>
 </g>
-<g transform="translate(88 649) scale(0.014)">
+<g transform="translate(88 661) scale(0.014)">
 <use href="#s6d"/>
 <use href="#s65" x="900"/>
 <use href="#s6d" x="1492"/>
@@ -1177,7 +1221,7 @@
 <use href="#s79" x="3398"/>
 <use href="#s2f" x="3986"/>
 </g>
-<g fill="#9198a1" transform="translate(160.17 649) scale(0.012)">
+<g fill="#9198a1" transform="translate(160.17 661) scale(0.012)">
 <use href="#r4f"/>
 <use href="#r66" x="765"/>
 <use href="#r66" x="1135"/>
@@ -1197,7 +1241,7 @@
 <use href="#r65" x="8191"/>
 <use href="#r78" x="8774"/>
 </g>
-<g transform="translate(88 677) scale(0.014)">
+<g transform="translate(88 689) scale(0.014)">
 <use href="#s70"/>
 <use href="#s69" x="624"/>
 <use href="#s6e" x="886"/>
@@ -1208,7 +1252,7 @@
 <use href="#s65" x="3892"/>
 <use href="#s2f" x="4483"/>
 </g>
-<g fill="#9198a1" transform="translate(167.129 677) scale(0.012)">
+<g fill="#9198a1" transform="translate(167.129 689) scale(0.012)">
 <use href="#r48"/>
 <use href="#r6f" x="743"/>
 <use href="#r73" x="1343"/>
@@ -1227,7 +1271,7 @@
 <use href="#r65" x="8420"/>
 <use href="#r78" x="9004"/>
 </g>
-<g transform="translate(88 705) scale(0.014)">
+<g transform="translate(88 717) scale(0.014)">
 <use href="#s70"/>
 <use href="#s6f" x="624"/>
 <use href="#s73" x="1233"/>
@@ -1238,7 +1282,7 @@
 <use href="#s73" x="3749"/>
 <use href="#s2f" x="4298"/>
 </g>
-<g fill="#9198a1" transform="translate(164.538 705) scale(0.012)">
+<g fill="#9198a1" transform="translate(164.538 717) scale(0.012)">
 <use href="#r44"/>
 <use href="#r6f" x="722"/>
 <use href="#r63" x="1321"/>
@@ -1270,12 +1314,12 @@
 <use href="#r62" x="16409"/>
 <use href="#r73" x="17021"/>
 </g>
-<g transform="translate(88 733) scale(0.014)">
+<g transform="translate(88 745) scale(0.014)">
 <use href="#s73"/>
 <use href="#s33" x="549"/>
 <use href="#s2f" x="1186"/>
 </g>
-<g fill="#9198a1" transform="translate(121.301 733) scale(0.012)">
+<g fill="#9198a1" transform="translate(121.301 745) scale(0.012)">
 <use href="#r4f"/>
 <use href="#r72" x="765"/>
 <use href="#r69" x="1141"/>
@@ -1308,7 +1352,55 @@
 <use href="#r64" x="15682"/>
 <use href="#r73" x="16295"/>
 </g>
-<g transform="translate(64 761) scale(0.014)">
+<g transform="translate(64 773) scale(0.014)">
+<use href="#s73"/>
+<use href="#s75" x="549"/>
+<use href="#s62" x="1162"/>
+<use href="#s6a" x="1786"/>
+<use href="#s65" x="2047"/>
+<use href="#s63" x="2639"/>
+<use href="#s74" x="3221"/>
+<use href="#s61" x="3574"/>
+<use href="#s75" x="4148"/>
+<use href="#s74" x="4761"/>
+<use href="#s68" x="5114"/>
+<use href="#s2f" x="5726"/>
+</g>
+<g fill="#9198a1" transform="translate(160.869 773) scale(0.012)">
+<use href="#r44"/>
+<use href="#r65" x="722"/>
+<use href="#r6c" x="1305"/>
+<use href="#r65" x="1547"/>
+<use href="#r67" x="2130"/>
+<use href="#r61" x="2743"/>
+<use href="#r74" x="3305"/>
+<use href="#r65" x="3632"/>
+<use href="#r64" x="4215"/>
+<use href="#r61" x="5108"/>
+<use href="#r63" x="5670"/>
+<use href="#r63" x="6241"/>
+<use href="#r65" x="6813"/>
+<use href="#r73" x="7396"/>
+<use href="#r73" x="7923"/>
+<use href="#r74" x="8733"/>
+<use href="#r6f" x="9060"/>
+<use href="#r6b" x="9659"/>
+<use href="#r65" x="10208"/>
+<use href="#r6e" x="10791"/>
+<use href="#r76" x="11663"/>
+<use href="#r65" x="12225"/>
+<use href="#r72" x="12808"/>
+<use href="#r69" x="13185"/>
+<use href="#r66" x="13427"/>
+<use href="#r69" x="13797"/>
+<use href="#r63" x="14039"/>
+<use href="#r61" x="14610"/>
+<use href="#r74" x="15172"/>
+<use href="#r69" x="15499"/>
+<use href="#r6f" x="15741"/>
+<use href="#r6e" x="16341"/>
+</g>
+<g transform="translate(64 801) scale(0.014)">
 <use href="#s74"/>
 <use href="#s65" x="353"/>
 <use href="#s73" x="944"/>
@@ -1319,7 +1411,7 @@
 <use href="#s6c" x="3074"/>
 <use href="#s2f" x="3335"/>
 </g>
-<g fill="#9198a1" transform="translate(127.865 761) scale(0.012)">
+<g fill="#9198a1" transform="translate(127.865 801) scale(0.012)">
 <use href="#r54"/>
 <use href="#r65" x="646"/>
 <use href="#r73" x="1229"/>
@@ -1332,7 +1424,7 @@
 <use href="#r72" x="5308"/>
 <use href="#r74" x="5685"/>
 </g>
-<g transform="translate(88 789) scale(0.014)">
+<g transform="translate(88 829) scale(0.014)">
 <use href="#s64"/>
 <use href="#s6f" x="624"/>
 <use href="#s63" x="1233"/>
@@ -1343,7 +1435,7 @@
 <use href="#s74" x="3878"/>
 <use href="#s2f" x="4231"/>
 </g>
-<g fill="#9198a1" transform="translate(163.93 789) scale(0.012)">
+<g fill="#9198a1" transform="translate(163.93 829) scale(0.012)">
 <use href="#r57"/>
 <use href="#r6f" x="985"/>
 <use href="#r72" x="1585"/>
@@ -1364,7 +1456,7 @@
 <use href="#r65" x="9641"/>
 <use href="#r73" x="10224"/>
 </g>
-<g transform="translate(88 817) scale(0.014)">
+<g transform="translate(88 857) scale(0.014)">
 <use href="#s70"/>
 <use href="#s67" x="624"/>
 <use href="#s74" x="1250"/>
@@ -1373,7 +1465,7 @@
 <use href="#s74" x="2743"/>
 <use href="#s2f" x="3096"/>
 </g>
-<g fill="#9198a1" transform="translate(147.708 817) scale(0.012)">
+<g fill="#9198a1" transform="translate(147.708 857) scale(0.012)">
 <use href="#r44"/>
 <use href="#r69" x="722"/>
 <use href="#r73" x="964"/>
@@ -1403,7 +1495,7 @@
 <use href="#r72" x="14207"/>
 <use href="#r73" x="14583"/>
 </g>
-<g transform="translate(64 845) scale(0.014)">
+<g transform="translate(64 885) scale(0.014)">
 <use href="#s74"/>
 <use href="#s65" x="353"/>
 <use href="#s78" x="944"/>
@@ -1414,7 +1506,7 @@
 <use href="#s6c" x="3093"/>
 <use href="#s2f" x="3355"/>
 </g>
-<g fill="#9198a1" transform="translate(128.138 845) scale(0.012)">
+<g fill="#9198a1" transform="translate(128.138 885) scale(0.012)">
 <use href="#r55"/>
 <use href="#r6e" x="744"/>
 <use href="#r69" x="1335"/>
@@ -1436,7 +1528,7 @@
 <use href="#r6f" x="9397"/>
 <use href="#r6e" x="9996"/>
 </g>
-<g transform="translate(64 873) scale(0.014)">
+<g transform="translate(64 913) scale(0.014)">
 <use href="#s74"/>
 <use href="#s72" x="353"/>
 <use href="#s61" x="750"/>
@@ -1446,7 +1538,7 @@
 <use href="#s67" x="2780"/>
 <use href="#s2f" x="3406"/>
 </g>
-<g fill="#9198a1" transform="translate(128.848 873) scale(0.012)">
+<g fill="#9198a1" transform="translate(128.848 913) scale(0.012)">
 <use href="#r4f"/>
 <use href="#r70" x="765"/>
 <use href="#r65" x="1377"/>
@@ -1481,7 +1573,7 @@
 <use href="#r72" x="18168"/>
 <use href="#r73" x="18544"/>
 </g>
-<g transform="translate(64 901) scale(0.014)">
+<g transform="translate(64 941) scale(0.014)">
 <use href="#s77"/>
 <use href="#s6f" x="839"/>
 <use href="#s72" x="1448"/>
@@ -1500,7 +1592,7 @@
 <use href="#s6c" x="8771"/>
 <use href="#s2f" x="9033"/>
 </g>
-<g fill="#9198a1" transform="translate(207.462 901) scale(0.012)">
+<g fill="#9198a1" transform="translate(207.462 941) scale(0.012)">
 <use href="#r57"/>
 <use href="#r6f" x="985"/>
 <use href="#r72" x="1585"/>
@@ -1523,7 +1615,7 @@
 <use href="#r72" x="10640"/>
 <use href="#r73" x="11017"/>
 </g>
-<g transform="translate(64 929) scale(0.014)">
+<g transform="translate(64 969) scale(0.014)">
 <use href="#s77"/>
 <use href="#s6f" x="839"/>
 <use href="#s72" x="1448"/>
@@ -1532,7 +1624,7 @@
 <use href="#s72" x="3006"/>
 <use href="#s2f" x="3403"/>
 </g>
-<g fill="#9198a1" transform="translate(128.644 929) scale(0.012)">
+<g fill="#9198a1" transform="translate(128.644 969) scale(0.012)">
 <use href="#r4c"/>
 <use href="#r65" x="565"/>
 <use href="#r61" x="1148"/>
@@ -1565,7 +1657,7 @@
 <use href="#r6e" x="15705"/>
 <use href="#r67" x="16296"/>
 </g>
-<g transform="translate(456 437) scale(0.014)">
+<g transform="translate(456 421) scale(0.014)">
 <use href="#s73"/>
 <use href="#s63" x="549"/>
 <use href="#s72" x="1132"/>
@@ -1575,7 +1667,7 @@
 <use href="#s73" x="2768"/>
 <use href="#s2f" x="3317"/>
 </g>
-<g fill="#9198a1" transform="translate(519.14 437) scale(0.012)">
+<g fill="#9198a1" transform="translate(519.14 421) scale(0.012)">
 <use href="#r4f"/>
 <use href="#r70" x="765"/>
 <use href="#r65" x="1377"/>
@@ -1596,7 +1688,7 @@
 <use href="#r64" x="9818"/>
 <use href="#r73" x="10430"/>
 </g>
-<g transform="translate(480 465) scale(0.014)">
+<g transform="translate(480 449) scale(0.014)">
 <use href="#s63"/>
 <use href="#s6c" x="583"/>
 <use href="#s65" x="844"/>
@@ -1606,7 +1698,7 @@
 <use href="#s70" x="3234"/>
 <use href="#s2f" x="3858"/>
 </g>
-<g fill="#9198a1" transform="translate(550.707 465) scale(0.012)">
+<g fill="#9198a1" transform="translate(550.707 449) scale(0.012)">
 <use href="#r44"/>
 <use href="#r65" x="722"/>
 <use href="#r6c" x="1305"/>
@@ -1631,7 +1723,7 @@
 <use href="#r74" x="12057"/>
 <use href="#r73" x="12384"/>
 </g>
-<g transform="translate(480 493) scale(0.014)">
+<g transform="translate(480 477) scale(0.014)">
 <use href="#s67"/>
 <use href="#s72" x="625"/>
 <use href="#s61" x="1022"/>
@@ -1647,7 +1739,7 @@
 <use href="#s67" x="5981"/>
 <use href="#s2f" x="6607"/>
 </g>
-<g fill="#9198a1" transform="translate(589.193 493) scale(0.012)">
+<g fill="#9198a1" transform="translate(589.193 477) scale(0.012)">
 <use href="#r49"/>
 <use href="#r6d" x="269"/>
 <use href="#r70" x="1145"/>
@@ -1667,7 +1759,7 @@
 <use href="#r74" x="8745"/>
 <use href="#r73" x="9072"/>
 </g>
-<g transform="translate(480 521) scale(0.014)">
+<g transform="translate(480 505) scale(0.014)">
 <use href="#s6c"/>
 <use href="#s61" x="262"/>
 <use href="#s6e" x="836"/>
@@ -1678,7 +1770,7 @@
 <use href="#s6c" x="3826"/>
 <use href="#s2f" x="4087"/>
 </g>
-<g fill="#9198a1" transform="translate(553.585 521) scale(0.012)">
+<g fill="#9198a1" transform="translate(553.585 505) scale(0.012)">
 <use href="#r41"/>
 <use href="#r6e" x="690"/>
 <use href="#r73" x="1281"/>
@@ -1710,7 +1802,7 @@
 <use href="#r6b" x="16588"/>
 <use href="#r73" x="17137"/>
 </g>
-<g transform="translate(480 549) scale(0.014)">
+<g transform="translate(480 533) scale(0.014)">
 <use href="#s72"/>
 <use href="#s65" x="397"/>
 <use href="#s63" x="988"/>
@@ -1722,7 +1814,7 @@
 <use href="#s65" x="3897"/>
 <use href="#s2f" x="4489"/>
 </g>
-<g fill="#9198a1" transform="translate(559.204 549) scale(0.012)">
+<g fill="#9198a1" transform="translate(559.204 533) scale(0.012)">
 <use href="#r46"/>
 <use href="#r69" x="590"/>
 <use href="#r6e" x="833"/>
@@ -1750,7 +1842,7 @@
 <use href="#r72" x="14481"/>
 <use href="#r73" x="14857"/>
 </g>
-<g transform="translate(480 577) scale(0.014)">
+<g transform="translate(480 561) scale(0.014)">
 <use href="#s73"/>
 <use href="#s69" x="549"/>
 <use href="#s6d" x="811"/>
@@ -1761,7 +1853,7 @@
 <use href="#s65" x="3513"/>
 <use href="#s2f" x="4104"/>
 </g>
-<g fill="#9198a1" transform="translate(554.159 577) scale(0.012)">
+<g fill="#9198a1" transform="translate(554.159 561) scale(0.012)">
 <use href="#r45"/>
 <use href="#r78" x="601"/>
 <use href="#r65" x="1147"/>
@@ -1784,7 +1876,7 @@
 <use href="#r50" x="10512"/>
 <use href="#r49" x="11150"/>
 </g>
-<g transform="translate(480 605) scale(0.014)">
+<g transform="translate(480 589) scale(0.014)">
 <use href="#s76"/>
 <use href="#s61" x="587"/>
 <use href="#s6c" x="1161"/>
@@ -1795,7 +1887,7 @@
 <use href="#s65" x="3236"/>
 <use href="#s2f" x="3827"/>
 </g>
-<g fill="#9198a1" transform="translate(550.618 605) scale(0.012)">
+<g fill="#9198a1" transform="translate(550.618 589) scale(0.012)">
 <use href="#r43"/>
 <use href="#r68" x="730"/>
 <use href="#r65" x="1322"/>
@@ -1819,14 +1911,14 @@
 <use href="#r6f" x="10594"/>
 <use href="#r72" x="11193"/>
 </g>
-<g transform="translate(456 661) scale(0.014)">
+<g transform="translate(456 645) scale(0.014)">
 <use href="#s74"/>
 <use href="#s65" x="353"/>
 <use href="#s73" x="944"/>
 <use href="#s74" x="1494"/>
 <use href="#s2f" x="1847"/>
 </g>
-<g fill="#9198a1" transform="translate(499.022 661) scale(0.012)">
+<g fill="#9198a1" transform="translate(499.022 645) scale(0.012)">
 <use href="#r53"/>
 <use href="#r65" x="642"/>
 <use href="#r72" x="1225"/>
@@ -1845,7 +1937,7 @@
 <use href="#r65" x="7576"/>
 <use href="#r73" x="8159"/>
 </g>
-<g transform="translate(480 693) scale(0.014)">
+<g transform="translate(480 677) scale(0.014)">
 <use href="#s69"/>
 <use href="#s6e" x="262"/>
 <use href="#s74" x="874"/>
@@ -1859,7 +1951,7 @@
 <use href="#s6e" x="4638"/>
 <use href="#s2f" x="5250"/>
 </g>
-<g fill="#9198a1" transform="translate(570.005 693) scale(0.012)">
+<g fill="#9198a1" transform="translate(570.005 677) scale(0.012)">
 <use href="#r44"/>
 <use href="#r61" x="722"/>
 <use href="#r74" x="1283"/>
@@ -1886,7 +1978,7 @@
 <use href="#r6f" x="12526"/>
 <use href="#r6e" x="13126"/>
 </g>
-<g transform="translate(480 725) scale(0.014)">
+<g transform="translate(480 709) scale(0.014)">
 <use href="#s73"/>
 <use href="#s6d" x="549"/>
 <use href="#s6f" x="1450"/>
@@ -1894,7 +1986,7 @@
 <use href="#s65" x="2628"/>
 <use href="#s2f" x="3219"/>
 </g>
-<g fill="#9198a1" transform="translate(541.773 725) scale(0.012)">
+<g fill="#9198a1" transform="translate(541.773 709) scale(0.012)">
 <use href="#r4f"/>
 <use href="#r70" x="765"/>
 <use href="#r74" x="1377"/>
@@ -1919,14 +2011,14 @@
 <use href="#r6b" x="11233"/>
 <use href="#r73" x="11782"/>
 </g>
-<g transform="translate(480 757) scale(0.014)">
+<g transform="translate(480 741) scale(0.014)">
 <use href="#s75"/>
 <use href="#s6e" x="612"/>
 <use href="#s69" x="1224"/>
 <use href="#s74" x="1486"/>
 <use href="#s2f" x="1839"/>
 </g>
-<g fill="#9198a1" transform="translate(522.105 757) scale(0.012)">
+<g fill="#9198a1" transform="translate(522.105 741) scale(0.012)">
 <use href="#r50"/>
 <use href="#r61" x="639"/>
 <use href="#r63" x="1200"/>
@@ -1949,7 +2041,7 @@
 <use href="#r6b" x="11086"/>
 <use href="#r73" x="11635"/>
 </g>
-<g transform="translate(456 821) scale(0.014)">
+<g transform="translate(456 805) scale(0.014)">
 <use href="#s74"/>
 <use href="#s6f" x="353"/>
 <use href="#s6f" x="962"/>
@@ -1957,7 +2049,7 @@
 <use href="#s73" x="1833"/>
 <use href="#s2f" x="2382"/>
 </g>
-<g fill="#9198a1" transform="translate(506.514 821) scale(0.012)">
+<g fill="#9198a1" transform="translate(506.514 805) scale(0.012)">
 <use href="#r44"/>
 <use href="#r6f" x="722"/>
 <use href="#r63" x="1321"/>
@@ -1979,7 +2071,7 @@
 <use href="#r72" x="10407"/>
 <use href="#r74" x="10783"/>
 </g>
-<g transform="translate(480 853) scale(0.014)">
+<g transform="translate(480 837) scale(0.014)">
 <use href="#s64"/>
 <use href="#s69" x="624"/>
 <use href="#s61" x="886"/>
@@ -1990,7 +2082,7 @@
 <use href="#s73" x="3957"/>
 <use href="#s2f" x="4506"/>
 </g>
-<g fill="#9198a1" transform="translate(559.785 853) scale(0.012)">
+<g fill="#9198a1" transform="translate(559.785 837) scale(0.012)">
 <use href="#r56"/>
 <use href="#r65" x="690"/>
 <use href="#r63" x="1273"/>
@@ -2019,7 +2111,7 @@
 <use href="#r6b" x="15007"/>
 <use href="#r73" x="15556"/>
 </g>
-<g transform="translate(504 885) scale(0.014)">
+<g transform="translate(504 869) scale(0.014)">
 <use href="#s66"/>
 <use href="#s6f" x="389"/>
 <use href="#s6e" x="998"/>
@@ -2027,7 +2119,7 @@
 <use href="#s73" x="1962"/>
 <use href="#s2f" x="2512"/>
 </g>
-<g fill="#9198a1" transform="translate(556.332 885) scale(0.012)">
+<g fill="#9198a1" transform="translate(556.332 869) scale(0.012)">
 <use href="#r42"/>
 <use href="#r75" x="654"/>
 <use href="#r6e" x="1246"/>
@@ -2056,7 +2148,7 @@
 <use href="#r65" x="13950"/>
 </g>
 <g class="ink" opacity="0" fill="#e6edf3" style="animation:n3 11s cubic-bezier(0.45,0,0.55,1) infinite">
-<g transform="translate(540.282 245) scale(0.012)">
+<g transform="translate(540.282 229) scale(0.012)">
 <use href="#r57"/>
 <use href="#r69" x="985"/>
 <use href="#r72" x="1228"/>
@@ -2085,7 +2177,7 @@
 </g>
 </g>
 <g class="ink" opacity="0" fill="#e6edf3" style="animation:n8 11s cubic-bezier(0.45,0,0.55,1) infinite">
-<g transform="translate(101.225 145) scale(0.012)">
+<g transform="translate(101.225 129) scale(0.012)">
 <use href="#r48"/>
 <use href="#r54" x="743"/>
 <use href="#r54" x="1389"/>
@@ -2098,8 +2190,8 @@
 <use href="#r72" x="5432"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#e6edf3" style="animation:n19 11s cubic-bezier(0.45,0,0.55,1) infinite">
-<g transform="translate(100.295 453) scale(0.012)">
+<g class="ink" opacity="0" fill="#e6edf3" style="animation:n20 11s cubic-bezier(0.45,0,0.55,1) infinite">
+<g transform="translate(100.295 465) scale(0.012)">
 <use href="#r41"/>
 <use href="#r6e" x="690"/>
 <use href="#r73" x="1281"/>
@@ -2126,8 +2218,8 @@
 <use href="#r65" x="13506"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#e6edf3" style="animation:n23 11s cubic-bezier(0.45,0,0.55,1) infinite">
-<g transform="translate(133.948 565) scale(0.012)">
+<g class="ink" opacity="0" fill="#e6edf3" style="animation:n24 11s cubic-bezier(0.45,0,0.55,1) infinite">
+<g transform="translate(133.948 577) scale(0.012)">
 <use href="#r49"/>
 <use href="#r6e" x="269"/>
 <use href="#r67" x="859"/>
@@ -2153,8 +2245,8 @@
 <use href="#r73" x="12290"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#e6edf3" style="animation:n24 11s cubic-bezier(0.45,0,0.55,1) infinite">
-<g transform="translate(138.692 593) scale(0.012)">
+<g class="ink" opacity="0" fill="#e6edf3" style="animation:n25 11s cubic-bezier(0.45,0,0.55,1) infinite">
+<g transform="translate(138.692 605) scale(0.012)">
 <use href="#r4c"/>
 <use href="#r4f" x="565"/>
 <use href="#r43" x="1330"/>
@@ -2180,8 +2272,8 @@
 <use href="#r6c" x="13522"/>
 </g>
 </g>
-<g class="ink" opacity="0" fill="#e6edf3" style="animation:n25 11s cubic-bezier(0.45,0,0.55,1) infinite">
-<g transform="translate(115.696 621) scale(0.012)">
+<g class="ink" opacity="0" fill="#e6edf3" style="animation:n26 11s cubic-bezier(0.45,0,0.55,1) infinite">
+<g transform="translate(115.696 633) scale(0.012)">
 <use href="#r53"/>
 <use href="#r74" x="642"/>
 <use href="#r6f" x="969"/>

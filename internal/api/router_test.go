@@ -117,7 +117,11 @@ func TestServiceRoutesRequireAuthentication(t *testing.T) {
 }
 
 func TestServiceRoutesAcceptRotationTokens(t *testing.T) {
-	router := NewRouter(&RouterDeps{Config: &config.Config{ServiceTokens: []string{"old-secret", "new-secret"}}, ChunkStore: probeStore{}, VectorStore: memory.NewFakeVectorStore()})
+	cfg := &config.Config{
+		ServiceTokens:    []string{"old-secret", "new-secret"},
+		SubjectAuthority: config.SubjectAuthorityConfig{JWKSFile: "unavailable-trust.json"},
+	}
+	router := NewRouter(&RouterDeps{Config: cfg, ChunkStore: probeStore{}, VectorStore: memory.NewFakeVectorStore()})
 	for _, route := range []struct{ method, path string }{
 		{http.MethodPost, "/ingest"},
 		{http.MethodPost, "/query"},
@@ -130,6 +134,7 @@ func TestServiceRoutesAcceptRotationTokens(t *testing.T) {
 			req := httptest.NewRequestWithContext(t.Context(), route.method, route.path, http.NoBody)
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("X-Service-Token", token)
+			req.Header.Set("Authorization", "Bearer ignored-in-service-mode")
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 			want := http.StatusUnauthorized

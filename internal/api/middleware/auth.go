@@ -19,23 +19,31 @@ func RequireServiceToken(token string, next http.HandlerFunc) http.HandlerFunc {
 // RequireServiceTokens accepts any configured token in X-Service-Token.
 // An empty token list leaves the handler open for offline use.
 func RequireServiceTokens(tokens []string, next http.HandlerFunc) http.HandlerFunc {
-	digests := make([][sha256.Size]byte, len(tokens))
-	for i, token := range tokens {
-		digests[i] = sha256.Sum256([]byte(token))
-	}
+	digests := serviceTokenDigests(tokens)
 	return func(w http.ResponseWriter, r *http.Request) {
-		presented := r.Header.Get("X-Service-Token")
-		digest := sha256.Sum256([]byte(presented))
-		matched := 0
-		for _, configured := range digests {
-			matched |= subtle.ConstantTimeCompare(digest[:], configured[:])
-		}
-		if len(digests) > 0 && (presented == "" || matched != 1) {
+		if len(digests) > 0 && !matchesServiceToken(r.Header.Get("X-Service-Token"), digests) {
 			writeJSONErr(w, http.StatusUnauthorized, "unauthorized", "invalid or missing X-Service-Token")
 			return
 		}
 		next(w, r)
 	}
+}
+
+func serviceTokenDigests(tokens []string) [][sha256.Size]byte {
+	digests := make([][sha256.Size]byte, len(tokens))
+	for i, token := range tokens {
+		digests[i] = sha256.Sum256([]byte(token))
+	}
+	return digests
+}
+
+func matchesServiceToken(presented string, digests [][sha256.Size]byte) bool {
+	digest := sha256.Sum256([]byte(presented))
+	matched := 0
+	for _, configured := range digests {
+		matched |= subtle.ConstantTimeCompare(digest[:], configured[:])
+	}
+	return presented != "" && matched == 1
 }
 
 // LogServiceAuthState reports only how many tokens protect service routes.

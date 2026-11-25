@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Quarry HTTP API
   version: unversioned
-  description: 'Behavior and limits: [API Reference](api.md).'
+  description: 'See the [API reference](api.md) for behavior and limits and the [authentication section](api.md#authentication) for the active credential requirements.'
 externalDocs:
   description: API Reference
   url: api.md
