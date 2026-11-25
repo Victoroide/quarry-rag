@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+case "$1" in
+  run)
+    test "$2" = ./scripts/fuzz
+    test "$3" = -package=
+    printf '%s\t%s\n' fixture.test/alpha FuzzFirst fixture.test/alpha FuzzSecond fixture.test/beta FuzzSecond
+    ;;
+  test)
+    printf 'call: %s %s %s %s %s\n' "$@"
+    if test "$3" = '-fuzz=^FuzzFirst$'; then
+      mkdir -p "$FUZZ_TEST_FIXTURE/testdata/fuzz/FuzzFirst"
+      printf '%s\n' reproducer > "$FUZZ_TEST_FIXTURE/testdata/fuzz/FuzzFirst/failing-input"
+      exit 1
+    fi
+    ;;
+  *) exit 2 ;;
+esac

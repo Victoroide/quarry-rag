@@ -37,7 +37,8 @@ var directoryDescriptions = map[string]string{
 	"internal/testutil":    "Test support", "internal/testutil/docxtest": "Word package fixtures", "internal/testutil/pgtest": "Disposable database containers",
 	"internal/textutil": "Unicode normalization", "internal/wordprocessingml": "Word schema identifiers", "internal/worker": "Leased ingestion and retry handling",
 	"scripts": "Operational commands", "scripts/cleanup": "Delete selected documents", "scripts/grant-catalog": "Import tenant grants", "scripts/langeval": "Answer language and latency checks", "scripts/reconcile": "Find and remove orphan vectors", "scripts/simulate": "Exercise the service API", "scripts/validate": "Check retrieval behavior",
-	"test": "Service test suites", "test/integration": "Database and API integration", "test/smoke": "Opt-in live service checks", "test/unit": "Package behavior checks",
+	"scripts/fuzz": "Discover and exercise Go fuzz targets",
+	"test":         "Service test suites", "test/integration": "Database and API integration", "test/smoke": "Opt-in live service checks", "test/unit": "Package behavior checks",
 	"tools": "Documentation support", "tools/diagrams": "Vector image sources and checks", "tools/diagrams/fonts": "Bundled typefaces and license",
 }
 

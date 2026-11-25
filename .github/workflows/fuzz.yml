@@ -3,6 +3,7 @@ name: Fuzz
 on:
   schedule:
     - cron: "41 3 * * 1"
+    - cron: "41 3 * * 0,2-6"
   workflow_dispatch:
     inputs:
       fuzztime:
@@ -14,45 +15,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.schedule || github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
 jobs:
-  fuzz:
-    name: Fuzz ${{ matrix.target }}
+  nightly:
+    name: Fuzz smoke test
+    if: github.event.schedule == '41 3 * * 0,2-6'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - package: ./internal/extractor
-            target: FuzzResolveContext
-          - package: ./internal/extractor
-            target: FuzzExtractors
-          - package: ./internal/extractor
-            target: FuzzDOCFIBAndPieces
-          - package: ./internal/extractor
-            target: FuzzDOCStoryPLC
-          - package: ./internal/extractor
-            target: FuzzDOCXStories
-          - package: ./internal/chunker
-            target: FuzzChunk
-          - package: ./internal/chunker
-            target: FuzzChunkEmbeddingProfile
-          - package: ./internal/embeddinginput
-            target: FuzzDecodeProfile
-          - package: ./internal/textutil
-            target: FuzzSanitizeForPrompt
-          - package: ./internal/textutil
-            target: FuzzNormalizeForIngest
-          - package: ./internal/pipeline
-            target: FuzzBuildSynthesisPrompt
-          - package: ./internal/llm
-            target: FuzzCountOpenAIChatTokens
-          - package: ./internal/api/handler
-            target: FuzzDecodeJSONObject
-          - package: ./internal/store/postgres
-            target: FuzzDecodeGrantBatch
-          - package: ./internal/pipeline
-            target: FuzzVerifyCitations
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,16 +32,64 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Fuzz target
-        env:
-          FUZZTIME: ${{ inputs.fuzztime || '2m' }}
-          PKG: ${{ matrix.package }}
-          TARGET: ${{ matrix.target }}
-        run: go test -run='^$' -fuzz="^${TARGET}\$" -fuzztime="$FUZZTIME" "$PKG"
+      - name: Fuzz every target for five seconds
+        run: make fuzz FUZZTIME=5s
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
-          name: fuzz-${{ matrix.target }}
+          name: fuzz-nightly
           path: '**/testdata/fuzz/**'
+          if-no-files-found: ignore
+          retention-days: 14
+
+  inventory:
+    name: Discover fuzz packages
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '41 3 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      packages: ${{ steps.inventory.outputs.packages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: List packages with fuzz targets
+        id: inventory
+        shell: bash
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '2m' }}
+        run: |
+          packages=$(go run ./scripts/fuzz -matrix -fuzztime="$FUZZTIME")
+          printf 'packages=%s\n' "$packages" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: Fuzz ${{ matrix.package }}
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.inventory.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Fuzz the assigned targets
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '2m' }}
+          FUZZ_INVENTORY: ${{ matrix.inventory }}
+        run: sh .github/scripts/fuzz.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: fuzz-package-${{ strategy.job-index }}
+          path: '${{ matrix.directory }}/testdata/fuzz/**'
           if-no-files-found: ignore
           retention-days: 14

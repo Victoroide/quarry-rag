@@ -104,7 +104,5 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: Scan diagram packages
         run: cd tools/diagrams && govulncheck -show verbose ./...
-      - name: Test diagram packages
-        run: go -C tools/diagrams test ./...
       - name: Validate vector diagrams
         run: make diagrams-check

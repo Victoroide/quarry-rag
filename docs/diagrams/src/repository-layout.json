@@ -236,75 +236,81 @@
       "W": 344,
       "H": 28
     },
-    "scripts/grant-catalog": {
+    "scripts/fuzz": {
       "X": 468,
       "Y": 456,
       "W": 344,
       "H": 28
     },
-    "scripts/langeval": {
+    "scripts/grant-catalog": {
       "X": 468,
       "Y": 484,
       "W": 344,
       "H": 28
     },
-    "scripts/reconcile": {
+    "scripts/langeval": {
       "X": 468,
       "Y": 512,
       "W": 344,
       "H": 28
     },
-    "scripts/simulate": {
+    "scripts/reconcile": {
       "X": 468,
       "Y": 540,
       "W": 344,
       "H": 28
     },
-    "scripts/validate": {
+    "scripts/simulate": {
       "X": 468,
       "Y": 568,
       "W": 344,
       "H": 28
     },
+    "scripts/validate": {
+      "X": 468,
+      "Y": 596,
+      "W": 344,
+      "H": 28
+    },
     "test": {
       "X": 444,
-      "Y": 624,
+      "Y": 652,
       "W": 368,
       "H": 32
     },
     "test/integration": {
       "X": 468,
-      "Y": 656,
+      "Y": 684,
       "W": 344,
       "H": 32
     },
     "test/smoke": {
       "X": 468,
-      "Y": 688,
+      "Y": 716,
       "W": 344,
       "H": 32
     },
     "test/unit": {
       "X": 468,
-      "Y": 720,
+      "Y": 748,
       "W": 344,
       "H": 32
     },
     "tools": {
       "X": 444,
-      "Y": 784,
+      "Y": 812,
       "W": 368,
       "H": 32
     },
     "tools/diagrams": {
       "X": 468,
-      "Y": 816,
+      "Y": 844,
       "W": 344,
       "H": 32
     },
     "tools/diagrams/fonts": {
       "X": 492,
-      "Y": 848,
+      "Y": 876,
       "W": 320,
       "H": 32
     },
@@ -364,14 +370,14 @@
         "X": 432,
         "Y": 392,
         "W": 392,
-        "H": 212
+        "H": 240
       }
     },
     {
       "Title": "",
       "Box": {
         "X": 432,
-        "Y": 616,
+        "Y": 644,
         "W": 392,
         "H": 144
       }
@@ -380,7 +386,7 @@
       "Title": "",
       "Box": {
         "X": 432,
-        "Y": 776,
+        "Y": 804,
         "W": 392,
         "H": 112
       }
