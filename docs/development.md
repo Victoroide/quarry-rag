@@ -198,16 +198,29 @@ make reconcile ARGS="-limit=10000 -page=100"
 ```
 
 The command prints JSON with `orphan_vectors`, `orphan_namespaces` and up to 20
-sample identifiers prefixed with `vector:` or `namespace:`. Vector counts cover
-the default namespace. A vector is selected if `doc_id` is missing or invalid,
-the document row is missing, or its document has status `failed` with no
-`ingest_jobs` row. Retryable failures and processing documents are preserved.
-Only UUID-named legacy namespaces with no document row are selected; other
-namespace names are ignored.
+sample identifiers prefixed with `vector:`, `namespace:` or `retired:`. Vector
+counts cover the default namespace. A vector is selected if `doc_id` is missing
+or invalid, the document row is missing, or its document has status `failed`
+with no `ingest_jobs` row. Retryable failures and processing documents are
+preserved. A vector tagged with an active, writing or cleanup-tracked
+`revision_id` is preserved even if the document row was deleted or reused until
+its revision cleanup finishes. Only UUID-named legacy namespaces with no document
+row are selected; other namespace names are ignored.
 
-`-limit` defaults to 100000 and bounds selected default-namespace vectors plus
-the vector counts of whole selected namespaces. A namespace larger than the
-remaining budget is skipped, and an empty namespace consumes one budget entry.
+Retired hosted vector revisions appear as `retired_revisions` and
+`retired_vectors`, with `retired:` samples that name the revision. A revision is
+unresolved when verification still found residue after every recorded ID was
+deleted. `unresolved_revisions` counts those, and `unresolved_vectors` counts the
+IDs the revisions recorded. With `-apply`, `swept_revisions` and `swept_vectors`
+report the cleanups completed by this run, and `sweep_error` carries the last
+residue or provider failure the sweep deferred. A deferred cleanup never stops
+the orphan scan or hides the report. A claim or database failure ends the run
+with a nonzero exit status.
+
+`-limit` defaults to 100000 and bounds selected default-namespace vectors,
+retired cleanup vectors drained during `-apply`, and the vector counts of whole
+selected namespaces. A namespace larger than the remaining budget is skipped, and
+an empty namespace consumes one budget entry.
 The listing page size defaults to 100 and accepts 1–1000. Listing stops at the
 end of the default namespace or when the selection budget is full; healthy
 vectors do not consume that budget. Pod-based indexes that do not support
@@ -482,11 +495,11 @@ At most one of the mode flags can be given, and each write needs `-apply`.
 
 **Bounds and cost.** `-max-embed-calls` defaults to 0. Staging stops before writing a document that exceeds the available budget. `-max-documents` (1000) counts scanned documents, including current checkpoints, and limits orphan cleanup. `-max-chunks` (100000) bounds chunk loads, writes and key scans. `-max-bytes` (128 MiB) bounds stored chunk text loaded into the command. `-batch` (100), `-page` (100) and `-timeout` (30 minutes) bound requests and elapsed time. For staging, pass the returned `next_after` as `-after`. If the frozen rollback key scan stopped, also pass `next_prune_after` as `-prune-after` during the same freeze. Verification requires all checks to fit within one invocation.
 
-**Checkpoints.** Every staged document has a ledger row keyed to the generation and a source revision, which hashes the document's incarnation, type, collection, owning tenant when assigned, and chunk keys, positions, token counts and text. The row records the intent before the first write, so an interruption never strands a key; vectors are upserted by chunk key; stale keys of a changed document are removed; and completion is recorded last. A document deleted, failed, being deleted or held is pruned from the target. A document deleted and recreated under the same UUID has a new incarnation and is restaged. A document whose `chunk_count` differs from its stored chunks is reported as inconsistent and blocks completion. Staged Pinecone records name the document incarnation, which retrieval requires, and carry `tenant_id` when the document is assigned in the grant catalog; a source record that names another incarnation or tenant is recomputed. A completed document stored in the tagged vector format has revision-qualified physical keys that a copy by chunk key cannot reproduce, so it blocks staging and verification. Documents without stored original files are counted in the inventory; the command never reads them.
+**Checkpoints.** Every staged document has a ledger row keyed to the generation and a source revision, which hashes the document's incarnation, type, collection, owning tenant when assigned, active hosted vector revision when manifested, and chunk keys, positions, token counts and text. The row records the intent before the first write, so an interruption never strands a key; vectors are upserted by chunk key (or by `<docID>#<revisionID>#<index>` with `revision_id` and `chunk_id` metadata on a Pinecone target when the document has an active hosted revision); stale keys of a changed document are removed; and completion is recorded last. A document deleted, failed, being deleted or held is pruned from the target. A document deleted and recreated under the same UUID has a new incarnation and is restaged. A document whose `chunk_count` differs from its stored chunks is reported as inconsistent and blocks completion. Staged Pinecone records name the document incarnation, which retrieval requires, and carry `tenant_id` when the document is assigned in the grant catalog; a source record that names another incarnation or tenant is recomputed. A completed document stored in the tagged vector format has revision-qualified physical keys that a copy by chunk key cannot reproduce, so it blocks staging and verification; a document with an active hosted revision blocks staging and verification only when the target is PostgreSQL. Documents without stored original files are counted in the inventory; the command never reads them.
 
 Staging, applied verification and activation have exclusive ownership of a target while they run. Use a PostgreSQL connection that preserves the server session for those operations. An unacknowledged mutation blocks subsequent staging and approval after a disconnect. Use `-confirm-target-drained` with staging only after establishing that the outstanding request can no longer change the target, then resume from the beginning of the incomplete document or key page. If the request cannot be resolved, stage a fresh isolated target.
 
-**Verification.** Counts alone prove nothing, so `-verify` walks every eligible document and requires, for every expected chunk key, a target record with the profile's dimension and PostgreSQL's document, position, text, token count, type and collection (and, on Pinecone, the document incarnation and the owning tenant when assigned), and no record outside the expected set. It then runs matched queries: for a deterministic sample of `-sample-size` stored chunks it queries the current target and the staged target with vectors independent of the staged records, scoped to the chunk's document and up to `-scope-documents` (5) others of its collection, and compares the top `-top-k` (10) results. It never sends an unscoped query. Thresholds have no defaults and must be declared: `-sample-size`, `-min-recall` (mean overlap with the current target's results) and `-max-p95` (95th percentile target query latency). The target passes only with 100% key and profile coverage, no out-of-scope record, no result outside a query's scope, the declared recall and latency, and a full sample. A target that cannot list its keys, such as a pod-based Pinecone index, cannot pass. A hosted index may lag its writes, so allow it to converge before verifying. The report lists every failure.
+**Verification.** Counts alone prove nothing, so `-verify` walks every eligible document and requires, for every expected target key, a target record with the profile's dimension and PostgreSQL's document, chunk, position, text, token count, type and collection (and, on Pinecone, the document incarnation, the active hosted revision when manifested, and the owning tenant when assigned), and no record outside the expected set. It then runs matched queries: for a deterministic sample of `-sample-size` stored chunks it queries the current target and the staged target with vectors independent of the staged records, scoped to the chunk's document and up to `-scope-documents` (5) others of its collection, and compares the top `-top-k` (10) results. It never sends an unscoped query. Thresholds have no defaults and must be declared: `-sample-size`, `-min-recall` (mean overlap with the current target's results) and `-max-p95` (95th percentile target query latency). The target passes only with 100% key and profile coverage, no out-of-scope record, no result outside a query's scope, the declared recall and latency, and a full sample. A target that cannot list its keys, such as a pod-based Pinecone index, cannot pass. A hosted index may lag its writes, so allow it to converge before verifying. The report lists every failure.
 
 For recorded profiles in the same embedding space, verification uses the current target's vector on both stores after checking the sampled chunk's document, position and text. For different spaces or an unattested legacy target, run verification without `-apply` to get `sample.chunk_ids`, `sample.source_profile_hash` and `profile_hash`. When the legacy profile is unknown, run verification with the live replicas' serving encoder settings, including the exact model revision and effective text settings. The resulting `sample.source_profile_query_only` means the hash identifies the query encoder. The baseline still queries the bound live target, and all current staging checkpoints must show that every vector was recomputed.
 

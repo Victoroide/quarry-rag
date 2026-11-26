@@ -301,3 +301,30 @@ func TestReindexMaintenanceRoleWithDocumentedGrants(t *testing.T) {
 	var count int
 	require.NoError(t, tx.QueryRow(ctx, `SELECT count(*) FROM public.chunk_vectors_g3`).Scan(&count))
 }
+
+func TestReindexManifestWithDocumentedGrants(t *testing.T) {
+	f := newFixture(t)
+	h := newHarness(t, f, "pinecone")
+	ctx := t.Context()
+	seedManifestedPineconeDoc(t, f.pg, h.stores.index("quarry"), "Manifested role fixture.")
+	dsn := f.pg.Pool.Config().ConnString()
+	role := pgtest.Role(t, dsn, "quarry_manifest_reindex")
+	ident := pgx.Identifier{role}.Sanitize()
+	_, err := f.pg.Pool.Exec(ctx, `CREATE ROLE `+ident+` LOGIN PASSWORD 'fixture-password'`)
+	require.NoError(t, err)
+	_, err = f.pg.Pool.Exec(ctx, replaceReindexRoleSQL(publishedDeploymentSQL(t, "GRANT USAGE ON SCHEMA public TO quarry_reindex"), role, ""))
+	require.NoError(t, err)
+	restricted, err := pgstore.NewClient(ctx, dsn, func(cfg *pgxpool.Config) { cfg.ConnConfig.User = role; cfg.ConnConfig.Password = "fixture-password" })
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, restricted.Close(context.Background())) })
+	h.deps.pg = restricted
+	inv, err := h.run(options{Generation: "g2", Profile: h.profileFile("g2.json", testProfile(sourceModel)), TargetStore: "pinecone", TargetIndex: "quarry-g2"})
+	require.NoError(t, err)
+	require.Empty(t, inv["blockers"])
+	h.attestSource()
+	stage := h.stagePinecone("g2", "quarry-g2", sourceModel, 0)
+	require.Equal(t, true, stage["complete"])
+	verified, err := h.run(verifyOptions("g2"))
+	require.NoError(t, err)
+	require.Equal(t, true, verified["passed"])
+}

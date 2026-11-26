@@ -1,6 +1,6 @@
 {
   "Width": 840,
-  "Height": 1766,
+  "Height": 2140,
   "Nodes": {
     "documents": {
       "X": 16,
@@ -15,45 +15,45 @@
       "H": 292
     },
     "chunks": {
-      "X": 472,
+      "X": 484,
       "Y": 78,
-      "W": 352,
+      "W": 340,
       "H": 150
     },
     "document_fingerprints": {
-      "X": 472,
+      "X": 484,
       "Y": 236,
-      "W": 352,
+      "W": 340,
       "H": 96
     },
     "ingest_jobs": {
-      "X": 472,
+      "X": 484,
       "Y": 340,
-      "W": 352,
+      "W": 340,
       "H": 258
     },
     "document_pdf_extractions": {
-      "X": 472,
+      "X": 484,
       "Y": 606,
-      "W": 352,
+      "W": 340,
       "H": 204
     },
     "document_deletion_activation": {
-      "X": 472,
+      "X": 484,
       "Y": 818,
-      "W": 352,
+      "W": 340,
       "H": 74
     },
     "evaluation_fixtures": {
-      "X": 472,
+      "X": 484,
       "Y": 900,
-      "W": 352,
+      "W": 340,
       "H": 132
     },
     "source_uploads": {
-      "X": 472,
+      "X": 484,
       "Y": 1040,
-      "W": 352,
+      "W": 340,
       "H": 402
     },
     "vector_generations": {
@@ -73,6 +73,24 @@
       "Y": 1180,
       "W": 352,
       "H": 204
+    },
+    "hosted_vector_revisions": {
+      "X": 484,
+      "Y": 1450,
+      "W": 340,
+      "H": 114
+    },
+    "hosted_vector_manifests": {
+      "X": 484,
+      "Y": 1572,
+      "W": 340,
+      "H": 294
+    },
+    "hosted_vector_cleanups": {
+      "X": 16,
+      "Y": 1712,
+      "W": 352,
+      "H": 366
     }
   },
   "Groups": []

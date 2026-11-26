@@ -32,6 +32,13 @@ func TestMigrationParser(t *testing.T) {
 	if _, err := parseSQL(`ALTER TABLE unknown ADD COLUMN x TEXT;`); err == nil {
 		t.Fatal("unknown table accepted")
 	}
+	replaced, replaceErr := parseSQL(`CREATE TABLE parents (id UUID PRIMARY KEY, kind TEXT CHECK (kind IN ('a'))); ALTER TABLE parents DROP CONSTRAINT parents_kind_check; ALTER TABLE parents ADD CONSTRAINT parents_kind_check CHECK (kind IN ('a', 'b'));`)
+	if replaceErr != nil || len(replaced["parents"]) != 2 {
+		t.Fatalf("a replaced check must leave the columns alone: %v %#v", replaceErr, replaced)
+	}
+	if _, err := parseSQL(`CREATE TABLE parents (id UUID PRIMARY KEY); ALTER TABLE parents DROP CONSTRAINT parents_pkey;`); err == nil {
+		t.Fatal("dropping a key must not be accepted silently")
+	}
 	grant, grantErr := parseSQL(`CREATE TABLE parents (id UUID PRIMARY KEY); ALTER TABLE grant_catalog_unmodeled ADD COLUMN origin TEXT NOT NULL DEFAULT 'imported' CHECK (origin IN ('imported', 'accepted'));`)
 	if grantErr != nil || len(grant) != 1 {
 		t.Fatalf("operator reference storage must not be modeled or rejected: %v %#v", grantErr, grant)
@@ -331,7 +338,7 @@ func TestCanvasAndInspectionTextSize(t *testing.T) {
 		if d.W > 960 {
 			t.Errorf("%s width %g > 960", d.Name, d.W)
 		}
-		if d.Name == "system-architecture" && d.H > 760 || d.Name == "database-schema" && d.H > 1770 {
+		if d.Name == "system-architecture" && d.H > 760 || d.Name == "database-schema" && d.H > 2140 {
 			t.Errorf("%s height %g", d.Name, d.H)
 		}
 		for _, l := range sceneLabels(d) {

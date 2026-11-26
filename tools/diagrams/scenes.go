@@ -135,8 +135,8 @@ func schemaColumnBaseline(index int) float64 {
 }
 
 func dataModel() diagram {
-	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", MaxW: 840, MaxH: 1770,
-		Description: "Data model. The chunks, document_fingerprints, ingest_jobs and document_pdf_extractions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. The vector_generations table records each vector target and its embedding profile, vector_generation_documents holds the per-document write ledger of a generation and references vector_generations.name, and vector_state records the active generation and the writer freeze. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column."}
+	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", MaxW: 840, MaxH: 2140,
+		Description: "Data model. The chunks, document_fingerprints, ingest_jobs, document_pdf_extractions and hosted_vector_revisions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. The vector_generations table records each vector target and its embedding profile, vector_generation_documents holds the per-document write ledger of a generation and references vector_generations.name, and vector_state records the active generation and the writer freeze. The hosted_vector_manifests and hosted_vector_cleanups tables record write intents and retired vector tombstones independently of live document rows, so deletion and UUID reuse cannot drop pending vector cleanup. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column."}
 	d.Nodes = []node{
 		{ID: "documents", Title: "documents", Columns: []column{
 			{"id", "UUID", "PK", ""}, {"content", "TEXT", "", ""}, {"metadata", "JSONB", "", ""}, {"status", "TEXT", "", ""}, {"chunk_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"file_name", "TEXT", "", ""}, {"file_type", "TEXT", "", ""}, {"s3_key", "TEXT", "", ""}, {"content_preview", "TEXT", "", ""}, {"doc_type", "TEXT", "", ""}, {"fingerprint", "TEXT", "", ""}, {"last_error", "TEXT", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"completed_at", "TIMESTAMPTZ", "", ""}, {"collection", "TEXT", "", ""}, {"text_source", "TEXT", "", ""}, {"content_dedup", "TEXT", "", ""},
@@ -162,24 +162,31 @@ func dataModel() diagram {
 		{ID: "vector_generation_documents", Title: "vector_generation_documents", Columns: []column{
 			{"generation", "TEXT", "FK", "vector_generations.name"}, {"document_id", "UUID", "", ""}, {"source_revision", "TEXT", "", ""}, {"incarnation", "UUID", "", ""}, {"chunk_ids", "TEXT[]", "", ""}, {"complete", "BOOLEAN", "", ""}, {"copied", "INTEGER", "", ""}, {"embedded", "INTEGER", "", ""}, {"checkpointed_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "vector_state", Title: "vector_state", Columns: []column{{"singleton", "BOOLEAN", "PK", ""}, {"active_generation", "TEXT", "", ""}, {"active_profile_hash", "TEXT", "", ""}, {"frozen", "BOOLEAN", "", ""}, {"frozen_at", "TIMESTAMPTZ", "", ""}, {"freeze_generation", "TEXT", "", ""}, {"legacy_store", "TEXT", "", ""}, {"legacy_target", "TEXT", "", ""}, {"legacy_host", "TEXT", "", ""}}},
+		{ID: "hosted_vector_manifests", Title: "hosted_vector_manifests", Columns: []column{
+			{"revision_id", "UUID", "PK", ""}, {"document_id", "UUID", "", ""}, {"incarnation", "UUID", "", ""}, {"attempt", "INTEGER", "", ""}, {"lease_token", "UUID", "", ""}, {"collection", "TEXT", "", ""}, {"vector_namespace", "TEXT", "", ""}, {"id_prefix", "TEXT", "", ""}, {"vector_ids", "TEXT[]", "", ""}, {"chunk_ids", "UUID[]", "", ""}, {"state", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"activated_at", "TIMESTAMPTZ", "", ""}, {"retired_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "hosted_vector_revisions", Title: "hosted_vector_revisions", Columns: []column{
+			{"document_id", "UUID", "PK/FK", "documents.id"}, {"incarnation", "UUID", "", ""}, {"active_revision_id", "UUID", "FK", "hosted_vector_manifests.revision_id"}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "hosted_vector_cleanups", Title: "hosted_vector_cleanups", Columns: []column{
+			{"revision_id", "UUID", "PK/FK", "hosted_vector_manifests.revision_id"}, {"document_id", "UUID", "", ""}, {"incarnation", "UUID", "", ""}, {"collection", "TEXT", "", ""}, {"vector_namespace", "TEXT", "", ""}, {"id_prefix", "TEXT", "", ""}, {"vector_ids", "TEXT[]", "", ""}, {"next_offset", "INTEGER", "", ""}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"convergence_checks", "INTEGER", "", ""}, {"last_error", "TEXT", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_token", "UUID", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"retired_at", "TIMESTAMPTZ", "", ""}, {"reason", "TEXT", "", ""}}},
 	}
 	d.Description += " The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes."
 	for _, v := range []struct {
 		id, to, card  string
 		x, sourceY, y float64
 	}{
-		{"documents-chunks", "chunks", "0..n", 440, 126, 138},
-		{"documents-fingerprints", "document_fingerprints", "0..n", 428, 138, 296},
-		{"documents-jobs", "ingest_jobs", "0..1", 416, 150, 382},
-		{"documents-pdf-extractions", "document_pdf_extractions", "0..1", 404, 162, 648},
-		{"documents-evaluation", "evaluation_fixtures", "0..1", 392, 174, 996},
-		{"documents-uploads", "source_uploads", "0..1", 380, 186, 1280},
+		{"documents-chunks", "chunks", "0..n", 452, 126, 138},
+		{"documents-fingerprints", "document_fingerprints", "0..n", 440, 138, 296},
+		{"documents-jobs", "ingest_jobs", "0..1", 428, 150, 382},
+		{"documents-pdf-extractions", "document_pdf_extractions", "0..1", 416, 162, 648},
+		{"documents-evaluation", "evaluation_fixtures", "0..1", 404, 174, 996},
+		{"documents-uploads", "source_uploads", "0..1", 392, 186, 1280},
+		{"documents-hosted-vector-revisions", "hosted_vector_revisions", "0..1", 380, 198, 1492},
 	} {
-		l := &label{Text: v.card, X: 467, Y: v.y - 14, Size: edgeLabelSize, Kind: "muted", Owner: v.id}
-		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {472, v.y}}})
+		l := &label{Text: v.card, X: 479, Y: v.y - 14, Size: edgeLabelSize, Kind: "muted", Owner: v.id}
+		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {484, v.y}}})
 	}
-	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs", "documents-pdf-extractions", "documents-evaluation", "documents-uploads"})
-	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 1744, Size: sublabelSize, Kind: "muted"}}
+	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs", "documents-pdf-extractions", "documents-evaluation", "documents-uploads", "documents-hosted-vector-revisions"})
+	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 2118, Size: sublabelSize, Kind: "muted"}}
 	return d
 }
 
