@@ -60,9 +60,12 @@ type TokenUsage struct {
 // ScoredChunk pairs a chunk with its similarity score from vector search.
 type ScoredChunk struct {
 	// ObservedIncarnation records the document lifetime verified by PostgreSQL.
-	ObservedIncarnation string   `json:"-"`
-	Chunk               Chunk    `json:"chunk"`
-	Score               float64  `json:"score"`
-	Namespace           string   `json:"namespace,omitempty"`
-	RerankScore         *float64 `json:"rerank_score,omitempty"`
+	ObservedIncarnation string `json:"-"`
+	// ObservedSnapshot is the PostgreSQL snapshot taken before the search that
+	// returned this historical untagged hit.
+	ObservedSnapshot string   `json:"-"`
+	Chunk            Chunk    `json:"chunk"`
+	Score            float64  `json:"score"`
+	Namespace        string   `json:"namespace,omitempty"`
+	RerankScore      *float64 `json:"rerank_score,omitempty"`
 }

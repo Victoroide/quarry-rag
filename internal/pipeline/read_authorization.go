@@ -177,13 +177,12 @@ func (f failClosedChecks) DocumentPreviews(ctx context.Context, ids []string) (m
 	return previews, unavailable(ctx, err)
 }
 
-// ObserveUntaggedIncarnations forwards to a store that observes historical
-// lifetimes. Without one there is nothing to observe, which a nil result expresses.
-func (f failClosedChecks) ObserveUntaggedIncarnations(ctx context.Context, allowedIDs []string) (map[string]string, error) {
-	observer, ok := f.evidence.(domain.EvidenceIncarnationObserver)
+// ObserveEvidenceSnapshot forwards the optional observation for historical hits.
+func (f failClosedChecks) ObserveEvidenceSnapshot(ctx context.Context) (string, error) {
+	observer, ok := f.evidence.(domain.EvidenceSnapshotObserver)
 	if !ok {
-		return nil, nil
+		return "", nil
 	}
-	incarnations, err := observer.ObserveUntaggedIncarnations(ctx, allowedIDs)
-	return incarnations, unavailable(ctx, err)
+	snapshot, err := observer.ObserveEvidenceSnapshot(ctx)
+	return snapshot, unavailable(ctx, err)
 }

@@ -97,8 +97,8 @@ type QueryContext struct {
 	FilterDocType string
 	AnswerMode    domain.AnswerMode
 	// EvidenceVisibility checks vector candidates against current stored chunks.
-	EvidenceVisibility   domain.EvidenceVisibility
-	untaggedIncarnations map[string]string
+	EvidenceVisibility domain.EvidenceVisibility
+	untaggedSnapshot   string
 	// Authorization, when set, binds the query to a verified principal. Every
 	// search carries its scope and every disclosure boundary rechecks it.
 	Authorization *ReadAuthorization

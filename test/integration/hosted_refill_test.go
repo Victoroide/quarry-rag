@@ -63,12 +63,12 @@ func (f refillReranker) Rerank(_ context.Context, _ string, chunks []domain.Scor
 	return chunks, nil
 }
 
-func insertRefillDocument(t *testing.T, c *pgstore.Client, ch domain.Chunk, collection, status string) {
+func insertRefillDocument(ctx context.Context, t *testing.T, c *pgstore.Client, ch domain.Chunk, collection, status string) {
 	t.Helper()
-	_, err := c.Pool.Exec(t.Context(), `INSERT INTO documents (id, content, content_preview, status, collection, doc_type, metadata)
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents (id, content, content_preview, status, collection, doc_type, metadata)
 		VALUES ($1, $2, $2, $3, $4, 'guide', '{"title":"Shared Archive"}')`, ch.DocumentID, ch.Text, status, collection)
 	require.NoError(t, err)
-	require.NoError(t, c.InsertChunks(t.Context(), []domain.Chunk{ch}))
+	require.NoError(t, c.InsertChunks(ctx, []domain.Chunk{ch}))
 }
 
 func refillFixture(text string, score float64) domain.ScoredChunk {
@@ -89,6 +89,7 @@ func TestHostedRefillWithPostgreSQLVisibility(t *testing.T) {
 		cancel       bool
 		evidenceOnly bool
 		reuseID      bool
+		reuseDuring  bool
 		want         bool
 	}{
 		{name: "default path"},
@@ -98,6 +99,7 @@ func TestHostedRefillWithPostgreSQLVisibility(t *testing.T) {
 		{name: "SQL failure after refill", enabled: true, stream: true, sqlFailure: true},
 		{name: "parent deadline during refill", enabled: true, stream: true, cancel: true},
 		{name: "reused public IDs", enabled: true, stream: true, reuseID: true, want: true},
+		{name: "replacement during refill", enabled: true, stream: true, reuseDuring: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			missing := refillFixture("Missing document.", .99)
@@ -105,16 +107,16 @@ func TestHostedRefillWithPostgreSQLVisibility(t *testing.T) {
 			live := refillFixture("The reading room closes at seven.", .9)
 			private := refillFixture(live.Chunk.Text, 1)
 			private.Chunk.Metadata = map[string]any{"doc_type": "guide"}
-			insertRefillDocument(t, c, wrong.Chunk, "private", "completed")
-			insertRefillDocument(t, c, live.Chunk, "archive", "completed")
-			insertRefillDocument(t, c, private.Chunk, "", "completed")
+			insertRefillDocument(t.Context(), t, c, wrong.Chunk, "private", "completed")
+			insertRefillDocument(t.Context(), t, c, live.Chunk, "archive", "completed")
+			insertRefillDocument(t.Context(), t, c, private.Chunk, "", "completed")
 			stale := missing
 			if tc.reuseID {
 				stale.Chunk = live.Chunk
 				stale.Chunk.Text = "Superseded text."
 				_, err := c.Pool.Exec(t.Context(), `DELETE FROM documents WHERE id=$1`, live.Chunk.DocumentID)
 				require.NoError(t, err)
-				insertRefillDocument(t, c, live.Chunk, "archive", "completed")
+				insertRefillDocument(t.Context(), t, c, live.Chunk, "archive", "completed")
 			}
 
 			filter := domain.VectorFilter{Collection: "archive", DocType: "guide", DocumentIDs: []string{
@@ -143,6 +145,10 @@ func TestHostedRefillWithPostgreSQLVisibility(t *testing.T) {
 				}
 				require.Equal(t, 1, cost)
 				switch {
+				case tc.reuseDuring:
+					_, err := c.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, live.Chunk.DocumentID)
+					require.NoError(t, err)
+					insertRefillDocument(ctx, t, c, live.Chunk, "archive", "completed")
 				case tc.remove:
 					_, err := c.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, live.Chunk.DocumentID)
 					require.NoError(t, err)
@@ -172,7 +178,11 @@ func TestHostedRefillWithPostgreSQLVisibility(t *testing.T) {
 			reranks := 0
 			checkRerank := refillReranker(func(hits []domain.ScoredChunk) {
 				reranks++
-				require.Equal(t, []domain.ScoredChunk{expected}, hits)
+				require.Len(t, hits, 1)
+				require.NotEmpty(t, hits[0].ObservedSnapshot)
+				withSnapshot := expected
+				withSnapshot.ObservedSnapshot = hits[0].ObservedSnapshot
+				require.Equal(t, withSnapshot, hits[0])
 			})
 			ret := retriever.NewRetriever(tracing.WrapVectorStore(idx, "pinecone"), emb, .7, 10)
 			h := handler.QueryHandler(ret, amb, cfg, c.Pool, handler.WithReranker(checkRerank))
@@ -226,9 +236,9 @@ func TestHostedRefillWithPostgreSQLVisibility(t *testing.T) {
 		local := refillFixture("The reading room closes at seven.", .9)
 		other := refillFixture("The catalog desk closes at eight.", .8)
 		wrong := refillFixture("Other collection text.", .99)
-		insertRefillDocument(t, c, local.Chunk, "archive", "completed")
-		insertRefillDocument(t, c, other.Chunk, "archive", "completed")
-		insertRefillDocument(t, c, wrong.Chunk, "private", "completed")
+		insertRefillDocument(t.Context(), t, c, local.Chunk, "archive", "completed")
+		insertRefillDocument(t.Context(), t, c, other.Chunk, "archive", "completed")
+		insertRefillDocument(t.Context(), t, c, wrong.Chunk, "private", "completed")
 		old := local
 		old.Chunk.Text = "Superseded preview source."
 		old.Score = 1
@@ -361,7 +371,7 @@ func testHostedRefillSkipsGroupedAllowlistOverBudget(t *testing.T, c *pgstore.Cl
 func testHostedRefillMixedProbeIDs(t *testing.T, db *pgstore.Client) {
 	t.Helper()
 	live := refillFixture("The room opens at eight.", .9)
-	insertRefillDocument(t, db, live.Chunk, "archive", "completed")
+	insertRefillDocument(t.Context(), t, db, live.Chunk, "archive", "completed")
 	missing := refillFixture("", .8)
 	missing.Chunk.DocumentID = ""
 	for _, enabled := range []bool{false, true} {
@@ -414,7 +424,7 @@ func (g *countingRefillGenerator) Stream(ctx context.Context, r llm.Request, _ f
 func testHostedRefillRevocationDuringContextFlush(t *testing.T, db *pgstore.Client) {
 	t.Helper()
 	live := refillFixture("The reading room closes at seven.", .9)
-	insertRefillDocument(t, db, live.Chunk, "archive", "completed")
+	insertRefillDocument(t.Context(), t, db, live.Chunk, "archive", "completed")
 	idx := hostedRefillDouble{query: func(context.Context, []float32, int, domain.VectorFilter, int) ([]domain.ScoredChunk, error) {
 		return []domain.ScoredChunk{live}, nil
 	}}

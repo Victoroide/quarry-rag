@@ -273,12 +273,11 @@ func TestSubjectEvidenceChecksRequireCurrentReadableDocuments(t *testing.T) {
 	for id := range texts {
 		require.Equal(t, f.own, id)
 	}
-	observer, ok := checks.Visibility.(domain.EvidenceIncarnationObserver)
+	observer, ok := checks.Visibility.(domain.EvidenceSnapshotObserver)
 	require.True(t, ok)
-	incarnations, err := observer.ObserveUntaggedIncarnations(ctx, nil)
+	snapshot, err := observer.ObserveEvidenceSnapshot(ctx)
 	require.NoError(t, err)
-	require.Contains(t, incarnations, f.own)
-	require.NotContains(t, incarnations, f.peerOnly)
+	require.NotEmpty(t, snapshot)
 
 	f.grantRead(t, f.peer, f.shared, f.owner, false)
 	visible, _, err = checks.Visibility.VisibleEvidenceWithPreviews(ctx, candidates, nil)

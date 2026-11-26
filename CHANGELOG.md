@@ -24,6 +24,7 @@ Notable changes are grouped by release.
 ### Changed
 
 - Delegated trust-file checks can proceed independently while another check reads unchanged trust data.
+- Hosted and memory queries take one PostgreSQL snapshot before searching to validate historical vector hits (migration `027_untagged_vector_stamps.sql`).
 
 ## [0.2.0] - 2026-11-26
 

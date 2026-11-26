@@ -277,7 +277,7 @@ has no refill path.
 
 Startup cleanup, upserts and terminal cleanup validate the processing document and live lease before each physical mutation. The worker records a claim in PostgreSQL, releases its connection during the provider call, then checkpoints the outcome. PostgreSQL calculates expiry from its own clock and the remaining call budget. A lost reply, partial acknowledgment or expired claim records uncertainty that survives subsequent successes. Tagged worker attempts use separate physical targets. Completion publishes the winning target with the chunk metadata. Any unresolved mutation on a shared untagged target prevents completion. pgvector writes commit with the chunk metadata in PostgreSQL.
 
-New untagged Pinecone and memory vectors store their claimed incarnation for retrieval. Completion records when those vectors are required to carry it. Untagged records use logical chunk IDs as physical keys, and cleanup targets them by document ID and the absence of tagged ownership.
+New untagged Pinecone and memory vectors store their claimed incarnation for retrieval. Completion records when those vectors are required to carry it. A trigger stamps each document with the transaction that last left its vectors untagged. Before searching, a query reads one PostgreSQL snapshot without scanning the corpus and checks historical hits against it. Untagged records use logical chunk IDs as physical keys, and cleanup targets them by document ID and the absence of tagged ownership.
 
 ## Data Model
 

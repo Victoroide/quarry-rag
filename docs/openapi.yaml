@@ -99,7 +99,7 @@ paths:
     post:
       operationId: queryDocuments
       summary: Return selected evidence or a generated answer
-      description: 'See [POST /query](api.md#post-query) for query scope, current-evidence checks and partial hosted results.'
+      description: 'See [POST /query](api.md#post-query) for query scope, evidence checks including historical untagged hits, and partial hosted results.'
       security:
         - ServiceToken: []
         - ServiceToken: []
