@@ -44,7 +44,7 @@ func readEvaluationFixture(ctx context.Context, source fixtureStatusQuery, id do
 // ReconcileEvaluationFixture retires absent intent under the same fence as admission.
 func (c *Client) ReconcileEvaluationFixture(ctx context.Context, id domain.DocumentID, receipt string) (domain.EvaluationFixtureStatus, error) {
 	var s domain.EvaluationFixtureStatus
-	tx, err := c.Pool.Begin(ctx)
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return s, err
 	}
@@ -52,7 +52,7 @@ func (c *Client) ReconcileEvaluationFixture(ctx context.Context, id domain.Docum
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 		return s, err
 	}
-	if gateErr := c.gate(ctx, tx); gateErr != nil {
+	if gateErr := c.gateWriter(ctx, tx); gateErr != nil {
 		return s, gateErr
 	}
 	if lockErr := lockFixtureDocument(ctx, tx, string(id)); lockErr != nil {
@@ -82,12 +82,12 @@ func (c *Client) ReconcileEvaluationFixture(ctx context.Context, id domain.Docum
 // DeleteEvaluationFixture locks the receipt and any pending job through cleanup.
 // The UUID remains reserved even after completion or a lost database connection.
 func (c *Client) DeleteEvaluationFixture(ctx context.Context, id domain.DocumentID, receipt, incarnation, vectorIdentity string, sweep func(context.Context) error) (string, error) {
-	tx, err := c.Pool.Begin(ctx)
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if gateErr := c.gate(ctx, tx); gateErr != nil {
+	if gateErr := c.gateWriter(ctx, tx); gateErr != nil {
 		return "", gateErr
 	}
 

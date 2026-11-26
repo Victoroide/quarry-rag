@@ -371,7 +371,7 @@ func TestPublishedServingUpgradeRestoresServiceMode(t *testing.T) {
 	owner, serving, roles := restrictedDatabase(t)
 	ctx := t.Context()
 	role := pgx.Identifier{roles.name("quarry_service")}.Sanitize()
-	grantExec(t, owner, `REVOKE EXECUTE ON FUNCTION grant_catalog_corpus_authz_mode() FROM `+role)
+	grantExec(t, owner, `REVOKE EXECUTE ON FUNCTION grant_catalog_corpus_authz_mode(), grant_catalog_corpus_authz_mode_shared() FROM `+role)
 	serving.SetAuthzMode("service")
 	require.Error(t, serving.WritersOpen(ctx), "a pre-029 restricted login must fail closed")
 
@@ -380,6 +380,9 @@ func TestPublishedServingUpgradeRestoresServiceMode(t *testing.T) {
 	mode, err := serving.CorpusAuthzMode(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "service", mode)
+	_, err = serving.AcceptDocument(ctx, jobsRequest("restricted service before writer grant"))
+	requireSQLState(t, err, "42501")
+	grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "Serving role upgrade for migration 036"))
 	result, err := serving.AcceptDocument(ctx, jobsRequest("restricted service upgrade"))
 	require.NoError(t, err)
 	require.Equal(t, domain.AcceptAccepted, result.Outcome)
@@ -468,12 +471,39 @@ func TestGrantsActivationRequiresCheckpointedDeletion(t *testing.T) {
 	require.EqualValues(t, 0, dry.Revision)
 	assertServiceUnchanged()
 
-	// Cutover succeeds atomically and advances revision + writes audit.
-	activated, err := c.ActivateGrants(ctx, false)
+	// Concurrent operators serialize behind the writer and commit only one cutover.
+	first, firstPID := corpusWriterSession(t, c, "")
+	second, secondPID := corpusWriterSession(t, c, "")
+	holder, holderPID := corpusCommitBarrier(t, c)
+	_, err = holder.Exec(ctx, "SELECT grant_catalog_corpus_authz_mode_shared()")
 	require.NoError(t, err)
-	require.False(t, activated.DryRun)
-	require.False(t, activated.AlreadyActive)
-	require.EqualValues(t, 1, activated.Revision)
+	activationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
+	defer stop()
+	type activation struct {
+		result GrantsActivationResult
+		err    error
+	}
+	activate := func(client *Client) <-chan activation {
+		done := make(chan activation, 1)
+		go func() {
+			result, activateErr := client.ActivateGrants(activationCtx, false)
+			done <- activation{result, activateErr}
+		}()
+		return done
+	}
+	firstDone := activate(first)
+	requireCorpusBlockedBy(t, c, firstPID, holderPID)
+	secondDone := activate(second)
+	requireCorpusBlockedBy(t, c, secondPID, firstPID, holderPID)
+	require.NoError(t, holder.Rollback(activationCtx))
+	activated, concurrent := <-firstDone, <-secondDone
+	require.NoError(t, activated.err)
+	require.NoError(t, concurrent.err)
+	require.False(t, activated.result.DryRun)
+	require.NotEqual(t, activated.result.AlreadyActive, concurrent.result.AlreadyActive)
+	require.EqualValues(t, 1, activated.result.Revision)
+	require.EqualValues(t, 1, concurrent.result.Revision)
+	requireCorpusPolicy(t, c, "grants", 1, 1)
 	mode, err = c.CorpusAuthzMode(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "grants", mode)

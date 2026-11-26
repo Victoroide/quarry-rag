@@ -119,6 +119,7 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_authorize_ingest(uuid, uuid, text
   public.grant_catalog_record_deletion_owner(uuid, uuid, uuid, uuid),
   public.grant_catalog_read_revision(uuid, uuid),
   public.grant_catalog_corpus_authz_mode(),
+  public.grant_catalog_corpus_authz_mode_shared(),
   public.grant_catalog_record_security_audit(text, uuid, uuid, bigint, text, text, text, uuid, uuid) TO quarry_service;
 GRANT SELECT ON public.grant_catalog_active_principals, public.grant_catalog_readable_documents,
   public.grant_catalog_document_sets_live, public.grant_catalog_document_set_readable TO quarry_service;
@@ -274,7 +275,7 @@ document-operation functions (`grant_catalog_policy_state`,
 
 After applying `029_authz_corpus_mode.sql`, grant the serving login execution of
 `grant_catalog_corpus_authz_mode()` before starting upgraded processes. Readiness,
-data routes and the writer gate read it even with `AUTHZ_MODE=service`. Grant
+data routes and writer preflight checks read it even with `AUTHZ_MODE=service`. Grant
 `grant_catalog_record_security_audit(text, uuid, uuid, bigint, text, text, text, uuid, uuid)`
 before enabling grants mode.
 
@@ -305,6 +306,16 @@ existing file authorization grant for older replicas and rollback.
 ```sql
 GRANT EXECUTE ON FUNCTION public.grant_catalog_lock_file_principal(uuid, uuid),
   public.grant_catalog_authorize_file_advisory(uuid, uuid, uuid) TO quarry_service;
+```
+
+After applying `036_corpus_writer_mode_lock.sql`, grant the serving login
+execution of `grant_catalog_corpus_authz_mode_shared()` before starting
+lock-aware processes in either authorization mode. Keep the existing grants
+for the unlocked read and the operator cutover.
+
+```sql
+-- Serving role upgrade for migration 036
+GRANT EXECUTE ON FUNCTION public.grant_catalog_corpus_authz_mode_shared() TO quarry_service;
 ```
 
 After applying `037_inventory_policy_revisions.sql`, grant the serving login
@@ -764,43 +775,50 @@ from the operator's database records without copying batch contents into logs.
 
 Migration `029_authz_corpus_mode.sql` records the corpus-level authorization mode
 in `grant_catalog_corpus_mode` (`service` by default, fenced to `grants` once activated)
-and creates the append-only security audit log `grant_catalog_security_audit`:
+and creates the append-only security audit log `grant_catalog_security_audit`.
 
-- Serving replicas check `grant_catalog_corpus_authz_mode()` on `/readyz`, HTTP data routes,
-  and database gates (`ErrAuthzModeMismatch`). Both `AUTHZ_MODE=service` and
-  `AUTHZ_MODE=grants` replicas fail readiness and admissions whenever the replica configuration
-  differs from the database corpus marker. Readiness caches the comparison for
-  `HEALTH_CACHE_TTL`; data routes and writer gates check it independently.
-- Follow the [grants cutover deployment sequence](deployment.md#grants-cutover)
-  before previewing or activating grants. Migration 038 requires checkpointed
-  deletion to be active for both operations, including a replay.
-- Preview and activate `grants` mode with the operator command (see [Database roles](#database-roles)):
+Serving replicas check the configured mode against the corpus marker through
+`grant_catalog_corpus_authz_mode()`. Both service and grants replicas fail
+readiness and admissions when their mode differs from the marker. Readiness
+caches the comparison for `HEALTH_CACHE_TTL`. Data routes and writer preflight
+checks read the marker independently. Acceptance, claim and publication
+transactions hold a shared lock on the marker until they end. Cutover takes
+an exclusive lock, so admitted transactions finish before the marker changes.
+Subsequent writes from mismatched replicas fail with `ErrAuthzModeMismatch`.
+
+Follow the [grants cutover deployment sequence](deployment.md#grants-cutover)
+before previewing or activating grants. Migration 038 requires checkpointed
+deletion to be active for both operations, including a replay. Use the
+[operator login](#database-roles) to run:
 
 ```sh
 go run ./scripts/grant-catalog -activate-grants -dry-run
 go run ./scripts/grant-catalog -activate-grants
 ```
 
-Activating `grants` locks the catalog, advances `grant_catalog_policy_revision`, records a
-`corpus_cutover` row in `grant_catalog_security_audit`, and is idempotent if re-run
-(`already_active: true`). A failed activation leaves mode, policy revision and
-audit unchanged. Historical documents without verified ownership remain quarantined
-and invisible in `grants` mode until reconciled via [Assign historical documents](#assign-historical-documents).
+The read-only preview can run while a writer holds the corpus marker lock.
+Activation locks the catalog, advances `grant_catalog_policy_revision` and
+records a `corpus_cutover` row in `grant_catalog_security_audit` in one
+transaction. Failure leaves the mode, revision and audit unchanged. If
+activation hits the five-second lock timeout or its result is uncertain,
+check the marker and finish draining any blocked writers before retrying.
+A replay reports `already_active: true` when activation already committed.
+Historical documents without verified ownership remain quarantined and
+invisible in grants mode until reconciled via [Assign historical documents](#assign-historical-documents).
 
 ### Recovery and retention
 
 For rollback, close ingress and keep both activation markers. Redeploy only a
-build that enforces scoped incarnation-qualified deletion with `AUTHZ_MODE=grants`.
-Service-mode replicas remain unready. Returning to service-only trust requires a
-separately authorized trust-boundary change: an isolated legacy corpus, or an
-operator migration and a trusted gateway enforcing every operation.
+lock-aware build that enforces scoped incarnation-qualified deletion with
+`AUTHZ_MODE=grants`, and retain the serving-role execution grants.
+Returning to service-only trust requires a separately authorized
+trust-boundary change through an isolated legacy corpus or an operator
+migration with a trusted gateway enforcing every operation.
 
-A restored backup carries its own marker. A backup from before cutover leaves
-grants replicas unready: re-fence older binaries, re-apply the final ownership
-delta, and follow the [grants cutover sequence](deployment.md#grants-cutover)
-before reopening ingress. A backup from after cutover keeps service replicas fenced. An interrupted cutover rolls back its
-single transaction, leaving the marker at `service`; rerunning is idempotent
-and reports `already_active` once committed.
+A restored backup carries its own markers. If the backup predates cutover,
+re-fence older binaries, reapply the final ownership delta and follow the
+[grants cutover sequence](deployment.md#grants-cutover) before reopening
+ingress.
 
 The deployment determines audit retention. Only the schema owner can prune or
 archive audit rows by `recorded_at`; serving, operator and auditor logins cannot

@@ -855,6 +855,12 @@ func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, job)
 
+	c.SetAuthzMode("service")
+	require.ErrorIs(t, c.WritersOpen(t.Context()), domain.ErrGenerationMismatch)
+	_, err = c.AcceptDocument(t.Context(), jobsRequest("configured replica before vector state"))
+	require.ErrorIs(t, err, domain.ErrGenerationMismatch)
+	c.SetAuthzMode("")
+
 	c.SetVectorGeneration("g2")
 	require.ErrorIs(t, c.WritersOpen(t.Context()), domain.ErrGenerationMismatch, "a named generation cannot be served without its record")
 	c.SetVectorGeneration(LegacyGeneration)

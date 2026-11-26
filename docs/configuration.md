@@ -356,13 +356,14 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `029_authz_corpus_mode.sql` | Adds the corpus authorization mode marker and security audit log. |
 | `030_deletion_mode_lock.sql` | Adds an owner-defined function through which admission reads the deletion activation marker while holding it in share mode, so a restricted serving login can select the tagged vector format without access to the marker table. |
 | `031_document_sets.sql` | Adds immutable [document sets](grant-catalog.md#document-sets), their membership with composite tenant constraints, two live relations for the serving login and the owner-defined functions an operator uses to create and purge sets. Service-mode queries and deployments that leave `DOCUMENT_SETS_ENABLED` off do not use them. |
+| `036_corpus_writer_mode_lock.sql` | Adds an owner-defined shared corpus-mode lock for serving writer transactions. |
 | `037_inventory_policy_revisions.sql` | Adds per-principal revisions for [scoped inventory and status](grant-catalog.md#scoped-document-operations). |
 | `038_grants_require_deletion_activation.sql` | Requires the checkpointed-deletion marker for grants activation and preview. |
 | `043_grant_catalog_stable_source_version.sql` | Replaces the grant source view without scanning or rewriting documents or ownership rows. Follow “Upgrade the source version” in the grant catalog guide before applying it. |
 
 The service can roll back to the previous binary with migration 010 and its
 checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026,
-029, 030, 031 or 037, follow the
+029, 030, 031, 036 or 037, follow the
 [serving-role upgrade procedure](grant-catalog.md#upgrade-an-existing-serving-role)
 for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).

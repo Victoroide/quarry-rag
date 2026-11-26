@@ -27,7 +27,7 @@ var (
 )
 
 // SetAuthzMode configures the expected corpus authorization mode enforced on
-// database gates and admissions.
+// database gates and publication.
 func (c *Client) SetAuthzMode(mode string) {
 	c.authzMode.Store(&mode)
 }
@@ -39,16 +39,25 @@ func (c *Client) configuredAuthzMode() string {
 	return ""
 }
 
+const (
+	corpusAuthzModeQuery       = `SELECT grant_catalog_corpus_authz_mode()`
+	sharedCorpusAuthzModeQuery = `SELECT grant_catalog_corpus_authz_mode_shared()`
+)
+
 // CorpusAuthzMode returns the active authorization mode recorded on the corpus.
 // A missing or unrecognized marker fails closed.
 func (c *Client) CorpusAuthzMode(ctx context.Context) (string, error) {
-	return readCorpusAuthzMode(ctx, c.Pool)
+	return readCorpusAuthzMode(ctx, c.Pool, corpusAuthzModeQuery)
 }
 
-func readCorpusAuthzMode(ctx context.Context, q queryRower) (string, error) {
+func readCorpusAuthzMode(ctx context.Context, q queryRower, query string) (string, error) {
 	var mode *string
-	if err := q.QueryRow(ctx, `SELECT grant_catalog_corpus_authz_mode()`).Scan(&mode); err != nil {
-		return "", fmt.Errorf("postgres: read corpus authz mode: %w", err)
+	readErr := q.QueryRow(ctx, query).Scan(&mode)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if readErr != nil {
+		return "", fmt.Errorf("postgres: read corpus authz mode: %w", readErr)
 	}
 	if mode == nil || (*mode != "service" && *mode != "grants") {
 		return "", errors.New("postgres: corpus authz mode marker is missing or invalid")
@@ -56,12 +65,12 @@ func readCorpusAuthzMode(ctx context.Context, q queryRower) (string, error) {
 	return *mode, nil
 }
 
-func (c *Client) checkAuthzMode(ctx context.Context, q queryRower) error {
+func (c *Client) checkAuthzMode(ctx context.Context, q queryRower, query string) error {
 	expected := c.configuredAuthzMode()
 	if expected == "" {
 		return nil
 	}
-	actual, err := readCorpusAuthzMode(ctx, q)
+	actual, err := readCorpusAuthzMode(ctx, q, query)
 	if err != nil {
 		return err
 	}
@@ -69,6 +78,11 @@ func (c *Client) checkAuthzMode(ctx context.Context, q queryRower) error {
 		return fmt.Errorf("%w: replica configured for %q, corpus is %q", domain.ErrAuthzModeMismatch, expected, actual)
 	}
 	return nil
+}
+
+// checkWriterAuthzMode holds the corpus marker in share mode until tx ends.
+func (c *Client) checkWriterAuthzMode(ctx context.Context, tx pgx.Tx) error {
+	return c.checkAuthzMode(ctx, tx, sharedCorpusAuthzModeQuery)
 }
 
 // ActivateGrants transitions the corpus authorization mode marker to grants
