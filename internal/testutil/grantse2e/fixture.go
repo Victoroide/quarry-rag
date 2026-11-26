@@ -43,9 +43,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Synthetic values shared by the HTTP and stdio fixtures.
 const (
 	Audience      = "quarry-grants-test"
-	TokenLifetime = 15 * time.Minute
+	TokenLifetime = 4 * time.Minute
 	Collection    = "shared-archive"
 	FileType      = "archive-file"
 	TextType      = "archive-text"
@@ -58,6 +59,7 @@ const (
 	dimensions    = 8
 )
 
+// Backends lists the vector adapters exercised by the fixture.
 var Backends = [...]string{"postgres", "pinecone"}
 
 // Actor is a catalog principal and its synthetic signed subject credential.
@@ -65,6 +67,8 @@ type Actor struct {
 	Tenant, ID, Subject string
 	Credential          client.SubjectCredential
 }
+
+type deletionActivator func(*pgstore.Client, context.Context) (domain.DeletionActivation, error)
 
 // Fixture wires two replicas to one isolated corpus through separate pools.
 type Fixture struct {
@@ -87,7 +91,7 @@ type Fixture struct {
 }
 
 // New starts the corpus, verifies the service-mode gates, and activates grants.
-func New(t *testing.T, backend string, setup ...func()) *Fixture {
+func New(t *testing.T, backend string, activateDeletion deletionActivator, setup ...func()) *Fixture {
 	t.Helper()
 	dsn := pgtest.StartVector(t)
 	for _, configure := range setup {
@@ -119,13 +123,13 @@ func New(t *testing.T, backend string, setup ...func()) *Fixture {
 	f.Revocable = f.actor(t, tenantA)
 	f.Foreign = f.actor(t, tenantB)
 
-	f.Admin = open(t, ctx, dsn, "", "")
+	f.Admin = open(ctx, t, dsn, "", "")
 	require.NoError(t, f.Admin.RunMigrations(ctx))
 	f.Exec(t, "REVOKE CREATE ON SCHEMA public FROM PUBLIC")
 	_, err = pgstore.NewVectorStore(ctx, f.Admin, dimensions)
 	require.NoError(t, err)
 	cfg := fixtureConfig(backend, f.ServiceToken)
-	host := f.prepareVectors(t, ctx, cfg)
+	host := f.prepareVectors(ctx, t, cfg)
 	password := uuid.NewString()
 	roles := make(map[string]string)
 	for _, name := range []string{"quarry_service", "quarry_operator", "quarry_auditor"} {
@@ -145,46 +149,117 @@ func New(t *testing.T, backend string, setup ...func()) *Fixture {
 		grant("deployment.md", "ON public.chunk_vectors_<generation> TO quarry_service")
 	}
 	f.OperatorLogin = roles["quarry_operator"]
-	f.Operator = open(t, ctx, dsn, f.OperatorLogin, password)
-	f.Auditor = open(t, ctx, dsn, roles["quarry_auditor"], password)
+	f.Operator = open(ctx, t, dsn, f.OperatorLogin, password)
+	f.Auditor = open(ctx, t, dsn, roles["quarry_auditor"], password)
 
 	for i := range f.Serving {
-		f.Serving[i] = open(t, ctx, dsn, roles["quarry_service"], password)
+		f.Serving[i] = open(ctx, t, dsn, roles["quarry_service"], password)
 	}
 	serving := f.Serving[0]
 	serving.SetAuthzMode(config.AuthzModeService)
 	store, target := cfg.VectorTarget()
 	require.NoError(t, serving.PinVectorGeneration(ctx, generation, store, target, host, cfg.EmbeddingSettings()))
-	f.checkServicePrivileges(t, ctx)
-	f.seedLegacy(t, ctx)
+	f.checkServicePrivileges(ctx, t)
+	f.seedLegacy(ctx, t)
 	f.provision(t)
-	s3 := newObjects(t, ctx)
-	f.checkQualifiedServiceDeletion(t, ctx, cfg, s3)
+	s3 := newObjects(ctx, t)
+	if backend == "postgres" {
+		f.checkQualifiedServiceDeletion(ctx, t, cfg, s3, activateDeletion)
+	} else {
+		// The hosted fixture exercises tagged vectors in the default namespace.
+		marker, err := activateDeletion(f.Admin, ctx)
+		require.NoError(t, err)
+		require.False(t, marker.ActivatedAt.IsZero())
+	}
 	for i := range f.Servers {
-		f.Servers[i] = f.startReplica(t, ctx, cfg, host, s3, i)
+		f.Servers[i] = f.startReplica(t, cfg, host, s3, i)
 	}
 
 	resp := f.Raw(t, 0, http.MethodGet, "/readyz", "", "", nil)
 	require.Equal(t, http.StatusServiceUnavailable, resp.Status, "%s", resp.Body)
 	resp = f.Raw(t, 1, http.MethodGet, "/documents", f.ServiceToken, f.Owner.Credential.Token, nil)
 	require.Equal(t, http.StatusServiceUnavailable, resp.Status, "%s", resp.Body)
+	f.checkAdmissionCutover(t)
+	f.checkServiceFence(t, cfg, s3)
+	return f
+}
+
+func (f *Fixture) checkAdmissionCutover(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	const content = "Owned admission across the corpus cutover."
+	body, err := json.Marshal(client.IngestRequest{Content: content, DocType: TextType, Collection: Collection})
+	require.NoError(t, err)
+	for i := range f.Servers {
+		resp := f.Raw(t, i, http.MethodPost, "/ingest", f.ServiceToken, f.Owner.Credential.Token, body)
+		RequireDenied(t, resp, http.StatusServiceUnavailable, "unavailable", "authorization mode mismatch")
+		var documentInserted, jobInserted bool
+		require.NoError(t, f.Admin.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM documents WHERE id <> $1),
+			EXISTS (SELECT FROM ingest_jobs)`, f.LegacyID).Scan(&documentInserted, &jobInserted))
+		require.False(t, documentInserted, "replica %d inserted a document before cutover", i)
+		require.False(t, jobInserted, "replica %d inserted a job before cutover", i)
+	}
+
 	activated, err := f.Operator.ActivateGrants(ctx, false)
 	require.NoError(t, err)
 	require.Equal(t, f.Revision+1, activated.Revision)
 	f.Revision = activated.Revision
+	var admitted [len(f.Servers)]string
+	// Leave workers idle until the committed admissions and pending jobs can be read together.
 	for i, replica := range f.Serving {
 		require.NoError(t, replica.WritersOpen(ctx))
 		resp := f.Raw(t, i, http.MethodGet, "/documents", f.ServiceToken, f.Owner.Credential.Token, nil)
 		require.Equal(t, http.StatusOK, resp.Status, "%s", resp.Body)
 		f.VerifyReady(t, i)
+
+		resp = f.Raw(t, i, http.MethodPost, "/ingest", f.ServiceToken, f.Owner.Credential.Token, body)
+		require.Equal(t, http.StatusAccepted, resp.Status, "%s", resp.Body)
+		var accepted client.IngestResponse
+		require.NoError(t, json.Unmarshal(resp.Body, &accepted))
+		require.Equal(t, "processing", accepted.Status)
+		id, err := uuid.Parse(accepted.DocumentID)
+		require.NoError(t, err)
+		require.NotEqual(t, uuid.Nil, id)
+		var tenant, principal, collection, documentStatus, jobState string
+		require.NoError(t, f.Admin.Pool.QueryRow(ctx, `SELECT o.tenant_id::text, o.principal_id::text,
+			o.collection, d.status, j.state FROM documents d
+			JOIN grant_catalog_document_ownership o ON o.document_id=d.id AND o.incarnation=d.incarnation
+			JOIN ingest_jobs j ON j.document_id=d.id WHERE d.id=$1`, accepted.DocumentID).
+			Scan(&tenant, &principal, &collection, &documentStatus, &jobState))
+		require.Equal(t, f.Owner.Tenant, tenant)
+		require.Equal(t, f.Owner.ID, principal)
+		require.Equal(t, Collection, collection)
+		require.Equal(t, "processing", documentStatus)
+		require.Equal(t, "pending", jobState)
+		admitted[i] = accepted.DocumentID
 	}
-	f.checkServiceFence(t, cfg, s3)
-	return f
+	for _, w := range f.workers {
+		w.Start(t.Context())
+	}
+	for i, id := range admitted {
+		doc := f.Wait(t, f.Owner, i, id, content)
+		result, err := f.Client(t, i, f.Owner).DeleteDocumentIncarnation(ctx, doc.ID, doc.Incarnation)
+		require.NoError(t, err)
+		require.True(t, result.Deleted)
+		f.RequireFinalized(t, doc)
+
+		var deletionRevision int64
+		require.NoError(t, f.Admin.Pool.QueryRow(ctx, `SELECT revision FROM grant_catalog_policy_audit
+			WHERE document_id=$1 AND incarnation=$2`, doc.ID, doc.Incarnation).Scan(&deletionRevision))
+		require.Equal(t, activated.Revision+int64(i+1), deletionRevision, "replica %d ownership removal", i)
+	}
+	// Finalizing each owned deletion advances the revision used by the next grant import.
+	var committedRevision int64
+	require.NoError(t, f.Admin.Pool.QueryRow(ctx, `SELECT revision FROM grant_catalog_policy_revision
+		WHERE singleton`).Scan(&committedRevision))
+	require.Equal(t, activated.Revision+int64(len(admitted)), committedRevision)
+	f.Revision = committedRevision
 }
 
 func fixtureConfig(backend, serviceToken string) *config.Config {
 	return &config.Config{
-		AuthzMode: config.AuthzModeGrants, ServiceToken: serviceToken,
+		AuthzMode: config.AuthzModeGrants, ServiceToken: serviceToken, S3Bucket: Bucket,
 		VectorStore: backend, VectorGeneration: generation,
 		PineconeIndexName: "fixture-index", PineconeTimeout: 5 * time.Second, PineconeMaxAttempts: 1, PineconeUpsertBatchSize: 100,
 		EmbeddingProvider: domain.EmbeddingProviderBedrock, BedrockEmbedModel: "fixture-embedding",
@@ -199,12 +274,12 @@ func fixtureConfig(backend, serviceToken string) *config.Config {
 	}
 }
 
-func (f *Fixture) prepareVectors(t *testing.T, ctx context.Context, cfg *config.Config) string {
+func (f *Fixture) prepareVectors(ctx context.Context, t *testing.T, cfg *config.Config) string {
 	t.Helper()
 	var host string
 	switch cfg.VectorStore {
 	case "postgres":
-		_, err := pgstore.CreateGenerationVectorStore(ctx, f.Admin, dimensions, generation)
+		_, err := pgstore.CreateGenerationVectorStore(ctx, f.Admin, dimensions, generation, pgstore.WithExactScopeMax(32))
 		require.NoError(t, err)
 	case "pinecone":
 		f.Pinecone, f.index, host = newPinecone(t)
@@ -213,11 +288,11 @@ func (f *Fixture) prepareVectors(t *testing.T, ctx context.Context, cfg *config.
 		t.Fatalf("unknown vector backend %q", cfg.VectorStore)
 	}
 	store, target := cfg.VectorTarget()
-	f.activateGeneration(t, ctx, cfg, store, target, host)
+	f.activateGeneration(ctx, t, cfg, store, target, host)
 	return host
 }
 
-func (f *Fixture) activateGeneration(t *testing.T, ctx context.Context, cfg *config.Config, store, target, host string) {
+func (f *Fixture) activateGeneration(ctx context.Context, t *testing.T, cfg *config.Config, store, target, host string) {
 	t.Helper()
 	_, err := f.Admin.RegisterGeneration(ctx, pgstore.Generation{
 		Name: generation, Store: store, Target: target, Host: host,
@@ -231,7 +306,7 @@ func (f *Fixture) activateGeneration(t *testing.T, ctx context.Context, cfg *con
 	require.NoError(t, f.Admin.ThawWriters(ctx))
 }
 
-func open(t *testing.T, ctx context.Context, dsn, role, password string) *pgstore.Client {
+func open(ctx context.Context, t *testing.T, dsn, role, password string) *pgstore.Client {
 	t.Helper()
 	conn, err := pgstore.NewClient(ctx, dsn, pgstore.WithQueryTracer(tracing.NewQueryTracer()), func(c *pgxpool.Config) {
 		c.MaxConns = 4
@@ -245,7 +320,7 @@ func open(t *testing.T, ctx context.Context, dsn, role, password string) *pgstor
 	return conn
 }
 
-func (f *Fixture) checkServicePrivileges(t *testing.T, ctx context.Context) {
+func (f *Fixture) checkServicePrivileges(ctx context.Context, t *testing.T) {
 	t.Helper()
 	serving := f.Serving[0]
 	_, err := serving.ActivateGrants(ctx, false)
@@ -261,13 +336,13 @@ func (f *Fixture) checkServicePrivileges(t *testing.T, ctx context.Context) {
 	}
 }
 
-func (f *Fixture) seedLegacy(t *testing.T, ctx context.Context) {
+func (f *Fixture) seedLegacy(ctx context.Context, t *testing.T) {
 	t.Helper()
 	serving := f.Serving[0]
-	f.LegacyID = string(f.acceptLegacy(t, ctx, serving).Document.ID)
+	f.LegacyID = string(f.acceptLegacy(ctx, t, serving).Document.ID)
 }
 
-func (f *Fixture) acceptLegacy(t *testing.T, ctx context.Context, serving *pgstore.Client) *domain.Job {
+func (f *Fixture) acceptLegacy(ctx context.Context, t *testing.T, serving *pgstore.Client) *domain.Job {
 	t.Helper()
 	req := domain.AcceptRequest{
 		Document: domain.Document{ID: domain.DocumentID(uuid.NewString()), Content: "Private unassigned legacy excerpt."},
@@ -286,13 +361,13 @@ func (f *Fixture) acceptLegacy(t *testing.T, ctx context.Context, serving *pgsto
 	return job
 }
 
-func (f *Fixture) checkQualifiedServiceDeletion(t *testing.T, ctx context.Context, cfg *config.Config, s3 *s3store.Client) {
+func (f *Fixture) checkQualifiedServiceDeletion(ctx context.Context, t *testing.T, cfg *config.Config, s3 *s3store.Client, activateDeletion deletionActivator) {
 	t.Helper()
 	serving := f.Serving[0]
-	doc := f.acceptLegacy(t, ctx, serving)
+	doc := f.acceptLegacy(ctx, t, serving)
 	service := *cfg
 	service.AuthzMode = config.AuthzModeService
-	vector := f.openVector(t, ctx, cfg, serving)
+	vector := f.openVector(ctx, t, cfg, serving)
 	deps := f.routerDeps(t, &service, serving, vector, s3, 0)
 	router := api.NewRouter(deps)
 	server := httptest.NewServer(router)
@@ -307,7 +382,7 @@ func (f *Fixture) checkQualifiedServiceDeletion(t *testing.T, ctx context.Contex
 	var precondition *client.APIError
 	require.ErrorAs(t, err, &precondition)
 	require.Equal(t, http.StatusPreconditionFailed, precondition.StatusCode)
-	marker, err := f.Admin.ActivateDeletion(ctx)
+	marker, err := activateDeletion(f.Admin, ctx)
 	require.NoError(t, err)
 	require.False(t, marker.ActivatedAt.IsZero())
 	mode, err = c.GetDeletionMode(ctx)
@@ -335,15 +410,18 @@ func (f *Fixture) checkQualifiedServiceDeletion(t *testing.T, ctx context.Contex
 	require.True(t, result.Deleted)
 }
 
-func (f *Fixture) startReplica(t *testing.T, ctx context.Context, cfg *config.Config, host string, s3 *s3store.Client, replica int) *httptest.Server {
+func (f *Fixture) startReplica(t *testing.T, cfg *config.Config, host string, s3 *s3store.Client, replica int) *httptest.Server {
 	t.Helper()
+	parent := t.Context()
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
 	conn := f.Serving[replica]
 	conn.SetAuthzMode(config.AuthzModeGrants)
 	store, target := cfg.VectorTarget()
 	require.NoError(t, conn.PinVectorGeneration(ctx, generation, store, target, host, cfg.EmbeddingSettings()))
-	vector := f.openVector(t, ctx, cfg, conn)
+	vector := f.openVector(ctx, t, cfg, conn)
 	verifier, err := subjectauth.NewVerifierWithObserver(f.issuer, Audience, f.jwksPath, func(event subjectauth.TrustEvent) error {
-		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 2*time.Second)
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
 		defer cancel()
 		return conn.RecordSecurityAudit(auditCtx, domain.SecurityAuditEvent{
 			Action: event.Action, Outcome: event.Outcome, Reason: event.Reason,
@@ -356,9 +434,8 @@ func (f *Fixture) startReplica(t *testing.T, ctx context.Context, cfg *config.Co
 	deps.ReadAuthority = pgstore.GrantReader{Pool: conn.Pool}
 	deps.AuditRecorder = conn
 	f.workers[replica] = deps.Worker
-	deps.Worker.Start(t.Context())
 	t.Cleanup(func() {
-		shutdown, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 15*time.Second)
+		shutdown, cancel := context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
 		defer cancel()
 		require.NoError(t, deps.Worker.ShutdownContext(shutdown))
 	})
@@ -378,7 +455,7 @@ func (f *Fixture) StopReplicas(t *testing.T) {
 	}
 }
 
-func (f *Fixture) openVector(t *testing.T, ctx context.Context, cfg *config.Config, conn *pgstore.Client) domain.VectorStore {
+func (f *Fixture) openVector(ctx context.Context, t *testing.T, cfg *config.Config, conn *pgstore.Client) domain.VectorStore {
 	t.Helper()
 	if f.index != nil {
 		pc := pcstore.NewClientForIndex(f.index, cfg, f.indexHost)
@@ -443,7 +520,7 @@ func (f *Fixture) checkServiceFence(t *testing.T, cfg *config.Config, s3 *s3stor
 	service := *cfg
 	service.AuthzMode = config.AuthzModeService
 	conn := f.Serving[0]
-	vector := f.openVector(t, t.Context(), cfg, conn)
+	vector := f.openVector(t.Context(), t, cfg, conn)
 	router := api.NewRouter(&api.RouterDeps{
 		Config: &service, ChunkStore: conn, S3Client: s3, VectorStore: vector,
 		Probes: f.probes(cfg, conn, vector, s3),
@@ -540,7 +617,7 @@ func (f *Fixture) Exec(t testing.TB, sql string, args ...any) {
 	require.NoError(t, err)
 }
 
-func newObjects(t *testing.T, ctx context.Context) *s3store.Client {
+func newObjects(ctx context.Context, t *testing.T) *s3store.Client {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

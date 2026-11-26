@@ -1,12 +1,14 @@
 package grantse2e
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pineconetest"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
@@ -19,7 +21,7 @@ func TestPineconeDataPlaneDispatch(t *testing.T) {
 	ctx := t.Context()
 	near, far := make([]float32, dimensions), make([]float32, dimensions)
 	near[0], far[1] = 1, 1
-	allowed, err := structpb.NewStruct(map[string]any{"doc_id": "allowed"})
+	allowed, err := structpb.NewStruct(map[string]any{"doc_id": "allowed", domain.VectorRevisionKey: "live"})
 	require.NoError(t, err)
 	forbidden, err := structpb.NewStruct(map[string]any{"doc_id": "forbidden"})
 	require.NoError(t, err)
@@ -31,8 +33,19 @@ func TestPineconeDataPlaneDispatch(t *testing.T) {
 	require.Equal(t, uint32(2), count)
 	filter, err := structpb.NewStruct(map[string]any{"doc_id": map[string]any{"$in": []any{"allowed"}}})
 	require.NoError(t, err)
+	scoped, err := structpb.NewStruct(map[string]any{"$and": []any{
+		map[string]any{"doc_id": map[string]any{"$in": []any{"allowed"}}},
+		map[string]any{"$or": []any{
+			map[string]any{domain.VectorRevisionKey: map[string]any{"$in": []any{"live"}}},
+			map[string]any{
+				"revision_id":            map[string]any{"$exists": true},
+				domain.VectorRevisionKey: map[string]any{"$exists": false},
+			},
+		}},
+	}})
+	require.NoError(t, err)
 	result, err := conn.QueryByVectorValues(ctx, &pinecone.QueryByVectorValuesRequest{
-		Vector: near, TopK: 1, IncludeMetadata: true, MetadataFilter: filter,
+		Vector: near, TopK: 1, IncludeMetadata: true, MetadataFilter: scoped,
 	})
 	require.NoError(t, err)
 	require.Len(t, result.Matches, 1)
@@ -57,18 +70,25 @@ func TestPineconeDataPlaneDispatch(t *testing.T) {
 
 func TestPineconeDataPlaneRejectsInvalidRequests(t *testing.T) {
 	fixture := &Pinecone{index: pcstore.NewMemoryIndex(dimensions)}
+	const query = `{"topK":1,"vector":[1,0,0,0,0,0,0,0],`
 	for _, tc := range []struct {
 		method, path, body string
 		code               int
 	}{
 		{http.MethodPost, "/query", "{", http.StatusBadRequest},
 		{http.MethodPost, "/query", "{}{}", http.StatusBadRequest},
-		{http.MethodPost, "/query", `{"topK":1,"invalid":true}`, http.StatusBadRequest},
-		{http.MethodPost, "/query", `{"namespace":"other","topK":1}`, http.StatusBadRequest},
-		{http.MethodPost, "/query", `{"topK":1,"filter":{"other":{"$eq":"id"}}}`, http.StatusBadRequest},
-		{http.MethodPost, "/query", `{"topK":1,"filter":{"doc_id":{"$gt":"id"}}}`, http.StatusBadRequest},
-		{http.MethodPost, "/query", `{"topK":1,"filter":{"doc_id":{"$eq":0}}}`, http.StatusBadRequest},
-		{http.MethodPost, "/query", `{"topK":1,"filter":{"doc_id":{"$in":[false]}}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"invalid":true}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"namespace":"other"}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"other":{"$eq":"id"}}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"doc_id":{"$gt":"id"}}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"doc_id":{"$eq":0}}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"doc_id":{"$in":[false]}}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"$and":[]}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"$or":{}}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"$or":[{}]}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"$or":[true]}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"$and":[{"$or":[{"doc_id":{"$in":[false]}}]}]}}`, http.StatusBadRequest},
+		{http.MethodPost, "/query", query + `"filter":{"$and":[{"other":{"$eq":"id"}}]}}`, http.StatusBadRequest},
 		{http.MethodPost, "/vectors/delete", `{"deleteAll":true}`, http.StatusBadRequest},
 		{http.MethodGet, "/vectors/list?namespace=other", "", http.StatusBadRequest},
 		{http.MethodGet, "/vectors/fetch?namespace=&ids=one&unexpected=1", "", http.StatusBadRequest},
@@ -88,4 +108,27 @@ func TestPineconeDataPlaneRejectsInvalidRequests(t *testing.T) {
 	namespaced := pineconetest.NewHTTPIndexConn(*endpoint, srv.Client(), "named")
 	_, err = namespaced.ListVectors(t.Context(), &pinecone.ListVectorsRequest{})
 	require.ErrorContains(t, err, "invalid namespace")
+}
+
+func FuzzPineconeDataPlaneQueryDispatch(f *testing.F) {
+	f.Add([]byte(`{"namespace":"","vector":[1,0,0,0,0,0,0,0],"topK":1,"filter":{"doc_id":{"$in":["allowed"]}}}`))
+	f.Add([]byte(`{"namespace":"other","topK":1}`))
+	f.Add([]byte(`{"topK":1,"filter":{"doc_id":{"$gt":"id"}}}`))
+	f.Add([]byte(`{"topK":1,"filter":{"collection":{"$eq":"archive"}}}`))
+	f.Add([]byte(`{"vector":[`))
+	f.Fuzz(func(t *testing.T, body []byte) {
+		fixture := &Pinecone{index: pcstore.NewMemoryIndex(dimensions)}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/query", bytes.NewReader(body))
+		out := httptest.NewRecorder()
+		fixture.ServeHTTP(out, req)
+		switch out.Code {
+		case http.StatusOK:
+			require.Len(t, fixture.Calls(), 1)
+			require.Equal(t, "", fixture.Calls()[0].Namespace)
+		case http.StatusBadRequest:
+			require.Empty(t, fixture.Calls())
+		default:
+			t.Fatalf("unexpected status %d", out.Code)
+		}
+	})
 }

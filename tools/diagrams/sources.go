@@ -37,6 +37,7 @@ var directoryDescriptions = map[string]string{
 	"internal/store": "Storage adapters", "internal/store/memory": "Offline vector index", "internal/store/pinecone": "Hosted vector index", "internal/store/postgres": "Documents, chunks and durable jobs", "internal/store/s3": "Original files and signed downloads",
 	"internal/subjectauth": "Delegated access token verification",
 	"internal/testutil":    "Test support", "internal/testutil/docxtest": "Word package fixtures", "internal/testutil/pgtest": "Disposable test databases",
+	"internal/testutil/grantse2e": "Grants integration fixtures", "internal/testutil/pineconetest": "Pinecone test transport",
 	"internal/textutil": "Unicode normalization", "internal/wordprocessingml": "Word schema identifiers", "internal/worker": "Leased ingestion and retry handling",
 	"scripts": "Operational commands", "scripts/cleanup": "Delete selected documents", "scripts/document-sets": "Create subject-bound sets", "scripts/evidenceeval": "Scoped evidence and visibility checks", "scripts/fuzz": "Discover and exercise Go fuzz targets", "scripts/grant-catalog": "Import tenant grants", "scripts/langeval": "Answer language and latency checks", "scripts/reconcile": "Find and remove orphan vectors", "scripts/reindex": "Stage and verify vector generations", "scripts/simulate": "Exercise the service API", "scripts/validate": "Check retrieval behavior",
 	"scripts/citationsupport": "Calibration",

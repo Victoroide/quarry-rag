@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/client"
+	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/grantse2e"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -15,7 +16,7 @@ import (
 func TestGrantsPostgresRouterIsolation(t *testing.T) {
 	for _, backend := range grantse2e.Backends {
 		t.Run(backend, func(t *testing.T) {
-			f := grantse2e.New(t, backend)
+			f := grantse2e.New(t, backend, (*pgstore.Client).ActivateDeletion)
 			docs := f.Seed(t)
 			owner := f.Client(t, 0, f.Owner)
 			reader := f.Client(t, 1, f.Reader)
@@ -49,8 +50,8 @@ func TestGrantsPostgresRouterIsolation(t *testing.T) {
 				require.Equal(t, docs.First.Incarnation, status.Incarnation)
 				require.Equal(t, "completed", status.Status)
 				for _, id := range []string{docs.Second.ID, docs.Foreign.ID, f.LegacyID, uuid.NewString()} {
-					_, err := reader.GetDocument(t.Context(), id)
-					requireAPIError(t, err, http.StatusNotFound, "not_found")
+					_, statusErr := reader.GetDocument(t.Context(), id)
+					requireAPIError(t, statusErr, http.StatusNotFound, "not_found")
 				}
 				_, err = f.Client(t, 1, f.Foreign).GetDocument(t.Context(), docs.First.ID)
 				requireAPIError(t, err, http.StatusNotFound, "not_found")
@@ -112,11 +113,16 @@ func TestGrantsPostgresRouterIsolation(t *testing.T) {
 								return nil
 							})
 							require.NoError(t, err)
-							want := []string{"context", "done"}
 							if answer == client.AnswerModeGenerated {
-								want = []string{"context", "delta", "done"}
+								require.GreaterOrEqual(t, len(names), 3)
+								require.Equal(t, "context", names[0])
+								require.Equal(t, "done", names[len(names)-1])
+								for _, event := range names[1 : len(names)-1] {
+									require.Equal(t, "delta", event)
+								}
+							} else {
+								require.Equal(t, []string{"context", "done"}, names)
 							}
-							require.Equal(t, want, names)
 							requireAnswer(t, answer, output.String(), done.FinishReason, done.Citations, docs.First.ID)
 							requireModelScope(t, f.Model.Inputs()[before:], answer, docs)
 						})
@@ -164,8 +170,8 @@ func TestGrantsPostgresRouterIsolation(t *testing.T) {
 				requireAPIError(t, err, http.StatusPreconditionFailed, "precondition")
 				f.RequireStoredVectors(t, docs.First, true)
 				for range 2 {
-					result, err := owner.DeleteDocumentIncarnation(t.Context(), docs.First.ID, docs.First.Incarnation)
-					require.NoError(t, err)
+					result, deleteErr := owner.DeleteDocumentIncarnation(t.Context(), docs.First.ID, docs.First.Incarnation)
+					require.NoError(t, deleteErr)
 					require.True(t, result.Deleted)
 					require.Equal(t, docs.First.ID, result.DocID)
 				}

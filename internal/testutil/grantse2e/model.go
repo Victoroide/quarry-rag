@@ -12,6 +12,7 @@ import (
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 )
 
+// Answer is the deterministic synthesis text before the citation marker.
 const Answer = "Amber archive records are kept in the northern cabinet"
 
 // Model records the prompts and offers one cancellable pre-delta barrier.
