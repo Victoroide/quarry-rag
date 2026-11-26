@@ -281,12 +281,13 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 		preview = preview[:120]
 	}
 	fingerprint := identityFingerprint(req.ContentDedup, req.Document.ID, req.Fingerprint)
-	// A capable backend can select the tagged format only under the database mode lock.
+	// A capable backend selects the tagged format only while it holds the
+	// activation marker in share mode, through an owner-defined function that
+	// needs no table privilege.
 	scoped := false
 	if req.SupportsScopedVectors && c.vectorDimensions.Load() == 0 {
-		err = tx.QueryRow(ctx, `SELECT activated_at IS NOT NULL FROM document_deletion_activation WHERE singleton FOR SHARE`).Scan(&scoped)
-		if err != nil {
-			return result, err
+		if err = tx.QueryRow(ctx, `SELECT document_deletion_active_shared()`).Scan(&scoped); err != nil {
+			return result, fmt.Errorf("postgres: read deletion mode: %w", err)
 		}
 	}
 	insert := `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,

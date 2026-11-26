@@ -71,6 +71,7 @@ func TestPublishedGrantsCoverTheDeletionPredicates(t *testing.T) {
 	var executable bool
 	require.NoError(t, owner.Pool.QueryRow(t.Context(), `SELECT
 		has_function_privilege($1,'document_deletion_active()','EXECUTE')
+		AND has_function_privilege($1,'document_deletion_active_shared()','EXECUTE')
 		AND has_function_privilege($1,'document_deletion_reserved(uuid)','EXECUTE')
 		AND has_table_privilege($1,'document_deletions','SELECT,INSERT,UPDATE')
 		AND NOT has_table_privilege($1,'document_deletion_activation','SELECT,INSERT,UPDATE,DELETE')`,
@@ -100,4 +101,290 @@ func TestFileSigningNeedsOnlySelect(t *testing.T) {
 
 	_, err = reader.Pool.Exec(ctx, `UPDATE documents SET updated_at=NOW() WHERE id=$1`, string(doc.id))
 	requireSQLState(t, err, "42501")
+}
+
+func waitForLockWaiter(t *testing.T, c *Client, queryPrefix string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var waiting bool
+		err := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(
+			SELECT FROM pg_stat_activity
+			WHERE pid<>pg_backend_pid()
+			  AND datname=current_database()
+			  AND wait_event_type='Lock'
+			  AND starts_with(query, $1))`, queryPrefix).Scan(&waiting)
+		return err == nil && waiting
+	}, 10*time.Second, 10*time.Millisecond, "query %q must wait for a row lock", queryPrefix)
+}
+
+func TestRestrictedServingLoginSelectsTheVectorFormat(t *testing.T) {
+	t.Run("inactive", func(t *testing.T) {
+		owner, serving, _ := restrictedDatabase(t)
+		ctx := t.Context()
+		req := jobsRequest("restricted tagged inactive")
+		req.SupportsScopedVectors = true
+		admitted, err := serving.AcceptDocument(ctx, req)
+		require.NoError(t, err)
+		require.Equal(t, domain.AcceptAccepted, admitted.Outcome)
+
+		var scoped bool
+		require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT scoped_vectors FROM documents WHERE id=$1`, string(admitted.DocumentID)).Scan(&scoped))
+		require.False(t, scoped)
+	})
+
+	t.Run("active", func(t *testing.T) {
+		owner, serving, _ := restrictedDatabase(t)
+		ctx := t.Context()
+		_, err := owner.Pool.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+		require.NoError(t, err)
+
+		req := jobsRequest("restricted tagged active")
+		req.SupportsScopedVectors = true
+		admitted, err := serving.AcceptDocument(ctx, req)
+		require.NoError(t, err)
+		require.Equal(t, domain.AcceptAccepted, admitted.Outcome)
+
+		var scoped bool
+		require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT scoped_vectors FROM documents WHERE id=$1`, string(admitted.DocumentID)).Scan(&scoped))
+		require.True(t, scoped)
+	})
+
+	t.Run("no_table_privilege", func(t *testing.T) {
+		owner, serving, roles := restrictedDatabase(t)
+		ctx := t.Context()
+		role := roles.name("quarry_service")
+		assertNoPrivilege := func() {
+			t.Helper()
+			var privileged bool
+			require.NoError(t, owner.Pool.QueryRow(ctx,
+				`SELECT has_table_privilege($1,'document_deletion_activation','SELECT,INSERT,UPDATE,DELETE')`, role).Scan(&privileged))
+			require.False(t, privileged)
+			_, err := serving.Pool.Exec(ctx, `SELECT 1 FROM document_deletion_activation`)
+			requireSQLState(t, err, "42501")
+		}
+
+		assertNoPrivilege()
+		_, err := owner.Pool.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+		require.NoError(t, err)
+		assertNoPrivilege()
+	})
+}
+
+func TestDeletionModeLockIsNotInherited(t *testing.T) {
+	databaseURL := startTestDatabase(t)
+	admin := migrationTestClient(t, databaseURL)
+	applyMigrationPrefix(t, admin, 29)
+	roles := newGrantRoles(t, databaseURL, servingRoles...)
+	grantExec(t, admin, roles.sql(`CREATE ROLE {quarry_service}; CREATE ROLE {quarry_operator}; CREATE ROLE {quarry_auditor};
+		ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO {quarry_service}, {quarry_operator};
+		ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO {quarry_service}, {quarry_operator}`))
+	require.NoError(t, admin.RunMigrations(t.Context()))
+
+	var inherited bool
+	require.NoError(t, admin.Pool.QueryRow(t.Context(), roles.sql(`SELECT
+		has_function_privilege('{quarry_service}','document_deletion_active_shared()','execute')
+		OR has_function_privilege('{quarry_operator}','document_deletion_active_shared()','execute')
+		OR has_function_privilege('public','document_deletion_active_shared()','execute')`)).Scan(&inherited))
+	require.False(t, inherited, "document_deletion_active_shared must not be reachable through default or PUBLIC privileges")
+}
+
+func TestDeletionModeLockDefinition(t *testing.T) {
+	owner, _, _ := restrictedDatabase(t)
+	var secdef bool
+	var volatile string
+	var config []string
+	var fnOwner, currentUser string
+	require.NoError(t, owner.Pool.QueryRow(t.Context(), `SELECT p.prosecdef, p.provolatile::text, p.proconfig, pg_get_userbyid(p.proowner), current_user
+		FROM pg_proc p
+		WHERE p.oid = 'document_deletion_active_shared()'::regprocedure`).Scan(&secdef, &volatile, &config, &fnOwner, &currentUser))
+	require.True(t, secdef)
+	require.Equal(t, "v", volatile)
+	require.Contains(t, config, "search_path=pg_catalog, pg_temp")
+	require.Equal(t, currentUser, fnOwner)
+}
+
+func TestActivationWaitsForTaggedAdmission(t *testing.T) {
+	owner, serving, _ := restrictedDatabase(t)
+	ctx := t.Context()
+
+	tx, err := serving.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var active bool
+	require.NoError(t, tx.QueryRow(ctx, `SELECT document_deletion_active_shared()`).Scan(&active))
+	require.False(t, active)
+
+	const activationUpdate = `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`
+	done := make(chan error, 1)
+	go func() {
+		_, updateErr := owner.Pool.Exec(ctx, activationUpdate)
+		done <- updateErr
+	}()
+	waitForLockWaiter(t, owner, activationUpdate)
+	select {
+	case updateErr := <-done:
+		require.FailNowf(t, "activation completed before admission committed", "err=%v", updateErr)
+	default:
+	}
+
+	require.NoError(t, tx.Commit(ctx))
+	require.NoError(t, <-done)
+}
+
+func TestTaggedAdmissionWaitsForActivation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		commit bool
+	}{
+		{name: "committed", commit: true},
+		{name: "rolled_back", commit: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner, serving, _ := restrictedDatabase(t)
+			ctx := t.Context()
+
+			tx, err := owner.Pool.Begin(ctx)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+			_, err = tx.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+			require.NoError(t, err)
+
+			type acceptOutcome struct {
+				result domain.AcceptResult
+				err    error
+			}
+			done := make(chan acceptOutcome, 1)
+			req := jobsRequest("waiting tagged admission " + tc.name)
+			req.SupportsScopedVectors = true
+			go func() {
+				res, acceptErr := serving.AcceptDocument(ctx, req)
+				done <- acceptOutcome{result: res, err: acceptErr}
+			}()
+
+			waitForLockWaiter(t, owner, `SELECT document_deletion_active_shared()`)
+			select {
+			case out := <-done:
+				require.FailNowf(t, "admission completed before activation finished", "outcome=%+v err=%v", out.result, out.err)
+			default:
+			}
+
+			if tc.commit {
+				require.NoError(t, tx.Commit(ctx))
+			} else {
+				require.NoError(t, tx.Rollback(ctx))
+			}
+			out := <-done
+			require.NoError(t, out.err)
+			require.Equal(t, domain.AcceptAccepted, out.result.Outcome)
+
+			var scoped bool
+			require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT scoped_vectors FROM documents WHERE id=$1`, string(out.result.DocumentID)).Scan(&scoped))
+			require.Equal(t, tc.commit, scoped)
+		})
+	}
+}
+
+func TestOldAndNewModeLocksBothHoldActivation(t *testing.T) {
+	owner, serving, _ := restrictedDatabase(t)
+	ctx := t.Context()
+
+	oldTx, err := owner.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = oldTx.Rollback(context.WithoutCancel(ctx)) }()
+	var oldActive bool
+	require.NoError(t, oldTx.QueryRow(ctx, `SELECT activated_at IS NOT NULL FROM document_deletion_activation WHERE singleton FOR SHARE`).Scan(&oldActive))
+	require.False(t, oldActive)
+
+	newTx, err := serving.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = newTx.Rollback(context.WithoutCancel(ctx)) }()
+	var newActive bool
+	require.NoError(t, newTx.QueryRow(ctx, `SELECT document_deletion_active_shared()`).Scan(&newActive))
+	require.False(t, newActive)
+
+	const activationUpdate = `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`
+	done := make(chan error, 1)
+	go func() {
+		_, updateErr := owner.Pool.Exec(ctx, activationUpdate)
+		done <- updateErr
+	}()
+	waitForLockWaiter(t, owner, activationUpdate)
+
+	require.NoError(t, oldTx.Commit(ctx))
+	select {
+	case updateErr := <-done:
+		require.FailNowf(t, "activation completed while the function share lock was still held", "err=%v", updateErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	waitForLockWaiter(t, owner, activationUpdate)
+
+	require.NoError(t, newTx.Commit(ctx))
+	require.NoError(t, <-done)
+}
+
+func TestTaggedAdmissionFailsWithoutMarker(t *testing.T) {
+	owner, serving, _ := restrictedDatabase(t)
+	ctx := t.Context()
+
+	_, err := owner.Pool.Exec(ctx, `DELETE FROM document_deletion_activation`)
+	require.NoError(t, err)
+
+	req := jobsRequest("missing marker tagged")
+	req.SupportsScopedVectors = true
+	_, err = serving.AcceptDocument(ctx, req)
+	require.Error(t, err)
+
+	var docs, jobs int
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM documents), (SELECT count(*) FROM ingest_jobs)`).Scan(&docs, &jobs))
+	require.Zero(t, docs)
+	require.Zero(t, jobs)
+}
+
+func TestUntaggedAdmissionNeedsNoModeLock(t *testing.T) {
+	owner, serving, roles := restrictedDatabase(t)
+	ctx := t.Context()
+
+	grantExec(t, owner, `REVOKE EXECUTE ON FUNCTION document_deletion_active_shared() FROM `+pgx.Identifier{roles.name("quarry_service")}.Sanitize())
+
+	admitted, err := serving.AcceptDocument(ctx, jobsRequest("untagged without mode lock"))
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, admitted.Outcome)
+}
+
+func TestTransactionalStoreAdmissionNeedsNoModeLock(t *testing.T) {
+	owner, _ := vectorDatabase(t)
+	serving, roles := publishedServingClient(t, owner)
+	ctx := t.Context()
+
+	grantExec(t, owner, `REVOKE EXECUTE ON FUNCTION document_deletion_active_shared() FROM `+pgx.Identifier{roles.name("quarry_service")}.Sanitize())
+	vs, err := OpenGenerationVectorStore(ctx, serving, 3, LegacyGeneration)
+	require.NoError(t, err)
+	vs.RouteCompletion()
+
+	req := jobsRequest("pgvector tagged admission")
+	req.SupportsScopedVectors = true
+	admitted, err := serving.AcceptDocument(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, admitted.Outcome)
+
+	var scoped bool
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT scoped_vectors FROM documents WHERE id=$1`, string(admitted.DocumentID)).Scan(&scoped))
+	require.False(t, scoped)
+}
+
+func TestTaggedAdmissionWithoutGrantFailsClosed(t *testing.T) {
+	owner, serving, roles := restrictedDatabase(t)
+	ctx := t.Context()
+
+	grantExec(t, owner, `REVOKE EXECUTE ON FUNCTION document_deletion_active_shared() FROM `+pgx.Identifier{roles.name("quarry_service")}.Sanitize())
+
+	req := jobsRequest("tagged without grant")
+	req.SupportsScopedVectors = true
+	_, err := serving.AcceptDocument(ctx, req)
+	requireSQLState(t, err, "42501")
+
+	var docs, jobs int
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM documents), (SELECT count(*) FROM ingest_jobs)`).Scan(&docs, &jobs))
+	require.Zero(t, docs)
+	require.Zero(t, jobs)
 }
