@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"testing"
-	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
@@ -309,6 +308,10 @@ func TestTaggedDocumentWithoutAttemptIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{doc.ID}, rep.Unsupported)
 	require.False(t, rep.Complete)
+
+	vRep, err := h.run(verifyOptions("g2"))
+	require.ErrorIs(t, err, errNotVerified)
+	require.Contains(t, fmt.Sprint(vRep["failures"]), "cannot be verified on this target or have no determinable published attempt")
 }
 
 func TestTaggedDocumentWithPendingMutationIsRefused(t *testing.T) {
@@ -335,6 +338,10 @@ func TestTaggedDocumentWithPendingMutationIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{doc.ID}, rep.Unsupported)
 	require.False(t, rep.Complete)
+
+	vRep, err := h.run(verifyOptions("g2"))
+	require.ErrorIs(t, err, errNotVerified)
+	require.Contains(t, fmt.Sprint(vRep["failures"]), "cannot be verified on this target or have no determinable published attempt")
 }
 
 func TestUncertainTaggedDocumentIsStaged(t *testing.T) {
@@ -503,6 +510,11 @@ func TestPostgresTargetRefusesTaggedDocuments(t *testing.T) {
 
 	_, err = h.run(options{Generation: "g2", Profile: profile, TargetStore: "postgres", Apply: true})
 	require.ErrorContains(t, err, "staging is blocked")
+
+	pgTarget(t, f.pg, "g2")
+	vRep, err := h.run(verifyOptions("g2"))
+	require.ErrorIs(t, err, errNotVerified)
+	require.Contains(t, fmt.Sprint(vRep["failures"]), "cannot be verified on this target or have no determinable published attempt")
 }
 
 func TestTaggedDocumentRespectsBudgets(t *testing.T) {
@@ -538,6 +550,4 @@ func TestTaggedDocumentRespectsBudgets(t *testing.T) {
 	opts2.MaxBytes = 5
 	_, err = h2.run(opts2)
 	require.ErrorContains(t, err, "alone exceeds")
-
-	_ = time.Second
 }

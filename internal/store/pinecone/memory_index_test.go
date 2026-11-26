@@ -169,3 +169,69 @@ func TestMemoryIndexUpdateVectorsByMetadata(t *testing.T) {
 	_, err = index.UpdateVectorsByMetadata(t.Context(), &pinecone.UpdateVectorsByMetadataRequest{Filter: badFilter, Metadata: update})
 	require.Error(t, err)
 }
+
+func TestMemoryIndexListsOnlyKeysUnderThePrefix(t *testing.T) {
+	index := NewMemoryIndex(2)
+	for _, id := range []string{"doc-1/rev-1/a", "doc-1/rev-1/b", "doc-1/rev-1/c", "doc-1/rev-2/a", "doc-10/rev-1/a", "bare"} {
+		_, err := index.UpsertVectors(t.Context(), []*pinecone.Vector{{Id: id, Values: &[]float32{1, 0}}})
+		require.NoError(t, err)
+	}
+	list := func(prefix string, token *string, limit uint32) ([]string, *string) {
+		res, err := index.ListVectors(t.Context(), &pinecone.ListVectorsRequest{Prefix: &prefix, Limit: &limit, PaginationToken: token})
+		require.NoError(t, err)
+		var ids []string
+		for _, id := range res.VectorIds {
+			ids = append(ids, *id)
+		}
+		return ids, res.NextPaginationToken
+	}
+
+	var paged []string
+	var token *string
+	for {
+		ids, next := list("doc-1/rev-1/", token, 2)
+		paged = append(paged, ids...)
+		if next == nil {
+			break
+		}
+		token = next
+	}
+	require.Equal(t, []string{"doc-1/rev-1/a", "doc-1/rev-1/b", "doc-1/rev-1/c"}, paged)
+
+	ids, _ := list("doc-1/", nil, 100)
+	require.Equal(t, []string{"doc-1/rev-1/a", "doc-1/rev-1/b", "doc-1/rev-1/c", "doc-1/rev-2/a"}, ids)
+	ids, _ = list("absent/", nil, 100)
+	require.Empty(t, ids)
+	ids, _ = list("", nil, 100)
+	require.Len(t, ids, 6, "an empty prefix lists every key")
+}
+
+// A cleanup of one revision, or one attempt of it, never lists or deletes the
+// records of another document, revision or attempt that shares the index.
+func TestRevisionCleanupLeavesOtherTaggedRecords(t *testing.T) {
+	taggedChunk := func(id, doc, revision, attempt string) domain.Chunk {
+		chunk := memoryChunk(id, doc, []float32{1, 0}, "report", "x")
+		chunk.Metadata[domain.VectorRevisionKey], chunk.Metadata[domain.VectorAttemptKey] = revision, attempt
+		return chunk
+	}
+	seed := func() (*Client, *MemoryIndex) {
+		client, index := memoryClient(2)
+		require.NoError(t, client.Upsert(t.Context(), "", []domain.Chunk{
+			taggedChunk("a", "doc-1", "rev-1", "att-1"),
+			taggedChunk("b", "doc-1", "rev-1", "att-1"),
+			taggedChunk("a", "doc-2", "rev-1", "att-1"),
+			taggedChunk("a", "doc-1", "rev-2", "att-1"),
+			taggedChunk("a", "doc-1", "rev-1", "att-2"),
+			taggedChunk("b", "doc-1", "rev-1", "att-2"),
+		}))
+		return client, index
+	}
+
+	client, index := seed()
+	require.NoError(t, client.DeleteByAttempt(t.Context(), "doc-1", "rev-1", "att-1"))
+	require.Equal(t, []string{"doc-1/rev-1/att-2/a", "doc-1/rev-1/att-2/b", "doc-1/rev-2/att-1/a", "doc-2/rev-1/att-1/a"}, index.IDs())
+
+	client, index = seed()
+	require.NoError(t, client.DeleteByRevision(t.Context(), "doc-1", "rev-1"))
+	require.ElementsMatch(t, []string{"doc-1/rev-2/att-1/a", "doc-2/rev-1/att-1/a"}, index.IDs())
+}

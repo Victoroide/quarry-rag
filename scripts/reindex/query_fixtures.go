@@ -25,20 +25,25 @@ type queryFixtures struct {
 
 func (v *verifier) queryVectors(ctx context.Context, sample []sampleChunk, rep *verifyReport) (map[string]queryVectors, error) {
 	ids := make([]string, len(sample))
+	sourceKeys := make([]string, len(sample))
 	for i, c := range sample {
 		ids[i] = c.id
+		sourceKeys[i] = c.sourceKey
+		if sourceKeys[i] == "" {
+			sourceKeys[i] = c.id
+		}
 	}
 	if !v.sourceQueryOnly && v.sourceProfile.SameEmbeddingSpace(v.profile) {
 		if v.opts.QueryFixtures != "" {
 			return nil, errors.New("-query-fixtures is only needed for different embedding spaces")
 		}
-		source, err := fetchAll(ctx, v.source, ids)
+		source, err := fetchAll(ctx, v.source, sourceKeys)
 		if err != nil {
 			return nil, err
 		}
 		queries := make(map[string]queryVectors, len(source))
-		for _, c := range sample {
-			chunk, ok := source[c.id]
+		for i, c := range sample {
+			chunk, ok := source[sourceKeys[i]]
 			if !ok || string(chunk.DocumentID) != c.doc || chunk.Index != c.index || sha256.Sum256([]byte(chunk.Text)) != c.textHash {
 				continue
 			}
