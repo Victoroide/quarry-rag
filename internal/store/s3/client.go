@@ -20,10 +20,8 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/smithy-go/middleware"
 )
 
 // Client wraps the AWS S3 SDK for file storage.
@@ -100,11 +98,12 @@ func (c *Client) Put(ctx context.Context, key string, ft extractor.FileType, r i
 	return result.VersionID, err
 }
 
-// PutSource reports whether all SDK attempts have a known outcome. A final
-// acknowledgment alone provides no evidence about the earlier requests.
+// PutSource reports whether every SDK attempt has a known outcome. An
+// attempt is accounted for when S3 acknowledged it, when S3 refused it with a
+// redirect or client error, or when no connection carried it.
 func (c *Client) PutSource(ctx context.Context, key string, ft extractor.FileType, r io.Reader) (domain.SourceUploadResult, error) {
 	contentType := extractor.ContentTypeFromFileType(ft)
-	var mayHaveDispatched bool
+	attempts := &putAttempts{}
 	out, err := c.s3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:              &c.bucket,
 		Key:                 &key,
@@ -112,24 +111,16 @@ func (c *Client) PutSource(ctx context.Context, key string, ft extractor.FileTyp
 		ContentType:         &contentType,
 		ExpectedBucketOwner: c.owner,
 	}, func(opts *s3.Options) {
-		opts.APIOptions = append(opts.APIOptions, func(stack *middleware.Stack) error {
-			// Validation and serialization can fail before the SDK reaches its
-			// request attempt loop in Finalize.
-			return stack.Finalize.Add(middleware.FinalizeMiddlewareFunc("RecordSourceUploadDispatch",
-				func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
-					mayHaveDispatched = true
-					return next.HandleFinalize(ctx, in)
-				}), middleware.Before)
-		})
+		// The client resolves its HTTP client at construction, so it is set here.
+		attempts.inner = opts.HTTPClient
+		opts.HTTPClient = attempts
 	})
 	if err != nil {
-		return domain.SourceUploadResult{Settled: !mayHaveDispatched}, fmt.Errorf("s3: upload %s: %w", key, err)
+		return domain.SourceUploadResult{Settled: attempts.settled(false)}, fmt.Errorf("s3: upload %s: %w", key, err)
 	}
 	slog.DebugContext(ctx, "s3 object uploaded", "key", key, "content_type", contentType)
-	attempts, ok := retry.GetAttemptResults(out.ResultMetadata)
 	return domain.SourceUploadResult{
-		VersionID: aws.ToString(out.VersionId), Acknowledged: true,
-		Settled: ok && len(attempts.Results) == 1,
+		VersionID: aws.ToString(out.VersionId), Acknowledged: true, Settled: attempts.settled(true),
 	}, nil
 }
 
