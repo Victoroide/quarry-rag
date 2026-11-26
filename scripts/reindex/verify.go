@@ -80,9 +80,9 @@ type sampleReport struct {
 type scopeDoc struct{ id, chunkID, revisionID, collection string }
 
 type sampleChunk struct {
-	id, doc, collection string
-	index               int
-	textHash            [sha256.Size]byte
+	id, sourceKey, doc, collection string
+	index                          int
+	textHash                       [sha256.Size]byte
 }
 
 // verifier compares a staged target with PostgreSQL, the authority, and with the
@@ -97,8 +97,11 @@ type verifier struct {
 	sourceProfile   domain.EmbeddingProfile
 	sourceQueryOnly bool
 	// taggedTarget is true for a store whose records carry the document
-	// incarnation they were written for, so each record must name it.
+	// incarnation they were written for, so each record must name it, and whose
+	// keys are revision-qualified for manifested and tagged documents.
 	taggedTarget bool
+	// sourceTagged is the key property of the store that source reads.
+	sourceTagged bool
 	opts         options
 	now          func() time.Time
 }
@@ -143,12 +146,12 @@ scan:
 				rep.Coverage.Inconsistent++
 				continue
 			}
-			if isTagged(rev) {
-				rep.Coverage.TaggedVectors++
-				continue
-			}
 			if !v.taggedTarget && rev.ActiveRevisionID != "" {
 				rep.Coverage.ManifestedVectors++
+				continue
+			}
+			if taggedRefusal(v.taggedTarget, rev) != "" {
+				rep.Coverage.TaggedVectors++
 				continue
 			}
 			cp, seen := checkpoints[rev.ID]
@@ -223,11 +226,17 @@ scan:
 func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSnapshot, rep *verifyReport, expected map[string]scopeDoc, sample *[]sampleChunk) (present, valid int, err error) {
 	ids := make([]string, len(snap.Chunks))
 	for i, c := range snap.Chunks {
-		if ids[i], err = vectorKey(v.taggedTarget, snap.DocumentRevision, c); err != nil {
-			return 0, 0, err
+		targetKey, keyErr := vectorKey(v.taggedTarget, snap.DocumentRevision, c)
+		if keyErr != nil {
+			return 0, 0, keyErr
 		}
-		expected[ids[i]] = scopeDoc{id: snap.ID, chunkID: string(c.ID), revisionID: snap.ActiveRevisionID, collection: snap.Collection}
-		*sample = append(*sample, sampleChunk{id: ids[i], doc: snap.ID, collection: snap.Collection, index: c.Index, textHash: sha256.Sum256([]byte(c.Text))})
+		sourceKey, keyErr := vectorKey(v.sourceTagged, snap.DocumentRevision, c)
+		if keyErr != nil {
+			return 0, 0, keyErr
+		}
+		ids[i] = targetKey
+		expected[targetKey] = scopeDoc{id: snap.ID, chunkID: string(c.ID), revisionID: snap.ActiveRevisionID, collection: snap.Collection}
+		*sample = append(*sample, sampleChunk{id: targetKey, sourceKey: sourceKey, doc: snap.ID, collection: snap.Collection, index: c.Index, textHash: sha256.Sum256([]byte(c.Text))})
 	}
 	got := make(map[string]domain.Chunk, len(ids))
 	for start := 0; start < len(ids); start += pcstore.FetchBatchSize {
@@ -239,12 +248,9 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 			got[id] = c
 		}
 	}
-	for _, want := range snap.Chunks {
-		wantKey, keyErr := vectorKey(v.taggedTarget, snap.DocumentRevision, want)
-		if keyErr != nil {
-			return 0, 0, keyErr
-		}
-		record, ok := got[wantKey]
+	tagged := v.taggedTarget && isTagged(snap.DocumentRevision)
+	for i, want := range snap.Chunks {
+		record, ok := got[ids[i]]
 		if !ok {
 			rep.Coverage.Missing++
 			continue
@@ -253,12 +259,15 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 		collection, _ := record.Metadata["collection"].(string)
 		docType, _ := record.Metadata["doc_type"].(string)
 		tenant, _ := record.Metadata[domain.VectorTenantKey].(string)
+		revision, _ := record.Metadata[domain.VectorRevisionKey].(string)
+		attempt, _ := record.Metadata[domain.VectorAttemptKey].(string)
 		switch {
 		case validVector(record.Embedding, v.profile.Dimensions) != nil:
 			rep.Coverage.BadVectors++
 		case record.DocumentID != want.DocumentID || record.ID != want.ID || record.Index != want.Index || record.Text != want.Text ||
 			record.TokenCount != want.TokenCount || collection != snap.Collection || docType != snap.DocType ||
-			v.taggedTarget && (record.VectorIncarnation != snap.Incarnation || tenant != snap.TenantID || record.RevisionID != snap.ActiveRevisionID):
+			v.taggedTarget && (record.VectorIncarnation != snap.Incarnation || tenant != snap.TenantID || record.RevisionID != snap.ActiveRevisionID) ||
+			tagged && (revision != snap.Incarnation || attempt != snap.VectorAttempt):
 			rep.Coverage.Mismatched++
 		default:
 			valid++
@@ -450,7 +459,7 @@ func (v *verifier) judge(rep *verifyReport) {
 		v.fail(rep, "%d documents declare a chunk count that differs from their stored chunks", c.Inconsistent)
 	}
 	if c.TaggedVectors > 0 {
-		v.fail(rep, "%d documents store tagged vectors, which a reindex does not stage", c.TaggedVectors)
+		v.fail(rep, "%d tagged documents cannot be verified on this target or have no determinable published attempt", c.TaggedVectors)
 	}
 	if c.ManifestedVectors > 0 {
 		v.fail(rep, "%d documents own hosted vector revisions, which this target does not store", c.ManifestedVectors)
@@ -561,7 +570,7 @@ func (d deps) verify(ctx context.Context, opts options, p targetPlan, out io.Wri
 		return fmt.Errorf("open the current target as the baseline: %w", err)
 	}
 	defer closeSource()
-	v := &verifier{corpus: d.pg, ledger: d.pg, target: target, source: source, generation: row.Name, profile: row.Profile, sourceProfile: *sourceProfile, sourceQueryOnly: sourceQueryOnly, taggedTarget: row.Store == "pinecone", opts: opts, now: time.Now}
+	v := &verifier{corpus: d.pg, ledger: d.pg, target: target, source: source, generation: row.Name, sourceTagged: p.live.store == "pinecone", profile: row.Profile, sourceProfile: *sourceProfile, sourceQueryOnly: sourceQueryOnly, taggedTarget: row.Store == "pinecone", opts: opts, now: time.Now}
 	rep, err := v.run(ctx)
 	if err != nil {
 		return err

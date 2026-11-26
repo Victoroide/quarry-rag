@@ -6,6 +6,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
@@ -16,7 +17,7 @@ import (
 // MemoryIndex is an in-memory cosine index that follows the semantics the
 // service relies on: upserts replace whole records and reject a wrong
 // dimension, queries apply equality and membership filters before ranking,
-// and keys can be fetched, listed in ascending order and deleted. It serves
+// and keys can be fetched, listed by prefix in ascending order and deleted. It serves
 // tests and offline tools that need an index without a hosted account.
 type MemoryIndex struct {
 	mu      sync.Mutex
@@ -180,7 +181,8 @@ func (m *MemoryIndex) FetchVectors(_ context.Context, ids []string) (*pinecone.F
 	return res, nil
 }
 
-// ListVectors pages through the keys in ascending order; the token is the last key returned.
+// ListVectors pages through the keys that start with the request prefix, in
+// ascending order; the token is the last key returned.
 func (m *MemoryIndex) ListVectors(_ context.Context, req *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -188,13 +190,16 @@ func (m *MemoryIndex) ListVectors(_ context.Context, req *pinecone.ListVectorsRe
 	if req.Limit != nil {
 		limit = int(*req.Limit)
 	}
-	after := ""
+	after, prefix := "", ""
 	if req.PaginationToken != nil {
 		after = *req.PaginationToken
 	}
+	if req.Prefix != nil {
+		prefix = *req.Prefix
+	}
 	res := &pinecone.ListVectorsResponse{}
 	for _, id := range m.sortedIDs() {
-		if id <= after {
+		if id <= after || !strings.HasPrefix(id, prefix) {
 			continue
 		}
 		if len(res.VectorIds) == limit {

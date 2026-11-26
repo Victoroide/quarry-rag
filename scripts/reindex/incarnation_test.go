@@ -183,7 +183,7 @@ func verifyIncarnation(t *testing.T, snapshot pg.DocumentSnapshot, tagged bool, 
 	opts := defaultOptions()
 	opts.SampleSize, opts.ScopeDocuments, opts.MinRecall, opts.MaxP95, opts.TopK = 1, 1, 1, time.Second, 2
 	v := verifier{corpus: snapshotCorpus{snapshot}, ledger: currentCheckpointLedger{doc: snapshot.ID, revision: snapshot.Revision, incarnation: snapshot.Incarnation}, target: dst, source: src,
-		generation: "g2", profile: testProfile(sourceModel), sourceProfile: testProfile(sourceModel), taggedTarget: tagged, opts: opts, now: time.Now}
+		generation: "g2", profile: testProfile(sourceModel), sourceProfile: testProfile(sourceModel), taggedTarget: tagged, sourceTagged: tagged, opts: opts, now: time.Now}
 	rep, err := v.run(t.Context())
 	require.NoError(t, err)
 	return rep
@@ -254,7 +254,7 @@ func TestVerificationFailsForTaggedVectorDocuments(t *testing.T) {
 	rep := verifyIncarnation(t, snapshot, true, doc.ID, "")
 	require.False(t, rep.Passed)
 	require.Equal(t, 1, rep.Coverage.TaggedVectors)
-	require.Contains(t, rep.Failures, "1 documents store tagged vectors, which a reindex does not stage")
+	require.Contains(t, rep.Failures, "1 tagged documents cannot be verified on this target or have no determinable published attempt")
 }
 
 func TestStagedRecordsPreserveLayoutProvenance(t *testing.T) {
