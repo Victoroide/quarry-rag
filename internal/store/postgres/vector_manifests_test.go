@@ -99,6 +99,301 @@ func acceptManifested(t *testing.T, c *Client, content string) domain.DocumentID
 	return req.Document.ID
 }
 
+const unresolvedPublication = "vector mutation is unresolved for the publication target"
+
+func restrictedManifestDatabase(t *testing.T) (owner, serving *Client) {
+	t.Helper()
+	owner, serving, roles := restrictedDatabase(t)
+	grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "GRANT SELECT, INSERT, UPDATE, DELETE ON public.hosted_vector_manifests"))
+	serving.EnableHostedVectorManifests(true)
+	return owner, serving
+}
+
+func legacyMutation(t *testing.T, c *Client, job domain.Job, deletes bool, outcome error) {
+	t.Helper()
+	err := c.MutateJobVectors(t.Context(), job, func(ctx context.Context) error {
+		return domain.DispatchVectorMutation(ctx, deletes, func(context.Context) error { return outcome })
+	})
+	if outcome != nil {
+		require.ErrorIs(t, err, outcome)
+	} else {
+		require.NoError(t, err)
+	}
+}
+
+// publicationState includes the old chunks, ownership, and retirement queue as
+// well as the pointer so that rejected completions cannot hide partial writes.
+func publicationState(t *testing.T, c *Client, id domain.DocumentID) string {
+	t.Helper()
+	var state string
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT jsonb_build_object(
+		'document', (SELECT to_jsonb(d) FROM documents d WHERE id=$1),
+		'job', (SELECT to_jsonb(j) FROM ingest_jobs j WHERE document_id=$1),
+		'pointer', (SELECT to_jsonb(r) FROM hosted_vector_revisions r WHERE document_id=$1),
+		'manifests', (SELECT jsonb_agg(to_jsonb(m) ORDER BY revision_id) FROM hosted_vector_manifests m WHERE document_id=$1),
+		'cleanups', (SELECT jsonb_agg(to_jsonb(q) ORDER BY revision_id) FROM hosted_vector_cleanups q WHERE document_id=$1),
+		'chunks', (SELECT jsonb_agg(to_jsonb(ch) ORDER BY id) FROM chunks ch WHERE document_id=$1)
+	)::text`, id).Scan(&state))
+	return state
+}
+
+func requirePublishedManifest(t *testing.T, c *Client, a manifestAttempt, uncertain bool) {
+	t.Helper()
+	var status, revision string
+	var pending, unknown, deleteUnknown bool
+	var withoutClaim bool
+	var active, jobs int
+	var chunks []string
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT d.status, r.active_revision_id::text,
+		d.vector_mutation_pending, d.vector_mutation_uncertain, d.vector_delete_uncertain,
+		d.vector_mutation_claim IS NULL AND d.vector_mutation_until IS NULL AND NOT d.vector_mutation_deletes,
+		(SELECT count(*) FROM hosted_vector_manifests m WHERE m.document_id=d.id AND m.state='active'),
+		(SELECT array_agg(ch.id::text) FROM chunks ch WHERE ch.document_id=d.id),
+		(SELECT count(*) FROM ingest_jobs j WHERE j.document_id=d.id)
+		FROM documents d JOIN hosted_vector_revisions r ON r.document_id=d.id WHERE d.id=$1`,
+		a.job.Document.ID).Scan(&status, &revision, &pending, &unknown, &deleteUnknown, &withoutClaim, &active, &chunks, &jobs))
+	require.Equal(t, "completed", status)
+	require.Equal(t, a.revision, revision)
+	require.False(t, pending)
+	require.Equal(t, uncertain, unknown)
+	require.False(t, deleteUnknown)
+	require.True(t, withoutClaim)
+	require.Equal(t, 1, active)
+	require.Equal(t, []string{a.chunkID}, chunks)
+	require.Zero(t, jobs)
+}
+
+func TestManifestCompletionWithLegacyMutationUncertainty(t *testing.T) {
+	owner, serving := restrictedManifestDatabase(t)
+	for _, tc := range []struct {
+		name                                        string
+		upsert, erase, claim, expired, claimDeletes bool
+		legacy, fixture, scoped, allowed            bool
+	}{
+		{name: "clean", allowed: true},
+		{name: "lost upsert acknowledgement", upsert: true, allowed: true},
+		{name: "expired upsert claim", claim: true, expired: true, allowed: true},
+		{name: "expired upsert claim on fixture route", claim: true, expired: true, fixture: true, allowed: true},
+		{name: "live upsert claim", claim: true},
+		{name: "live delete claim", claim: true, claimDeletes: true},
+		{name: "lost delete acknowledgement", erase: true},
+		{name: "expired delete claim", claim: true, expired: true, claimDeletes: true},
+		{name: "unresolved upsert and delete", upsert: true, erase: true},
+		{name: "expired upsert cannot mask uncertain delete", erase: true, claim: true, expired: true},
+		{name: "legacy retry after acknowledged cleanup", upsert: true, legacy: true},
+		{name: "scoped manifest keeps pending guard", claim: true, expired: true, scoped: true},
+		{name: "scoped manifest keeps existing uncertainty rule", scoped: true, upsert: true, allowed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			req := jobsRequest(tc.name)
+			req.CallerSupplied = true
+			if tc.fixture {
+				req = fixtureRequest(fixtureShapedID(), uuid.NewString(), "pinecone:bound")
+			}
+			if tc.scoped {
+				grantExec(t, owner, "UPDATE document_deletion_activation SET activated_at=clock_timestamp()")
+				req.SupportsScopedVectors = true
+			}
+			res, err := owner.AcceptDocument(ctx, req)
+			require.NoError(t, err)
+			require.Equal(t, domain.AcceptAccepted, res.Outcome)
+			id := req.Document.ID
+			t.Cleanup(func() {
+				cleanupCtx := context.WithoutCancel(ctx)
+				if tc.fixture {
+					// The reservation references the live document.
+					_, cleanupErr := owner.Pool.Exec(cleanupCtx, `DELETE FROM evaluation_fixtures WHERE document_id=$1 AND receipt=$2`, id, req.EvaluationReceipt)
+					require.NoError(t, cleanupErr)
+				}
+				_, cleanupErr := owner.Pool.Exec(cleanupCtx, `DELETE FROM documents WHERE id=$1`, id)
+				require.NoError(t, cleanupErr)
+			})
+
+			claim := func(worker string) domain.Job {
+				t.Helper()
+				var job *domain.Job
+				var claimErr error
+				if tc.fixture {
+					job, claimErr = serving.ClaimJobForFixtureStore(ctx, worker, time.Minute, 5, req.EvaluationVectorIdentity)
+				} else {
+					job, claimErr = serving.ClaimJob(ctx, worker, time.Minute, 5)
+				}
+				require.NoError(t, claimErr)
+				require.NotNil(t, job)
+				require.Equal(t, id, job.Document.ID)
+				require.Equal(t, tc.scoped, job.ScopedVectors)
+				return *job
+			}
+			first := claim("legacy")
+			if tc.upsert {
+				legacyMutation(t, serving, first, false, context.DeadlineExceeded)
+			}
+			if tc.erase {
+				legacyMutation(t, serving, first, true, context.DeadlineExceeded)
+			}
+			recordClaim := func(seconds float64) {
+				t.Helper()
+				_, recordErr := owner.Pool.Exec(ctx, `UPDATE documents SET vector_mutation_pending=TRUE,
+					vector_mutation_claim=$2, vector_mutation_until=clock_timestamp()+make_interval(secs=>$3),
+					vector_mutation_deletes=$4 WHERE id=$1`, id, uuid.NewString(), seconds, tc.claimDeletes)
+				require.NoError(t, recordErr)
+			}
+			if tc.expired {
+				recordClaim(-time.Hour.Seconds())
+			}
+			expireJobLease(t, owner, id)
+			job := claim("retry")
+			if tc.claim && !tc.expired {
+				// An unexpired claim would prevent the selector from issuing a retry lease.
+				recordClaim(time.Hour.Seconds())
+			}
+			if tc.legacy {
+				legacyMutation(t, serving, job, true, nil)
+			}
+			attempt := manifestAttempt{job: job, chunkID: uuid.NewString()}
+			if !tc.legacy {
+				attempt = persistManifestAttempt(t, serving, id, job)
+			}
+			before := publicationState(t, owner, id)
+			ok, err := serving.CompleteJob(ctx, attempt.job, attempt.chunks(id, tc.name), domain.IndexObservation{})
+			if tc.allowed {
+				require.NoError(t, err)
+				require.True(t, ok)
+				requirePublishedManifest(t, owner, attempt, tc.upsert || tc.expired)
+			} else {
+				require.EqualError(t, err, unresolvedPublication)
+				require.False(t, ok)
+				require.Equal(t, before, publicationState(t, owner, id))
+			}
+		})
+	}
+}
+
+func TestManifestLegacyMutationPublicationIsAtomic(t *testing.T) {
+	owner, serving := restrictedManifestDatabase(t)
+	for _, name := range []string{
+		"missing manifest", "malformed manifest", "another lease's manifest", "retired manifest",
+		"stale lease", "reused UUID", "cancellation during activation", "activation SQL failure",
+		"concurrent completion and replay",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			id := acceptManifested(t, owner, name)
+			t.Cleanup(func() {
+				_, err := owner.Pool.Exec(context.WithoutCancel(ctx), `DELETE FROM documents WHERE id=$1`, id)
+				require.NoError(t, err)
+			})
+			first := startManifestAttempt(t, serving, id, "legacy")
+			_, err := owner.Pool.Exec(ctx, `UPDATE documents SET vector_mutation_pending=TRUE,
+				vector_mutation_claim=$2, vector_mutation_until=clock_timestamp()-interval '1 hour' WHERE id=$1`, id, uuid.NewString())
+			require.NoError(t, err)
+			_, err = owner.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,'prior chunk',2)`, first.chunkID, id)
+			require.NoError(t, err)
+			expireJobLease(t, owner, id)
+			next := startManifestAttempt(t, serving, id, "retry")
+			job := next.job
+			chunks := next.chunks(id, name)
+			complete := func(ctx context.Context) (bool, error) {
+				return serving.CompleteJob(ctx, job, chunks, domain.IndexObservation{})
+			}
+
+			switch name {
+			case "missing manifest":
+				job.RevisionID = uuid.NewString()
+			case "malformed manifest":
+				job.RevisionID = "invalid"
+			case "another lease's manifest":
+				job.RevisionID = first.revision
+			case "retired manifest":
+				_, err := owner.Pool.Exec(ctx, `UPDATE hosted_vector_manifests SET state='retired', retired_at=now() WHERE revision_id=$1`, next.revision)
+				require.NoError(t, err)
+			case "stale lease":
+				job = first.job
+			case "reused UUID":
+				require.NoError(t, owner.DeleteDocument(ctx, id))
+				res, err := owner.AcceptDocument(ctx, shapedRequest(id, "replacement"))
+				require.NoError(t, err)
+				require.Equal(t, domain.AcceptAccepted, res.Outcome)
+				replacement := startManifestAttempt(t, serving, id, "replacement")
+				require.NotEqual(t, job.Incarnation, replacement.job.Incarnation)
+			case "activation SQL failure":
+				grantExec(t, owner, `ALTER TABLE hosted_vector_revisions ADD CONSTRAINT reject_publication CHECK (false) NOT VALID`)
+				defer grantExec(t, owner, `ALTER TABLE hosted_vector_revisions DROP CONSTRAINT reject_publication`)
+			}
+
+			before := publicationState(t, owner, id)
+			switch name {
+			case "cancellation during activation":
+				requireCanceledManifestActivation(t, owner, next, complete)
+			case "concurrent completion and replay":
+				start := make(chan struct{})
+				results := make(chan error, 2)
+				for range cap(results) {
+					go func() {
+						<-start
+						ok, err := complete(ctx)
+						if err == nil && !ok {
+							err = domain.ErrJobNotOwned
+						}
+						results <- err
+					}()
+				}
+				close(start)
+				require.ElementsMatch(t, []error{nil, domain.ErrJobNotOwned}, []error{<-results, <-results})
+				requirePublishedManifest(t, owner, next, true)
+				// Replay without relying on a delivered success response.
+				published := publicationState(t, owner, id)
+				ok, err := complete(ctx)
+				require.NoError(t, err)
+				require.False(t, ok)
+				require.Equal(t, published, publicationState(t, owner, id))
+				return
+			default:
+				ok, err := complete(ctx)
+				require.False(t, ok)
+				switch name {
+				case "stale lease", "reused UUID":
+					require.NoError(t, err)
+				case "activation SQL failure":
+					require.ErrorContains(t, err, "set active vector revision")
+					requireSQLState(t, err, "23514")
+				default:
+					require.ErrorContains(t, err, "vector manifest")
+				}
+			}
+			require.Equal(t, before, publicationState(t, owner, id))
+		})
+	}
+}
+
+func requireCanceledManifestActivation(t *testing.T, owner *Client, a manifestAttempt, complete func(context.Context) (bool, error)) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	lock, err := owner.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, lock.Rollback(context.WithoutCancel(ctx))) }()
+	var blocker int32
+	require.NoError(t, lock.QueryRow(ctx, `SELECT pg_backend_pid() FROM hosted_vector_manifests WHERE revision_id=$1 FOR UPDATE`, a.revision).Scan(&blocker))
+	result := make(chan error, 1)
+	go func() {
+		ok, err := complete(ctx)
+		if ok {
+			err = errors.New("completion committed during cancellation")
+		}
+		result <- err
+	}()
+	require.Eventually(t, func() bool {
+		var blocked bool
+		err := owner.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE query LIKE '%SET state = ''active''%' AND $1=ANY(pg_blocking_pids(pid)))`, blocker).Scan(&blocked)
+		return err == nil && blocked
+	}, 5*time.Second, 10*time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-result, context.Canceled)
+}
+
 func TestVectorManifestLifecycleAndUUIDReuse(t *testing.T) {
 	c := manifestDatabase(t)
 	ctx := t.Context()

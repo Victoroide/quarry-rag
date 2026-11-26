@@ -609,11 +609,11 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	var policy domain.ContentDedup
 	var fingerprint *string
 	var collection string
-	var safeToPublish, assigned bool
+	var scoped, pending, uncertain, deleteUncertain, assigned bool
 	err = tx.QueryRow(ctx, `SELECT content_dedup,fingerprint,collection,
-		NOT vector_mutation_pending AND (scoped_vectors OR NOT vector_mutation_uncertain),grant_catalog_assigned
+		scoped_vectors,vector_mutation_pending,vector_mutation_uncertain,vector_delete_uncertain,grant_catalog_assigned
 		FROM documents WHERE id=$1 AND status='processing' AND COALESCE(incarnation,id)=$2 FOR UPDATE`,
-		j.Document.ID, j.Incarnation).Scan(&policy, &fingerprint, &collection, &safeToPublish, &assigned)
+		j.Document.ID, j.Incarnation).Scan(&policy, &fingerprint, &collection, &scoped, &pending, &uncertain, &deleteUncertain, &assigned)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -630,6 +630,22 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	}
 	if err != nil {
 		return false, err
+	}
+	safeToPublish := !pending && (scoped || !uncertain)
+	if j.RevisionID != "" && !scoped {
+		if pending {
+			if _, settleErr := settleExpiredVectorMutation(ctx, tx, j.Document.ID); settleErr != nil {
+				return false, settleErr
+			}
+			err = tx.QueryRow(ctx, `SELECT vector_mutation_pending,vector_delete_uncertain FROM documents WHERE id=$1`,
+				j.Document.ID).Scan(&pending, &deleteUncertain)
+			if err != nil {
+				return false, err
+			}
+		}
+		// Manifested revisions use disjoint keys from legacy upserts. A broad
+		// legacy delete can still match their metadata.
+		safeToPublish = !pending && !deleteUncertain
 	}
 	if !safeToPublish {
 		return false, errors.New("vector mutation is unresolved for the publication target")

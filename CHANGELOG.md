@@ -17,6 +17,10 @@ Notable changes are grouped by release.
 
 - Pinecone queries in grants and service mode can retrieve scoped documents with an active hosted vector revision without reindexing.
 
+### Fixed
+
+- Unscoped ingestion with hosted vector manifests can recover from an uncertain legacy vector upsert.
+
 ## [0.2.0] - 2026-11-26
 
 ### Upgrade from 0.1.0
