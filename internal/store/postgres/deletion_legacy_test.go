@@ -571,7 +571,7 @@ func TestLostSessionReleasesTheLockButNotTheReservation(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.RetireLegacyDocument(ctx, doc.id, target))
 
-		pid := store.conn.Conn().PgConn().PID()
+		pid := store.conn.PgConn().PID()
 		var terminated bool
 		require.NoError(t, killer.Pool.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, int32(pid)).Scan(&terminated)) // #nosec G115 -- PostgreSQL process IDs are small.
 		require.True(t, terminated)
@@ -810,7 +810,7 @@ func TestDeletionActivationLockIsReleasedAfterEveryOutcome(t *testing.T) {
 	require.True(t, lockIsFree(ctx, t, c))
 	_ = c.WithLegacyDeletion(ctx, id, func(domain.LegacyDocumentStore) error { return domain.ErrDeletionBusy })
 	require.True(t, lockIsFree(ctx, t, c))
-	// A session lock must not leak back to the pool: one connection serves every call.
+	// The guarded session is not pooled, so a one-connection pool serves every call.
 	single, err := NewClient(ctx, c.Pool.Config().ConnString(), func(cfg *pgxpool.Config) { cfg.MaxConns = 1 })
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, single.Close(context.Background())) })

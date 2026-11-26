@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -13,13 +14,20 @@ import (
 
 func sessionTestClient(t *testing.T) (*Client, *pgx.Conn) {
 	t.Helper()
+	return sessionTestClientWithPool(t, 2)
+}
+
+// sessionTestClientWithPool returns a migrated client whose pool holds at most
+// maxConns connections, with an independent observer of the server's sessions.
+func sessionTestClientWithPool(t *testing.T, maxConns int) (*Client, *pgx.Conn) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("requires PostgreSQL")
 	}
 	u, err := url.Parse(pgtest.Start(t))
 	require.NoError(t, err)
 	q := u.Query()
-	q.Set("pool_max_conns", "2")
+	q.Set("pool_max_conns", strconv.Itoa(maxConns))
 	u.RawQuery = q.Encode()
 	c, err := NewClient(t.Context(), u.String())
 	require.NoError(t, err)

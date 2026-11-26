@@ -25,6 +25,7 @@ type Client struct {
 	vectorStateReady atomic.Bool
 	authzMode        atomic.Pointer[string]
 	writerSlots      chan struct{}
+	legacy           legacySlots
 	hostedManifests  atomic.Bool
 }
 
@@ -62,7 +63,12 @@ func NewClient(ctx context.Context, databaseURL string, opts ...Option) (*Client
 		return nil, fmt.Errorf("postgres: ping: %w", err)
 	}
 	slog.InfoContext(ctx, "postgres connected")
-	return &Client{Pool: pool, GenerationLedger: GenerationLedger{db: pool}, writerSlots: make(chan struct{}, config.MaxConns)}, nil
+	return &Client{
+		Pool:             pool,
+		GenerationLedger: GenerationLedger{db: pool},
+		writerSlots:      make(chan struct{}, config.MaxConns),
+		legacy:           legacySlots{limit: legacyBound(int(config.MaxConns), 0)},
+	}, nil
 }
 
 func poolConfig(url string) (*pgxpool.Config, error) {
