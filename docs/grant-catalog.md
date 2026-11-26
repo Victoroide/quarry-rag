@@ -764,11 +764,23 @@ delete them.
 `operator`), `policy_revision`, `action`, `outcome`, bounded `reason`, and `request_id` without
 raw `sub`, credentials, presigned URLs, or text excerpts:
 
-- `corpus_cutover`, grant imports (`mirror_policy_audit`), `ingest` acceptance, `file_sign` URL signing,
-  and `document_delete` intents record allow events inside their PostgreSQL transactions.
-- `subject_auth`, `query`, `document_list`, and `document_status` fail closed if
-  required allow audit records fail, and record denials/errors.
-- Grant `SELECT` on `grant_catalog_security_audit` to `quarry_auditor` only; keep mutations restricted to the schema owner and `grant_catalog_record_security_audit(...)` for `quarry_service`.
+- Starting with migration `035`, `grant_catalog_record_security_audit(...)`
+  accepts only `ingest`, `query`, `document_list`, `document_status`, `file_sign`,
+  `document_delete`, `subject_auth`, and `trust_key_load` with an outcome of
+  `allow`, `deny`, or `error`. The function leaves `operator` NULL on runtime rows.
+- Ingest acceptance, file signing, and deletion intents record allow events in
+  their PostgreSQL transactions. Subject authentication, queries, and document
+  listing and status fail closed if required allow audit records fail, and
+  record denials or errors.
+- Owner-defined operator functions and the policy-audit mirror (`mirror_policy_audit`) write
+  `corpus_cutover` and `grant_import` rows with a named operator in the same
+  transaction as the change. A historical row with either action and a NULL
+  `operator` provides no evidence of an operator action. The mirror also records
+  ownership deletion as `document_delete` with reason `ownership_deleted` and
+  the acting login in `operator`. A serving deletion intent has a NULL `operator`.
+- Grant `SELECT` on `grant_catalog_security_audit` to `quarry_auditor` only. The
+  schema owner can modify audit rows. The serving login writes runtime events
+  through the audit function.
 
 ### Operational telemetry
 
