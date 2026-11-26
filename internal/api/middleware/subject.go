@@ -30,6 +30,12 @@ func (s VerifiedSubject) ValidAt(now time.Time) bool {
 
 type subjectContextKey struct{}
 
+// ContextWithSubject carries a principal that a gate has already verified.
+// Only code that performed the verification may call it.
+func ContextWithSubject(ctx context.Context, subject VerifiedSubject) context.Context {
+	return context.WithValue(ctx, subjectContextKey{}, subject)
+}
+
 // SubjectFromContext returns the authenticated principal, when present.
 func SubjectFromContext(ctx context.Context) (VerifiedSubject, bool) {
 	subject, ok := ctx.Value(subjectContextKey{}).(VerifiedSubject)
@@ -77,7 +83,7 @@ func RequireSubject(tokens []string, verifier *subjectauth.Verifier, resolver Su
 			writeJSONErr(w, http.StatusForbidden, "forbidden", "access denied")
 			return
 		}
-		verified := r.Clone(context.WithValue(ctx, subjectContextKey{}, subject))
+		verified := r.Clone(ContextWithSubject(ctx, subject))
 		verified.Header.Del("Authorization")
 		verified.Header.Del("X-Service-Token")
 		err = verifier.CheckTrust(identity)

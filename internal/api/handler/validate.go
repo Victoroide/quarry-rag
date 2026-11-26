@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/textutil"
 )
 
@@ -85,4 +86,22 @@ func effectiveMaxChunks(requested, configured int) int {
 		return configured
 	}
 	return min(requested, configured)
+}
+
+// reservedMetadataKeys name ownership and index fields that only the server
+// writes. Matching ignores case so a variant cannot shadow a server value.
+var reservedMetadataKeys = map[string]struct{}{
+	domain.VectorTenantKey: {}, domain.VectorRevisionKey: {}, domain.VectorAttemptKey: {}, domain.VectorIncarnationKey: {},
+	"tenant": {}, "owner": {}, "owner_id": {}, "principal": {}, "principal_id": {},
+	"incarnation": {}, "document_id": {}, "doc_id": {}, "collection": {}, "doc_type": {},
+	"chunk_index": {}, "chunk_id": {}, "kind": {}, "quality": {}, "text": {}, "token_count": {}, "namespace": {},
+}
+
+func validateOwnedMetadata(metadata map[string]any) *APIError {
+	for key := range metadata {
+		if _, reserved := reservedMetadataKeys[strings.ToLower(key)]; reserved {
+			return &APIError{Error: "validation", Message: "metadata contains a reserved field name"}
+		}
+	}
+	return nil
 }

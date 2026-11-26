@@ -129,6 +129,15 @@ func acceptIngestWith(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	case domain.AcceptOCRRetryAfterExpiry:
 		writeJSONError(rw, http.StatusConflict, "conflict", "the mixed PDF result can be retried after it expires")
 		return result.Outcome, nil
+	case domain.AcceptNotFound:
+		writeJSONError(rw, http.StatusNotFound, "not_found", "document not found")
+		return result.Outcome, nil
+	case domain.AcceptForbidden:
+		writeJSONError(rw, http.StatusForbidden, "forbidden", "access denied")
+		return result.Outcome, nil
+	case domain.AcceptUnauthorized:
+		writeJSONError(rw, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+		return result.Outcome, nil
 	case domain.AcceptQueueFull:
 		rw.Header().Set("Retry-After", "30")
 		writeJSONError(rw, http.StatusServiceUnavailable, "queue", "ingest queue is full")
