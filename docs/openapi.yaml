@@ -56,7 +56,7 @@ paths:
     post:
       operationId: ingestDocument
       summary: Accept a document
-      description: 'See [document identity](api.md#document-identity), [queue admission and retries](api.md#queue-admission-and-retries), and optional [image-only](api.md#image-only-pdf-ocr) or [mixed](api.md#mixed-pdf-ocr) PDF OCR.'
+      description: 'See [document identity](api.md#document-identity), [queue admission and retries](api.md#queue-admission-and-retries), and optional [image-only](api.md#image-only-pdf-ocr), [mixed](api.md#mixed-pdf-ocr), or [layout](api.md#pdf-layout-analysis) PDF processing.'
       security:
         - ServiceToken: []
       requestBody:
@@ -843,6 +843,18 @@ components:
           type: string
         quality:
           type: string
+        pages:
+          type: array
+          items:
+            type: integer
+        table_ids:
+          type: array
+          items:
+            type: string
+        row_ids:
+          type: array
+          items:
+            type: string
         excerpt:
           type: integer
         truncated:
@@ -1051,7 +1063,7 @@ components:
         pdf_coverage: &documentSummaryPDFCoverage
           type: string
           enum: [pending, complete, partial, failed]
-          description: Included when requested and recorded for the document.
+          description: Included when requested and recorded for mixed PDF OCR or PDF layout analysis. `partial` covers unresolved pages in mixed OCR as well as rotated text, unlinked lines, unmatched layout tables, ambiguous table spans, missing/unrecognized pages, or provider warnings in layout analysis; per-page reasons are stored internally and not returned.
     DocumentIncarnationSummary:
       type: object
       additionalProperties: false

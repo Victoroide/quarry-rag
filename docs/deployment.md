@@ -602,8 +602,10 @@ Enable the [OCR configuration](configuration.md#environment-variables) to accept
 [image-only PDFs](api.md#image-only-pdf-ocr). The S3 bucket and Textract endpoint
 must be in the same AWS Region. The service uses its shared AWS credential chain
 and retry policy. Grant `textract:StartDocumentTextDetection` and
-`textract:GetDocumentTextDetection` on `*`; Textract reads the original with the
-caller's existing `s3:GetObject` permission. SSE-KMS objects also need
+`textract:GetDocumentTextDetection` on `*` for `image_only` and `mixed` OCR, and
+`textract:StartDocumentAnalysis` and `textract:GetDocumentAnalysis` on `*` when
+enabling [`PDF_LAYOUT_MODE=textract`](configuration.md#environment-variables);
+Textract reads the original with the caller's existing `s3:GetObject` permission. SSE-KMS objects also need
 `kms:Decrypt` on the object's key. Polling requires no SNS topic or notification role. Enable OCR only after every replica runs a release with OCR support, and let pending OCR documents finish before rolling back; replicas without it fail those documents with `no chunks produced`.
 
 Textract asynchronous PDF detection supports at most 3,000 pages and 500 MB per
@@ -638,6 +640,26 @@ drains. Confirm `SELECT count(*) FROM ingest_jobs WHERE pdf_required` returns
 zero before starting older binaries. Retain migration 015 and its data.
 Keep UUID retries for documents accepted in mixed mode on binaries that
 support migration 015 to preserve original-byte identity matching.
+
+### PDF Layout Analysis Rollout
+
+Every replica that claims PDF jobs must run a release with layout support
+before any upload replica sets `PDF_LAYOUT_MODE=textract`, with
+`textract:StartDocumentAnalysis` and `textract:GetDocumentAnalysis` granted.
+Because PDF job claims are not profile-filtered, an earlier replica with only
+mixed PDF support will claim layout jobs and fail them permanently with
+`unsupported PDF extraction profile`; recovering failed jobs requires an
+explicit `document_id` (UUID) retry on a layout-capable replica. Layout mode
+sends eligible new PDFs (including born-digital pages) to Textract
+`StartDocumentAnalysis` (`LAYOUT` and `TABLES`) and applies Textract's document
+analysis pricing per page. Offline execution (`GO_RAG_FAKE_MODE=true`) invokes
+neither S3 nor Textract.
+
+To roll back, set `PDF_LAYOUT_MODE=plain` on all upload replicas, let pending
+layout jobs finish (confirming `SELECT count(*) FROM ingest_jobs j JOIN
+document_pdf_extractions p ON p.document_id = j.document_id WHERE
+j.pdf_required AND p.profile = 'quarry.pdf.layout.v1'` returns zero), and then
+roll back the worker binaries.
 
 ## Vector Index Maintenance
 
