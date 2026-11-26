@@ -11,7 +11,14 @@ import (
 )
 
 // DocumentStatusHandler returns a document's ingestion summary.
-func DocumentStatusHandler(cs domain.ChunkStore) http.HandlerFunc {
+func DocumentStatusHandler(cs domain.ChunkStore, opts ...DocumentStatusOption) http.HandlerFunc {
+	var options documentStatusOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	if options.scoped {
+		return scopedDocumentStatusHandler(cs, options)
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := uuid.Parse(r.PathValue("doc_id"))
 		if err != nil {
@@ -89,4 +96,45 @@ func (p documentSummaryProjection) body(doc domain.DocumentSummary) any {
 		return doc.WithIncarnation()
 	}
 	return doc
+}
+
+func scopedDocumentStatusHandler(cs domain.ChunkStore, opts documentStatusOptions) http.HandlerFunc {
+	now := clockOrDefault(opts.now)
+	return func(w http.ResponseWriter, r *http.Request) {
+		subject, ok := requireScopedSubject(w, r, now)
+		if !ok {
+			return
+		}
+		id, err := uuid.Parse(r.PathValue("doc_id"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
+			return
+		}
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		var projection documentSummaryProjection
+		if err == nil {
+			projection = documentSummaryOptions(query)
+		}
+		lister, capable := cs.(domain.ScopedDocumentLister)
+		if !capable {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document status is unavailable")
+			return
+		}
+		summary, fetchErr := fetchVerifiedScopedSummary(r.Context(), lister, subject, now, domain.DocumentID(id.String()), projection.incarnation)
+		if fetchErr != nil {
+			if fetchErr.cause != nil {
+				slog.ErrorContext(r.Context(), "look up scoped document summary", "document_id", id, "error", fetchErr.cause)
+			}
+			writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
+			return
+		}
+		if summary.Document == nil {
+			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(projection.body(redactScopedSummary(*summary.Document))); err != nil {
+			slog.ErrorContext(r.Context(), "encode scoped document summary", "error", err)
+		}
+	}
 }

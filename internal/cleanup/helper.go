@@ -84,6 +84,10 @@ var ErrDocumentNotFound = domain.ErrDocumentNotFound
 // ErrFileStorageUnavailable indicates a stored file cannot be removed without object storage.
 var ErrFileStorageUnavailable = domain.ErrFileStorageUnavailable
 
+// ErrScopedDeletionCanceled reports that a scoped deletion stopped because the
+// caller context ended before the deletion intent committed.
+var ErrScopedDeletionCanceled = errors.New("scoped deletion canceled before commit")
+
 // Targets names the nonsecret stores that a checkpointed deletion acts on. The
 // coordinator records them with the cleanup target and refuses to resume
 // against different stores.
@@ -140,6 +144,26 @@ func RemoveIncarnation(ctx context.Context, deleter domain.DocumentDeleter, vect
 	ops := operations(vectors, objects, targets)
 	ops.ExpectedIncarnation = incarnation
 	return deleter.DeleteWithCleanup(ctx, id, ops)
+}
+
+// RemoveScoped atomically authorizes owner-only deletion against the current
+// incarnation under ctx, then runs detached cross-store cleanup for that target.
+func RemoveScoped(ctx context.Context, deleter domain.ScopedDocumentDeleter, vectors domain.VectorDeleter, objects ObjectDeleter, targets Targets, principal domain.Principal, validUntil time.Time, id domain.DocumentID, incarnation string) error {
+	ops := operations(vectors, objects, targets)
+	ops.ExpectedIncarnation = incarnation
+	resolvedIncarnation, complete, err := deleter.BeginScopedDeletion(ctx, principal, validUntil, id, ops)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: %w", ErrScopedDeletionCanceled, err)
+		}
+		return err
+	}
+	if complete {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	defer cancel()
+	return deleter.ResumeScopedDeletion(cleanupCtx, id, resolvedIncarnation, ops)
 }
 
 // Cleaner reuses store connections for a sequence of document deletions.

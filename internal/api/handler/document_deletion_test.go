@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,6 +77,8 @@ func TestDeleteMapsCoordinatorOutcomes(t *testing.T) {
 		{name: "source storage missing", header: incarnation, result: domain.ErrFileStorageUnavailable, status: http.StatusServiceUnavailable, category: "storage"},
 		{name: "vector storage missing", header: incarnation, result: domain.ErrVectorStorageUnavailable, status: http.StatusServiceUnavailable, category: "storage"},
 		{name: "unfinished step", header: incarnation, result: errors.New("provider unavailable"), status: http.StatusInternalServerError, category: "internal"},
+		{name: "deadline exceeded", header: incarnation, result: fmt.Errorf("delete vectors: %w", context.DeadlineExceeded), status: http.StatusInternalServerError, category: "internal"},
+		{name: "canceled", header: incarnation, result: fmt.Errorf("delete vectors: %w", context.Canceled), status: http.StatusInternalServerError, category: "internal"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &checkpointedStore{active: true, result: tc.result}
@@ -208,6 +211,32 @@ func (s *contextChecking) DeleteWithCleanup(ctx context.Context, id domain.Docum
 		return err
 	}
 	return s.checkpointedStore.DeleteWithCleanup(ctx, id, ops)
+}
+
+func TestServiceDeleteTimeoutReturnsInternalWithRetryContract(t *testing.T) {
+	store := &checkpointedStore{
+		active: true,
+		result: fmt.Errorf("delete vectors: %w", context.DeadlineExceeded),
+	}
+	rec := serveDeletion(t, store, http.Header{"X-Document-Incarnation": {uuid.NewString()}})
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	require.JSONEq(t, `{"error":"internal","message":"failed to delete document"}`, rec.Body.String())
+
+	// Compatibility path (inactive / non-DocumentDeleter store) also keeps 500 on timeout.
+	calls := 0
+	compatStore := &fileDeleteStore{
+		document: &domain.Document{ID: deletionTestDocument},
+		check: func(ctx context.Context) error {
+			calls++
+			if calls == 1 {
+				return ctx.Err()
+			}
+			return fmt.Errorf("delete document metadata: %w", context.DeadlineExceeded)
+		},
+	}
+	compatRec := serveDeletion(t, compatStore, nil)
+	require.Equal(t, http.StatusInternalServerError, compatRec.Code, compatRec.Body.String())
+	require.JSONEq(t, `{"error":"internal","message":"failed to delete document"}`, compatRec.Body.String())
 }
 
 func FuzzDeletionIncarnation(f *testing.F) {

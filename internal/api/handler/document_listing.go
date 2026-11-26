@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/api/middleware"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 )
@@ -120,4 +122,155 @@ func listingCollection(query url.Values) (string, *APIError) {
 		return "", &APIError{Error: "validation", Message: "collection must occur at most once"}
 	}
 	return validateLabel("collection", query.Get("collection"))
+}
+
+func scopedListDocumentsHandler(cs domain.ChunkStore, opts documentListOptions) http.HandlerFunc {
+	now := clockOrDefault(opts.now)
+	batchSize := opts.streamBatchSize
+	if batchSize <= 0 {
+		batchSize = defaultScopedStreamBatchSize
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		subject, ok := requireScopedSubject(w, r, now)
+		if !ok {
+			return
+		}
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "validation", "invalid query parameters")
+			return
+		}
+		collection, apiErr := listingCollection(query)
+		if apiErr != nil {
+			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			return
+		}
+		projection := documentSummaryOptions(query)
+		lister, capable := cs.(domain.ScopedDocumentLister)
+		if !capable {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document inventory is unavailable")
+			return
+		}
+		if !query.Has("limit") && !query.Has("after") {
+			streamScopedDocumentSummaries(w, r, lister, subject, now, batchSize, collection, projection)
+			return
+		}
+		limit, err := strconv.Atoi(query.Get("limit"))
+		if err != nil || limit < 1 || limit > 1000 || len(query["limit"]) != 1 {
+			writeJSONError(w, http.StatusBadRequest, "validation", "limit must be between 1 and 1000")
+			return
+		}
+		after := ""
+		if query.Has("after") {
+			id, parseErr := uuid.Parse(query.Get("after"))
+			if parseErr != nil || len(query["after"]) != 1 {
+				writeJSONError(w, http.StatusBadRequest, "validation", "after must be a valid UUID")
+				return
+			}
+			after = id.String()
+		}
+		page, fetchErr := fetchVerifiedScopedPage(r.Context(), lister, subject, now, after, limit, collection, projection.incarnation)
+		if fetchErr != nil {
+			if fetchErr.cause != nil {
+				slog.ErrorContext(r.Context(), "list scoped documents page", "error", fetchErr.cause)
+			}
+			writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
+			return
+		}
+		var next *string
+		if len(page.Documents) == limit {
+			next = &page.Documents[len(page.Documents)-1].ID
+		}
+		documents := make([]any, len(page.Documents))
+		for i, doc := range page.Documents {
+			documents[i] = projection.body(redactScopedSummary(doc))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(struct {
+			Documents []any   `json:"documents"`
+			Count     int     `json:"count"`
+			NextAfter *string `json:"next_after"`
+		}{documents, len(page.Documents), next}); err != nil {
+			slog.ErrorContext(r.Context(), "encode scoped document list", "error", err)
+		}
+	}
+}
+
+func streamScopedDocumentSummaries(
+	w http.ResponseWriter,
+	r *http.Request,
+	lister domain.ScopedDocumentLister,
+	subject middleware.VerifiedSubject,
+	now func() time.Time,
+	batchSize int,
+	collection string,
+	projection documentSummaryProjection,
+) {
+	after := ""
+	count := 0
+	started := false
+	for {
+		page, fetchErr := fetchVerifiedScopedPage(r.Context(), lister, subject, now, after, batchSize, collection, projection.incarnation)
+		if fetchErr != nil {
+			if fetchErr.cause != nil {
+				slog.ErrorContext(r.Context(), "stream scoped documents", "error", fetchErr.cause)
+			}
+			if !started {
+				writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
+			}
+			return
+		}
+		if len(page.Documents) == 0 {
+			break
+		}
+		for _, doc := range page.Documents {
+			if !subject.ValidAt(now()) {
+				if !started {
+					writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+				}
+				return
+			}
+			encoded, err := json.Marshal(projection.body(redactScopedSummary(doc)))
+			if err != nil {
+				slog.ErrorContext(r.Context(), "encode scoped document summary", "error", err)
+				if !started {
+					writeJSONError(w, http.StatusInternalServerError, "internal", "failed to list documents")
+				}
+				return
+			}
+			prefix := ","
+			if !started {
+				w.Header().Set("Content-Type", "application/json")
+				started = true
+				prefix = `{"documents":[`
+			}
+			if _, err := io.WriteString(w, prefix); err != nil {
+				return
+			}
+			if _, err := w.Write(encoded); err != nil {
+				return
+			}
+			count++
+		}
+		if len(page.Documents) < batchSize {
+			break
+		}
+		after = page.Documents[len(page.Documents)-1].ID
+	}
+	if !subject.ValidAt(now()) {
+		if !started {
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+		}
+		return
+	}
+	if !started {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := io.WriteString(w, `{"documents":[`); err != nil {
+			slog.ErrorContext(r.Context(), "encode scoped document list", "error", err)
+			return
+		}
+	}
+	if _, err := fmt.Fprintf(w, `],"count":%d}`+"\n", count); err != nil {
+		slog.ErrorContext(r.Context(), "encode scoped document list", "error", err)
+	}
 }
