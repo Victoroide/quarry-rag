@@ -22,8 +22,10 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -65,11 +67,12 @@ func admission(t *testing.T, c *pgstore.Client, id, content string) domain.Accep
 	return result.Outcome
 }
 
-// terminateActivationHolders ends only the SQL sessions that hold the shared
-// activation lock, as a lost connection would.
+// terminateActivationHolders simulates lost sessions holding the shared
+// activation lock in this fixture database.
 func terminateActivationHolders(t *testing.T, c *pgstore.Client) int {
 	t.Helper()
 	rows, err := c.Pool.Query(t.Context(), `SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND mode='ShareLock'
+		AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
 		AND classid::bigint=$1 AND objid::bigint=$2 AND objsubid=1`,
 		(pgstore.DeletionActivationLockID>>32)&0xffffffff, pgstore.DeletionActivationLockID&0xffffffff)
 	require.NoError(t, err)
@@ -86,6 +89,19 @@ func terminateActivationHolders(t *testing.T, c *pgstore.Client) int {
 		require.True(t, ended)
 	}
 	return len(pids)
+}
+
+func holdSiblingActivationLock(t *testing.T, c *pgstore.Client) pgx.Tx {
+	t.Helper()
+	address := pgtest.Sibling(t, c.Pool.Config().ConnString())
+	conn, err := pgx.Connect(t.Context(), address)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close(context.Background())) })
+	tx, err := conn.Begin(t.Context())
+	require.NoError(t, err)
+	_, err = tx.Exec(t.Context(), `SELECT pg_advisory_xact_lock_shared($1)`, pgstore.DeletionActivationLockID)
+	require.NoError(t, err)
+	return tx
 }
 
 func TestBareDeleteBeforeActivationReservesFirstAndRepeatReportsAbsence(t *testing.T) {
@@ -286,11 +302,14 @@ func TestHostedFinalCallOutcomesKeepTheIdentityReserved(t *testing.T) {
 
 func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	c := durableDatabase(t)
+	sibling := holdSiblingActivationLock(t, c)
 	activator := otherDatabaseClient(t, c)
 	stores := newDeletionStores()
 	id := uuid.NewString()
 	acceptDeletable(t, c, id, "hosted legacy document", false, "")
 	entered, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
 	var mu sync.Mutex
 	calls := 0
 	stores.hook("vectors", func(context.Context) error {
@@ -334,6 +353,9 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 	}
 	require.Equal(t, 1, terminateActivationHolders(t, activator), "only the guarding session ends")
+	var alive bool
+	require.NoError(t, sibling.QueryRow(t.Context(), `SELECT TRUE`).Scan(&alive), "the sibling session still holds its lock")
+	require.True(t, alive)
 	select {
 	case <-activated:
 	case <-time.After(10 * time.Second):
@@ -341,7 +363,7 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	}
 	require.Equal(t, domain.AcceptDeletionConflict, admission(t, activator, id, "replacement"), "the durable hold still blocks the identity")
 
-	close(release)
+	unblock()
 	require.Equal(t, http.StatusOK, (<-reply).code)
 	receipt := legacyReceiptOf(t.Context(), t, c, id)
 	require.True(t, receipt.finalized)
@@ -364,16 +386,16 @@ func smallPoolDatabase(t *testing.T, maxConns int) *pgstore.Client {
 	return c
 }
 
-// blockFirstCalls makes the first n calls of a provider kind wait until release
-// closes, and signals each arrival on entered.
-func blockFirstCalls(stores *deletionStores, kind string, n int) (entered, release chan struct{}) {
-	entered, release = make(chan struct{}, n), make(chan struct{})
+// blockFirstCalls pauses the first n calls of a provider kind until unblocked,
+// signaling each arrival on entered.
+func blockFirstCalls(stores *deletionStores, kind string, n int) (entered <-chan struct{}, unblock func()) {
+	arrivals, release := make(chan struct{}, n), make(chan struct{})
 	var calls atomic.Int32
 	stores.hook(kind, func(ctx context.Context) error {
 		if int(calls.Add(1)) > n {
 			return nil
 		}
-		entered <- struct{}{}
+		arrivals <- struct{}{}
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -381,10 +403,10 @@ func blockFirstCalls(stores *deletionStores, kind string, n int) (entered, relea
 		}
 		return nil
 	})
-	return entered, release
+	return arrivals, sync.OnceFunc(func() { close(release) })
 }
 
-func awaitArrivals(t *testing.T, entered chan struct{}, n int) {
+func awaitArrivals(t *testing.T, entered <-chan struct{}, n int) {
 	t.Helper()
 	for range n {
 		select {
@@ -398,7 +420,8 @@ func awaitArrivals(t *testing.T, entered chan struct{}, n int) {
 func advisoryLocks(t *testing.T, c *pgstore.Client) int {
 	t.Helper()
 	var n int
-	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND granted`).Scan(&n))
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND granted
+		AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`).Scan(&n))
 	return n
 }
 
@@ -410,7 +433,8 @@ func TestGuardedIDOnlyDeleteRejectsBurstWith503BusyBeforeLocks(t *testing.T) {
 	for _, id := range ids {
 		acceptDeletable(t, c, id, "burst document "+id, false, "")
 	}
-	entered, release := blockFirstCalls(stores, "namespace", 2)
+	entered, unblock := blockFirstCalls(stores, "namespace", 2)
+	defer unblock()
 	server := deletionServer(t, c, "token", legacyRoutes(stores))
 	untouched := documentState(t, c, ids[2])
 	require.NotEmpty(t, untouched)
@@ -420,6 +444,8 @@ func TestGuardedIDOnlyDeleteRejectsBurstWith503BusyBeforeLocks(t *testing.T) {
 	}
 	awaitArrivals(t, entered, 2)
 	locks := advisoryLocks(t, c)
+	// Other fixtures can take locks on this server between samples.
+	holdSiblingActivationLock(t, c)
 
 	refused := sendDelete(t, server, "token", ids[2], "")
 	require.Equal(t, http.StatusServiceUnavailable, refused.code, refused.body)
@@ -432,7 +458,7 @@ func TestGuardedIDOnlyDeleteRejectsBurstWith503BusyBeforeLocks(t *testing.T) {
 	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM document_deletions WHERE document_id=$1`, ids[2]).Scan(&receipts))
 	require.Zero(t, receipts, "the refused request reserved nothing")
 
-	close(release)
+	unblock()
 	for range 2 {
 		require.Equal(t, http.StatusOK, (<-replies).code)
 	}
@@ -447,7 +473,8 @@ func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
 	for _, id := range ids {
 		acceptDeletable(t, c, id, "slow document "+id, false, "")
 	}
-	entered, release := blockFirstCalls(stores, "namespace", 2)
+	entered, unblock := blockFirstCalls(stores, "namespace", 2)
+	defer unblock()
 	server := deletionServer(t, c, "token", legacyRoutes(stores))
 	replies := make(chan httpReply, 2)
 	for _, id := range ids {
@@ -478,7 +505,7 @@ func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
 	require.Less(t, time.Since(started), 5*time.Second)
 	require.Zero(t, c.Pool.Stat().AcquiredConns(), "the guarded deletions hold no pooled connection")
 
-	close(release)
+	unblock()
 	for range 2 {
 		require.Equal(t, http.StatusOK, (<-replies).code)
 	}
