@@ -87,9 +87,6 @@ func serveEvidenceQuery(t *testing.T, query http.Handler, w http.ResponseWriter,
 }
 
 func TestEvidenceQueryUsesCurrentCategoryAfterDocumentReuse(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	id := uuid.NewString()
 	ch := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(id), Index: 2,
@@ -184,9 +181,6 @@ func TestEvidenceQueryUsesCurrentCategoryAfterDocumentReuse(t *testing.T) {
 }
 
 func TestEvidenceQueryRejectsRevokedRoutingEvidenceBeforeResponse(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	for _, accept := range []string{"application/json", "text/event-stream"} {
 		t.Run(accept, func(t *testing.T) {
@@ -222,9 +216,6 @@ func TestEvidenceQueryRejectsRevokedRoutingEvidenceBeforeResponse(t *testing.T) 
 }
 
 func TestEvidenceQueryChecksNamedEntityRouteAfterDocumentReuse(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	const originalPreview = "Cedar Archive accepts paper records."
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	for _, accept := range []string{"application/json", "text/event-stream"} {
@@ -305,9 +296,6 @@ func TestEvidenceQueryChecksNamedEntityRouteAfterDocumentReuse(t *testing.T) {
 }
 
 func TestEvidenceQueryChecksCurrentScopeAcrossVectorStores(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	ctx := t.Context()
 	db, err := pgstore.NewClient(ctx, pgtest.StartVector(t))
 	require.NoError(t, err)
@@ -425,9 +413,6 @@ func TestEvidenceQueryChecksCurrentScopeAcrossVectorStores(t *testing.T) {
 }
 
 func TestEvidencePolicyRoutingWithStaleHostedHitsAndPreviewErrors(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	staleID, visibleID := uuid.NewString(), uuid.NewString()
 	staleChunk := domain.Chunk{
@@ -576,9 +561,6 @@ func (v citationVerifier) Verify(_ context.Context, batch citationsupport.Batch)
 }
 
 func TestLocalQuerySkipsPineconeHitsWithoutDocumentIDs(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	hit := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(uuid.NewString()), Text: "The library opens at nine.",
 		Metadata: map[string]any{"collection": "archive", "doc_type": "guide"}}
@@ -635,9 +617,6 @@ func TestLocalQuerySkipsPineconeHitsWithoutDocumentIDs(t *testing.T) {
 }
 
 func TestCitationSupportUsesOnlyScopedPineconeBodies(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	allowed := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(uuid.NewString()), Text: "Fold the paper.",
 		Metadata: map[string]any{"collection": "archive", "doc_type": "guide"}}

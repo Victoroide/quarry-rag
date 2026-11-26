@@ -8,9 +8,6 @@ import (
 )
 
 func TestPendingIngestJobsUsesPersistedState(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	c := jobsDatabase(t)
 	count, err := c.PendingIngestJobs(t.Context())
 	require.NoError(t, err)

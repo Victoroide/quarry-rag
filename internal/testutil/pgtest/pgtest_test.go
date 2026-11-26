@@ -23,16 +23,10 @@ func queryOne(t *testing.T, url, query string) {
 }
 
 func TestStartServesQueries(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon or the test services")
-	}
 	queryOne(t, Start(t), "SELECT 1")
 }
 
 func TestStartVectorCreatesTheExtension(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon or the test services")
-	}
 	url := StartVector(t)
 	conn, err := pgx.Connect(t.Context(), url)
 	if err != nil {

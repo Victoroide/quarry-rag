@@ -30,9 +30,6 @@ func listingDatabase(t *testing.T) (*Client, domain.DocumentLister) {
 }
 
 func TestStreamDocumentsOrdersByID(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	_, lister := listingDatabase(t)
 	var ids []string
 	require.NoError(t, lister.StreamDocuments(t.Context(), func(doc domain.DocumentSummary) error {
@@ -58,9 +55,6 @@ func TestStreamDocumentsOrdersByID(t *testing.T) {
 }
 
 func TestListDocumentsPageBoundaries(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	c, lister := listingDatabase(t)
 	for _, tc := range []struct {
 		after string

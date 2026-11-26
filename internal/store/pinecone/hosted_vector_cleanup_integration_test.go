@@ -325,9 +325,6 @@ func manifestCount(t *testing.T, client *pgstore.Client, revision string) int {
 }
 
 func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	client := setupPostgresClient(t)
 	client.EnableHostedVectorManifests(true)
 
@@ -565,9 +562,6 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 }
 
 func TestHostedVectorSweeperPodResidueConvergenceAndReaderVisibilityGate(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	client := setupPostgresClient(t)
 	idx := newDelayedHTTPIndex()
 	idx.disableList = true

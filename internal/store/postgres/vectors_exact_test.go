@@ -143,9 +143,6 @@ func explainVectorPlan(ctx context.Context, c *Client, settings, statement strin
 }
 
 func TestExactScope(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	baseURL := pgtest.StartVector(t, testcontainers.WithAfterReadyCommand(testcontainers.NewRawCommand(
 		[]string{"localedef", "--no-archive", "-i", "es_ES", "-f", "UTF-8", "es_ES.utf8"},
 		tcexec.WithUser("root"),
