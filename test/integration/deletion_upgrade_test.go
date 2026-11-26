@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/api"
@@ -28,6 +30,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+const upgradeHostedIndex = "idx-upgrade"
 
 const preUpgradeCommit = "4e5fa7cbdfecb1c4fb61521ada0ad78e9f8cf84c"
 
@@ -141,6 +145,8 @@ import (
 func TestPreUpgradeRouterProcess(t *testing.T) {
 	id := os.Getenv("PREUPGRADE_TARGET")
 	require.NotEmpty(t, id)
+	index := os.Getenv("PINECONE_INDEX_NAME")
+	require.NotEmpty(t, index)
 	db, err := pg.NewClient(t.Context(), os.Getenv("PREUPGRADE_DB"))
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close(context.Background())) }()
@@ -159,7 +165,7 @@ func TestPreUpgradeRouterProcess(t *testing.T) {
 		}
 		return nil
 	})
-	router := api.NewRouter(&api.RouterDeps{ChunkStore: db, PineconeDriver: driver, Config: &config.Config{ServiceToken: "preupgrade-token"}})
+	router := api.NewRouter(&api.RouterDeps{ChunkStore: db, PineconeDriver: driver, Config: &config.Config{ServiceToken: "preupgrade-token", VectorStore: "pinecone", PineconeIndexName: index}})
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/"+id, nil)
 	req.Header.Set("X-Service-Token", "preupgrade-token")
 	rec := httptest.NewRecorder()
@@ -207,6 +213,8 @@ func runPreUpgradeDelete(t *testing.T, binPath, dbURL, id string, wantCode int) 
 	cmd := exec.CommandContext(t.Context(), binPath, "-test.run=^TestPreUpgradeRouterProcess$", "-test.v", "-test.timeout=30s") // #nosec G204 -- compiled test binary
 	cmd.Env = append(os.Environ(),
 		"PREUPGRADE_DB="+dbURL,
+		"VECTOR_STORE=pinecone",
+		"PINECONE_INDEX_NAME="+upgradeHostedIndex,
 		"PREUPGRADE_TARGET="+id,
 		"PREUPGRADE_CODE="+strconv.Itoa(wantCode),
 		"PREUPGRADE_FILTER="+filterFile,
@@ -275,6 +283,25 @@ func TestRetiredProviderMutationWaitsForUUIDQuarantine(t *testing.T) {
 	firstDatabaseURL := pgtest.StartVector(t)
 	preUpgradeBin := buildPreUpgradeRouter(t)
 	cleanupBin := buildCleanupBinary(t)
+	var proxyConnections atomic.Int32
+	proxy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	proxy.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			proxyConnections.Add(1)
+		}
+	}
+	proxy.Start()
+	t.Cleanup(proxy.Close)
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		t.Setenv(name, proxy.URL)
+	}
+	for _, name := range []string{"NO_PROXY", "no_proxy", "PINECONE_CONTROLLER_HOST", "PINECONE_ADDITIONAL_HEADERS", "REQUEST_METHOD"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("PINECONE_API_KEY", "synthetic-upgrade-key")
+	t.Setenv("VECTOR_GENERATION", "")
 
 	for i, priorCompatibleReceipt := range []bool{false, true} {
 		name := "case_a_missing_receipt_on_009"
@@ -296,13 +323,13 @@ func TestRetiredProviderMutationWaitsForUUIDQuarantine(t *testing.T) {
 			_, err = db.Pool.Exec(ctx, `INSERT INTO documents(id,content,status) VALUES($1,'old hosted evidence','completed')`, id)
 			require.NoError(t, err)
 
+			stores := newDeletionStores()
 			var expectedIncarnation string
 			if priorCompatibleReceipt {
 				require.NoError(t, db.RunMigrations(ctx))
 				_, err = pgstore.NewVectorStore(ctx, db, 3)
 				require.NoError(t, err)
 				expectedIncarnation = storedIncarnation(t, db, id)
-				stores := newDeletionStores()
 				stores.hook("namespace", func(context.Context) error {
 					return errors.New("namespace call failed before removal")
 				})
@@ -312,7 +339,7 @@ func TestRetiredProviderMutationWaitsForUUIDQuarantine(t *testing.T) {
 					signer:  stores,
 					options: []handler.DeleteOption{
 						handler.WithLegacyReservations(),
-						handler.WithCleanupTargets(cleanup.Targets{VectorIndex: "idx-upgrade"}),
+						handler.WithCleanupTargets(cleanup.Targets{VectorIndex: upgradeHostedIndex}),
 					},
 				})
 				require.Equal(t, http.StatusInternalServerError, sendDelete(t, compatServer, "compat-token", id, "").code)
@@ -342,36 +369,47 @@ func TestRetiredProviderMutationWaitsForUUIDQuarantine(t *testing.T) {
 			type quarantineResp struct {
 				Quarantined []domain.HeldDeletion `json:"quarantined"`
 			}
-			out1, err := runCleanupCLI(t, cleanupBin, dbURL, "postgres", "", "--quarantine", id)
+			out1, err := runCleanupCLI(t, cleanupBin, dbURL, "pinecone", upgradeHostedIndex, "--quarantine", id)
 			require.NoError(t, err, string(out1))
 			var q1 quarantineResp
 			require.NoError(t, json.Unmarshal(out1, &q1), string(out1))
 			require.Len(t, q1.Quarantined, 1)
 
-			out2, err := runCleanupCLI(t, cleanupBin, dbURL, "postgres", "", "--quarantine", id)
+			out2, err := runCleanupCLI(t, cleanupBin, dbURL, "pinecone", upgradeHostedIndex, "--quarantine", id)
 			require.NoError(t, err, string(out2))
 			var q2 quarantineResp
 			require.NoError(t, json.Unmarshal(out2, &q2), string(out2))
 			require.Equal(t, q1.Quarantined[0], q2.Quarantined[0], "repeated quarantine preserves the same pair and receipt")
 
-			inc := q1.Quarantined[0].Incarnation
+			held := q1.Quarantined[0]
+			inc := held.Incarnation
+			require.Equal(t, domain.DocumentID(id), held.DocumentID)
+			require.Equal(t, "legacy", held.VectorMode)
+			require.Equal(t, upgradeHostedIndex, held.VectorIndex)
+			require.True(t, held.Held)
+			require.False(t, held.DocumentPresent)
 			if priorCompatibleReceipt {
 				require.Equal(t, expectedIncarnation, inc, "unfinished legacy receipt incarnation must be preserved")
-				require.Equal(t, "legacy_reservation", q1.Quarantined[0].Kind)
-				require.Equal(t, "idx-upgrade", q1.Quarantined[0].VectorIndex)
+				require.Equal(t, "legacy_reservation", held.Kind)
+				require.Equal(t, "reserved", held.Phase)
+				require.False(t, held.Finalized)
 			} else {
-				require.Equal(t, "quarantine", q1.Quarantined[0].Kind)
+				require.Equal(t, "quarantine", held.Kind)
+				require.Equal(t, "quarantined", held.Phase)
+				require.True(t, held.Finalized)
 			}
+			durable, err := db.ListHeldDeletions(ctx)
+			require.NoError(t, err)
+			require.Equal(t, []domain.HeldDeletion{held}, durable)
 
-			listOut, listErr := runCleanupCLI(t, cleanupBin, dbURL, "postgres", "", "--list-held")
+			listOut, listErr := runCleanupCLI(t, cleanupBin, dbURL, "pinecone", upgradeHostedIndex, "--list-held")
 			require.NoError(t, listErr, string(listOut))
 			var listed struct {
 				Held []domain.HeldDeletion `json:"held"`
 			}
 			require.NoError(t, json.Unmarshal(listOut, &listed), string(listOut))
 			require.Len(t, listed.Held, 1)
-			require.Equal(t, inc, listed.Held[0].Incarnation)
-			require.False(t, listed.Held[0].DocumentPresent)
+			require.Equal(t, held, listed.Held[0])
 
 			// New admission is blocked with 409 while the old filter is outstanding.
 			activateDeletion(t, db)
@@ -393,27 +431,27 @@ func TestRetiredProviderMutationWaitsForUUIDQuarantine(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, remainingOld)
 
-			_, wrongErr := runCleanupCLI(t, cleanupBin, dbURL, "postgres", "", "--release-held", id, uuid.NewString())
-			require.Error(t, wrongErr)
+			_, wrongErr := runCleanupCLI(t, cleanupBin, dbURL, "pinecone", upgradeHostedIndex, "--release-held", id, uuid.NewString())
+			require.ErrorContains(t, wrongErr, domain.ErrDeletionPreconditionFailed.Error())
+			blocked = doRequest(t, server, http.MethodPost, "/ingest", "upgrade-service", nil,
+				`{"document_id":"`+id+`","content":"blocked after wrong release"}`)
+			require.Equal(t, http.StatusConflict, blocked.code, blocked.body)
 
-			if priorCompatibleReceipt {
-				// Case B recorded vector_index="idx-upgrade"; verify legacy release cleans
-				// without issuing any broad DeleteAllVectorsInNamespace / DeleteByDocID.
-				require.NoError(t, db.ReleaseHeldDeletion(ctx, domain.DocumentID(id), inc, domain.DeleteOperations{
-					VectorIndex: "idx-upgrade",
-					LegacyNamespace: func(context.Context, string) error {
-						t.Fatal("legacy release must issue zero document-wide namespace deletes")
-						return nil
-					},
-					LegacyVectors: func(context.Context, string) error {
-						t.Fatal("legacy release must issue zero document-wide vector deletes")
-						return nil
-					},
-				}))
-			} else {
-				relOut, relErr := runCleanupCLI(t, cleanupBin, dbURL, "postgres", "", "--release-held", id, inc)
-				require.NoError(t, relErr, string(relOut))
-			}
+			priorCalls := stores.all()
+			relOut, relErr := runCleanupCLI(t, cleanupBin, dbURL, "pinecone", upgradeHostedIndex, "--release-held", id, inc)
+			require.NoError(t, relErr, string(relOut))
+			require.Equal(t, priorCalls, stores.all(), "hosted release adds no vector mutations")
+			require.Zero(t, proxyConnections.Load(), "hosted recovery must not open a Pinecone connection")
+			var mode, index, kind, releasedInc string
+			var finalized, stillHeld bool
+			require.NoError(t, db.Pool.QueryRow(ctx, `SELECT vector_mode, vector_index, kind, incarnation::text, finalized, held
+				FROM document_deletions WHERE document_id=$1`, id).Scan(&mode, &index, &kind, &releasedInc, &finalized, &stillHeld))
+			require.Equal(t, held.VectorMode, mode)
+			require.Equal(t, held.VectorIndex, index)
+			require.Equal(t, held.Kind, kind)
+			require.Equal(t, inc, releasedInc)
+			require.True(t, finalized)
+			require.False(t, stillHeld)
 
 			// Reuse now returns 202 with a new incarnation and preserves its replacement vectors.
 			admitted := doRequest(t, server, http.MethodPost, "/ingest", "upgrade-service", nil,
@@ -449,17 +487,25 @@ func TestCaseBSourceFailureAndWrongTokenKeepHold(t *testing.T) {
 	require.NoError(t, err)
 
 	// Missing S3, source delete error, and wrong incarnation keep the UUID held.
-	require.ErrorIs(t, db.ReleaseHeldDeletion(ctx, domain.DocumentID(id), inc, domain.DeleteOperations{
+	require.ErrorIs(t, db.ReleaseLegacyHostedHold(ctx, domain.DocumentID(id), inc, domain.DeleteOperations{
 		SourceBucket: "originals", VectorIndex: "idx-1",
 	}), domain.ErrFileStorageUnavailable)
-	require.ErrorContains(t, db.ReleaseHeldDeletion(ctx, domain.DocumentID(id), inc, domain.DeleteOperations{
+	require.ErrorIs(t, db.ReleaseLegacyHostedHold(ctx, domain.DocumentID(id), inc, domain.DeleteOperations{
 		SourceBucket: "originals", VectorIndex: "idx-1",
-		Source: func(context.Context, string) error { return errors.New("s3 timeout") },
-	}), "s3 timeout")
-	require.ErrorIs(t, db.ReleaseHeldDeletion(ctx, domain.DocumentID(id), uuid.NewString(), domain.DeleteOperations{
+		Source: func(context.Context, string) error { return context.DeadlineExceeded },
+	}), context.DeadlineExceeded)
+	require.ErrorIs(t, db.ReleaseLegacyHostedHold(ctx, domain.DocumentID(id), uuid.NewString(), domain.DeleteOperations{
 		SourceBucket: "originals", VectorIndex: "idx-1",
 		Source: func(context.Context, string) error { return nil },
 	}), domain.ErrDeletionPreconditionFailed)
+
+	require.ErrorIs(t, db.ReleaseLegacyHostedHold(ctx, domain.DocumentID(id), inc, domain.DeleteOperations{
+		SourceBucket: "wrong", VectorIndex: "idx-1",
+		Source: func(context.Context, string) error {
+			t.Error("wrong bucket must not run source cleanup")
+			return nil
+		},
+	}), domain.ErrDeletionTargetMismatch)
 
 	// Verify receipt stays unfinished and held, and retry succeeds cleanly without broad vector calls.
 	r := receiptOf(t, db, id)
@@ -467,7 +513,7 @@ func TestCaseBSourceFailureAndWrongTokenKeepHold(t *testing.T) {
 	require.True(t, r.held)
 
 	var sourceCalls int
-	require.NoError(t, db.ReleaseHeldDeletion(ctx, domain.DocumentID(id), inc, domain.DeleteOperations{
+	require.NoError(t, db.ReleaseLegacyHostedHold(ctx, domain.DocumentID(id), inc, domain.DeleteOperations{
 		SourceBucket: "originals", VectorIndex: "idx-1",
 		LegacyNamespace: func(context.Context, string) error {
 			t.Fatal("legacy release must not call LegacyNamespace")

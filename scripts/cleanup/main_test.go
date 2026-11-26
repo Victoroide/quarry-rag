@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -198,6 +201,48 @@ func FuzzParseCommand(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestCleanupRoutesHeldReleaseByReceipt(t *testing.T) {
+	c := cleanupDatabase(t)
+	const index = "retired-index"
+	var requests atomic.Int32
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(controller.Close)
+	t.Setenv("VECTOR_STORE", "pinecone")
+	t.Setenv("VECTOR_GENERATION", "")
+	t.Setenv("PINECONE_INDEX_NAME", index)
+	t.Setenv("PINECONE_API_KEY", "synthetic-cleanup-key")
+	t.Setenv("PINECONE_CONTROLLER_HOST", controller.URL)
+
+	var buf bytes.Buffer
+	legacy, err := c.QuarantineDeletion(t.Context(), domain.DocumentID(uuid.NewString()), domain.QuarantineTarget{
+		VectorMode: "legacy", VectorIndex: index,
+	})
+	require.NoError(t, err)
+	require.ErrorContains(t, runArgs([]string{"--release-held", string(legacy.DocumentID), "bad-token"}, &buf), "invalid incarnation")
+	require.ErrorIs(t, runArgs([]string{"--release-held", string(legacy.DocumentID), uuid.NewString()}, &buf), domain.ErrDeletionPreconditionFailed)
+	t.Setenv("PINECONE_INDEX_NAME", "wrong-index")
+	require.ErrorIs(t, runArgs([]string{"--release-held", string(legacy.DocumentID), legacy.Incarnation}, &buf), domain.ErrDeletionTargetMismatch)
+	t.Setenv("PINECONE_INDEX_NAME", index)
+	t.Setenv("PINECONE_API_KEY", "")
+	require.ErrorContains(t, runArgs([]string{"--release-held", string(legacy.DocumentID), legacy.Incarnation}, &buf), "PINECONE_API_KEY")
+	t.Setenv("PINECONE_API_KEY", "synthetic-cleanup-key")
+	require.NoError(t, runArgs([]string{"--release-held", string(legacy.DocumentID), legacy.Incarnation}, &buf))
+	require.Zero(t, requests.Load())
+
+	revision, err := c.QuarantineDeletion(t.Context(), domain.DocumentID(uuid.NewString()), domain.QuarantineTarget{
+		VectorMode: "revision", VectorIndex: index,
+	})
+	require.NoError(t, err)
+	require.ErrorContains(t, runArgs([]string{"--release-held", string(revision.DocumentID), revision.Incarnation}, &buf), "pinecone: describe index")
+	require.Positive(t, requests.Load())
+	listed, err := c.ListHeldDeletions(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []domain.HeldDeletion{revision}, listed)
 }
 
 func TestCleanupCLIQuarantineListAndReleaseAcrossActivation(t *testing.T) {

@@ -210,6 +210,9 @@ func runArgs(args []string, stdout io.Writer) error {
 	case actionRelease:
 		if cmd.terminatedSet {
 			opts = append(opts, cleanup.WithDirectRecovery(true))
+		} else if !cfg.FakeMode && cfg.VectorStore == "pinecone" {
+			t := cmd.targets[0]
+			opts = append(opts, cleanup.WithHostedReleaseTarget(t.id, t.incarnation))
 		}
 	default:
 		// An ID-only request reserves its targets under the activation lock.

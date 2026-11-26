@@ -261,6 +261,8 @@ type Cleaner struct {
 	quarantineMode  string
 	directRecovery  bool
 	recoveryObjects bool
+	hostedRelease   *heldReleaseTarget
+	legacyHosted    bool
 	// offline forwards deletions to the service that holds an in-memory index.
 	offline OfflineAPI
 	// reserve routes ID-only cleanup through the activation guard and its reservation.
@@ -277,6 +279,16 @@ type OfflineAPI interface {
 
 // Option configures a Cleaner.
 type Option func(*Cleaner)
+
+type heldReleaseTarget struct {
+	id, incarnation string
+}
+
+// WithHostedReleaseTarget selects recovery for the exact hosted receipt before
+// connecting to the vector provider.
+func WithHostedReleaseTarget(id, incarnation string) Option {
+	return func(c *Cleaner) { c.hostedRelease = &heldReleaseTarget{id: id, incarnation: incarnation} }
+}
 
 // WithLegacyReservations makes ID-only cleanup commit a durable reservation
 // under the activation lock before it mutates any external store. It is meant
@@ -347,6 +359,21 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Cleaner, err
 	cleaner.targets = Targets{SourceBucket: cfg.S3Bucket, InMemory: cfg.FakeMode}
 	if !cfg.FakeMode && cfg.VectorStore != "postgres" {
 		cleaner.targets.VectorIndex = cfg.PineconeIndexName
+	}
+	if cleaner.hostedRelease != nil && !cleaner.directRecovery && cfg.VectorStore == "pinecone" {
+		pair := cleaner.hostedRelease
+		mode, index, lookupErr := pg.HeldDeletionReleaseMode(ctx, domain.DocumentID(pair.id), pair.incarnation)
+		if lookupErr != nil {
+			return nil, errors.Join(fmt.Errorf("read held release target: %w", lookupErr), pg.Close(ctx))
+		}
+		if mode == "legacy" || mode == "revision" || mode == "manifest" {
+			if index == "" || index != cfg.PineconeIndexName {
+				return nil, errors.Join(domain.ErrDeletionTargetMismatch, pg.Close(ctx))
+			}
+		}
+		if mode == "legacy" {
+			cleaner.directRecovery, cleaner.recoveryObjects, cleaner.legacyHosted = true, true, true
+		}
 	}
 	if !cleaner.directRecovery {
 		var host string
@@ -515,6 +542,12 @@ func (c *Cleaner) ReleaseHeld(ctx context.Context, docID, incarnation string) er
 	}
 	if c.metadata == nil {
 		return errors.New("metadata store is not configured")
+	}
+	if c.legacyHosted {
+		if pair := c.hostedRelease; docID != pair.id || incarnation != pair.incarnation {
+			return domain.ErrDeletionPreconditionFailed
+		}
+		return c.metadata.ReleaseLegacyHostedHold(ctx, domain.DocumentID(docID), incarnation, operations(nil, c.objects, c.targets))
 	}
 	release, err := c.acquireWriter(ctx)
 	if err != nil {
