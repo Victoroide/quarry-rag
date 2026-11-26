@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -174,6 +175,12 @@ func (f *Fixture) RequireFinalized(t *testing.T, doc Document) {
 // RequireStoredVectors checks the selected vector store's persisted state.
 func (f *Fixture) RequireStoredVectors(t *testing.T, doc Document, want bool) {
 	t.Helper()
+	if f.Pinecone != nil {
+		prefix := doc.ID + "/" + doc.Incarnation + "/"
+		exists := slices.ContainsFunc(f.Pinecone.IDs(), func(key string) bool { return strings.HasPrefix(key, prefix) })
+		require.Equal(t, want, exists, "document %s", doc.ID)
+		return
+	}
 	var exists bool
 	require.NoError(t, f.Admin.Pool.QueryRow(t.Context(), "SELECT EXISTS (SELECT FROM "+f.vectorTable()+" WHERE document_id=$1)", doc.ID).Scan(&exists))
 	require.Equal(t, want, exists, "document %s", doc.ID)

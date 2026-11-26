@@ -19,6 +19,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/client"
 	"github.com/Victoroide/quarry-rag/internal/api"
+	"github.com/Victoroide/quarry-rag/internal/api/handler"
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -26,6 +27,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
+	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
 	"github.com/Victoroide/quarry-rag/internal/subjectauth"
@@ -37,6 +39,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,7 +58,7 @@ const (
 	dimensions    = 8
 )
 
-var Backends = [...]string{"postgres"}
+var Backends = [...]string{"postgres", "pinecone"}
 
 // Actor is a catalog principal and its synthetic signed subject credential.
 type Actor struct {
@@ -76,6 +79,9 @@ type Fixture struct {
 	Revision                                             int64
 	Backend                                              string
 
+	Pinecone         *Pinecone
+	indexHost        string
+	index            pcstore.IndexConn
 	key              *rsa.PrivateKey
 	issuer, jwksPath string
 }
@@ -180,6 +186,7 @@ func fixtureConfig(backend, serviceToken string) *config.Config {
 	return &config.Config{
 		AuthzMode: config.AuthzModeGrants, ServiceToken: serviceToken,
 		VectorStore: backend, VectorGeneration: generation,
+		PineconeIndexName: "fixture-index", PineconeTimeout: 5 * time.Second, PineconeMaxAttempts: 1, PineconeUpsertBatchSize: 100,
 		EmbeddingProvider: domain.EmbeddingProviderBedrock, BedrockEmbedModel: "fixture-embedding",
 		EmbeddingModelRevision: "fixture-v1", EmbeddingDimensions: dimensions,
 		ExtractionChunkVersion: "fixture-v1", ChunkTokenSize: 128, ChunkOverlap: 16,
@@ -194,11 +201,20 @@ func fixtureConfig(backend, serviceToken string) *config.Config {
 
 func (f *Fixture) prepareVectors(t *testing.T, ctx context.Context, cfg *config.Config) string {
 	t.Helper()
-	_, err := pgstore.CreateGenerationVectorStore(ctx, f.Admin, dimensions, generation)
-	require.NoError(t, err)
+	var host string
+	switch cfg.VectorStore {
+	case "postgres":
+		_, err := pgstore.CreateGenerationVectorStore(ctx, f.Admin, dimensions, generation)
+		require.NoError(t, err)
+	case "pinecone":
+		f.Pinecone, f.index, host = newPinecone(t)
+		f.indexHost = host
+	default:
+		t.Fatalf("unknown vector backend %q", cfg.VectorStore)
+	}
 	store, target := cfg.VectorTarget()
-	f.activateGeneration(t, ctx, cfg, store, target, "")
-	return ""
+	f.activateGeneration(t, ctx, cfg, store, target, host)
+	return host
 }
 
 func (f *Fixture) activateGeneration(t *testing.T, ctx context.Context, cfg *config.Config, store, target, host string) {
@@ -276,7 +292,7 @@ func (f *Fixture) checkQualifiedServiceDeletion(t *testing.T, ctx context.Contex
 	doc := f.acceptLegacy(t, ctx, serving)
 	service := *cfg
 	service.AuthzMode = config.AuthzModeService
-	vector := f.openVector(t, ctx, serving)
+	vector := f.openVector(t, ctx, cfg, serving)
 	deps := f.routerDeps(t, &service, serving, vector, s3, 0)
 	router := api.NewRouter(deps)
 	server := httptest.NewServer(router)
@@ -325,7 +341,7 @@ func (f *Fixture) startReplica(t *testing.T, ctx context.Context, cfg *config.Co
 	conn.SetAuthzMode(config.AuthzModeGrants)
 	store, target := cfg.VectorTarget()
 	require.NoError(t, conn.PinVectorGeneration(ctx, generation, store, target, host, cfg.EmbeddingSettings()))
-	vector := f.openVector(t, ctx, conn)
+	vector := f.openVector(t, ctx, cfg, conn)
 	verifier, err := subjectauth.NewVerifierWithObserver(f.issuer, Audience, f.jwksPath, func(event subjectauth.TrustEvent) error {
 		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 2*time.Second)
 		defer cancel()
@@ -362,8 +378,13 @@ func (f *Fixture) StopReplicas(t *testing.T) {
 	}
 }
 
-func (f *Fixture) openVector(t *testing.T, ctx context.Context, conn *pgstore.Client) domain.VectorStore {
+func (f *Fixture) openVector(t *testing.T, ctx context.Context, cfg *config.Config, conn *pgstore.Client) domain.VectorStore {
 	t.Helper()
+	if f.index != nil {
+		pc := pcstore.NewClientForIndex(f.index, cfg, f.indexHost)
+		t.Cleanup(func() { require.NoError(t, pc.Close()) })
+		return tracing.WrapVectorStore(pcstore.NewDriver(pc), "pinecone")
+	}
 	vector, err := pgstore.OpenGenerationVectorStore(ctx, conn, dimensions, generation, pgstore.WithExactScopeMax(32))
 	require.NoError(t, err)
 	require.NoError(t, vector.EnsureExactScopeIndexes(ctx))
@@ -391,8 +412,29 @@ func (f *Fixture) routerDeps(t *testing.T, cfg *config.Config, conn *pgstore.Cli
 	return &api.RouterDeps{
 		Config: cfg, ChunkStore: conn, VectorStore: vector, PGPool: conn.Pool, S3Client: s3,
 		Retriever:  retriever.NewRetriever(vector, emb, cfg.LocalRetrievalThreshold, cfg.MaxChunksPerQuery),
+		Probes:     f.probes(cfg, conn, vector, s3),
 		Ambassador: amb, PineconeDriver: deleter, Metrics: serviceMetrics, Worker: w, LegacyDeletionReservations: true,
 	}
+}
+
+func (f *Fixture) probes(cfg *config.Config, conn *pgstore.Client, vector domain.VectorStore, s3 *s3store.Client) *handler.Probes {
+	if f.index != nil {
+		// The injected SDK connection exposes the data plane only. Probe it
+		// directly because Driver.Ping uses the hosted control plane.
+		vector = pineconeProbe{VectorStore: vector, conn: f.index}
+	}
+	return handler.NewProbes(vector, conn, s3, cfg.HealthCacheTTL)
+}
+
+type pineconeProbe struct {
+	domain.VectorStore
+	conn pcstore.IndexConn
+}
+
+func (p pineconeProbe) Ping(ctx context.Context) error {
+	one := uint32(1)
+	_, err := p.conn.ListVectors(ctx, &pinecone.ListVectorsRequest{Limit: &one})
+	return err
 }
 
 func (f *Fixture) checkServiceFence(t *testing.T, cfg *config.Config, s3 *s3store.Client) {
@@ -400,9 +442,11 @@ func (f *Fixture) checkServiceFence(t *testing.T, cfg *config.Config, s3 *s3stor
 	// Service-mode gates read the same marker as a grants replica.
 	service := *cfg
 	service.AuthzMode = config.AuthzModeService
+	conn := f.Serving[0]
+	vector := f.openVector(t, t.Context(), cfg, conn)
 	router := api.NewRouter(&api.RouterDeps{
-		Config: &service, ChunkStore: f.Serving[0], S3Client: s3,
-		VectorStore: f.openVector(t, t.Context(), f.Serving[0]),
+		Config: &service, ChunkStore: conn, S3Client: s3, VectorStore: vector,
+		Probes: f.probes(cfg, conn, vector, s3),
 	})
 	for _, path := range []string{"/readyz", "/documents"} {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, http.NoBody)
