@@ -34,7 +34,7 @@ type inventorySource interface {
 	DocumentRevisions(ctx context.Context, after string, limit int) ([]pgstore.DocumentRevision, error)
 	HasDocumentsAfter(ctx context.Context, after string) (bool, error)
 	GenerationCheckpoints(ctx context.Context, generation string, documentIDs []string) (map[string]pgstore.Checkpoint, error)
-	OrphanedGenerationDocuments(ctx context.Context, generation string, limit int) ([]pgstore.Checkpoint, error)
+	CountOrphanedGenerationDocuments(ctx context.Context, generation string) (int, error)
 }
 
 type targetReport struct {
@@ -312,11 +312,11 @@ func scanPlan(ctx context.Context, src inventorySource, opts options, p targetPl
 	// Reusable vectors are checked per chunk during staging, so the bound is an upper bound.
 	rep.Plan.EmbeddingCallsUpperBound = rep.Plan.ChunksToStage
 	if registered {
-		orphans, err := src.OrphanedGenerationDocuments(ctx, p.generation, opts.MaxDocuments)
+		orphaned, err := src.CountOrphanedGenerationDocuments(ctx, p.generation)
 		if err != nil {
 			return err
 		}
-		rep.Ledger.Orphaned = len(orphans)
+		rep.Ledger.Orphaned = orphaned
 	}
 	return nil
 }

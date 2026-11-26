@@ -848,6 +848,16 @@ func (l GenerationLedger) HasOrphanedGenerationDocuments(ctx context.Context, ge
 	return found, err
 }
 
+// CountOrphanedGenerationDocuments counts every ledger entry whose document is
+// no longer an eligible source, without loading its keys.
+func (l GenerationLedger) CountOrphanedGenerationDocuments(ctx context.Context, generation string) (int, error) {
+	var n int
+	if err := l.db.QueryRow(ctx, `SELECT count(*) `+orphanedLedger, generation).Scan(&n); err != nil {
+		return 0, fmt.Errorf("postgres: count orphaned generation documents: %w", err)
+	}
+	return n, nil
+}
+
 // ForgetGenerationDocument removes a ledger entry after its target keys are gone.
 func (l GenerationLedger) ForgetGenerationDocument(ctx context.Context, generation, documentID string) error {
 	tx, err := l.db.Begin(ctx)

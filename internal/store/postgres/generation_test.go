@@ -741,7 +741,12 @@ func TestOrphansFollowSourceEligibility(t *testing.T) {
 		_, err = c.BeginGenerationDocument(t.Context(), "g2", id, []string{name})
 		require.NoError(t, err)
 	}
-	_, err = c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'quarantine','local')`, ids["deleting"], uuid.NewString())
+	_, err = c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode,held,finalized)
+ VALUES($1,$2,'quarantine','local',TRUE,TRUE)`, ids["deleting"], uuid.NewString())
+	require.NoError(t, err)
+	_, err = c.RegisterGeneration(t.Context(), stagingGeneration("g3"))
+	require.NoError(t, err)
+	_, err = c.BeginGenerationDocument(t.Context(), "g3", ids["removed"], []string{"other-generation"})
 	require.NoError(t, err)
 	orphans, err := c.OrphanedGenerationDocuments(t.Context(), "g2", 10)
 	require.NoError(t, err)
@@ -750,6 +755,10 @@ func TestOrphansFollowSourceEligibility(t *testing.T) {
 		got = append(got, o.ChunkIDs...)
 	}
 	require.ElementsMatch(t, []string{"failed", "deleting", "removed"}, got, "a completed document being deleted is not eligible either")
+	count, err := c.CountOrphanedGenerationDocuments(t.Context(), "g2")
+	require.NoError(t, err)
+	require.Equal(t, len(orphans), count)
+	require.Equal(t, 3, count)
 }
 
 func TestVectorRowsMatchUsesPinnedGenerationTable(t *testing.T) {

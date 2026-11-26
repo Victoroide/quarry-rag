@@ -199,6 +199,7 @@ func TestInventoryReportsTruncationOnlyWhenDocumentsRemain(t *testing.T) {
 		{name: "below_limit", documents: 3, limit: 4, page: 2},
 		{name: "page_above_limit", documents: 3, limit: 3, page: 100},
 		{name: "exact_limit_over_pages", documents: 4, limit: 4, page: 2},
+		{name: "default_limits", documents: 4, limit: base.MaxDocuments, page: base.Page},
 	}
 	inserted := 0
 	for _, tt := range tests {
@@ -280,6 +281,26 @@ func TestInventoryProbeErrorWritesNoReport(t *testing.T) {
 	err = execute(ctx, h.deps, opts, &out, 10*time.Millisecond)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, out.String())
+}
+
+func TestInventoryCountsEveryOrphanedCheckpoint(t *testing.T) {
+	pg := vectorDB(t)
+	h := newHarness(t, &fixture{pg: pg}, "postgres")
+	insertDoc(t, pg, newDoc("manuals", "manual", "inventory chunk"))
+	registerGeneration(t, pg, "g2", "postgres", pgstore.VectorTable("g2"), sourceModel)
+	for range 3 {
+		_, err := pg.BeginGenerationDocument(t.Context(), "g2", uuid.NewString(), []string{uuid.NewString()})
+		require.NoError(t, err)
+	}
+
+	opts := defaultOptions()
+	opts.Generation = "g2"
+	opts.Profile = h.profileFile("target.json", testProfile(sourceModel))
+	opts.MaxDocuments = 2
+	report, err := h.run(opts)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, report["ledger"].(map[string]any)["orphaned"])
+	require.Equal(t, false, report["truncated"])
 }
 
 func TestInventoryReportsBlockers(t *testing.T) {
