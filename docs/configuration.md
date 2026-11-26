@@ -26,6 +26,9 @@ The table below lists the environment variables recognized by the service:
 | `CHUNK_TOKEN_SIZE` | integer | `512` | 2 to 8192 | Maximum estimated tokens per text chunk. Dense scripts count one token per character; chunks never exceed 30,000 bytes. |
 | `DATABASE_URL` | string | `""` | Valid PostgreSQL connection string | PostgreSQL connection string for document metadata and chunk storage. Always required in all modes. Pool size and statement timeout defaults are described under [Schema Migrations](#schema-migrations). |
 | `DOC_STORIES` | comma-separated set | `body` | `body`, `footnotes`, `endnotes`, `headers`, `footers`, `comments` | Selects optional [Word binary stories](api.md#word-binary-extraction) for new uploads. The body is always included. Empty entries, duplicate names, and unknown names are configuration errors. |
+| `DOCUMENT_SET_MAX_BATCHES` | integer | `10` | 1 to 10 | Total hosted search attempts one [document set](api.md#document-sets) query may spend, including probe, local, global and top-up searches and retries. A route that cannot fit returns `422` before any embedding. |
+| `DOCUMENT_SET_MAX_MEMBERS` | integer | `100000` | 1 to 100000 | Most members a [document set](grant-catalog.md#document-sets) may have and most authorized documents one set query may search. The operator command reads the same variable and rejects a manifest with more raw entries. |
+| `DOCUMENT_SETS_ENABLED` | boolean | `false` | `true` or `false`; `true` requires `AUTHZ_MODE=grants` | Accepts `document_set_id` on `POST /query`, the Go client and the stdio query tool. Serving logins need the [set privileges](grant-catalog.md#upgrade-an-existing-serving-role) first. |
 | `DOCX_STORIES` | comma-separated set | `body,footnotes,endnotes` | Any nonempty subset of `body`, `footnotes`, `endnotes`, `headers`, `footers`, `comments`. Names are case-sensitive, surrounding whitespace is trimmed, and duplicate or empty entries are invalid. Unset or empty uses the default. | Keep the same set on all replicas that accept uploads. See [DOCX story selection](api.md#docx-story-selection). |
 | `EMBEDDING_DIMENSIONS` | integer | `1024` | Bedrock: 256, 512, or 1024; OpenAI-compatible: 1 to 4096 | Embedding vector dimensions: requested from Bedrock Titan; with an OpenAI-compatible provider, the model's output size. Responses with a different length, missing values or non-finite values are rejected. Must match the vector index dimensions; the PostgreSQL vector backend accepts at most 2000. |
 | `EMBEDDING_MODEL_REVISION` | string | `""` | An immutable model or deployment identity | Required for recorded profiles when the configured model ID does not itself identify an immutable Bedrock foundation model version. For an OpenAI-compatible endpoint, use a deployment-specific revision and configure the endpoint to serve that exact revision for the model name. |
@@ -351,9 +354,10 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `026_authorized_retrieval.sql` | Adds the relation of documents each principal may read now and the policy revision function that [authorized retrieval](grant-catalog.md#authorized-retrieval) reads. Service-mode queries do not use them. |
 | `029_authz_corpus_mode.sql` | Adds the corpus authorization mode marker and security audit log. |
 | `030_deletion_mode_lock.sql` | Adds an owner-defined function through which admission reads the deletion activation marker while holding it in share mode, so a restricted serving login can select the tagged vector format without access to the marker table. |
+| `031_document_sets.sql` | Adds immutable [document sets](grant-catalog.md#document-sets), their membership with composite tenant constraints, two live relations for the serving login and the owner-defined functions an operator uses to create and purge sets. Service-mode queries and deployments that leave `DOCUMENT_SETS_ENABLED` off do not use them. |
 
 The service can roll back to the previous binary with migration 010 and its
-checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026, 029 or 030, follow the
+checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026, 029, 030 or 031, follow the
 [serving-role upgrade procedure](grant-catalog.md#upgrade-an-existing-serving-role)
 for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).
@@ -396,7 +400,7 @@ Metrics use Prometheus text format:
   route reason (`empty_scope`, `explicit_global`, `explicit_local`, `probe_failed`,
   `empty_probe`, `missing_calibration`, `multi_need`, `ambiguous_entities`,
   `negated_entity`, `named_entity`, `ambiguous_margin`, `score_threshold`,
-  `strong_lead`, `low_score`).
+  `strong_lead`, `low_score`, `search_budget`).
 - `quarry_rerank_total{result}` counts optional reranking attempts: `reranked` for
   success and `fallback` for errors, invalid results or an expired `RERANK_TIMEOUT`.
   Disabled reranking, empty candidate lists and queries canceled or timed out during

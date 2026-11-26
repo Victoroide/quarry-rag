@@ -533,6 +533,7 @@ Request fields:
 | `include_citations` | bool | no | Request numbered inline citations, lexical checks, and [semantic assessment](#citation-support) where enabled. Defaults to false |
 | `preserve_code` | bool | no | Requires `include_citations`; otherwise the service returns HTTP 400. Keeps Markdown code in the answer unchanged and treats bracketed numbers inside it as text, as described below. Defaults to false |
 | `allowed_document_ids` | array of strings | no | Tenant/role allowlist of UUIDs, at most [`MAX_ALLOWED_DOCUMENT_IDS`](configuration.md#environment-variables) entries. IDs are canonicalized and deduplicated. Omitted or `null` means unrestricted unless `REQUIRE_DOCUMENT_ALLOWLIST=true`, which makes a non-null field mandatory. An empty list (`[]`) returns the no-information answer without embedding or search. The allowlist is applied inside vector search and routing |
+| `document_set_id` | string | no | UUID of an immutable, expiring [document set](#document-sets) owned by the authenticated subject. Requires `DOCUMENT_SETS_ENABLED=true` under `AUTHZ_MODE=grants`. The set only narrows the request: it grants no access and a valid reference never causes an unrestricted query |
 
 Response fields (200 OK):
 
@@ -571,7 +572,7 @@ By default, cleanup also edits bracketed numbers inside Markdown code, and an in
 
 The referencing sentence begins after the previous `.`, `!`, `?`, `。`, `！`, `？` or newline before the marker and excludes other citation markers. Tokens are maximal runs of letters, combining marks and digits after NFC normalization and lowercasing, ignoring invisible format characters; runs of at least three code points or containing a digit are kept. Dense-script runs (Han, Hiragana, Katakana, Hangul, Thai, Lao, Khmer, Myanmar and Tibetan) use character bigrams, and script-neutral letters such as `ー` stay in the run they follow. Lexical checks use the actual sanitized, possibly truncated excerpt body rather than the response snippet.
 
-Malformed allowlist entries return 400 `allowed_document_ids must contain UUIDs`; a missing or null required allowlist returns 400 `allowed_document_ids is required`. Lists above `MAX_ALLOWED_DOCUMENT_IDS` return 400 before deduplication.
+A request that supplies `document_set_id` follows [its own rules](#document-sets). Malformed allowlist entries return 400 `allowed_document_ids must contain UUIDs`; a missing or null required allowlist returns 400 `allowed_document_ids is required`. Lists above `MAX_ALLOWED_DOCUMENT_IDS` return 400 before deduplication.
 
 If retrieval, the document allowlist, `MIN_RELEVANCE_SCORE`, or dropping empty and control-only excerpt bodies leaves no usable evidence, the answer is a fixed message selected from the optional `Accept-Language` request header. Built-in languages are `en`, `es`, `pt`, `fr`, `de` and `it`. Deployments can add languages through the [translation catalog](configuration.md#no-evidence-translation-catalog).
 
@@ -588,6 +589,27 @@ Document visibility is checked against PostgreSQL before answer generation. Olde
 Optional [Bedrock reranking](configuration.md#environment-variables) submits the original question and up to 100 authorized, visible candidate texts after retrieval and before synthesis context selection. Candidates are sorted by descending relevance; ties retain vector order. Reranking changes only the order: `MIN_RELEVANCE_SCORE` and `SYNTHESIS_RELATIVE_SCORE_FLOOR` still compare vector similarity, and candidates below the relative floor are skipped rather than ending selection (except for the leading usable candidate under the [first-candidate exception](architecture.md#query-stages)). A failed, timed-out or invalid reranking response preserves vector order and omits reranking scores; a warning and [outcome counter](configuration.md#metrics) record the fallback. The `rerank` entry in `stage_timings_ms` measures this step.
 
 Admitted queries run under the [query time budget](architecture.md#query-time-budget). A canceled request produces no further response bytes. Nonempty truncated or filtered answers retain their completion reason; empty synthesis text uses the `synthesis` error category below.
+
+#### Document sets
+
+A document set lets one query name a large, arbitrary selection of documents with a reference of constant size, where an inline `allowed_document_ids` list would compete with the 1 MiB body limit and the entry limit. An operator creates the set for one principal with the [document set command](grant-catalog.md#document-sets). The set is immutable, expires after at most 24 hours and belongs to one tenant and one principal. It is a selector only. It grants its holder no permission.
+
+Document sets are off by default. Setting `DOCUMENT_SETS_ENABLED=true` requires `AUTHZ_MODE=grants` and a vector store that can confine a search to the set. If sets are enabled and the vector store lacks that capability, the service refuses set queries with `503 unavailable`. A client cannot supply an owner, revision, tenant or batch budget. Existing requests that omit the field keep their contract.
+
+| Reference | Result |
+|---|---|
+| Omitted | The request follows its existing rules |
+| `null`, a non-string, an empty string or a value that is not a UUID | `400 validation` |
+| Any value where document sets are not enabled, including `AUTHZ_MODE=service` | `400 validation` |
+| A reference submitted by an inactive principal | `403 forbidden` before the set is resolved |
+| A UUID that is missing, owned by another principal or tenant, deleted or expired | `404 not_found`, the same response for each, even when `allowed_document_ids` is `[]` |
+| A UUID owned by the authenticated principal and unexpired | The request is narrowed to the set |
+
+The service resolves the reference by tenant and authenticated subject before it embeds or searches anything. The documents searched are the intersection of the set's immutable membership, the principal's live read grants, each document's current incarnation, `allowed_document_ids`, `collection`, `filter_doc_type` and the existing completion rules. A grant made after the set was created cannot add a document the set does not name, and a revoked, deleted or recreated member yields nothing under its old grant. A resolved reference satisfies `REQUIRE_DOCUMENT_ALLOWLIST`. An explicit empty `allowed_document_ids` still means no matches. A valid empty intersection, including an empty set, returns the no-information answer with no embedding, search, reranking or generation call.
+
+The request deadline, `max_chunks` and query admission limits apply as usual. A hosted store receives the intersection in partitions of at most 10,000 documents. The request spends at most `DOCUMENT_SET_MAX_BATCHES` hosted search attempts in total, counting the routing probe, the local pass, the sparse top-up, the global pass and every retry. A set with `B` partitions costs `B` attempts for one global pass. Automatic routing can need `2B + 1`, which is a probe of the whole scope, a one-document local pass and a top-up. When that does not fit, an automatic query takes one global pass up front, reports the route reason `search_budget`, and a query with an explicit `mode` that does not fit returns `422 scope_too_large` before anything is embedded. At the default ceiling of 100,000 members a global pass makes at most ten searches. A timed-out or failed partition fails the whole request, and the service never ranks from the partitions that answered. For a hosted store, an authorized scope larger than `DOCUMENT_SET_MAX_MEMBERS` also returns `422`.
+
+The credential, principal, policy revision and set are checked again before each hosted batch, each reranker or model request and each JSON release, and before every `context`, `delta` and `done` frame. A set that expires or is removed after admission ends the request with `404 not_found` before the first byte, or with a terminal `error` event carrying the same body after streaming began. Nothing from the rejected disclosure is sent, and an unavailable authority fails closed. Responses are `Cache-Control: private, no-store`.
 
 #### Citation support
 
@@ -725,10 +747,12 @@ Error Status Codes:
 
 | Status | Error Category | Condition |
 |---|---|---|
-| `400 Bad Request` | `validation` | Invalid query, retrieval mode, answer mode, chunk limit, type or collection filter, or JSON body. Also returned for a citation request in evidence mode |
+| `400 Bad Request` | `validation` | Invalid query, retrieval mode, answer mode, chunk limit, type or collection filter, or JSON body. Also returned for a citation request in evidence mode, and for a `document_set_id` that is null, not a UUID or sent where document sets are not enabled |
 | `400 Bad Request` | `embedding_input_too_long` | The query exceeds the [embedding input profile](configuration.md#embedding-input-profiles). The service skips this check for an empty allowlist. |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `403 Forbidden` | `forbidden` | The deployed answer policy disallows generated answers |
+| `422 Unprocessable Entity` | `scope_too_large` | Under `AUTHZ_MODE=grants`, the authorized scope exceeds the supported size, or a document set query cannot fit its hosted search budget. Nothing was embedded or searched |
+| `404 Not Found` | `not_found` | A well-formed `document_set_id` that is missing, foreign, deleted or expired, or one that expired before the response was released: `document set not found` |
 | `413 Payload Too Large` | `validation` or `input_too_large` | Request body exceeds the 1 MiB limit (`validation`), or strict counting establishes that the base input or smallest excerpt exceeds the model context window after reserving output tokens (`input_too_large`) |
 | `415 Unsupported Media Type` | `validation` | Content-Type is not `application/json` |
 | `504 Gateway Timeout` | `timeout` | The query, synthesis or PostgreSQL vector search deadline expired, or PostgreSQL returned SQLSTATE `57014` (`query_canceled`, shared by statement timeouts and administrative cancellations) while the request context remained active: `query processing timed out` |
