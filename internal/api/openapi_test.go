@@ -118,22 +118,35 @@ func TestOpenAPIRoutes(t *testing.T) {
 		method, path, found := strings.Cut(pattern, " ")
 		require.True(t, found, "route must declare a method: %s", pattern)
 		require.NotContains(t, codeRoutes, pattern, "duplicate router registration")
-		protected := false
+		kind := ""
 		ast.Inspect(call.Args[1], func(node ast.Node) bool {
-			if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "RequireServiceTokens" {
-				protected = true
+			switch n := node.(type) {
+			case *ast.SelectorExpr:
+				if n.Sel.Name == "RequireServiceTokens" {
+					kind = "service"
+				}
+			case *ast.Ident:
+				if n.Name == "protectData" && kind == "" {
+					kind = "data"
+				}
 			}
 			return true
 		})
-		codeRoutes[pattern] = protected
+		codeRoutes[pattern] = kind != ""
 		codePaths[path] = true
 		require.Contains(t, paths, path, "%s missing from OpenAPI", pattern)
 		pathItem := openAPIObject(t, paths[path])
 		require.Contains(t, pathItem, strings.ToLower(method), "%s missing from OpenAPI", pattern)
 		operation := openAPIObject(t, pathItem[strings.ToLower(method)])
 		security := []any{}
-		if protected {
+		switch kind {
+		case "service":
 			security = []any{map[string]any{"ServiceToken": []any{}}}
+		case "data":
+			security = []any{
+				map[string]any{"ServiceToken": []any{}},
+				map[string]any{"ServiceToken": []any{}, "SubjectToken": []any{}},
+			}
 		}
 		require.Equal(t, security, operation["security"], "%s authentication", pattern)
 		return true
@@ -152,6 +165,7 @@ func TestOpenAPIRoutes(t *testing.T) {
 	require.Equal(t, slices.Sorted(maps.Keys(codeRoutes)), slices.Sorted(maps.Keys(specRoutes)), "router and OpenAPI routes differ")
 	security := openAPIObject(t, openAPIObject(t, doc["components"])["securitySchemes"])
 	require.Equal(t, map[string]any{"type": "apiKey", "in": "header", "name": "X-Service-Token"}, security["ServiceToken"])
+	require.Equal(t, map[string]any{"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}, security["SubjectToken"])
 }
 
 func TestOpenAPIMiddlewareErrorEnvelope(t *testing.T) {

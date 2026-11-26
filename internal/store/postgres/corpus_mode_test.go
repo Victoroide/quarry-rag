@@ -12,6 +12,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPublishedServingUpgradeRestoresServiceMode(t *testing.T) {
+	owner, serving, roles := restrictedDatabase(t)
+	ctx := t.Context()
+	role := pgx.Identifier{roles.name("quarry_service")}.Sanitize()
+	grantExec(t, owner, `REVOKE EXECUTE ON FUNCTION grant_catalog_corpus_authz_mode() FROM `+role)
+	serving.SetAuthzMode("service")
+	require.Error(t, serving.WritersOpen(ctx), "a pre-029 restricted login must fail closed")
+
+	grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "Serving role upgrade for migration 029"))
+	require.NoError(t, serving.WritersOpen(ctx))
+	mode, err := serving.CorpusAuthzMode(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "service", mode)
+	result, err := serving.AcceptDocument(ctx, jobsRequest("restricted service upgrade"))
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, result.Outcome)
+}
+
 func TestCorpusModeDefaultsToServiceAndActivatesIdempotently(t *testing.T) {
 	databaseURL := startTestDatabase(t)
 	c := migrationTestClient(t, databaseURL)
