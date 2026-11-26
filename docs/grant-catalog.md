@@ -30,14 +30,18 @@ Export the public RSA `kty`, `n`, `e` and `kid` fields. When present,
 `use`, `alg` and `key_ops` must identify RS256 signature verification. Rotate by
 atomically replacing the file on each replica. Include both keys during overlap,
 then remove the retired key. A missing, unreadable, invalid or expired file
-makes the authority unavailable. Each replica requires a successful
-`trust_key_load` allow audit before using a new key set, and rechecks the file
-and its expiry after the write. Subject admissions and readiness checks that
-encounter a pending or failed audit return `503`. A subsequent check can retry the
-audit, and liveness continues to report process availability. Upgrade every
-grants replica before relying on audit ordering. Rolling back to an earlier
-build can reintroduce the race. After resolving the principal, the gate checks
-that the current key set is still valid and contains the signing key.
+makes the authority unavailable. Each trust check enforces the file policy and
+hashes the bytes it reads. A stalled filesystem read can delay its caller while
+other checks of unchanged trust data proceed independently. Each replica
+serializes a trust change through a candidate reread, a successful
+`trust_key_load` allow audit and a final reread of the same unexpired bytes
+before using them. Subject admissions and readiness checks return `503` during
+a pending transition or when trust data is unavailable. A subsequent check can
+retry, and liveness continues to report process availability. Replicas can use
+the same trust files and audit schema during an upgrade. Roll back only to a
+build that audits trust changes before publishing them. After resolving the
+principal, the gate checks that the current key set is still valid and contains
+the signing key.
 
 Use TLS between clients and trusted ingress, with protected transport from
 ingress to Quarry. The verified, case-sensitive issuer and subject select the

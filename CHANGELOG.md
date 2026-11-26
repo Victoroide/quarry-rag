@@ -8,6 +8,10 @@ Notable changes are grouped by release.
 
 - Vector reindex supports tagged documents in both directions between Pinecone and PostgreSQL, including retrieval and checkpointed deletion after PostgreSQL cutover.
 
+### Changed
+
+- Delegated trust-file checks can proceed independently while another check reads unchanged trust data.
+
 ## [0.2.0] - 2026-11-26
 
 ### Upgrade from 0.1.0
