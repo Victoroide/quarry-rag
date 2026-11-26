@@ -1063,7 +1063,9 @@ and fence older executables using network policy and separate PostgreSQL logins.
 Drain in-flight requests, workers and outstanding provider work under the
 [checkpointed deletion upgrade order](#upgrade-order). Complete any required
 vector reindex under [Changing Models or Vector Stores](#changing-models-or-vector-stores)
-before permitting the new replicas to write.
+before permitting the new replicas to write. A PostgreSQL reindex target for a
+corpus with incarnation-tagged vectors requires a build that can stage and
+delete those records.
 
 As the schema owner, [activate checkpointed deletion](#activate-checkpointed-deletion)
 and verify that the deletion-mode endpoint reports active. With ingress still

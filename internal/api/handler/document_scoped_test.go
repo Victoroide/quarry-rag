@@ -257,14 +257,17 @@ func (s *scopedMockStore) BeginScopedDeletion(ctx context.Context, principal dom
 	if !nowFn().Before(validUntil) {
 		return "", false, domain.ErrUnauthorized
 	}
-	if ops.ExpectedIncarnation != "" && ops.ExpectedIncarnation != entry.summary.Incarnation {
-		return "", false, domain.ErrDeletionPreconditionFailed
-	}
 	if entry.finalized {
-		if ops.ExpectedIncarnation != "" {
+		if ops.ExpectedIncarnation == entry.summary.Incarnation {
 			return entry.summary.Incarnation, true, nil
 		}
 		return "", false, domain.ErrDocumentNotFound
+	}
+	if ops.ExpectedIncarnation == "" {
+		return "", false, domain.ErrDeletionPreconditionRequired
+	}
+	if ops.ExpectedIncarnation != entry.summary.Incarnation {
+		return "", false, domain.ErrDeletionPreconditionFailed
 	}
 	if entry.s3Key != nil && ops.Source == nil {
 		return "", false, domain.ErrFileStorageUnavailable
@@ -409,7 +412,7 @@ func (d *deleteStorageSpy) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func serveScoped(h http.HandlerFunc, method, target string, principal *domain.Principal, expires time.Time) *httptest.ResponseRecorder {
+func serveScoped(h http.HandlerFunc, method, target string, principal *domain.Principal, expires time.Time, qualifiers ...string) *httptest.ResponseRecorder {
 	req := httptest.NewRequestWithContext(context.Background(), method, target, http.NoBody)
 	if strings.Contains(target, "/documents/") {
 		trimmed := strings.TrimPrefix(target, "/documents/")
@@ -419,6 +422,9 @@ func serveScoped(h http.HandlerFunc, method, target string, principal *domain.Pr
 	}
 	if principal != nil {
 		req = req.WithContext(middleware.ContextWithSubject(req.Context(), middleware.VerifiedSubject{Principal: *principal, ExpiresAt: expires}))
+	}
+	for _, qualifier := range qualifiers {
+		req.Header.Add(incarnationHeaderName, qualifier)
 	}
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -776,7 +782,7 @@ func TestScopedDeletionAuthorizationFailuresAndCancellation(t *testing.T) {
 
 	// Provider failures on each step retain target and checkpoint progress; retry after logout is denied until re-authenticated.
 	storage.errOn = "namespace"
-	failStep0 := serveScoped(deleteH, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute))
+	failStep0 := serveScoped(deleteH, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute), inc)
 	require.Equal(t, http.StatusInternalServerError, failStep0.Code)
 	require.NotContains(t, failStep0.Body.String(), "pinecone namespace failure")
 
@@ -787,11 +793,11 @@ func TestScopedDeletionAuthorizationFailuresAndCancellation(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, expiredRetry.Code)
 
 	storage.errOn = "revision"
-	failStep1 := serveScoped(deleteH, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute))
+	failStep1 := serveScoped(deleteH, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute), inc)
 	require.Equal(t, http.StatusInternalServerError, failStep1.Code)
 
 	storage.errOn = "source"
-	failStep2 := serveScoped(deleteH, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute))
+	failStep2 := serveScoped(deleteH, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute), inc)
 	require.Equal(t, http.StatusInternalServerError, failStep2.Code)
 
 	// Disconnect AFTER intent commits still completes cleanup for the exact incarnation & key.
@@ -800,6 +806,7 @@ func TestScopedDeletionAuthorizationFailuresAndCancellation(t *testing.T) {
 	store.afterBegin = liveCancel
 	reqAfter := httptest.NewRequestWithContext(liveCtx, http.MethodDelete, "/documents/"+docID, http.NoBody)
 	reqAfter.SetPathValue("doc_id", docID)
+	reqAfter.Header.Set(incarnationHeaderName, inc)
 	reqAfter = reqAfter.WithContext(middleware.ContextWithSubject(reqAfter.Context(), middleware.VerifiedSubject{Principal: owner, ExpiresAt: time.Now().Add(time.Minute)}))
 	recAfter := httptest.NewRecorder()
 	deleteH(recAfter, reqAfter)
@@ -840,7 +847,7 @@ func TestScopedDeletionAuthorizationFailuresAndCancellation(t *testing.T) {
 	// Post-commit deadline exceeded (after intent commits) while credential is valid returns 500 internal, not 503.
 	clockNow = fixedNow
 	store.resumeDeleteErr = fmt.Errorf("delete vectors: %w", context.DeadlineExceeded)
-	postCommitValid := serveScoped(advancingDeleteH, http.MethodDelete, "/documents/"+docTimeoutID, &owner, fixedNow.Add(time.Minute))
+	postCommitValid := serveScoped(advancingDeleteH, http.MethodDelete, "/documents/"+docTimeoutID, &owner, fixedNow.Add(time.Minute), store.docs[docTimeoutID].summary.Incarnation)
 	require.Equal(t, http.StatusInternalServerError, postCommitValid.Code, postCommitValid.Body.String())
 	require.JSONEq(t, `{"error":"internal","message":"failed to delete document"}`, postCommitValid.Body.String())
 	require.True(t, store.docs[docTimeoutID].deleting)
@@ -848,7 +855,7 @@ func TestScopedDeletionAuthorizationFailuresAndCancellation(t *testing.T) {
 	// Post-commit deadline exceeded when credential expired maps to 401.
 	clockNow = fixedNow
 	store.afterBegin = func() { clockNow = fixedNow.Add(2 * time.Minute) }
-	postCommitExpired := serveScoped(advancingDeleteH, http.MethodDelete, "/documents/"+docTimeoutID, &owner, fixedNow.Add(time.Minute))
+	postCommitExpired := serveScoped(advancingDeleteH, http.MethodDelete, "/documents/"+docTimeoutID, &owner, fixedNow.Add(time.Minute), store.docs[docTimeoutID].summary.Incarnation)
 	require.Equal(t, http.StatusUnauthorized, postCommitExpired.Code, postCommitExpired.Body.String())
 	store.afterBegin = nil
 	store.resumeDeleteErr = nil
@@ -883,4 +890,77 @@ func FuzzScopedFailureCategoryAndTTL(f *testing.F) {
 			require.LessOrEqual(t, ttl, 900)
 		}
 	})
+}
+
+func TestScopedDeletePreconditionResponses(t *testing.T) {
+	owner := domain.Principal{ID: uuid.NewString(), TenantID: uuid.NewString()}
+	reader := domain.Principal{ID: uuid.NewString(), TenantID: owner.TenantID}
+	disabled := domain.Principal{ID: uuid.NewString(), TenantID: owner.TenantID}
+	docID, incarnation := uuid.NewString(), uuid.NewString()
+	path := "/documents/" + docID
+	expires := time.Now().Add(time.Minute)
+	for _, tc := range []struct {
+		name      string
+		principal *domain.Principal
+		path      string
+		headers   []string
+		storeErr  error
+		status    int
+		audit     string
+		begins    bool
+	}{
+		{name: "missing qualifier", principal: &owner, status: 428, audit: "precondition_failed", begins: true},
+		{name: "wrong qualifier", principal: &owner, headers: []string{uuid.NewString()}, status: 412, audit: "precondition_failed", begins: true},
+		{name: "inactive", principal: &owner, headers: []string{incarnation}, storeErr: domain.ErrDeletionInactive, status: 412, audit: "deletion_inactive", begins: true},
+		{name: "reserved fixture", principal: &owner, storeErr: domain.ErrFixtureDeletionRequired, status: 412, audit: "precondition_failed", begins: true},
+		{name: "malformed", principal: &owner, headers: []string{"malformed"}, status: 400},
+		{name: "repeated", principal: &owner, headers: []string{incarnation, incarnation}, status: 400},
+		{name: "blank", principal: &owner, headers: []string{""}, status: 400},
+		{name: "zero", principal: &owner, headers: []string{uuid.Nil.String()}, status: 400},
+		{name: "oversized", principal: &owner, headers: []string{strings.Repeat("a", 4096)}, status: 400},
+		{name: "hold release", principal: &owner, path: path + "?release_held=true", headers: []string{incarnation}, status: 412, audit: "release_held_unsupported"},
+		{name: "missing credentials", status: 401},
+		{name: "disabled", principal: &disabled, headers: []string{incarnation}, status: 403, audit: "access_denied", begins: true},
+		{name: "reader without qualifier", principal: &reader, status: 404, audit: "not_found", begins: true},
+		{name: "reader with qualifier", principal: &reader, headers: []string{incarnation}, status: 404, audit: "not_found", begins: true},
+		{name: "absent with qualifier", principal: &owner, path: "/documents/" + uuid.NewString(), headers: []string{incarnation}, status: 404, audit: "not_found", begins: true},
+		{name: "normalized qualifier", principal: &owner, headers: []string{strings.ToUpper(incarnation)}, status: 200, begins: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newScopedMockStore(owner, reader)
+			store.docs[docID] = &scopedMemoryEntry{
+				owner: owner, readers: map[string]bool{reader.ID: true},
+				summary: domain.DocumentSummary{ID: docID, Incarnation: incarnation, Status: "completed"},
+			}
+			began := false
+			store.beforeBegin = func() { began = true }
+			store.beginDeleteErr = tc.storeErr
+			audit := &auditMock{}
+			storage := &deleteStorageSpy{}
+			h := DeleteHandler(store, storage, storage, WithScopedDeletion(), WithDeleteAudit(audit))
+			target := tc.path
+			if target == "" {
+				target = path
+			}
+			res := serveScoped(h, http.MethodDelete, target, tc.principal, expires, tc.headers...)
+			require.Equal(t, tc.status, res.Code, res.Body.String())
+			require.Equal(t, tc.begins, began)
+			require.Equal(t, "private, no-store", res.Header().Get("Cache-Control"))
+			if tc.audit != "" {
+				require.Len(t, audit.events, 1)
+				require.Equal(t, tc.audit, audit.events[0].Reason)
+			}
+			if errors.Is(tc.storeErr, domain.ErrDeletionInactive) {
+				require.JSONEq(t, `{"error":"precondition","message":"incarnation-qualified deletion and hold release are unavailable"}`, res.Body.String())
+			}
+			if tc.status == http.StatusNotFound {
+				require.JSONEq(t, `{"error":"not_found","message":"document not found"}`, res.Body.String())
+			}
+			if tc.status != http.StatusOK {
+				require.False(t, store.docs[docID].deleting)
+				require.Empty(t, storage.vectors)
+				require.Empty(t, storage.objects)
+			}
+		})
+	}
 }

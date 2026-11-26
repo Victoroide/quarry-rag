@@ -946,13 +946,35 @@ curl localhost:8081/documents/8a3e792c-5df6-4b6e-a612-4f7db4959db2/file \
 
 Deletes a document and all related artifacts across Pinecone, S3, and PostgreSQL.
 
-Deletion continues after the caller disconnects, with a separate 60-second deadline. When a stored file exists but file storage is not configured, deletion returns `503 Service Unavailable` before removing any vectors or metadata, with `{"error":"storage","message":"stored file cannot be deleted because file storage is not configured"}`.
+Once a checkpointed intent commits, cleanup continues after the caller
+disconnects, with a separate 60-second deadline. When a stored file exists but
+file storage is missing from the configuration, deletion returns `503 Service Unavailable` before
+removing any vectors or metadata.
 
 - **Method**: `DELETE`
 - **Path**: `/documents/{doc_id}`
-- **Auth**: Required (`X-Service-Token`)
+- **Auth**: Required (`X-Service-Token`, plus a delegated bearer token in grants mode)
 - **Parameters**: `doc_id` (path parameter, must be a valid UUID)
 - **Request Body**: None
+
+#### Grants mode
+
+An active owner must read the document with `include_incarnation=true` and send its
+original `X-Document-Incarnation` on every attempt, including retries of an open
+intent or after a lost response. Go callers can use `Client.DeleteDocumentIncarnation`.
+An empty, repeated, zero or malformed header returns `400`. For an authorized
+live or deleting document, an unset deletion activation marker returns `412`.
+Once active, omission returns `428` and a different incarnation returns `412`. The presence of `release_held` is unsupported and returns
+`412`.
+
+An active principal who cannot delete the document receives the same private
+`404` as for an absent UUID, with or without a valid qualifier. An absent UUID
+returns `200` only when the qualifier matches a finalized receipt for that active
+owner. If the UUID has a live replacement, the request is evaluated against the
+replacement and cannot acknowledge the earlier receipt. Missing or expired
+credentials return `401`, and disabled principals receive `403`.
+
+#### Service mode
 
 `release_held` accepts zero or one literal `true` or `false` query value. `release_held=true` selects verified hold release on the offline service that owns the in-memory index (requires a canonical `X-Document-Incarnation`, never removes a live document, and works in either activation mode without activating the database); `release_held=false` or omission selects ordinary deletion under its usual preconditions. Malformed query encoding, empty values, noncanonical spellings and duplicate `release_held` parameters return `400 Bad Request` without touching storage. `X-Document-Incarnation` is reserved, including empty values, until the database activates [checkpointed deletion](#checkpointed-deletion). During a mixed rollout, older endpoints may ignore these selectors. Keep the originally observed incarnation on every attempt of an incarnation-qualified operation and send it only to an endpoint that enforces the qualifier. An ID-only DELETE addresses the document currently stored under `doc_id`.
 

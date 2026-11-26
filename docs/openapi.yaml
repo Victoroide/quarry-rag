@@ -328,18 +328,18 @@ paths:
       parameters:
         - name: X-Document-Incarnation
           in: header
-          description: 'The document lifetime the caller observed. Required for a live document once checkpointed deletion is active and reserved before then; see [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
+          description: 'The original observed document lifetime. Required for an authorized live or deleting document when checkpointed deletion is active, including grants-mode retries. Reserved for ordinary service-mode deletion before activation.'
           schema:
             type: string
             format: uuid
         - name: release_held
           in: query
-          description: 'Replay and release a matching held deletion on the offline service (`true`), or select ordinary deletion (`false` or omitted); see [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
+          description: 'Service mode only. Replay and release a matching held deletion on the offline service (`true`), or select ordinary deletion (`false` or omitted). See [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
           schema:
             type: boolean
       responses:
         '200':
-          description: Deletion result
+          description: Deletion result or acknowledgment of a matching finalized receipt
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -348,17 +348,45 @@ paths:
               schema:
                 $ref: '#/components/schemas/DeleteResponse'
         '400':
-          $ref: '#/components/responses/Error'
+          description: Malformed request or invalid incarnation header
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
         '401':
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
         '404':
-          $ref: '#/components/responses/Error'
+          description: Document absent without a matching authorized receipt, or inaccessible in grants mode
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
         '412':
-          $ref: '#/components/responses/Error'
+          description: Deletion activation, incarnation, fixture, or hold-release precondition failed
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
         '428':
-          $ref: '#/components/responses/Error'
+          description: The live or deleting document requires an incarnation, or a hold release requires its qualifier
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
         '500':
           $ref: '#/components/responses/Error'
         '503':

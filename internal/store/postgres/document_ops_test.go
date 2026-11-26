@@ -134,7 +134,7 @@ func TestScopedListingAndStatusEnforceTenantGrantsAndState(t *testing.T) {
 	require.Nil(t, disStatus.Document)
 }
 
-func TestScopedFileAuthorizationAndDeletionLocking(t *testing.T) {
+func TestScopedDeleteRequiresObservedIncarnation(t *testing.T) {
 	f := newOwnedFixture(t)
 	_, err := f.c.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
 	require.NoError(t, err)
@@ -193,7 +193,7 @@ func TestScopedFileAuthorizationAndDeletionLocking(t *testing.T) {
 
 	// Non-owner grantee (even with read+download) cannot delete.
 	rec := newDeletionRecorder()
-	ops := rec.ops("")
+	ops := rec.ops(incarnation)
 	ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
 	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.peer, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
 	require.ErrorIs(t, err, domain.ErrDocumentNotFound)
@@ -202,6 +202,21 @@ func TestScopedFileAuthorizationAndDeletionLocking(t *testing.T) {
 	// Outsider cannot delete.
 	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.outsider, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
 	require.ErrorIs(t, err, domain.ErrDocumentNotFound)
+
+	// Missing and wrong qualifiers preserve the live document and create no intent.
+	id := domain.DocumentID(docID)
+	for _, tc := range []struct {
+		qualifier string
+		want      error
+	}{{"", domain.ErrDeletionPreconditionRequired}, {uuid.NewString(), domain.ErrDeletionPreconditionFailed}} {
+		refused := ops
+		refused.ExpectedIncarnation = tc.qualifier
+		_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), id, refused)
+		require.ErrorIs(t, err, tc.want)
+		require.NotEqual(t, "deleting", documentStatus(t, f.c, id))
+		require.Zero(t, receiptCount(t.Context(), t, f.c, id))
+	}
+	require.Empty(t, rec.all())
 
 	// Owner deletion succeeds across partial failure and retry, and rejects signing once deleting.
 	rec.hook("source", failFirst("s3 timeout"))
@@ -220,6 +235,19 @@ func TestScopedFileAuthorizationAndDeletionLocking(t *testing.T) {
 
 	err = f.c.ResumeScopedDeletion(t.Context(), domain.DocumentID(docID), resolvedInc, ops)
 	require.ErrorContains(t, err, "s3 timeout")
+	beforeRetry := rec.all()
+	open := readReceipt(t, f.c, id)
+	for _, tc := range []struct {
+		qualifier string
+		want      error
+	}{{"", domain.ErrDeletionPreconditionRequired}, {uuid.NewString(), domain.ErrDeletionPreconditionFailed}} {
+		refused := ops
+		refused.ExpectedIncarnation = tc.qualifier
+		_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), id, refused)
+		require.ErrorIs(t, err, tc.want)
+	}
+	require.Equal(t, open, readReceipt(t, f.c, id))
+	require.Equal(t, beforeRetry, rec.all())
 
 	// Non-owner still gets 404 while status='deleting'.
 	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.peer, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
@@ -234,47 +262,77 @@ func TestScopedFileAuthorizationAndDeletionLocking(t *testing.T) {
 	require.Equal(t, 1, rec.count("revision"), "completed vector step is not repeated on retry")
 	require.Equal(t, 2, rec.count("source"))
 
-	// Qualified retry after finalization acknowledges only the original owner.
-	opsWithInc := ops
-	opsWithInc.ExpectedIncarnation = incarnation
-	_, complete, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), opsWithInc)
-	require.NoError(t, err)
-	require.True(t, complete)
+	// Only the active original owner can acknowledge a matching finalized receipt.
+	beforeCalls := rec.all()
+	for _, tc := range []struct {
+		principal domain.Principal
+		qualifier string
+		want      error
+	}{
+		{f.owner, incarnation, nil},
+		{f.owner, "", domain.ErrDocumentNotFound},
+		{f.owner, uuid.NewString(), domain.ErrDocumentNotFound},
+		{f.peer, incarnation, domain.ErrDocumentNotFound},
+		{f.outsider, incarnation, domain.ErrDocumentNotFound},
+		{f.disabled, incarnation, domain.ErrForbidden},
+	} {
+		attempt := ops
+		attempt.ExpectedIncarnation = tc.qualifier
+		_, complete, err = f.c.BeginScopedDeletion(t.Context(), tc.principal, time.Now().Add(time.Minute), id, attempt)
+		require.ErrorIs(t, err, tc.want)
+		require.Equal(t, tc.want == nil, complete)
+	}
+	f.setEnabled(t, f.owner, "owner", false)
+	_, complete, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), id, ops)
+	require.ErrorIs(t, err, domain.ErrForbidden)
+	require.False(t, complete)
+	f.setEnabled(t, f.owner, "owner", true)
+	require.Equal(t, beforeCalls, rec.all())
 
-	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.peer, time.Now().Add(time.Minute), domain.DocumentID(docID), opsWithInc)
-	require.ErrorIs(t, err, domain.ErrDocumentNotFound)
+	// Test reuse by the same owner and a different tenant's owner in turn.
+	for _, replacementOwner := range []domain.Principal{f.owner, f.outsider} {
+		newInc := replaceScopedDocument(t, f, id, replacementOwner)
+		require.NotEqual(t, incarnation, newInc)
+		unqualified := ops
+		unqualified.ExpectedIncarnation = ""
+		for _, attempt := range []domain.DeleteOperations{ops, unqualified} {
+			_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), id, attempt)
+			switch {
+			case replacementOwner != f.owner:
+				require.ErrorIs(t, err, domain.ErrDocumentNotFound)
+			case attempt.ExpectedIncarnation == "":
+				require.ErrorIs(t, err, domain.ErrDeletionPreconditionRequired)
+			default:
+				require.ErrorIs(t, err, domain.ErrDeletionPreconditionFailed)
+			}
+		}
+		_, _, err = f.c.BeginScopedDeletion(t.Context(), replacementOwner, time.Now().Add(time.Minute), id, ops)
+		require.ErrorIs(t, err, domain.ErrDeletionPreconditionFailed)
+		require.NoError(t, f.c.ResumeScopedDeletion(t.Context(), id, incarnation, ops))
+		require.ErrorIs(t, f.c.ResumeScopedDeletion(t.Context(), id, newInc, ops), domain.ErrDocumentNotFound)
+		require.Equal(t, beforeCalls, rec.all())
+		repStatus, repErr := f.c.GetScopedDocumentSummary(t.Context(), replacementOwner, id, true)
+		require.NoError(t, repErr)
+		require.NotNil(t, repStatus.Document)
+		require.Equal(t, newInc, repStatus.Document.Incarnation)
+		require.Equal(t, 1, receiptCount(t.Context(), t, f.c, id))
+		if replacementOwner == f.owner {
+			require.NoError(t, f.c.DeleteDocument(t.Context(), id))
+		}
+	}
 
-	// Unqualified retry after finalization returns 404.
-	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
-	require.ErrorIs(t, err, domain.ErrDocumentNotFound)
+}
 
-	// Replacement document reusing the same UUID gets a new incarnation and is safe from the old intent.
-	repReq := jobsRequest("replacement")
-	repReq.Document.ID, repReq.CallerSupplied, repReq.SupportsScopedVectors = domain.DocumentID(docID), true, true
-	require.Equal(t, domain.AcceptAccepted, f.accept(t, repReq).Outcome)
-	newInc := storedIncarnation(t, f.c, domain.DocumentID(docID))
-	require.NotEqual(t, incarnation, newInc)
+func replaceScopedDocument(t *testing.T, f *ownedFixture, id domain.DocumentID, owner domain.Principal) string {
+	t.Helper()
+	req := jobsRequest("replacement " + uuid.NewString())
+	req.Document.ID, req.CallerSupplied, req.SupportsScopedVectors = id, true, true
+	require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)
 	f.importBatch(t, func(b map[string]any) {
-		b["assignments"] = []grantEntry{grantAssignment(t, f.c, f.otherTenant, f.outsider.ID, docID)}
+		b["assignments"] = []grantEntry{grantAssignment(t, f.c, owner.TenantID, owner.ID, string(id))}
 	})
-	grantExec(t, f.c, `UPDATE grant_catalog_document_ownership SET ready=true WHERE document_id=$1`, docID)
-
-	// Stale resume of finalized old incarnation acknowledges without touching stores or replacement, and unstarted new incarnation returns 404.
-	beforeCalls := len(rec.all())
-	require.NoError(t, f.c.ResumeScopedDeletion(t.Context(), domain.DocumentID(docID), incarnation, ops))
-	require.Len(t, rec.all(), beforeCalls)
-	require.ErrorIs(t, f.c.ResumeScopedDeletion(t.Context(), domain.DocumentID(docID), newInc, ops), domain.ErrDocumentNotFound)
-
-	repStatus, repErr := f.c.GetScopedDocumentSummary(t.Context(), f.outsider, domain.DocumentID(docID), true)
-	require.NoError(t, repErr)
-	require.NotNil(t, repStatus.Document)
-	require.Equal(t, newInc, repStatus.Document.Incarnation)
-
-	// Old owner's qualified retry with old incarnation gets 404; new owner gets 412.
-	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), opsWithInc)
-	require.ErrorIs(t, err, domain.ErrDocumentNotFound)
-	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.outsider, time.Now().Add(time.Minute), domain.DocumentID(docID), opsWithInc)
-	require.ErrorIs(t, err, domain.ErrDeletionPreconditionFailed)
+	grantExec(t, f.c, `UPDATE grant_catalog_document_ownership SET ready=true WHERE document_id=$1`, string(id))
+	return storedIncarnation(t, f.c, id)
 }
 
 func TestScopedDeletionCancellationBeforeCommitLeavesDocumentIntact(t *testing.T) {
@@ -336,7 +394,7 @@ func TestScopedDeletionIntentWaitsForServiceSigning(t *testing.T) {
 	}
 
 	rec := newDeletionRecorder()
-	ops := rec.ops("")
+	ops := rec.ops(storedIncarnation(t, f.c, domain.DocumentID(docID)))
 	ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
 	type beginResult struct {
 		complete bool
@@ -364,4 +422,113 @@ func TestScopedDeletionIntentWaitsForServiceSigning(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.False(t, found)
+}
+
+func TestScopedDeleteQualifierSurvivesRetryAndReuse(t *testing.T) {
+	f := provisionOwnedFixture(t, activatedDatabase(t))
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	id := domain.DocumentID(f.acceptOwned(t, f.owner, "", "documents/doc/retry/original.pdf"))
+	inc := storedIncarnation(t, f.c, id)
+	rec := newDeletionRecorder()
+	ops := rec.ops(inc)
+	begin := func(ctx context.Context, validUntil time.Time) (bool, error) {
+		_, complete, err := f.c.BeginScopedDeletion(ctx, f.owner, validUntil, id, ops)
+		return complete, err
+	}
+	attemptAsync := func(ctx context.Context, validUntil time.Time) <-chan error {
+		result := make(chan error, 1)
+		go func() {
+			_, err := begin(ctx, validUntil)
+			result <- err
+		}()
+		return result
+	}
+
+	t.Run("cancel during marker lookup", func(t *testing.T) {
+		subCtx, cancelSubtest := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancelSubtest()
+		tx, err := f.c.Pool.Begin(subCtx)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(subCtx)) }()
+		_, err = tx.Exec(subCtx, `LOCK TABLE document_deletion_activation IN ACCESS EXCLUSIVE MODE`)
+		require.NoError(t, err)
+		request, cancelRequest := context.WithCancel(subCtx)
+		defer cancelRequest()
+		result := attemptAsync(request, time.Now().Add(time.Minute))
+		waitForLockWaiter(t, f.c, "SELECT COALESCE(document_deletion_active()")
+		cancelRequest()
+		require.ErrorIs(t, <-result, context.Canceled)
+	})
+	t.Run("policy revoked before owner lookup", func(t *testing.T) {
+		subCtx, cancelSubtest := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancelSubtest()
+		tx, err := f.c.Pool.Begin(subCtx)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(subCtx)) }()
+		require.NoError(t, lockDocumentIntent(subCtx, tx, id))
+		result := attemptAsync(subCtx, time.Now().Add(time.Minute))
+		waitForAdvisoryWaiter(t, f.c, "ExclusiveLock")
+		f.setEnabled(t, f.owner, "owner", false)
+		require.NoError(t, tx.Commit(subCtx))
+		require.ErrorIs(t, <-result, domain.ErrForbidden)
+		f.setEnabled(t, f.owner, "owner", true)
+	})
+	t.Run("credentials expire before intent", func(t *testing.T) {
+		subCtx, cancelSubtest := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancelSubtest()
+		tx, err := f.c.Pool.Begin(subCtx)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(subCtx)) }()
+		require.NoError(t, lockDocumentIntent(subCtx, tx, id))
+		expires := time.Now().Add(5 * time.Second)
+		result := attemptAsync(subCtx, expires)
+		waitForAdvisoryWaiter(t, f.c, "ExclusiveLock")
+		select {
+		case <-time.After(time.Until(expires)):
+		case <-subCtx.Done():
+			t.Fatal(subCtx.Err())
+		}
+		require.NoError(t, tx.Commit(subCtx))
+		require.ErrorIs(t, <-result, domain.ErrUnauthorized)
+	})
+	require.Zero(t, receiptCount(ctx, t, f.c, id))
+	require.NotEqual(t, "deleting", documentStatus(t, f.c, id))
+	require.Empty(t, rec.all())
+
+	complete, err := begin(ctx, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	require.False(t, complete)
+	stale := uuid.NewString()
+	grantExec(t, f.c, `UPDATE document_deletions SET claim=$2,claim_until=clock_timestamp()+interval '1 hour' WHERE document_id=$1`, string(id), stale)
+	require.ErrorIs(t, f.c.ResumeScopedDeletion(ctx, id, inc, ops), domain.ErrDeletionBusy)
+	require.Empty(t, rec.all())
+	grantExec(t, f.c, `UPDATE document_deletions SET claim_until=clock_timestamp()-interval '1 second' WHERE document_id=$1`, string(id))
+	rec.hook("source", failFirst("source unavailable"))
+	require.ErrorContains(t, f.c.ResumeScopedDeletion(ctx, id, inc, ops), "source unavailable")
+	require.ErrorIs(t, f.c.checkpointDeletion(ctx, id, inc, stale, stepNamespace), domain.ErrDeletionBusy)
+	complete, err = begin(ctx, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	require.False(t, complete)
+	require.NoError(t, f.c.ResumeScopedDeletion(ctx, id, inc, ops))
+
+	// Reuse the UUID while the qualified retry is waiting to read it.
+	tx, err := f.c.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	require.NoError(t, lockDocumentIntent(ctx, tx, id))
+	result := attemptAsync(ctx, time.Now().Add(time.Minute))
+	waitForAdvisoryWaiter(t, f.c, "ExclusiveLock")
+	newInc := replaceScopedDocument(t, f, id, f.owner)
+	require.NoError(t, tx.Commit(ctx))
+	require.ErrorIs(t, <-result, domain.ErrDeletionPreconditionFailed)
+	require.Equal(t, newInc, storedIncarnation(t, f.c, id))
+	require.NotEqual(t, "deleting", documentStatus(t, f.c, id))
+	require.Equal(t, []string{
+		"revision:" + string(id) + "/" + inc,
+		"source:documents/doc/retry/original.pdf",
+		"source:documents/doc/retry/original.pdf",
+	}, rec.all())
+	require.Equal(t, 1, receiptCount(ctx, t, f.c, id))
+	require.True(t, readReceipt(t, f.c, id).finalized)
 }

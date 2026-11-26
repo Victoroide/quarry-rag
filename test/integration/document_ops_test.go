@@ -37,8 +37,11 @@ func TestScopedDocumentOperationsEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close(context.Background())) })
 	require.NoError(t, store.RunMigrations(ctx))
-	_, err = store.Pool.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	_, err = store.ActivateDeletion(ctx)
 	require.NoError(t, err)
+	_, err = store.ActivateGrants(ctx, false)
+	require.NoError(t, err)
+	store.SetAuthzMode("grants")
 
 	tenantA, tenantB := uuid.NewString(), uuid.NewString()
 	ownerA := domain.Principal{ID: uuid.NewString(), TenantID: tenantA}
@@ -143,10 +146,13 @@ func TestScopedDocumentOperationsEndToEnd(t *testing.T) {
 	mux.HandleFunc("DELETE /documents/{doc_id}", guard(handler.DeleteHandler(store, vectors, s3Client,
 		handler.WithScopedDeletion(), handler.WithCleanupTargets(cleanup.Targets{SourceBucket: "fixture-bucket", InMemory: true, Memory: vectors}))))
 
-	doReq := func(method, path, sub string, lifetime time.Duration, body string) *httptest.ResponseRecorder {
+	doReq := func(method, path, sub string, lifetime time.Duration, body string, qualifiers ...string) *httptest.ResponseRecorder {
 		req := httptest.NewRequestWithContext(ctx, method, path, strings.NewReader(body))
 		req.Header.Set("X-Service-Token", serviceToken)
 		req.Header.Set("Authorization", "Bearer "+mint(sub, lifetime))
+		for _, qualifier := range qualifiers {
+			req.Header.Add("X-Document-Incarnation", qualifier)
+		}
 		if body != "" {
 			req.Header.Set("Content-Type", "application/json")
 		}
@@ -165,8 +171,12 @@ func TestScopedDocumentOperationsEndToEnd(t *testing.T) {
 	s3Key := "documents/document/" + docA + "/inc/att/report.pdf"
 	_, err = store.Pool.Exec(ctx, `UPDATE documents SET s3_key=$2 WHERE id=$1`, docA, s3Key)
 	require.NoError(t, err)
-	var incA string
-	require.NoError(t, store.Pool.QueryRow(ctx, `SELECT incarnation::text FROM documents WHERE id=$1`, docA).Scan(&incA))
+	observed := doReq(http.MethodGet, "/documents/"+docA+"?include_incarnation=true", "owner-a", 2*time.Minute, "")
+	require.Equal(t, http.StatusOK, observed.Code)
+	var observedDocument domain.DocumentIncarnationSummary
+	require.NoError(t, json.Unmarshal(observed.Body.Bytes(), &observedDocument))
+	incA := observedDocument.Incarnation
+	require.NotEmpty(t, incA)
 
 	ingB := doReq(http.MethodPost, "/ingest", "outsider-b", 2*time.Minute, `{"content":"tenant B private text"}`)
 	require.Equal(t, http.StatusAccepted, ingB.Code)
@@ -198,10 +208,17 @@ func TestScopedDocumentOperationsEndToEnd(t *testing.T) {
 
 	// Grantee still cannot delete; ownerA deletes and removes s3Key.
 	require.Equal(t, http.StatusNotFound, doReq(http.MethodDelete, "/documents/"+docA, "peer-a", 2*time.Minute, "").Code)
-	delRec := doReq(http.MethodDelete, "/documents/"+docA, "owner-a", 2*time.Minute, "")
+	require.Equal(t, http.StatusPreconditionRequired, doReq(http.MethodDelete, "/documents/"+docA, "owner-a", 2*time.Minute, "").Code)
+	require.Equal(t, http.StatusPreconditionFailed, doReq(http.MethodDelete, "/documents/"+docA, "owner-a", 2*time.Minute, "", uuid.NewString()).Code)
+	require.Equal(t, http.StatusNotFound, doReq(http.MethodDelete, "/documents/"+docA, "peer-a", 2*time.Minute, "", incA).Code)
+	delRec := doReq(http.MethodDelete, "/documents/"+docA, "owner-a", 2*time.Minute, "", incA)
 	require.Equal(t, http.StatusOK, delRec.Code, delRec.Body.String())
+	require.Equal(t, http.StatusOK, doReq(http.MethodDelete, "/documents/"+docA, "owner-a", 2*time.Minute, "", incA).Code)
+	require.Equal(t, http.StatusNotFound, doReq(http.MethodDelete, "/documents/"+docA, "owner-a", 2*time.Minute, "").Code)
+	require.Equal(t, http.StatusNotFound, doReq(http.MethodDelete, "/documents/"+docA, "peer-a", 2*time.Minute, "", incA).Code)
 	mu.Lock()
-	require.Equal(t, []string{s3Key}, deletedObjects)
+	objectCalls := append([]string(nil), deletedObjects...)
 	mu.Unlock()
+	require.Equal(t, []string{s3Key}, objectCalls)
 	require.Equal(t, http.StatusNotFound, doReq(http.MethodGet, "/documents/"+docA, "owner-a", 2*time.Minute, "").Code)
 }

@@ -692,6 +692,14 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 	if !time.Now().Before(validUntil) {
 		return "", false, domain.ErrUnauthorized
 	}
+	// The active marker is monotone. An absent row also refuses live deletion.
+	var deletionActive bool
+	if err = tx.QueryRow(ctx, `SELECT COALESCE(document_deletion_active(), false)`).Scan(&deletionActive); err != nil {
+		return "", false, fmt.Errorf("postgres: read deletion activation: %w", err)
+	}
+	if !deletionActive {
+		return "", false, domain.ErrDeletionInactive
+	}
 	if parsed.Version() == 5 {
 		var reserved bool
 		if reserveErr := tx.QueryRow(ctx, `SELECT evaluation_fixture_reserved($1)`, parsed.String()).Scan(&reserved); reserveErr != nil {
@@ -701,7 +709,10 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 			return "", false, domain.ErrFixtureDeletionRequired
 		}
 	}
-	if expected != "" && expected != incarnation {
+	if expected == "" {
+		return "", false, domain.ErrDeletionPreconditionRequired
+	}
+	if expected != incarnation {
 		return "", false, domain.ErrDeletionPreconditionFailed
 	}
 	if source != nil && ops.Source == nil {
