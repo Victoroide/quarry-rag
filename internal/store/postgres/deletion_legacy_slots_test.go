@@ -155,6 +155,36 @@ func advisoryLockCount(ctx context.Context, t *testing.T, observer *pgx.Conn) in
 	return n
 }
 
+func TestGuardedDeletionProbesIgnoreUnrelatedSessions(t *testing.T) {
+	c, observer := sessionTestClient(t)
+	ctx := t.Context()
+	connect := func(config *pgx.ConnConfig) *pgx.Conn {
+		conn, err := pgx.ConnectConfig(ctx, config)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, conn.Close(context.Background())) })
+		return conn
+	}
+
+	unrelated := observer.Config()
+	unrelated.RuntimeParams["application_name"] = "unrelated-deletion-probe"
+	connect(unrelated)
+
+	siblingURL := pgtest.Sibling(t, observer.Config().ConnString())
+	siblingConfig, err := pgx.ParseConfig(siblingURL)
+	require.NoError(t, err)
+	siblingConfig.RuntimeParams["application_name"] = observer.Config().RuntimeParams["application_name"]
+	sibling := connect(siblingConfig)
+	_, err = sibling.Exec(ctx, `SELECT pg_advisory_lock_shared($1)`, DeletionActivationLockID)
+	require.NoError(t, err)
+
+	t.Run("advisory locks", func(t *testing.T) {
+		require.Zero(t, advisoryLockCount(t.Context(), t, observer))
+	})
+	t.Run("dedicated sessions", func(t *testing.T) {
+		requireDedicatedSessions(t, c, observer, 0)
+	})
+}
+
 func TestGuardedDeletionHoldsNoPoolConnection(t *testing.T) {
 	c, observer := sessionTestClient(t)
 	ctx := legacyContext(t)

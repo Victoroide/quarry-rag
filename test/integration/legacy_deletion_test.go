@@ -414,6 +414,26 @@ func advisoryLocks(t *testing.T, c *pgstore.Client) int {
 	return n
 }
 
+func TestLegacyDeletionProbesIgnoreSiblingActivationLock(t *testing.T) {
+	ctx := t.Context()
+	address := startPostgres(t)
+	c, err := pgstore.NewClient(ctx, address)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
+
+	sibling, err := pgx.Connect(ctx, pgtest.Sibling(t, address))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sibling.Close(context.Background())) })
+	_, err = sibling.Exec(ctx, `SELECT pg_advisory_lock_shared($1)`, pgstore.DeletionActivationLockID)
+	require.NoError(t, err)
+
+	require.Zero(t, advisoryLocks(t, c))
+	require.Zero(t, terminateActivationHolders(t, c))
+	var unlocked bool
+	require.NoError(t, sibling.QueryRow(ctx, `SELECT pg_advisory_unlock_shared($1)`, pgstore.DeletionActivationLockID).Scan(&unlocked))
+	require.True(t, unlocked, "the sibling session still holds the activation lock")
+}
+
 func TestGuardedIDOnlyDeleteRejectsBurstWith503BusyBeforeLocks(t *testing.T) {
 	c := durableDatabase(t)
 	c.SetLegacyDeletionConcurrency(2)
