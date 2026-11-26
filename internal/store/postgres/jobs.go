@@ -25,6 +25,9 @@ func (c *Client) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (
 			return domain.AcceptResult{}, err
 		}
 	}
+	if err := validateOwnedRequest(req, false); err != nil {
+		return domain.AcceptResult{}, err
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		result, err := c.acceptDocument(ctx, req, false, false)
 		var pgErr *pgconn.PgError
@@ -41,6 +44,9 @@ func (c *Client) AcceptDocument(ctx context.Context, req domain.AcceptRequest) (
 
 // AcceptExistingPDF resolves a UUID or a shared original without admitting a new document.
 func (c *Client) AcceptExistingPDF(ctx context.Context, req domain.AcceptRequest, includeLegacy bool) (domain.AcceptResult, error) {
+	if err := validateOwnedRequest(req, true); err != nil {
+		return domain.AcceptResult{}, err
+	}
 	if !req.CallerSupplied && (req.ContentDedup != domain.ContentDedupCollection || !includeLegacy) {
 		return domain.AcceptResult{}, errors.New("postgres: anonymous PDF lookup requires collection deduplication in mixed mode")
 	}
@@ -87,11 +93,41 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 		}
 	}
 	var id, state string
-	if req.CallerSupplied {
+	owned := req.Owner != nil
+	var ownedTarget domain.OwnedTarget
+	if owned {
+		if ownedTarget, err = authorizeOwnedAcceptance(ctx, tx, req); err != nil {
+			return result, err
+		}
+		if !time.Now().Before(req.Owner.ValidUntil) {
+			result.Outcome = domain.AcceptUnauthorized
+			return result, nil
+		}
+		switch ownedTarget.Decision {
+		case domain.OwnedForbidden:
+			result.Outcome = domain.AcceptForbidden
+			return result, nil
+		case domain.OwnedNotFound:
+			result.Outcome = domain.AcceptNotFound
+			return result, nil
+		}
+		result.Incarnation = req.Owner.Incarnation
+	}
+	if req.CallerSupplied && (!owned || ownedTarget.Decision == domain.OwnedExisting) {
 		var fingerprint *string
 		var content, collection string
 		var policy domain.ContentDedup
-		err = tx.QueryRow(ctx, `SELECT status,fingerprint,content,collection,content_dedup FROM documents WHERE id=$1 FOR UPDATE`, string(req.Document.ID)).Scan(&state, &fingerprint, &content, &collection, &policy)
+		lookup, lookupArgs := `SELECT status,fingerprint,content,collection,content_dedup FROM documents WHERE id=$1 FOR UPDATE`, []any{string(req.Document.ID)}
+		if owned {
+			lookup = `SELECT status,fingerprint,content,collection,content_dedup FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2::uuid FOR UPDATE`
+			lookupArgs = append(lookupArgs, req.Owner.Incarnation)
+		}
+		err = tx.QueryRow(ctx, lookup, lookupArgs...).Scan(&state, &fingerprint, &content, &collection, &policy)
+		if errors.Is(err, pgx.ErrNoRows) && owned {
+			// Deleted or replaced since the permission check.
+			result.Outcome = domain.AcceptNotFound
+			return result, nil
+		}
 		if err == nil {
 			if req.EvaluationReceipt != "" || collection != req.Collection {
 				result.Outcome = domain.AcceptConflict
@@ -124,7 +160,7 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 			}
 			id = string(req.Document.ID)
 		}
-	} else if req.ContentDedup == domain.ContentDedupCollection {
+	} else if !owned && req.ContentDedup == domain.ContentDedupCollection {
 		if req.PDF != nil || existingPDFOnly {
 			id, state, err = findSharedPDF(ctx, tx, req)
 		} else {
@@ -250,6 +286,12 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 		file_name,file_type,s3_key,doc_type,status,fingerprint,collection,content_dedup,scoped_vectors)
 		VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9,$10,$11,$12)`
 	args := []any{string(req.Document.ID), req.Document.Content, string(preview), encoded, req.Document.FileName, req.Document.FileType, req.Document.S3Key, metadata["doc_type"], fingerprint, req.Collection, req.ContentDedup, scoped}
+	if owned {
+		insert = `INSERT INTO documents(id,content,content_preview,metadata,chunk_count,
+		file_name,file_type,s3_key,doc_type,status,fingerprint,collection,content_dedup,scoped_vectors,incarnation)
+		VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,'processing',$9,$10,$11,$12,$13::uuid)`
+		args = append(args, req.Owner.Incarnation)
+	}
 	if req.EvaluationReceipt == "" {
 		_, err = tx.Exec(ctx, insert, args...)
 	} else {
@@ -286,6 +328,16 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 	if err != nil {
 		return result, err
 	}
+	if owned {
+		bound, bindErr := bindAcceptedDocument(ctx, tx, req, req.CallerSupplied)
+		if bindErr != nil {
+			return result, bindErr
+		}
+		if !bound {
+			result.Outcome = domain.AcceptForbidden
+			return result, nil
+		}
+	}
 	if req.SourceUpload != nil {
 		// Cleanup claims a staged upload under a row lock, so exactly one of
 		// the claim and this adoption succeeds.
@@ -320,7 +372,8 @@ const claimJobSuffix = `
 		ORDER BY ready.next_attempt_at,ready.created_at FOR UPDATE OF ready SKIP LOCKED LIMIT 1)
 	RETURNING j.document_id,j.attempts,j.lease_token)
 	SELECT d.id::text,j.attempts,d.content,d.metadata,d.file_name,d.file_type,d.s3_key,d.doc_type,d.fingerprint,d.collection,
-		d.text_source,COALESCE(d.incarnation,d.id)::text,j.lease_token::text,d.scoped_vectors,p.profile,p.coverage,p.manifest
+		d.text_source,COALESCE(d.incarnation,d.id)::text,j.lease_token::text,d.scoped_vectors,p.profile,p.coverage,p.manifest,
+		d.grant_catalog_assigned
 	FROM claimed j JOIN documents d ON d.id=j.document_id
 	LEFT JOIN document_pdf_extractions p ON p.document_id=d.id`
 
@@ -367,9 +420,10 @@ func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, st
 		var metadata, manifest []byte
 		var fingerprint, profile *string
 		var coverage *domain.PDFCoverage
+		var assigned bool
 		err := c.Pool.QueryRow(ctx, statement, args...).
 			Scan(&id, &j.Attempts, &j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType,
-				&j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource, &j.Incarnation, &j.LeaseToken, &j.ScopedVectors, &profile, &coverage, &manifest)
+				&j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource, &j.Incarnation, &j.LeaseToken, &j.ScopedVectors, &profile, &coverage, &manifest, &assigned)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -385,6 +439,18 @@ func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, st
 				return nil, failErr
 			}
 			continue
+		}
+		if assigned {
+			// Only an assigned document needs the catalog, so service-mode logins need no catalog privilege.
+			tenant, tenantErr := c.documentTenant(ctx, id, j.Incarnation)
+			if tenantErr != nil {
+				return nil, tenantErr
+			}
+			if tenant == "" {
+				// Deletion removed the ownership with the document, and the job went with it.
+				continue
+			}
+			j.Tenant = tenant
 		}
 		if fingerprint != nil {
 			j.Document.Fingerprint = *fingerprint
@@ -452,11 +518,11 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	var policy domain.ContentDedup
 	var fingerprint *string
 	var collection string
-	var safeToPublish bool
+	var safeToPublish, assigned bool
 	err = tx.QueryRow(ctx, `SELECT content_dedup,fingerprint,collection,
-		NOT vector_mutation_pending AND (scoped_vectors OR NOT vector_mutation_uncertain)
+		NOT vector_mutation_pending AND (scoped_vectors OR NOT vector_mutation_uncertain),grant_catalog_assigned
 		FROM documents WHERE id=$1 AND status='processing' AND COALESCE(incarnation,id)=$2 FOR UPDATE`,
-		j.Document.ID, j.Incarnation).Scan(&policy, &fingerprint, &collection, &safeToPublish)
+		j.Document.ID, j.Incarnation).Scan(&policy, &fingerprint, &collection, &safeToPublish, &assigned)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -507,7 +573,9 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 		}
 		observation = domain.IndexObservation{Visibility: domain.VisibilityTransactional}
 	}
-	if policy == domain.ContentDedupCollection {
+	// A document assigned in the grant catalog never registers a shared match,
+	// even when a historical row kept the collection policy.
+	if policy == domain.ContentDedupCollection && !assigned {
 		if fingerprint == nil {
 			legacy := chunker.ScopedFingerprint(collection, j.Document.Content)
 			fingerprint = &legacy
@@ -525,6 +593,11 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
         vector_attempt=CASE WHEN scoped_vectors THEN $5::uuid ELSE NULL END,vector_incarnation_required=$6
         WHERE id=$1`, j.Document.ID, len(chunks), observation.Visibility, observation.ObservedAt, j.LeaseToken, vectorIncarnationRequired); err != nil {
 		return false, err
+	}
+	if assigned {
+		if _, err = tx.Exec(ctx, `SELECT grant_catalog_publish_accepted_document($1::uuid,$2::uuid)`, string(j.Document.ID), j.Incarnation); err != nil {
+			return false, fmt.Errorf("postgres: publish accepted document: %w", err)
+		}
 	}
 	// Persistence can outlast the lease, and a renewal may have extended it.
 	// Lock the job row only now, then test the lease in the next statement.

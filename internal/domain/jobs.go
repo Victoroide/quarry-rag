@@ -25,6 +25,13 @@ const (
 	AcceptUploadExpired
 	// AcceptDeletionConflict reports a document identity reserved by an unfinished or held deletion.
 	AcceptDeletionConflict
+	// AcceptNotFound reports a supplied identity that the caller cannot use.
+	// Missing, unreserved, deleted, unassigned and foreign identities are the same outcome.
+	AcceptNotFound
+	// AcceptForbidden reports a principal without current permission to create in the collection.
+	AcceptForbidden
+	// AcceptUnauthorized reports a subject credential that expired before durable acceptance.
+	AcceptUnauthorized
 )
 
 // ContentDedup controls whether uploads participate in collection-wide content matching.
@@ -56,6 +63,9 @@ type AcceptRequest struct {
 	SupportsScopedVectors bool
 	// SourceUpload, when set, must still be staged for the new document's original file.
 	SourceUpload *SourceUploadLink
+	// Owner binds the document to a verified principal. Owned acceptance never
+	// reads or writes shared content fingerprints.
+	Owner *OwnerBinding
 }
 
 // AcceptResult identifies the document selected by acceptance.
@@ -84,6 +94,8 @@ type Job struct {
 	LeaseOwner  string
 	LeaseToken  string
 	Incarnation string
+	// Tenant is the owner's tenant for documents assigned in the grant catalog.
+	Tenant string
 
 	Collection    string
 	PDF           *PDFExtraction

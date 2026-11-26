@@ -32,6 +32,10 @@ func TestMigrationParser(t *testing.T) {
 	if _, err := parseSQL(`ALTER TABLE unknown ADD COLUMN x TEXT;`); err == nil {
 		t.Fatal("unknown table accepted")
 	}
+	grant, grantErr := parseSQL(`CREATE TABLE parents (id UUID PRIMARY KEY); ALTER TABLE grant_catalog_unmodeled ADD COLUMN origin TEXT NOT NULL DEFAULT 'imported' CHECK (origin IN ('imported', 'accepted'));`)
+	if grantErr != nil || len(grant) != 1 {
+		t.Fatalf("operator reference storage must not be modeled or rejected: %v %#v", grantErr, grant)
+	}
 }
 
 func TestRouteParser(t *testing.T) {
