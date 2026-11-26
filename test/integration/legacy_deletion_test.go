@@ -523,6 +523,7 @@ func TestLegacyDeletionProbesIgnoreSiblingActivationLock(t *testing.T) {
 	var localUnlocked bool
 	require.NoError(t, local.QueryRow(lockCtx, `SELECT pg_advisory_unlock_shared($1)`, pgstore.DeletionActivationLockID).Scan(&localUnlocked))
 	require.True(t, localUnlocked, "the fixture session held the activation lock")
+	require.Zero(t, advisoryLocks(t, c), "only the sibling session still holds the activation lock")
 
 	var unlocked bool
 	require.NoError(t, sibling.QueryRow(ctx, `SELECT pg_advisory_unlock_shared($1)`, pgstore.DeletionActivationLockID).Scan(&unlocked))
