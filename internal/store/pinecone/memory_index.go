@@ -88,6 +88,32 @@ func (m *MemoryIndex) UpsertVectors(_ context.Context, vectors []*pinecone.Vecto
 
 func matchesFilter(md, filter *structpb.Struct) (bool, error) {
 	for field, condition := range filter.GetFields() {
+		if field == "$and" || field == "$or" {
+			clauses := condition.GetListValue().GetValues()
+			if len(clauses) == 0 {
+				return false, fmt.Errorf("%s needs at least one filter clause", field)
+			}
+			matches := field == "$and"
+			for _, clause := range clauses {
+				nested := clause.GetStructValue()
+				if len(nested.GetFields()) == 0 {
+					return false, fmt.Errorf("%s needs nonempty filter clauses", field)
+				}
+				match, err := matchesFilter(md, nested)
+				if err != nil {
+					return false, err
+				}
+				if field == "$and" {
+					matches = matches && match
+				} else {
+					matches = matches || match
+				}
+			}
+			if !matches {
+				return false, nil
+			}
+			continue
+		}
 		operators := condition.GetStructValue().GetFields()
 		if len(operators) == 0 {
 			return false, fmt.Errorf("filter on %q needs an operator", field)
@@ -108,6 +134,9 @@ func matchesFilter(md, filter *structpb.Struct) (bool, error) {
 					return false, nil
 				}
 			case "$exists":
+				if _, valid := want.GetKind().(*structpb.Value_BoolValue); !valid {
+					return false, fmt.Errorf("$exists on %q needs a boolean", field)
+				}
 				if (have != nil) != want.GetBoolValue() {
 					return false, nil
 				}

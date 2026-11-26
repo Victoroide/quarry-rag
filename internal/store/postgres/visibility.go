@@ -193,8 +193,13 @@ WHERE ($9='' OR d.collection=$9) AND ($10='' OR d.doc_type=$10)
   AND (hit.incarnation='' OR hit.incarnation=COALESCE(d.incarnation,d.id)::text)
   AND ((hit.vector_incarnation='' AND NOT d.vector_incarnation_required)
        OR hit.vector_incarnation=COALESCE(d.incarnation,d.id)::text)
-  AND (CASE WHEN d.scoped_vectors THEN COALESCE(d.incarnation,d.id)::text ELSE '' END)=hit.revision
-  AND COALESCE(d.vector_attempt::text,'')=hit.attempt
+  AND (
+    (hit.rev_id IS NOT NULL AND hit.revision='' AND hit.attempt='')
+    OR
+    (hit.rev_id IS NULL
+     AND (CASE WHEN d.scoped_vectors THEN COALESCE(d.incarnation,d.id)::text ELSE '' END)=hit.revision
+     AND COALESCE(d.vector_attempt::text,'')=hit.attempt)
+  )
   AND hosted_vector_revision_visible(d.id, hit.rev_id)
   AND encode(digest(convert_to(c.text, 'UTF8'), 'sha256'), 'hex')=hit.hash
 ORDER BY hit.ord`, args...)

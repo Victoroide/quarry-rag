@@ -521,6 +521,12 @@ func (qc *QueryContext) matchObservedEvidence(chunks []domain.ScoredChunk) []dom
 	// against the SQL lifetime observed before searching.
 	matched := make([]domain.ScoredChunk, 0, len(chunks))
 	for _, hit := range chunks {
+		if hit.Chunk.RevisionID != "" {
+			if domain.ManifestIdentity(hit.Chunk) {
+				matched = append(matched, hit)
+			}
+			continue
+		}
 		_, tagged := hit.Chunk.Metadata[domain.VectorRevisionKey]
 		if hit.ObservedIncarnation == "" && hit.Chunk.VectorIncarnation == "" && !tagged {
 			id, err := uuid.Parse(string(hit.Chunk.DocumentID))
@@ -558,18 +564,21 @@ func filterEvidenceScope(filter domain.VectorFilter, chunks []domain.ScoredChunk
 
 // filterAuthorizedHits discards candidates whose own metadata contradicts the
 // authorized scope. A hit naming another tenant is never usable. Under an
-// explicit membership, a hit must also be tagged with the incarnation the
-// principal may read. Database checks still decide what is current.
+// explicit membership, a hit must name the tenant and carry either the listed
+// incarnation or a hosted revision. Database checks still decide what is current.
 func filterAuthorizedHits(scope *domain.AuthorizedScope, chunks []domain.ScoredChunk) []domain.ScoredChunk {
 	kept := make([]domain.ScoredChunk, 0, len(chunks))
 	for _, sc := range chunks {
-		if tenant, labeled := sc.Chunk.Metadata[domain.VectorTenantKey].(string); labeled && !strings.EqualFold(tenant, scope.TenantID) {
-			continue
-		}
-		if scope.Incarnations != nil {
+		if scope.Incarnations == nil {
+			if tenant, labeled := sc.Chunk.Metadata[domain.VectorTenantKey].(string); labeled && !strings.EqualFold(tenant, scope.TenantID) {
+				continue
+			}
+		} else {
 			incarnation, member := scope.IncarnationOf(string(sc.Chunk.DocumentID))
 			revision, _ := sc.Chunk.Metadata[domain.VectorRevisionKey].(string)
-			if !member || revision != incarnation {
+			tagged := sc.Chunk.RevisionID == "" && revision == incarnation
+			identityMatches := tagged || domain.ManifestIdentity(sc.Chunk)
+			if !member || !scope.SameTenant(sc.Chunk.Metadata) || !identityMatches {
 				continue
 			}
 		}

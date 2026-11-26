@@ -300,9 +300,17 @@ revisions in owner-defined triggers. Only replicas that set
 [manifest table grants](grant-catalog.md#database-roles)
 and run the sweeper.
 
-Readers accept legacy unrevisioned vectors for a document that has no active
-revision and hits matching the active revision otherwise. Upgrade every replica
-to run the revision-aware readers before enabling `HOSTED_VECTOR_MANIFEST=true`.
+When a document has an active hosted revision, readers require hits to match
+that revision, including for documents configured to use scoped vectors.
+Manifest hits carry the hosted revision ID alone for publication identity.
+Evidence reads reject hits that also supply tagged revision or attempt fields.
+In grants mode, Pinecone searches for manifest vectors by revision ID presence
+within the authorized tenant and document membership. PostgreSQL confirms that
+each hit belongs to the active revision.
+For documents without an active hosted revision, evidence reads continue to
+validate unrevisioned hits against the document's persisted vector format.
+Upgrade every replica to run the revision-aware readers before enabling
+`HOSTED_VECTOR_MANIFEST=true`.
 Enable the flag on one replica first and confirm that
 `quarry_hosted_vector_cleanups_total` reports completions.
 

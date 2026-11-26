@@ -24,19 +24,10 @@ func buildFilter(docType string, ids []string, collection string) *structpb.Stru
 	return buildScopedFilter(docType, ids, collection, "", nil)
 }
 
-// buildScopedFilter adds the owning tenant and the incarnations a subject may
-// read to the document predicate. Both lists describe the same documents, so
-// neither exceeds the document list's size.
+// buildScopedFilter binds both vector formats to the same tenant and document
+// membership. Tagged vectors must also match one of the listed incarnations.
 func buildScopedFilter(docType string, ids []string, collection, tenant string, incarnations []string) *structpb.Struct {
 	fields := make(map[string]*structpb.Value)
-	if tenant != "" {
-		fields[domain.VectorTenantKey] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$eq": structpb.NewStringValue(tenant)}})
-		values := make([]*structpb.Value, len(incarnations))
-		for i, incarnation := range incarnations {
-			values[i] = structpb.NewStringValue(incarnation)
-		}
-		fields[domain.VectorRevisionKey] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$in": structpb.NewListValue(&structpb.ListValue{Values: values})}})
-	}
 	if collection != "" {
 		fields["collection"] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$eq": structpb.NewStringValue(collection)}})
 	}
@@ -49,6 +40,32 @@ func buildScopedFilter(docType string, ids []string, collection, tenant string, 
 			values[i] = structpb.NewStringValue(id)
 		}
 		fields["doc_id"] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$in": structpb.NewListValue(&structpb.ListValue{Values: values})}})
+	}
+	if tenant != "" {
+		fields[domain.VectorTenantKey] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$eq": structpb.NewStringValue(tenant)}})
+		values := make([]*structpb.Value, len(incarnations))
+		for i, incarnation := range incarnations {
+			values[i] = structpb.NewStringValue(incarnation)
+		}
+		tagged := map[string]*structpb.Value{
+			domain.VectorRevisionKey: structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$in": structpb.NewListValue(&structpb.ListValue{Values: values})}}),
+		}
+		manifest := map[string]*structpb.Value{
+			"revision_id":            structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$exists": structpb.NewBoolValue(true)}}),
+			domain.VectorRevisionKey: structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$exists": structpb.NewBoolValue(false)}}),
+		}
+		identity := structpb.NewListValue(&structpb.ListValue{Values: []*structpb.Value{
+			structpb.NewStructValue(&structpb.Struct{Fields: tagged}),
+			structpb.NewStructValue(&structpb.Struct{Fields: manifest}),
+		}})
+		clauses := make([]*structpb.Value, 0, len(fields)+1)
+		for _, field := range []string{domain.VectorTenantKey, "doc_id", "collection", "doc_type"} {
+			if condition := fields[field]; condition != nil {
+				clauses = append(clauses, structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{field: condition}}))
+			}
+		}
+		clauses = append(clauses, structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$or": identity}}))
+		fields = map[string]*structpb.Value{"$and": structpb.NewListValue(&structpb.ListValue{Values: clauses})}
 	}
 	if len(fields) == 0 {
 		return nil
@@ -222,14 +239,15 @@ func authorizedMembers(scope *domain.AuthorizedScope, ids []string) (documents, 
 }
 
 // withinMembers rejects any hit whose own metadata contradicts the request.
-// Hosted metadata is untrusted, so identity, tenant and incarnation must match
-// what the request asked for before a hit can rank or reach a preview.
+// Hosted metadata is untrusted. Membership and tenant must match for both
+// vector formats, and SQL checks the active revision of each manifest hit.
 func withinMembers(scope *domain.AuthorizedScope, members map[string]string, chunks []domain.ScoredChunk) []domain.ScoredChunk {
 	kept := chunks[:0:0]
 	for _, sc := range chunks {
 		incarnation, listed := members[string(sc.Chunk.DocumentID)]
 		revision, _ := sc.Chunk.Metadata[domain.VectorRevisionKey].(string)
-		if listed && scope.SameTenant(sc.Chunk.Metadata) && revision == incarnation {
+		tagged := sc.Chunk.RevisionID == "" && revision == incarnation
+		if listed && scope.SameTenant(sc.Chunk.Metadata) && (tagged || domain.ManifestIdentity(sc.Chunk)) {
 			kept = append(kept, sc)
 		}
 	}
