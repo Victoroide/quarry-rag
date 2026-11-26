@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -764,4 +765,56 @@ func TestQueryToolKeepsEnglishNoEvidenceDefaultWithCatalog(t *testing.T) {
 	require.Equal(t, "no_evidence", got.FinishReason)
 	require.Zero(t, got.TokenUsage)
 	require.Empty(t, got.Chunks)
+}
+
+func TestQueryToolPreserveCode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		arguments map[string]any
+		want      string // empty when the field must be omitted
+	}{
+		{"enabled", map[string]any{"include_citations": true, "preserve_code": true}, "true"},
+		{"disabled", map[string]any{"include_citations": true, "preserve_code": false}, ""},
+		{"omitted", map[string]any{"include_citations": true}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				if tc.want == "" {
+					assert.NotContains(t, body, "preserve_code")
+				} else {
+					assert.Equal(t, tc.want, string(body["preserve_code"]))
+				}
+				_, err := io.WriteString(w, `{"answer":"Archive [1]","scored_chunks":[],"citations":[]}`)
+				assert.NoError(t, err)
+			}))
+			defer s.Close()
+			cs := connectServer(t, config{baseURL: s.URL, timeout: time.Second})
+			tools, err := cs.ListTools(t.Context(), nil)
+			require.NoError(t, err)
+			for _, tool := range tools.Tools {
+				if tool.Name != "quarry_query" {
+					continue
+				}
+				data, marshalErr := json.Marshal(tool.InputSchema)
+				require.NoError(t, marshalErr)
+				var schema struct {
+					Properties map[string]struct {
+						Type        any
+						Description string
+					}
+				}
+				require.NoError(t, json.Unmarshal(data, &schema))
+				assert.Equal(t, "boolean", schema.Properties["preserve_code"].Type)
+				assert.Contains(t, schema.Properties["preserve_code"].Description, "include_citations")
+				assert.Contains(t, schema.Properties["preserve_code"].Description, "code")
+			}
+			arguments := map[string]any{"query": "archive"}
+			maps.Copy(arguments, tc.arguments)
+			result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "quarry_query", Arguments: arguments})
+			require.NoError(t, err)
+			require.False(t, result.IsError, "%v", result.Content)
+		})
+	}
 }

@@ -764,6 +764,9 @@ components:
           type: integer
         include_citations:
           type: boolean
+        preserve_code:
+          type: boolean
+          description: 'Requires include_citations. See [POST /query](api.md#post-query).'
         allowed_document_ids:
           type: [array, 'null']
           items:
