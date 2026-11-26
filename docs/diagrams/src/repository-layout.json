@@ -1,7 +1,49 @@
 {
   "Width": 840,
-  "Height": 1016,
+  "Height": 1042,
   "Nodes": {
+    "client": {
+      "X": 444,
+      "Y": 80,
+      "W": 368,
+      "H": 32
+    },
+    "cmd": {
+      "X": 444,
+      "Y": 144,
+      "W": 368,
+      "H": 32
+    },
+    "cmd/quarry-mcp": {
+      "X": 468,
+      "Y": 176,
+      "W": 344,
+      "H": 32
+    },
+    "cmd/server": {
+      "X": 468,
+      "Y": 208,
+      "W": 344,
+      "H": 32
+    },
+    "docs": {
+      "X": 444,
+      "Y": 272,
+      "W": 368,
+      "H": 32
+    },
+    "docs/diagrams": {
+      "X": 468,
+      "Y": 304,
+      "W": 344,
+      "H": 32
+    },
+    "docs/diagrams/src": {
+      "X": 492,
+      "Y": 336,
+      "W": 320,
+      "H": 32
+    },
     "internal": {
       "X": 28,
       "Y": 80,
@@ -206,36 +248,6 @@
       "W": 344,
       "H": 26
     },
-    "cmd": {
-      "X": 444,
-      "Y": 144,
-      "W": 368,
-      "H": 32
-    },
-    "cmd/server": {
-      "X": 468,
-      "Y": 208,
-      "W": 344,
-      "H": 32
-    },
-    "docs": {
-      "X": 444,
-      "Y": 272,
-      "W": 368,
-      "H": 32
-    },
-    "docs/diagrams": {
-      "X": 468,
-      "Y": 304,
-      "W": 344,
-      "H": 32
-    },
-    "docs/diagrams/src": {
-      "X": 492,
-      "Y": 336,
-      "W": 320,
-      "H": 32
-    },
     "scripts": {
       "X": 444,
       "Y": 400,
@@ -254,111 +266,105 @@
       "W": 344,
       "H": 26
     },
-    "scripts/evidenceeval": {
+    "scripts/document-sets": {
       "X": 468,
       "Y": 480,
       "W": 344,
       "H": 26
     },
-    "scripts/fuzz": {
+    "scripts/evidenceeval": {
       "X": 468,
       "Y": 506,
       "W": 344,
       "H": 26
     },
-    "scripts/grant-catalog": {
+    "scripts/fuzz": {
       "X": 468,
       "Y": 532,
       "W": 344,
       "H": 26
     },
-    "scripts/langeval": {
+    "scripts/grant-catalog": {
       "X": 468,
       "Y": 558,
       "W": 344,
       "H": 26
     },
-    "scripts/reconcile": {
+    "scripts/langeval": {
       "X": 468,
       "Y": 584,
       "W": 344,
       "H": 26
     },
-    "scripts/reindex": {
+    "scripts/reconcile": {
       "X": 468,
       "Y": 610,
       "W": 344,
       "H": 26
     },
-    "scripts/simulate": {
+    "scripts/reindex": {
       "X": 468,
       "Y": 636,
       "W": 344,
       "H": 26
     },
-    "scripts/validate": {
+    "scripts/simulate": {
       "X": 468,
       "Y": 662,
       "W": 344,
       "H": 26
     },
+    "scripts/validate": {
+      "X": 468,
+      "Y": 688,
+      "W": 344,
+      "H": 26
+    },
     "test": {
       "X": 444,
-      "Y": 720,
+      "Y": 746,
       "W": 368,
       "H": 30
     },
     "test/integration": {
       "X": 468,
-      "Y": 750,
+      "Y": 776,
       "W": 344,
       "H": 30
     },
     "test/smoke": {
       "X": 468,
-      "Y": 780,
+      "Y": 806,
       "W": 344,
       "H": 30
     },
     "test/unit": {
       "X": 468,
-      "Y": 810,
+      "Y": 836,
       "W": 344,
       "H": 30
     },
     "tools": {
       "X": 444,
-      "Y": 872,
+      "Y": 898,
       "W": 368,
       "H": 30
     },
     "tools/diagrams": {
       "X": 468,
-      "Y": 902,
+      "Y": 928,
       "W": 344,
       "H": 30
     },
     "tools/diagrams/fonts": {
       "X": 492,
-      "Y": 932,
+      "Y": 958,
       "W": 320,
       "H": 30
     },
-    "client": {
-      "X": 444,
-      "Y": 80,
-      "W": 368,
-      "H": 32
-    },
-    "cmd/quarry-mcp": {
-      "X": 468,
-      "Y": 176,
-      "W": 344,
-      "H": 32
-    },
     "tools/imagecheck": {
       "X": 468,
-      "Y": 962,
+      "Y": 988,
       "W": 344,
       "H": 30
     }
@@ -406,14 +412,14 @@
         "X": 432,
         "Y": 392,
         "W": 392,
-        "H": 304
+        "H": 330
       }
     },
     {
       "Title": "",
       "Box": {
         "X": 432,
-        "Y": 712,
+        "Y": 738,
         "W": 392,
         "H": 136
       }
@@ -422,7 +428,7 @@
       "Title": "",
       "Box": {
         "X": 432,
-        "Y": 864,
+        "Y": 890,
         "W": 392,
         "H": 136
       }

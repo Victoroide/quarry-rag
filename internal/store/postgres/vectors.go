@@ -522,10 +522,18 @@ func hasScopeFilter(filter domain.VectorFilter) bool {
 // GrantScope reports that search joins the readable-document relation itself.
 func (*VectorStore) GrantScope() domain.GrantScopeKind { return domain.GrantScopeRelation }
 
+// DocumentSetScope reports that search also joins a set's membership, so a
+// query that carries a set is confined to it inside the ranking statement.
+func (*VectorStore) DocumentSetScope() {}
+
+var _ domain.DocumentSetScopedVectorStore = (*VectorStore)(nil)
+
 // authorizedJoin restricts the completed documents joined as d to those the
 // filter's subject may read at their current incarnation. The relation sits in
 // the FROM clause, so ranking and LIMIT only ever see readable rows. A scope
-// that does not name both a tenant and a principal matches nothing.
+// that does not name both a tenant and a principal matches nothing. A scope
+// bound to a document set joins the set's readable members instead, which are
+// the same rows further limited to the set's immutable membership.
 func authorizedJoin(args []any, scope *domain.AuthorizedScope) (join string, next []any, matches bool) {
 	if scope == nil {
 		return "", args, true
@@ -535,9 +543,18 @@ func authorizedJoin(args []any, scope *domain.AuthorizedScope) (join string, nex
 	if tenantErr != nil || principalErr != nil {
 		return "", nil, false
 	}
-	args = append(args, tenant.String(), principal.String())
-	return fmt.Sprintf(` JOIN grant_catalog_readable_documents g ON g.tenant_id=$%d::uuid AND g.principal_id=$%d::uuid
+	if scope.DocumentSet == nil {
+		args = append(args, tenant.String(), principal.String())
+		return fmt.Sprintf(` JOIN grant_catalog_readable_documents g ON g.tenant_id=$%d::uuid AND g.principal_id=$%d::uuid
   AND g.document_id=d.id AND g.incarnation=COALESCE(d.incarnation,d.id)`, len(args)-1, len(args)), args, true
+	}
+	set, setErr := uuid.Parse(scope.DocumentSet.ID)
+	if setErr != nil {
+		return "", nil, false
+	}
+	args = append(args, tenant.String(), principal.String(), set.String())
+	return fmt.Sprintf(` JOIN grant_catalog_document_set_readable g ON g.tenant_id=$%d::uuid AND g.principal_id=$%d::uuid
+  AND g.set_id=$%d::uuid AND g.document_id=d.id AND g.incarnation=COALESCE(d.incarnation,d.id)`, len(args)-2, len(args)-1, len(args)), args, true
 }
 
 func appendFilterPredicates(args []any, filter domain.VectorFilter, matchDocumentLabels bool) (predicates string, nextArgs []any, matches bool) {

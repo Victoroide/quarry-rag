@@ -23,18 +23,27 @@ type Visibility struct {
 	// at its current incarnation. Service mode leaves it nil and reads no grant
 	// relation.
 	Subject *domain.Principal
+	// DocumentSetID, with Subject, also requires every document to belong to
+	// that live set at its current incarnation.
+	DocumentSetID string
 }
 
 // readableJoin restricts the documents relation aliased d to those the principal
 // may read now. The relation itself requires an active principal, a ready
-// ownership row for the live incarnation and a completed document.
-func readableJoin(subject *domain.Principal, args []any) (join string, next []any) {
+// ownership row for the live incarnation and a completed document. A set also
+// requires the document to belong to that live set at the same incarnation.
+func readableJoin(subject *domain.Principal, set string, args []any) (join string, next []any) {
 	if subject == nil {
 		return "", args
 	}
-	args = append(args, subject.TenantID, subject.ID)
-	return fmt.Sprintf(` JOIN grant_catalog_readable_documents g ON g.tenant_id=$%d::uuid AND g.principal_id=$%d::uuid
+	if set == "" {
+		args = append(args, subject.TenantID, subject.ID)
+		return fmt.Sprintf(` JOIN grant_catalog_readable_documents g ON g.tenant_id=$%d::uuid AND g.principal_id=$%d::uuid
   AND g.document_id=d.id AND g.incarnation=COALESCE(d.incarnation,d.id)`, len(args)-1, len(args)), args
+	}
+	args = append(args, subject.TenantID, subject.ID, set)
+	return fmt.Sprintf(` JOIN grant_catalog_document_set_readable g ON g.tenant_id=$%d::uuid AND g.principal_id=$%d::uuid
+  AND g.set_id=$%d::uuid AND g.document_id=d.id AND g.incarnation=COALESCE(d.incarnation,d.id)`, len(args)-2, len(args)-1, len(args)), args
 }
 
 // ObserveUntaggedIncarnations reads a consistent view of the SQL identities
@@ -47,7 +56,7 @@ func (v Visibility) ObserveUntaggedIncarnations(ctx context.Context, allowedIDs 
 			return incarnations, nil
 		}
 	}
-	join, args := readableJoin(v.Subject, []any{v.Collection, v.DocType, allowedIDs})
+	join, args := readableJoin(v.Subject, v.DocumentSetID, []any{v.Collection, v.DocType, allowedIDs})
 	rows, err := v.Pool.Query(ctx, `
 SELECT d.id::text, COALESCE(d.incarnation,d.id)::text
 FROM documents d`+join+`
@@ -172,7 +181,7 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 		return input, previews, nil
 	}
 
-	join, args := readableJoin(v.Subject, []any{chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs, revIDs})
+	join, args := readableJoin(v.Subject, v.DocumentSetID, []any{chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs, revIDs})
 	rows, err := source.Query(ctx, `
 SELECT hit.ord, d.doc_type, COALESCE(d.incarnation,d.id)::text,
        CASE WHEN d.id=ANY($11::uuid[]) THEN d.content_preview END
@@ -250,7 +259,7 @@ func (v Visibility) VisibleDocumentIDs(ctx context.Context, ids []string) (map[s
 		return visible, nil
 	}
 
-	join, args := readableJoin(v.Subject, []any{queryIDs})
+	join, args := readableJoin(v.Subject, v.DocumentSetID, []any{queryIDs})
 	query := `SELECT d.id::text FROM documents d` + join + ` WHERE d.id = ANY($1::uuid[]) AND d.status = 'completed'`
 	if v.Collection != "" {
 		args = append(args, v.Collection)
@@ -304,7 +313,7 @@ func (v Visibility) VisibleRevisionChunks(ctx context.Context, candidates []doma
 	if len(input) == 0 {
 		return []domain.ScoredChunk{}, nil
 	}
-	join, args := readableJoin(v.Subject, []any{docIDs, revIDs, v.Collection})
+	join, args := readableJoin(v.Subject, v.DocumentSetID, []any{docIDs, revIDs, v.Collection})
 	rows, err := v.Pool.Query(ctx, `
 SELECT hit.ord
 FROM unnest($1::uuid[], $2::uuid[]) WITH ORDINALITY AS hit(doc_id, rev_id, ord)
