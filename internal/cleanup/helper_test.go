@@ -3,6 +3,7 @@ package cleanup
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
@@ -222,4 +223,55 @@ func TestPostgresCleanupOnAnActiveDatabaseUsesTheCoordinator(t *testing.T) {
 	var held bool
 	require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT held FROM document_deletions WHERE document_id=$1`, string(id)).Scan(&held))
 	require.False(t, held, "a transactional delete permits reuse")
+}
+
+func TestLegacyPostgresCleanupWithSingleConnection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	databaseURL := pgtest.StartVector(t)
+	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
+	require.NoError(t, metadata.RunMigrations(t.Context()))
+	vectors, err := pgstore.NewVectorStore(t.Context(), metadata, 3)
+	require.NoError(t, err)
+	separator := "?"
+	if strings.Contains(databaseURL, "?") {
+		separator = "&"
+	}
+	// One connection must serve the guard, the receipt statements and the metadata removal.
+	cleaner, err := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL + separator + "pool_max_conns=1"}, WithLegacyReservations())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
+	seed := func() domain.DocumentID {
+		id := domain.DocumentID(uuid.NewString())
+		require.NoError(t, metadata.InsertDocument(t.Context(), domain.Document{ID: id}))
+		require.NoError(t, vectors.Upsert(t.Context(), "", []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: id, Embedding: []float32{1, 0, 0}}}))
+		return id
+	}
+
+	id := seed()
+	require.NoError(t, cleaner.Delete(t.Context(), string(id)))
+	require.ErrorIs(t, cleaner.Delete(t.Context(), string(id)), ErrDocumentNotFound, "a repeat reports absence")
+	var remaining int
+	require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT count(*) FROM chunk_vectors WHERE document_id=$1`, string(id)).Scan(&remaining))
+	require.Zero(t, remaining)
+	var receipts int
+	require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT count(*) FROM document_deletions`).Scan(&receipts))
+	require.Zero(t, receipts, "transactional vectors need no reservation")
+
+	live := seed()
+	var incarnation string
+	require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, string(live)).Scan(&incarnation))
+	require.ErrorIs(t, cleaner.DeleteIncarnation(t.Context(), string(live), incarnation), domain.ErrDeletionInactive)
+	require.ErrorIs(t, cleaner.DeleteIncarnation(t.Context(), string(live), ""), domain.ErrDeletionPreconditionRequired, "an empty qualifier is never an ID-only request")
+	exists, err := metadata.DocumentExists(t.Context(), live)
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	_, err = metadata.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	require.NoError(t, err)
+	require.ErrorIs(t, cleaner.Delete(t.Context(), string(live)), domain.ErrDeletionPreconditionRequired, "the guard yields to the activated contract")
+	require.NoError(t, cleaner.DeleteIncarnation(t.Context(), string(live), incarnation))
 }

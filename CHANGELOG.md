@@ -6,6 +6,8 @@ Notable changes are grouped by release.
 
 ### Added
 
+- Qualified document deletion for callers: `Client.DeleteDocumentIncarnation`, `UUID@incarnation` arguments for `make cleanup` and an optional `incarnation` for `quarry_delete_document`. An empty or malformed incarnation is rejected and never becomes an ID-only request.
+- Opt-in legacy deletion reservations commit a durable receipt before ID-only cleanup mutates a vector store, so activating checkpointed deletion or losing a database session cannot let a replacement overtake the last call. Document and administrative deletion enable them only in the activation release.
 - A PostgreSQL grant catalog and operator import for staging tenant-bound document ownership and direct grants.
 - Optional [Word binary stories](docs/api.md#word-binary-extraction) for `.doc` uploads.
 - Optional [strict synthesis budgeting](docs/configuration.md#strict-synthesis-budgets) measures complete model input, reserves answer space and reports the measured input count.
@@ -42,6 +44,7 @@ Notable changes are grouped by release.
 
 - Release archives are checked for platform coverage and package contents before publication. See [release packaging](docs/development.md#releases).
 - PostgreSQL vector queries handle server query timeouts consistently across locales.
+- `make cleanup` with `GO_RAG_FAKE_MODE` forwards each deletion once to the running service on `SERVER_PORT`, because that service owns the in-memory vectors.
 - Local and scheduled fuzzing discover all active targets, and CI exercises them nightly.
 - The file download API and Go client describe `expires_in` as the requested lifetime and explain why access can end earlier.
 - The no-evidence answer follows `Accept-Language` for English, Spanish, Portuguese, French, German and Italian and sets `Content-Language`.

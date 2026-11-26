@@ -9,6 +9,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/store/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -97,10 +98,20 @@ func TestDeletionTargetsFollowTheConfiguredStores(t *testing.T) {
 		{name: "offline", cfg: config.Config{FakeMode: true, PineconeIndexName: "ignored"}, wantInMemory: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			targets := deletionTargets(&tc.cfg)
+			targets := deletionTargets(&tc.cfg, nil)
 			require.Equal(t, tc.bucket, targets.SourceBucket)
 			require.Equal(t, tc.idx, targets.VectorIndex)
 			require.Equal(t, tc.wantInMemory, targets.InMemory)
 		})
 	}
+}
+
+func TestDeletionTargetsExposeTheOwningInMemoryIndex(t *testing.T) {
+	index := memory.NewFakeVectorStore()
+	offline := deletionTargets(&config.Config{FakeMode: true}, index)
+	require.Same(t, index, offline.Memory)
+	require.Equal(t, index.MemoryOwner(), offline.Memory.MemoryOwner())
+	// A hosted deployment never treats a process-local index as the owner.
+	require.Nil(t, deletionTargets(&config.Config{PineconeIndexName: "index"}, index).Memory)
+	require.Nil(t, deletionTargets(&config.Config{FakeMode: true}, nil).Memory)
 }

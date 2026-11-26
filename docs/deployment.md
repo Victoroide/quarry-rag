@@ -609,6 +609,17 @@ If documents already have collection labels, complete the
 [collection metadata backfill](development.md#collection-metadata-backfill) once
 after upgrading to enable collection-filtered retrieval of their existing vectors.
 
+## Legacy Deletion Reservations
+
+ID-only deletion keeps working while the database has not activated [checkpointed deletion](api.md#checkpointed-deletion). The [reservation behavior](api.md#id-only-deletion-across-activation) closes the window in which an activation, or a lost database session, lets a replacement UUID overtake the last external call of a legacy cleanup. The server entry point and `make cleanup` of this release do not enable it, because a reservation that holds a hosted identity needs the quarantine, release and activation procedures that ship with the activation release. The activation release enables it through `RouterDeps.LegacyDeletionReservations` and `cleanup.WithLegacyReservations`. Until then deletion behaves as before and the reservation receipts are not written.
+
+Where it is enabled:
+
+- Activation takes the same lock exclusively. It waits for every healthy ID-only cleanup, then commits. A cleanup whose database session was lost does not hold the lock, so activation can commit while the last provider call is outstanding. The durable reservation then blocks admission of that UUID with `409` until the call completes, and the original request completes it on a new connection.
+- A live row with a reservation, for example after the first hosted call failed, still serves status, signed file addresses and same-content duplicates until an activated request qualifies the original incarnation. That request converts the reservation and fences the document.
+- Each in-flight ID-only cleanup holds one pool connection, and the standalone command needs only one. See [PostgreSQL connections](#concurrency-limits).
+- A qualified request sent to an endpoint that predates the header can be treated as an ID-only request. Send qualified deletions only after every endpoint in the pool enforces the qualifier, and keep ID-only clients until then.
+
 ## Health Probes and Readiness
 
 The service exposes three unauthenticated probe endpoints:

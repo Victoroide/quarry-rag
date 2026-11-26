@@ -24,7 +24,18 @@ type DeleteResponse struct {
 // DeleteOption customizes DELETE /documents/{doc_id}.
 type DeleteOption func(*deleteOptions)
 
-type deleteOptions struct{ targets cleanup.Targets }
+type deleteOptions struct {
+	targets            cleanup.Targets
+	legacyReservations bool
+}
+
+// WithLegacyReservations makes an ID-only request commit a durable reservation
+// under the activation lock before it mutates any external store, so activation
+// and a replacement admission cannot overtake its last call. Enable it only in a
+// deployment that can also quarantine, release and activate.
+func WithLegacyReservations() DeleteOption {
+	return func(opts *deleteOptions) { opts.legacyReservations = true }
+}
 
 // WithCleanupTargets names the stores the deletion acts on, so a checkpointed
 // deletion records them and refuses to resume against different ones.
@@ -65,6 +76,15 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 		defer cancel()
 		docID := domain.DocumentID(docIDStr)
+		if guard, ok := cs.(domain.LegacyDeletionGuard); ok && options.legacyReservations && !qualified {
+			// The activation lock decides the contract. A request that loses the race
+			// to an activation continues below as an activated ID-only request.
+			err = cleanup.RemoveLegacy(ctx, guard, pcDriver, objects, options.targets, docID)
+			if !errors.Is(err, domain.ErrDeletionActivated) {
+				writeDeleteResult(ctx, w, docIDStr, err)
+				return
+			}
+		}
 		if deleter, ok := cs.(domain.DocumentDeleter); ok {
 			active, modeErr := deleter.DeletionActive(ctx)
 			if modeErr != nil {

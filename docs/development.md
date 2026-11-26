@@ -180,6 +180,8 @@ Accepts one or more document UUIDs as command-line arguments and removes their r
 make cleanup IDS="<document-uuid-1> <document-uuid-2>"
 ```
 
+A bare UUID addresses the live document, which is the only form that works before the database activates [checkpointed deletion](api.md#checkpointed-deletion). `UUID@incarnation` addresses only the lifetime read earlier with `include_incarnation=true`. The incarnation must be one canonical UUID; an empty, repeated or malformed value stops the command before any deletion, and it is never treated as a bare UUID. With `GO_RAG_FAKE_MODE` the vectors live in the running service, so the command sends each deletion once to that service on `SERVER_PORT` with the configured service token.
+
 ### Orphan Reconciliation (`scripts/reconcile`)
 
 Use the service environment configuration, including `DATABASE_URL`,

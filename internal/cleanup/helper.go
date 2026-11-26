@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
+
+	"github.com/Victoroide/quarry-rag/client"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -91,6 +94,9 @@ type Targets struct {
 	VectorIndex string
 	// InMemory marks vectors that live in the serving process.
 	InMemory bool
+	// Memory identifies that in-memory index and serializes its deletions. An
+	// ID-only cleanup of in-memory vectors needs it.
+	Memory domain.InMemoryIndex
 }
 
 // operations adapts the configured stores to the coordinator's external steps.
@@ -98,6 +104,9 @@ type Targets struct {
 // cascades to its rows.
 func operations(vectors domain.VectorDeleter, objects ObjectDeleter, targets Targets) domain.DeleteOperations {
 	ops := domain.DeleteOperations{InMemory: targets.InMemory, SourceBucket: targets.SourceBucket, VectorIndex: targets.VectorIndex}
+	if targets.Memory != nil {
+		ops.MemoryOwner = targets.Memory.MemoryOwner()
+	}
 	if _, transactional := vectors.(domain.TransactionalVectorStore); vectors != nil && !transactional {
 		ops.LegacyNamespace = func(ctx context.Context, id string) error {
 			return ignoreMissing(vectors.DeleteAllVectorsInNamespace(ctx, id))
@@ -139,10 +148,53 @@ type Cleaner struct {
 	vectors  *pcstore.Client
 	objects  ObjectDeleter
 	targets  Targets
+	// offline forwards deletions to the service that holds an in-memory index.
+	offline OfflineAPI
+	// reserve routes ID-only cleanup through the activation guard and its reservation.
+	reserve bool
 }
 
-// New connects the stores required for document deletion.
-func New(ctx context.Context, cfg *config.Config) (*Cleaner, error) {
+// OfflineAPI is the service interface that holds in-memory vectors. Only that
+// service can delete them, so offline cleanup is sent there.
+type OfflineAPI interface {
+	DeleteDocument(ctx context.Context, id string) (*client.DeleteResponse, error)
+	DeleteDocumentIncarnation(ctx context.Context, id, incarnation string) (*client.DeleteResponse, error)
+}
+
+// Option configures a Cleaner.
+type Option func(*Cleaner)
+
+// WithLegacyReservations makes ID-only cleanup commit a durable reservation
+// under the activation lock before it mutates any external store. It is meant
+// for a deployment that can also quarantine, release and activate.
+func WithLegacyReservations() Option {
+	return func(c *Cleaner) { c.reserve = true }
+}
+
+// WithOfflineService sends every deletion to the service that owns the
+// in-memory index instead of touching any store directly.
+func WithOfflineService(api OfflineAPI) Option {
+	return func(c *Cleaner) { c.offline = api }
+}
+
+// New connects the stores required for document deletion. With GO_RAG_FAKE_MODE
+// the vectors live in the running service, so deletions go to that service.
+func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Cleaner, error) {
+	cleaner := &Cleaner{}
+	for _, opt := range opts {
+		opt(cleaner)
+	}
+	if cfg.FakeMode {
+		if cleaner.offline != nil {
+			return cleaner, nil
+		}
+		api, err := client.New("http://127.0.0.1:"+cfg.ServerPort, client.WithServiceToken(serviceToken(cfg)))
+		if err != nil {
+			return nil, fmt.Errorf("offline service client: %w", err)
+		}
+		cleaner.offline = api
+		return cleaner, nil
+	}
 	pg, err := pgstore.NewClient(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("postgres connect: %w", err)
@@ -153,7 +205,8 @@ func New(ctx context.Context, cfg *config.Config) (*Cleaner, error) {
 	if migrationErr != nil {
 		return nil, errors.Join(fmt.Errorf("prepare cleanup schema: %w", migrationErr), pg.Close(ctx))
 	}
-	cleaner := &Cleaner{metadata: pg, targets: Targets{SourceBucket: cfg.S3Bucket}}
+	cleaner.metadata = pg
+	cleaner.targets = Targets{SourceBucket: cfg.S3Bucket}
 	if cfg.VectorStore != "postgres" {
 		cleaner.vectors, err = pcstore.NewPineconeClient(ctx, cfg)
 		if err != nil {
@@ -170,29 +223,61 @@ func New(ctx context.Context, cfg *config.Config) (*Cleaner, error) {
 	return cleaner, nil
 }
 
+// serviceToken returns the first configured service credential.
+func serviceToken(cfg *config.Config) string {
+	if cfg.ServiceToken != "" {
+		return cfg.ServiceToken
+	}
+	for _, token := range cfg.ServiceTokens {
+		if token != "" {
+			return token
+		}
+	}
+	return ""
+}
+
 // Delete removes one stored document and its external data. When the database
 // selected checkpointed deletion, a live document needs DeleteIncarnation.
 func (c *Cleaner) Delete(ctx context.Context, docID string) error {
-	return c.DeleteIncarnation(ctx, docID, "")
+	return c.delete(ctx, docID, "", false)
 }
 
 // DeleteIncarnation removes the document lifetime identified by incarnation
-// through the checkpointed coordinator. An empty incarnation takes the
-// compatibility path until the database selects checkpointed deletion.
+// through the checkpointed coordinator. It never falls back to an ID-only
+// request: an empty incarnation is invalid, and a database that has not selected
+// checkpointed deletion refuses the request.
 func (c *Cleaner) DeleteIncarnation(ctx context.Context, docID, incarnation string) error {
-	active, err := c.metadata.DeletionActive(ctx)
-	if err != nil {
-		return err
+	return c.delete(ctx, docID, incarnation, true)
+}
+
+func (c *Cleaner) delete(ctx context.Context, docID, incarnation string, qualified bool) error {
+	if qualified && incarnation == "" {
+		return domain.ErrDeletionPreconditionRequired
+	}
+	if c.offline != nil {
+		return c.deleteOffline(ctx, docID, incarnation, qualified)
 	}
 	var vectors domain.VectorDeleter
 	if c.vectors != nil {
 		vectors = c.vectors
 	}
 	id := domain.DocumentID(docID)
+	if !qualified && c.reserve {
+		// The activation lock decides the contract, so an activation that wins the
+		// race continues as an activated ID-only request.
+		err := RemoveLegacy(ctx, c.metadata, vectors, c.objects, c.targets, id)
+		if !errors.Is(err, domain.ErrDeletionActivated) {
+			return err
+		}
+	}
+	active, err := c.metadata.DeletionActive(ctx)
+	if err != nil {
+		return err
+	}
 	if active {
 		return RemoveIncarnation(ctx, c.metadata, vectors, c.objects, c.targets, id, incarnation)
 	}
-	if incarnation != "" {
+	if qualified {
 		return domain.ErrDeletionInactive
 	}
 	doc, err := c.metadata.GetDocument(ctx, id)
@@ -205,8 +290,27 @@ func (c *Cleaner) DeleteIncarnation(ctx context.Context, docID, incarnation stri
 	return Remove(ctx, c.metadata, vectors, c.objects, doc)
 }
 
+// deleteOffline sends the request to the service that owns the vectors. It
+// sends the saved incarnation once and never looks up a current one.
+func (c *Cleaner) deleteOffline(ctx context.Context, docID, incarnation string, qualified bool) error {
+	var err error
+	if qualified {
+		_, err = c.offline.DeleteDocumentIncarnation(ctx, docID, incarnation)
+	} else {
+		_, err = c.offline.DeleteDocument(ctx, docID)
+	}
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %s", ErrDocumentNotFound, docID)
+	}
+	return err
+}
+
 // Close releases the shared store connections.
 func (c *Cleaner) Close(ctx context.Context) error {
+	if c.metadata == nil {
+		return nil
+	}
 	var vectorErr error
 	if c.vectors != nil {
 		vectorErr = c.vectors.Close()
