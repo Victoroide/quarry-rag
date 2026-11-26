@@ -18,6 +18,18 @@ const VectorAttemptKey = "vector_attempt"
 // VectorIncarnationKey records read provenance on an untagged hosted vector.
 const VectorIncarnationKey = "document_incarnation"
 
+// ManifestIdentity reports whether a chunk carries only a hosted revision as
+// its publication identity. Its active revision still needs SQL verification.
+func ManifestIdentity(chunk Chunk) bool {
+	return chunk.RevisionID != "" && emptyVectorTag(chunk.Metadata, VectorRevisionKey) &&
+		emptyVectorTag(chunk.Metadata, VectorAttemptKey)
+}
+
+func emptyVectorTag(metadata map[string]any, key string) bool {
+	value, exists := metadata[key]
+	return !exists || value == ""
+}
+
 type vectorIncarnationKey struct{}
 
 // WithVectorIncarnation binds an untagged vector write to its claimed document.

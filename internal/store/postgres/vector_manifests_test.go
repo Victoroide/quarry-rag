@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 	"time"
 
@@ -395,4 +396,102 @@ func TestVisibleRevisionChunksEnforcesSubjectGrants(t *testing.T) {
 	visible, err = vis.VisibleRevisionChunks(t.Context(), candidates)
 	require.NoError(t, err)
 	require.Equal(t, []string{ownDoc}, documentIDs(visible))
+}
+
+func grantsManifestFixture(t *testing.T, c *Client) *ownedFixture {
+	t.Helper()
+	c.EnableHostedVectorManifests(true)
+	f := provisionOwnedFixture(t, c)
+	_, err := c.ActivateGrants(t.Context(), false)
+	require.NoError(t, err)
+	c.SetAuthzMode("grants")
+	return f
+}
+
+func admitHostedOwned(t *testing.T, f *ownedFixture, p domain.Principal, text string, scoped bool) domain.DocumentID {
+	t.Helper()
+	req := ownedRequest(p, "", text)
+	req.SupportsScopedVectors = scoped
+	require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)
+	return req.Document.ID
+}
+
+func completeManifestHit(t *testing.T, c *Client, a manifestAttempt, score float64) domain.ScoredChunk {
+	t.Helper()
+	chunks := a.chunks(a.job.Document.ID, a.job.Document.Content)
+	ok, err := c.CompleteJob(t.Context(), a.job, chunks, domain.IndexObservation{})
+	require.NoError(t, err)
+	require.True(t, ok)
+	hit := domain.ScoredChunk{Chunk: chunks[0], Score: score}
+	hit.Chunk.RevisionID = a.revision
+	hit.Chunk.VectorID = a.vectorID
+	return hit
+}
+
+func expectedManifestEvidence(hit domain.ScoredChunk, incarnation string) domain.ScoredChunk {
+	hit.ObservedIncarnation = incarnation
+	metadata := make(map[string]any, len(hit.Chunk.Metadata)+1)
+	maps.Copy(metadata, hit.Chunk.Metadata)
+	metadata["doc_type"] = domain.DefaultDocType
+	hit.Chunk.Metadata = metadata
+	return hit
+}
+
+func TestVisibleEvidenceScopedManifestPublication(t *testing.T) {
+	c := jobsDatabase(t)
+	f := grantsManifestFixture(t, c)
+	ctx := t.Context()
+	const body = "scoped manifest publication"
+	id := admitHostedOwned(t, f, f.owner, body, true)
+	first := startManifestAttempt(t, c, id, "expired")
+	expireJobLease(t, c, id)
+	second := startManifestAttempt(t, c, id, "published")
+	require.NotEqual(t, first.job.LeaseToken, second.job.LeaseToken)
+	active := completeManifestHit(t, c, second, 0.95)
+	require.Equal(t, "retired", manifestState(t, c, first.revision))
+	require.Equal(t, "active", manifestState(t, c, second.revision))
+	var scoped bool
+	var attempt string
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT scoped_vectors, vector_attempt::text FROM documents WHERE id=$1`, id).
+		Scan(&scoped, &attempt))
+	require.True(t, scoped)
+	require.Equal(t, second.job.LeaseToken, attempt)
+
+	otherID := admitHostedOwned(t, f, f.owner, "another published document", true)
+	other := startManifestAttempt(t, c, otherID, "other")
+	otherHit := completeManifestHit(t, c, other, 0.4)
+	pendingID := admitHostedOwned(t, f, f.owner, "unpublished document", true)
+	pending := startManifestAttempt(t, c, pendingID, "pending")
+	require.Equal(t, "writing", manifestState(t, c, pending.revision))
+
+	// Keep the current chunk ID, index and text to isolate the revision predicate.
+	candidates := []domain.ScoredChunk{otherHit}
+	for _, revision := range []string{first.revision, pending.revision, uuid.NewString(), "", "not-a-uuid", other.revision} {
+		rejected := active
+		rejected.Chunk.RevisionID = revision
+		candidates = append(candidates, rejected)
+	}
+	tagged := active
+	tagged.Chunk.RevisionID = ""
+	tagged.Chunk.Metadata = map[string]any{
+		domain.VectorRevisionKey: second.job.Incarnation,
+		domain.VectorAttemptKey:  second.job.LeaseToken,
+	}
+	candidates = append(candidates, tagged)
+	candidates = append(candidates, active)
+	vis := Visibility{Pool: c.Pool, Subject: &f.owner}
+	revisions, err := vis.VisibleRevisionChunks(ctx, candidates)
+	require.NoError(t, err)
+	require.Equal(t, []domain.ScoredChunk{otherHit, active}, revisions)
+	want := []domain.ScoredChunk{
+		expectedManifestEvidence(otherHit, other.job.Incarnation),
+		expectedManifestEvidence(active, second.job.Incarnation),
+	}
+	evidence, err := vis.VisibleEvidence(ctx, candidates)
+	require.NoError(t, err)
+	require.Equal(t, want, evidence)
+	evidence, previews, err := vis.VisibleEvidenceWithPreviews(ctx, candidates, []string{string(id), string(pendingID)})
+	require.NoError(t, err)
+	require.Equal(t, want, evidence)
+	require.Equal(t, map[string]string{string(id): body}, previews)
 }
