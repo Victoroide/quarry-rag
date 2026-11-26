@@ -70,6 +70,16 @@ func (c *Client) NewKey(documentID, uploadID, docType, filename string) string {
 	return objectKey(sanitizeKeyComponent(documentID, 64, "document")+"/"+sanitizeKeyComponent(uploadID, 64, "upload"), docType, filename)
 }
 
+// NewOwnedKey allocates an upload attempt key scoped to the owner's intended incarnation.
+func (c *Client) NewOwnedKey(documentID, incarnation, uploadID, docType, filename string) string {
+	return objectKey(
+		sanitizeKeyComponent(documentID, 64, "document")+"/"+
+			sanitizeKeyComponent(incarnation, 64, "incarnation")+"/"+
+			sanitizeKeyComponent(uploadID, 64, "upload"),
+		docType, filename,
+	)
+}
+
 func objectKey(docID, docType, filename string) string {
 	return fmt.Sprintf("documents/%s/%s/%s", sanitizeKeyComponent(docType, 64, "document"), docID, sanitizeKeyComponent(filename, 200, "file"))
 }

@@ -335,6 +335,18 @@ func TestUploadSanitizesKey(t *testing.T) {
 }
 
 func TestNewKeyIsAllocatedBeforeTheWrite(t *testing.T) {
+	testKeyAllocatedBeforeWrite(t, (*Client).NewKey, "")
+}
+
+func TestNewOwnedKeyIsAllocatedBeforeWrite(t *testing.T) {
+	const incarnation = "44444444-4444-4444-8444-444444444444"
+	testKeyAllocatedBeforeWrite(t, func(client *Client, documentID, uploadID, docType, filename string) string {
+		return client.NewOwnedKey(documentID, incarnation, uploadID, docType, filename)
+	}, incarnation+"/")
+}
+
+func testKeyAllocatedBeforeWrite(t *testing.T, allocate func(*Client, string, string, string, string) string, incarnationPrefix string) {
+	t.Helper()
 	received := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received <- strings.TrimPrefix(r.URL.Path, "/owned-bucket/")
@@ -345,11 +357,11 @@ func TestNewKeyIsAllocatedBeforeTheWrite(t *testing.T) {
 	}))
 	defer server.Close()
 	client := s3EndpointClient(t, server.URL, "")
-	key := client.NewKey("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "reference", "../report.pdf")
-	if want := "documents/reference/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222/_report.pdf"; key != want {
+	key := allocate(client, "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "reference", "../report.pdf")
+	if want := "documents/reference/11111111-1111-4111-8111-111111111111/" + incarnationPrefix + "22222222-2222-4222-8222-222222222222/_report.pdf"; key != want {
 		t.Fatalf("key = %q, want %q", key, want)
 	}
-	if other := client.NewKey("11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", "reference", "../report.pdf"); other == key {
+	if other := allocate(client, "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", "reference", "../report.pdf"); other == key {
 		t.Fatal("attempts share an object key")
 	}
 	select {

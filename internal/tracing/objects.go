@@ -21,6 +21,7 @@ type SourceObjectStore interface {
 	ObjectStore
 	Bucket() string
 	NewKey(documentID, uploadID, docType, fileName string) string
+	NewOwnedKey(documentID, incarnation, uploadID, docType, fileName string) string
 	PutSource(context.Context, string, extractor.FileType, io.Reader) (domain.SourceUploadResult, error)
 }
 
@@ -44,6 +45,10 @@ func (s *sourceObjectStore) Bucket() string { return s.source.Bucket() }
 
 func (s *sourceObjectStore) NewKey(documentID, uploadID, docType, fileName string) string {
 	return s.source.NewKey(documentID, uploadID, docType, fileName)
+}
+
+func (s *sourceObjectStore) NewOwnedKey(documentID, incarnation, uploadID, docType, fileName string) string {
+	return s.source.NewOwnedKey(documentID, incarnation, uploadID, docType, fileName)
 }
 
 func (s *sourceObjectStore) PutSource(ctx context.Context, key string, fileType extractor.FileType, reader io.Reader) (domain.SourceUploadResult, error) {

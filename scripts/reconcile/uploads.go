@@ -99,11 +99,23 @@ type uploadPlan struct {
 	versions int
 }
 
-// recognizedKey accepts only keys this service generates for the journaled
-// upload: documents/{type}/{document id}/{upload id}/{file name}.
+// recognizedKey matches the journal row to a generated key, which includes
+// a canonical incarnation UUID between the document and upload IDs for owned uploads.
 func recognizedKey(row pgstore.SourceUploadRecord) bool {
 	parts := strings.Split(row.Key, "/")
-	return len(parts) == 5 && parts[0] == "documents" && parts[2] == row.DocumentID && parts[3] == row.ID
+	if len(parts) != 5 && len(parts) != 6 {
+		return false
+	}
+	kind, name := parts[1], parts[len(parts)-1]
+	if kind == "" || kind == "." || kind == ".." || name == "" || name == "." || name == ".." ||
+		parts[0] != "documents" || parts[2] != row.DocumentID || parts[len(parts)-2] != row.ID {
+		return false
+	}
+	if len(parts) == 5 {
+		return true
+	}
+	incarnation, err := uuid.Parse(parts[3])
+	return err == nil && incarnation.String() == parts[3]
 }
 
 // settlementDue reports whether a tombstone may be dropped after a clean
