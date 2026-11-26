@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,7 +64,7 @@ func configureValidGrantsEnv(t *testing.T, jwksPath string) {
 	t.Setenv("VECTOR_STORE", "postgres")
 	t.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "false")
 	t.Setenv("EVALUATION_COLLECTION_PREFIX", "")
-	t.Setenv("AUTHZ_ISSUER", "https://issuer.example/delegated")
+	t.Setenv("AUTHZ_ISSUER", (&url.URL{Scheme: "https", Host: "issuer.example", Path: "/delegated"}).String())
 	t.Setenv("AUTHZ_AUDIENCE", "quarry-documents")
 	t.Setenv("AUTHZ_JWKS_FILE", jwksPath)
 }
@@ -89,7 +90,7 @@ func TestGrantsModeConfigValidation(t *testing.T) {
 		{"default dedup", "INGEST_CONTENT_DEDUP", "", "INGEST_CONTENT_DEDUP"},
 		{"content capture", "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true", "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"},
 		{"evaluation fixtures", "EVALUATION_COLLECTION_PREFIX", "eval-prefix", "EVALUATION_COLLECTION_PREFIX"},
-		{"http issuer", "AUTHZ_ISSUER", "http://issuer.example", "AUTHZ_ISSUER"},
+		{"http issuer", "AUTHZ_ISSUER", (&url.URL{Scheme: "http", Host: "issuer.example"}).String(), "AUTHZ_ISSUER"},
 		{"missing audience", "AUTHZ_AUDIENCE", "", "AUTHZ_AUDIENCE"},
 		{"missing jwks file", "AUTHZ_JWKS_FILE", filepath.Join(t.TempDir(), "absent.json"), "AUTHZ_JWKS_FILE"},
 		{"expired jwks file", "AUTHZ_JWKS_FILE", expiredJWKS, "AUTHZ_JWKS_FILE"},

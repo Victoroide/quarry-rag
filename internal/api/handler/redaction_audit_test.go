@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,11 +52,12 @@ func (s *modeChunkStore) CorpusAuthzMode(context.Context) (string, error) {
 
 func TestReadinessEnforcesCorpusModeAndTrust(t *testing.T) {
 	cs := &modeChunkStore{healthChunkStore: &healthChunkStore{}, mode: "grants"}
-	probes := NewProbes(&healthVectorStore{}, cs, nil, time.Minute)
 	trustErr := error(nil)
-	probes.SetAuthzChecks("grants", func() error { return trustErr })
-
+	// Each probe lifetime caches the corpus comparison, so every scenario
+	// starts from fresh probes.
 	check := func() int {
+		probes := NewProbes(&healthVectorStore{}, cs, nil, time.Minute)
+		probes.SetAuthzChecks("grants", func() error { return trustErr })
 		rec := httptest.NewRecorder()
 		ReadinessHandler(probes)(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
 		return rec.Code
@@ -73,6 +75,36 @@ func TestReadinessEnforcesCorpusModeAndTrust(t *testing.T) {
 	cs.mode = "grants"
 	cs.err = errors.New("db unavailable")
 	require.Equal(t, http.StatusServiceUnavailable, check())
+}
+
+type countingModeStore struct {
+	*modeChunkStore
+	reads atomic.Int64
+}
+
+func (s *countingModeStore) CorpusAuthzMode(ctx context.Context) (string, error) {
+	s.reads.Add(1)
+	return s.modeChunkStore.CorpusAuthzMode(ctx)
+}
+
+func TestReadinessCachesCorpusModeForTheProbeLifetime(t *testing.T) {
+	for _, mode := range []string{"service", "grants"} {
+		t.Run(mode, func(t *testing.T) {
+			cs := &countingModeStore{modeChunkStore: &modeChunkStore{healthChunkStore: &healthChunkStore{}, mode: mode}}
+			probes := NewProbes(&healthVectorStore{}, cs, nil, time.Minute)
+			probes.SetAuthzChecks(mode, func() error { return nil })
+			var wg sync.WaitGroup
+			for range 50 {
+				wg.Go(func() {
+					rec := httptest.NewRecorder()
+					ReadinessHandler(probes)(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
+					require.Equal(t, http.StatusOK, rec.Code)
+				})
+			}
+			wg.Wait()
+			require.Equal(t, int64(1), cs.reads.Load(), "readiness must not query the corpus mode on every probe")
+		})
+	}
 }
 
 type failingScopedStore struct {

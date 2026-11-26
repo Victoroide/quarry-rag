@@ -19,7 +19,7 @@ func TestGrantCatalogRejectsIncompatibleFlagsBeforeConnecting(t *testing.T) {
 		{"-activate-grants", "-vector-dimensions", "256"},
 		{"extra-arg"},
 	} {
-		err := run(t.Context(), args, "postgres://example", strings.NewReader(""), io.Discard)
+		err := run(t.Context(), args, "invalid connection string", strings.NewReader(""), io.Discard)
 		require.ErrorContains(t, err, "-activate-grants")
 	}
 }
