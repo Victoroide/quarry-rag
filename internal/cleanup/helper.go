@@ -76,16 +76,69 @@ func remove(ctx context.Context, cs domain.ChunkStore, vectors domain.VectorDele
 }
 
 // ErrDocumentNotFound indicates that metadata is not yet present or was removed.
-var ErrDocumentNotFound = errors.New("document not found")
+var ErrDocumentNotFound = domain.ErrDocumentNotFound
 
 // ErrFileStorageUnavailable indicates a stored file cannot be removed without object storage.
-var ErrFileStorageUnavailable = errors.New("file storage is not configured")
+var ErrFileStorageUnavailable = domain.ErrFileStorageUnavailable
+
+// Targets names the nonsecret stores that a checkpointed deletion acts on. The
+// coordinator records them with the cleanup target and refuses to resume
+// against different stores.
+type Targets struct {
+	// SourceBucket is the object bucket that holds original files.
+	SourceBucket string
+	// VectorIndex is the hosted index that holds vectors.
+	VectorIndex string
+	// InMemory marks vectors that live in the serving process.
+	InMemory bool
+}
+
+// operations adapts the configured stores to the coordinator's external steps.
+// A transactional vector store has no external step: the metadata removal
+// cascades to its rows.
+func operations(vectors domain.VectorDeleter, objects ObjectDeleter, targets Targets) domain.DeleteOperations {
+	ops := domain.DeleteOperations{InMemory: targets.InMemory, SourceBucket: targets.SourceBucket, VectorIndex: targets.VectorIndex}
+	if _, transactional := vectors.(domain.TransactionalVectorStore); vectors != nil && !transactional {
+		ops.LegacyNamespace = func(ctx context.Context, id string) error {
+			return ignoreMissing(vectors.DeleteAllVectorsInNamespace(ctx, id))
+		}
+		ops.LegacyVectors = func(ctx context.Context, id string) error {
+			return ignoreMissing(vectors.DeleteByDocID(ctx, id))
+		}
+		if revisions, ok := vectors.(domain.RevisionVectorDeleter); ok {
+			ops.RevisionVectors = func(ctx context.Context, id, incarnation string) error {
+				return ignoreMissing(revisions.DeleteByRevision(ctx, id, incarnation))
+			}
+		}
+	}
+	if objects != nil {
+		ops.Source = objects.Delete
+	}
+	return ops
+}
+
+func ignoreMissing(err error) error {
+	if status.Code(err) == codes.NotFound {
+		return nil
+	}
+	return err
+}
+
+// RemoveIncarnation deletes the document lifetime the caller observed through
+// the checkpointed coordinator. HTTP and administrative cleanup both use it.
+// An empty incarnation is accepted only for an absent document.
+func RemoveIncarnation(ctx context.Context, deleter domain.DocumentDeleter, vectors domain.VectorDeleter, objects ObjectDeleter, targets Targets, id domain.DocumentID, incarnation string) error {
+	ops := operations(vectors, objects, targets)
+	ops.ExpectedIncarnation = incarnation
+	return deleter.DeleteWithCleanup(ctx, id, ops)
+}
 
 // Cleaner reuses store connections for a sequence of document deletions.
 type Cleaner struct {
 	metadata *pgstore.Client
 	vectors  *pcstore.Client
 	objects  ObjectDeleter
+	targets  Targets
 }
 
 // New connects the stores required for document deletion.
@@ -100,12 +153,13 @@ func New(ctx context.Context, cfg *config.Config) (*Cleaner, error) {
 	if migrationErr != nil {
 		return nil, errors.Join(fmt.Errorf("prepare cleanup schema: %w", migrationErr), pg.Close(ctx))
 	}
-	cleaner := &Cleaner{metadata: pg}
+	cleaner := &Cleaner{metadata: pg, targets: Targets{SourceBucket: cfg.S3Bucket}}
 	if cfg.VectorStore != "postgres" {
 		cleaner.vectors, err = pcstore.NewPineconeClient(ctx, cfg)
 		if err != nil {
 			return nil, errors.Join(fmt.Errorf("pinecone connect: %w", err), pg.Close(ctx))
 		}
+		cleaner.targets.VectorIndex = cfg.PineconeIndexName
 	}
 	if cfg.S3Bucket != "" {
 		cleaner.objects, err = s3store.New(ctx, cfg)
@@ -116,18 +170,37 @@ func New(ctx context.Context, cfg *config.Config) (*Cleaner, error) {
 	return cleaner, nil
 }
 
-// Delete removes one stored document and its external data.
+// Delete removes one stored document and its external data. When the database
+// selected checkpointed deletion, a live document needs DeleteIncarnation.
 func (c *Cleaner) Delete(ctx context.Context, docID string) error {
-	doc, err := c.metadata.GetDocument(ctx, domain.DocumentID(docID))
+	return c.DeleteIncarnation(ctx, docID, "")
+}
+
+// DeleteIncarnation removes the document lifetime identified by incarnation
+// through the checkpointed coordinator. An empty incarnation takes the
+// compatibility path until the database selects checkpointed deletion.
+func (c *Cleaner) DeleteIncarnation(ctx context.Context, docID, incarnation string) error {
+	active, err := c.metadata.DeletionActive(ctx)
+	if err != nil {
+		return err
+	}
+	var vectors domain.VectorDeleter
+	if c.vectors != nil {
+		vectors = c.vectors
+	}
+	id := domain.DocumentID(docID)
+	if active {
+		return RemoveIncarnation(ctx, c.metadata, vectors, c.objects, c.targets, id, incarnation)
+	}
+	if incarnation != "" {
+		return domain.ErrDeletionInactive
+	}
+	doc, err := c.metadata.GetDocument(ctx, id)
 	if err != nil {
 		return err
 	}
 	if doc == nil {
 		return fmt.Errorf("%w: %s", ErrDocumentNotFound, docID)
-	}
-	var vectors domain.VectorDeleter
-	if c.vectors != nil {
-		vectors = c.vectors
 	}
 	return Remove(ctx, c.metadata, vectors, c.objects, doc)
 }
