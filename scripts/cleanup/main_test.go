@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
@@ -122,10 +125,25 @@ func TestParseCommandModesAndValidation(t *testing.T) {
 		{"--release-held", "--offline-owner-terminated=" + owner, "--offline-owner-terminated=unknown", documentArg, incarnationArg},
 		{"--offline-owner-terminated=" + owner, documentArg},
 		{"--unknown-flag", documentArg},
+		{"--activate-deletion", documentArg},
+		{documentArg, "--activate-deletion"},
+		{"--activate-deletion", "--activate-deletion"},
+		{"--activate-deletion", "--list-held"},
+		{"--list-held", "--activate-deletion"},
+		{"--quarantine", documentArg, "--activate-deletion"},
+		{"--release-held", documentArg, incarnationArg, "--activate-deletion"},
+		{"--activate-deletion", ""},
+		{"--activate-deletion=true"},
+		{"--activate-deletion="},
+		{"--activate-deletion", "true"},
 	} {
 		_, err = parseCommand(bad)
 		require.Error(t, err, bad)
 	}
+
+	cmd, err = parseCommand([]string{"--activate-deletion"})
+	require.NoError(t, err)
+	require.Equal(t, command{action: actionActivate}, cmd, "activation takes no target")
 
 	cmd, err = parseCommand([]string{"--release-held", strings.ToUpper(documentArg), strings.ToUpper(incarnationArg)})
 	require.NoError(t, err)
@@ -150,6 +168,9 @@ func FuzzParseCommand(f *testing.F) {
 	f.Add("--quarantine", documentArg, "")
 	f.Add("--release-held", documentArg, incarnationArg)
 	f.Add("--release-held", "--offline-owner-terminated=unknown", documentArg)
+	f.Add("--activate-deletion", "", "")
+	f.Add("--activate-deletion", documentArg, "")
+	f.Add(documentArg, "--activate-deletion", "")
 	f.Add(documentArg+"@"+incarnationArg, "", "")
 	f.Fuzz(func(t *testing.T, a, b, c string) {
 		var args []string
@@ -162,6 +183,12 @@ func FuzzParseCommand(f *testing.F) {
 		if err != nil {
 			return
 		}
+		if slices.Contains(args, "--activate-deletion") {
+			require.Equal(t, command{action: actionActivate}, cmd, "activation is exclusive")
+			require.Len(t, args, 1)
+			return
+		}
+		require.NotEqual(t, actionActivate, cmd.action, "only the exact flag selects activation")
 		for _, tgt := range cmd.targets {
 			_, parseErr := uuid.Parse(tgt.id)
 			require.NoError(t, parseErr)
@@ -232,4 +259,119 @@ func TestCleanupCLIQuarantineListAndReleaseAcrossActivation(t *testing.T) {
 
 	// Keep os.Args unused in test output.
 	_ = os.Stdout
+}
+
+// cleanupDatabase prepares a disposable database for the command: schema,
+// transactional vectors and the environment the command reads.
+func cleanupDatabase(t *testing.T) *pgstore.Client {
+	t.Helper()
+	db := pgtest.StartVector(t)
+	t.Setenv("DATABASE_URL", db)
+	t.Setenv("VECTOR_STORE", "postgres")
+	t.Setenv("GO_RAG_FAKE_MODE", "false")
+	t.Setenv("S3_BUCKET", "")
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("SERVICE_TOKEN", "cleanup-cli")
+	c, err := pgstore.NewClient(t.Context(), db)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
+	require.NoError(t, c.RunMigrations(t.Context()))
+	_, err = pgstore.NewVectorStore(t.Context(), c, 3)
+	require.NoError(t, err)
+	return c
+}
+
+func liveDocument(t *testing.T, c *pgstore.Client, content string) (id, incarnation string) {
+	t.Helper()
+	id = uuid.NewString()
+	result, err := c.AcceptDocument(t.Context(), domain.AcceptRequest{
+		Document: domain.Document{ID: domain.DocumentID(id), Content: content}, CallerSupplied: true,
+		Fingerprint: chunker.ScopedFingerprint("", content), MaxPending: 100,
+	})
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, result.Outcome)
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, id).Scan(&incarnation))
+	return id, incarnation
+}
+
+func documentExists(t *testing.T, c *pgstore.Client, id string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM documents WHERE id=$1)`, id).Scan(&exists))
+	return exists
+}
+
+func recordedActivation(t *testing.T, c *pgstore.Client) *time.Time {
+	t.Helper()
+	var marker *time.Time
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT activated_at FROM document_deletion_activation`).Scan(&marker))
+	return marker
+}
+
+func TestActivationCommandIsTheOnlyWriterOfTheMarker(t *testing.T) {
+	c := cleanupDatabase(t)
+	id, incarnation := liveDocument(t, c, "live before activation")
+	var buf bytes.Buffer
+
+	// A local setting from before activation moved into the database authorizes
+	// nothing, and ordinary invocations never set the marker.
+	t.Setenv("RETRYABLE_DELETION", "true")
+	require.NoError(t, runArgs([]string{"--list-held"}, &buf))
+	require.ErrorIs(t, runArgs([]string{uuid.NewString()}, &buf), domain.ErrDocumentNotFound)
+	require.Nil(t, recordedActivation(t, c))
+	require.ErrorIs(t, runArgs([]string{id + "@" + incarnation}, &buf), domain.ErrDeletionInactive, "a qualified request cannot activate")
+	require.Nil(t, recordedActivation(t, c))
+	require.True(t, documentExists(t, c, id))
+
+	buf.Reset()
+	require.NoError(t, runArgs([]string{"--activate-deletion"}, &buf))
+	var first domain.DeletionActivation
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &first), buf.String())
+	require.False(t, first.AlreadyActive)
+	marker := recordedActivation(t, c)
+	require.NotNil(t, marker)
+	require.True(t, marker.Equal(first.ActivatedAt))
+
+	// A second explicit activation reports the same instant.
+	time.Sleep(20 * time.Millisecond)
+	buf.Reset()
+	require.NoError(t, runArgs([]string{"--activate-deletion"}, &buf))
+	var second domain.DeletionActivation
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &second), buf.String())
+	require.True(t, second.AlreadyActive)
+	require.True(t, second.ActivatedAt.Equal(first.ActivatedAt))
+
+	// The activated contract: a bare request for a live UUID is refused, and the
+	// request that names the observed lifetime deletes it.
+	t.Setenv("RETRYABLE_DELETION", "false")
+	require.ErrorIs(t, runArgs([]string{id}, &buf), domain.ErrDeletionPreconditionRequired)
+	require.True(t, documentExists(t, c, id))
+	require.NoError(t, runArgs([]string{id + "@" + incarnation}, &buf))
+	require.False(t, documentExists(t, c, id))
+	require.True(t, recordedActivation(t, c).Equal(first.ActivatedAt))
+}
+
+func TestBareCleanupWaitsForTheActivationLock(t *testing.T) {
+	c := cleanupDatabase(t)
+	id, _ := liveDocument(t, c, "removed once activation is out of the way")
+	holder, err := c.Pool.Acquire(t.Context())
+	require.NoError(t, err)
+	_, err = holder.Exec(t.Context(), `SELECT pg_advisory_lock($1)`, pgstore.DeletionActivationLockID)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- runArgs([]string{id}, &bytes.Buffer{}) }()
+	select {
+	case err = <-done:
+		t.Fatalf("an ID-only cleanup proceeded while activation held its lock: %v", err)
+	case <-time.After(750 * time.Millisecond):
+	}
+	require.True(t, documentExists(t, c, id))
+
+	_, err = holder.Exec(t.Context(), `SELECT pg_advisory_unlock($1)`, pgstore.DeletionActivationLockID)
+	require.NoError(t, err)
+	holder.Release()
+	require.NoError(t, <-done)
+	require.False(t, documentExists(t, c, id))
+	require.Nil(t, recordedActivation(t, c))
 }

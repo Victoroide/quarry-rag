@@ -15,12 +15,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// activatedDatabase returns a disposable database whose marker was set by the
-// fixture itself; the coordinator under test never sets it.
+// activatedDatabase returns a disposable database that the fixture activated
+// through the administrative operation; the coordinator under test never sets
+// the marker.
 func activatedDatabase(t *testing.T) *Client {
 	t.Helper()
 	c := jobsDatabase(t)
-	_, err := c.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	_, err := c.ActivateDeletion(t.Context())
 	require.NoError(t, err)
 	return c
 }

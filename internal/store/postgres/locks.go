@@ -11,6 +11,9 @@ const (
 // holds it shared for the whole external sequence. The writer of the activation
 // marker takes it exclusively, so activation commits only after a healthy
 // cleanup has returned. The durable reservation covers a session that is lost.
+// It is always the outermost lock: no path takes it while holding another
+// advisory lock or the marker row, so activation, which locks the marker row
+// under it, cannot deadlock with admission, migrations or maintenance.
 const DeletionActivationLockID int64 = 0x7175617272790004
 
 // documentIntentLockKey is the per-document advisory key that orders a
