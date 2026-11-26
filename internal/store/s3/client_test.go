@@ -1,21 +1,29 @@
 package s3
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -29,6 +37,81 @@ func s3EndpointClient(t *testing.T, endpoint, owner string) *Client {
 		o.BaseEndpoint = &endpoint
 		o.UsePathStyle = true
 	})
+}
+
+type httpClientFunc func(*http.Request) (*http.Response, error)
+
+func (f httpClientFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+func retryingClient(t *testing.T, endpoint string, maxAttempts int, httpClient aws.HTTPClient, backoff ...time.Duration) *Client {
+	t.Helper()
+	delay := time.Duration(0)
+	if len(backoff) > 0 {
+		delay = backoff[0]
+	}
+	return retryingClientWithCreds(t, endpoint, maxAttempts, credentials.NewStaticCredentialsProvider("test-key", "test-secret", ""), httpClient, delay)
+}
+
+func retryingClientWithCreds(t *testing.T, endpoint string, maxAttempts int, creds aws.CredentialsProvider, httpClient aws.HTTPClient, delay time.Duration) *Client {
+	t.Helper()
+	cfg := aws.Config{
+		Region:      "us-east-1",
+		Credentials: creds,
+		HTTPClient:  httpClient,
+		Retryer: func() aws.Retryer {
+			return retry.NewStandard(func(o *retry.StandardOptions) {
+				o.MaxAttempts = maxAttempts
+				o.RateLimiter = ratelimit.None
+				o.Backoff = retry.BackoffDelayerFunc(func(int, error) (time.Duration, error) {
+					return delay, nil
+				})
+			})
+		},
+	}
+	return newClient(cfg, "owned-bucket", "", func(o *awss3.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = &endpoint
+		}
+		o.UsePathStyle = true
+	})
+}
+
+func closedListenerAddr(t *testing.T) string {
+	t.Helper()
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
+func writeS3Error(w http.ResponseWriter, status int, code, requestID string) {
+	if requestID != "" {
+		w.Header().Set("X-Amz-Request-Id", requestID)
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>%s</Code><Message>%s</Message><RequestId>body-req-id</RequestId></Error>`, code, code)
+}
+
+func hijackAndClose(t *testing.T, w http.ResponseWriter, rst bool) {
+	t.Helper()
+	conn, _, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if rst {
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.SetLinger(0)
+		}
+	}
+	_ = conn.Close()
 }
 
 func TestPutSourceSeparatesAcknowledgmentFromSettlement(t *testing.T) {
@@ -465,5 +548,426 @@ func TestVersionLockReadsRetentionAndLegalHold(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+func TestPutSourceAccountsForEachAttempt(t *testing.T) {
+	t.Run("refused_403", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeS3Error(w, http.StatusForbidden, "AccessDenied", "req-403")
+		}))
+		defer server.Close()
+
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || !result.Settled || calls.Load() != 1 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want err, Acknowledged=false, Settled=true, calls=1", result, err, calls.Load())
+		}
+	})
+
+	t.Run("refused_404", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeS3Error(w, http.StatusNotFound, "NoSuchBucket", "req-404")
+		}))
+		defer server.Close()
+
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || !result.Settled {
+			t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=true", result, err)
+		}
+	})
+
+	t.Run("refused_400", func(t *testing.T) {
+		for _, code := range []string{"InvalidArgument", "KMS.DisabledException"} {
+			t.Run(code, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = io.Copy(io.Discard, r.Body)
+					writeS3Error(w, http.StatusBadRequest, code, "req-400")
+				}))
+				defer server.Close()
+
+				result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+				if err == nil || result.Acknowledged || !result.Settled {
+					t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=true", result, err)
+				}
+			})
+		}
+	})
+
+	t.Run("refused_redirect", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeS3Error(w, http.StatusMovedPermanently, "PermanentRedirect", "req-301")
+		}))
+		defer server.Close()
+
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || !result.Settled {
+			t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=true", result, err)
+		}
+	})
+
+	t.Run("refusal_without_request_id", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeS3Error(w, http.StatusForbidden, "AccessDenied", "")
+		}))
+		defer server.Close()
+
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || result.Settled {
+			t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=false", result, err)
+		}
+	})
+
+	t.Run("refused_before_body", func(t *testing.T) {
+		var sawExpect atomic.Bool
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.EqualFold(r.Header.Get("Expect"), "100-continue") {
+				sawExpect.Store(true)
+			}
+			writeS3Error(w, http.StatusForbidden, "AccessDenied", "req-403-early")
+		}))
+		defer server.Close()
+
+		body := bytes.NewReader(bytes.Repeat([]byte("a"), 3<<20))
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/large.bin", extractor.FileTypeText, body)
+		if err == nil || result.Acknowledged || !result.Settled || !sawExpect.Load() {
+			t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=true (expect100=%v)", result, err, sawExpect.Load())
+		}
+	})
+
+	t.Run("refused_then_acknowledged", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			if calls.Add(1) == 1 {
+				writeS3Error(w, http.StatusBadRequest, "RequestTimeout", "req-400")
+				return
+			}
+			w.Header().Set("X-Amz-Version-Id", "v2")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err != nil || !result.Acknowledged || !result.Settled || result.VersionID != "v2" || calls.Load() != 2 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want Acknowledged=true, Settled=true, v2, calls=2", result, err, calls.Load())
+		}
+	})
+
+	t.Run("unknown_then_acknowledged", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			if calls.Add(1) == 1 {
+				writeS3Error(w, http.StatusBadRequest, "RequestTimeout", "")
+				return
+			}
+			w.Header().Set("X-Amz-Version-Id", "v2")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err != nil || !result.Acknowledged || result.Settled || result.VersionID != "v2" || calls.Load() != 2 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want Acknowledged=true, Settled=false, v2, calls=2", result, err, calls.Load())
+		}
+	})
+
+	t.Run("server_error_then_acknowledged", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			if calls.Add(1) == 1 {
+				writeS3Error(w, http.StatusServiceUnavailable, "SlowDown", "req-503")
+				return
+			}
+			w.Header().Set("X-Amz-Version-Id", "v2")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err != nil || !result.Acknowledged || result.Settled || result.VersionID != "v2" || calls.Load() != 2 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want Acknowledged=true, Settled=false, v2, calls=2", result, err, calls.Load())
+		}
+	})
+
+	t.Run("server_errors", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeS3Error(w, http.StatusInternalServerError, "InternalError", "req-500")
+		}))
+		defer server.Close()
+
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || result.Settled || calls.Load() != 3 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want err, Acknowledged=false, Settled=false, calls=3", result, err, calls.Load())
+		}
+	})
+
+	t.Run("connection_refused", func(t *testing.T) {
+		endpoint := "http://" + closedListenerAddr(t)
+		result, err := retryingClient(t, endpoint, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || !result.Settled {
+			t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=true", result, err)
+		}
+	})
+
+	t.Run("tls_handshake", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}}
+		result, err := retryingClient(t, server.URL, 3, httpClient).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || !result.Settled || calls.Load() != 0 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want err, Acknowledged=false, Settled=true, calls=0", result, err, calls.Load())
+		}
+	})
+
+	t.Run("proxy_unreachable", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		proxyURL, err := url.Parse("http://" + closedListenerAddr(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		httpClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+		result, err := retryingClient(t, server.URL, 3, httpClient).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || !result.Settled || calls.Load() != 0 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want err, Acknowledged=false, Settled=true, calls=0", result, err, calls.Load())
+		}
+	})
+
+	t.Run("credentials_unavailable", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		creds := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			return aws.Credentials{}, errors.New("no credentials")
+		})
+		result, err := retryingClientWithCreds(t, server.URL, 3, creds, nil, 0).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || !result.Settled || calls.Load() != 0 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want err, Acknowledged=false, Settled=true, calls=0", result, err, calls.Load())
+		}
+	})
+
+	t.Run("response_lost", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			hijackAndClose(t, w, false)
+		}))
+		defer server.Close()
+
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || result.Settled || calls.Load() != 3 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want err, Acknowledged=false, Settled=false, calls=3", result, err, calls.Load())
+		}
+	})
+
+	t.Run("deadline_after_send", func(t *testing.T) {
+		received := make(chan struct{})
+		var once sync.Once
+		release := make(chan struct{})
+		defer close(release)
+		server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			once.Do(func() { close(received) })
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+		defer cancel()
+		result, err := retryingClient(t, server.URL, 1, nil).PutSource(ctx, "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		select {
+		case <-received:
+		default:
+			t.Fatal("request did not reach server before deadline")
+		}
+		if err == nil || result.Acknowledged || result.Settled {
+			t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=false", result, err)
+		}
+	})
+
+	t.Run("reset_during_body", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			_, _ = io.CopyN(io.Discard, r.Body, 64<<10)
+			hijackAndClose(t, w, true)
+		}))
+		defer server.Close()
+
+		body := bytes.NewReader(bytes.Repeat([]byte("b"), 3<<20))
+		result, err := retryingClient(t, server.URL, 3, nil).PutSource(t.Context(), "documents/large.bin", extractor.FileTypeText, body)
+		if err == nil || result.Acknowledged || result.Settled || calls.Load() != 3 {
+			t.Fatalf("got result=%+v err=%v calls=%d, want err, Acknowledged=false, Settled=false, calls=3", result, err, calls.Load())
+		}
+	})
+
+	t.Run("deadline_between_unsent_attempts", func(t *testing.T) {
+		endpoint := "http://" + closedListenerAddr(t)
+		var transportCalls atomic.Int32
+		counting := httpClientFunc(func(req *http.Request) (*http.Response, error) {
+			transportCalls.Add(1)
+			return http.DefaultClient.Do(req)
+		})
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		result, err := retryingClient(t, endpoint, 3, counting, 200*time.Millisecond).PutSource(ctx, "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || !result.Settled || transportCalls.Load() != 1 {
+			t.Fatalf("got result=%+v err=%v transportCalls=%d, want err, Acknowledged=false, Settled=true, transportCalls=1", result, err, transportCalls.Load())
+		}
+	})
+
+	t.Run("transport_without_trace", func(t *testing.T) {
+		custom := httpClientFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("custom transport failure")
+		})
+		result, err := retryingClient(t, "http://127.0.0.1:1", 1, custom).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || result.Settled {
+			t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=false", result, err)
+		}
+	})
+
+	t.Run("transport_response_with_error", func(t *testing.T) {
+		custom := httpClientFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     http.Header{"X-Amz-Request-Id": {"req-with-err"}},
+				Body:       http.NoBody,
+			}, errors.New("response returned with error")
+		})
+		result, err := retryingClient(t, "http://127.0.0.1:1", 1, custom).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+		if err == nil || result.Acknowledged || result.Settled {
+			t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=false", result, err)
+		}
+	})
+
+	t.Run("single_attempt", func(t *testing.T) {
+		t.Run("refused", func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				writeS3Error(w, http.StatusForbidden, "AccessDenied", "req-403")
+			}))
+			defer server.Close()
+
+			result, err := retryingClient(t, server.URL, 1, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+			if err == nil || result.Acknowledged || !result.Settled {
+				t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=true", result, err)
+			}
+		})
+
+		t.Run("lost_response", func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				hijackAndClose(t, w, false)
+			}))
+			defer server.Close()
+
+			result, err := retryingClient(t, server.URL, 1, nil).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+			if err == nil || result.Acknowledged || result.Settled {
+				t.Fatalf("got result=%+v err=%v, want err, Acknowledged=false, Settled=false", result, err)
+			}
+		})
+	})
+}
+
+func TestPutSourceAccountsForAttemptsOverHTTP2(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		abortStream bool
+		wantSettled bool
+	}{
+		{name: "refused_403", abortStream: false, wantSettled: true},
+		{name: "stream_aborted_after_body", abortStream: true, wantSettled: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawHTTP2 atomic.Bool
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.ProtoMajor == 2 {
+					sawHTTP2.Store(true)
+				}
+				_, _ = io.Copy(io.Discard, r.Body)
+				if tc.abortStream {
+					panic(http.ErrAbortHandler)
+				}
+				writeS3Error(w, http.StatusForbidden, "AccessDenied", "req-h2-403")
+			}))
+			server.EnableHTTP2 = true
+			server.StartTLS()
+			defer server.Close()
+
+			result, err := retryingClient(t, server.URL, 2, server.Client()).PutSource(t.Context(), "documents/key.txt", extractor.FileTypeText, strings.NewReader("payload"))
+			if err == nil || result.Acknowledged || result.Settled != tc.wantSettled || !sawHTTP2.Load() {
+				t.Fatalf("got result=%+v err=%v sawHTTP2=%v, want err, Acknowledged=false, Settled=%v, HTTP/2", result, err, sawHTTP2.Load(), tc.wantSettled)
+			}
+		})
+	}
+}
+
+func TestPutSourceAttemptsArePerCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if strings.HasPrefix(r.URL.Path, "/owned-bucket/documents/refuse/") {
+			writeS3Error(w, http.StatusForbidden, "AccessDenied", "req-concurrent")
+			return
+		}
+		hijackAndClose(t, w, false)
+	}))
+	defer server.Close()
+
+	client := retryingClient(t, server.URL, 2, nil)
+	const workers = 32
+	type outcome struct {
+		wantSettled bool
+		result      domain.SourceUploadResult
+		err         error
+	}
+	outcomes := make([]outcome, workers)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			refuse := idx%2 == 0
+			key := fmt.Sprintf("documents/lost/%d.txt", idx)
+			if refuse {
+				key = fmt.Sprintf("documents/refuse/%d.txt", idx)
+			}
+			res, err := client.PutSource(t.Context(), key, extractor.FileTypeText, strings.NewReader("payload"))
+			outcomes[idx] = outcome{wantSettled: refuse, result: res, err: err}
+		}(i)
+	}
+	wg.Wait()
+
+	for i, o := range outcomes {
+		if o.err == nil || o.result.Acknowledged || o.result.Settled != o.wantSettled {
+			t.Fatalf("worker %d: result=%+v err=%v, want err, Acknowledged=false, Settled=%v", i, o.result, o.err, o.wantSettled)
+		}
 	}
 }
