@@ -331,10 +331,11 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `017_evaluation_fixtures.sql` | Adds durable receipts and UUID reservations for the [opt-in evaluation fixtures](development.md#evidence-evaluation). |
 | `018_evaluation_vector_identity.sql` | Binds new fixture receipts to their vector store and permits reservations for durably retired submissions. |
 | `019_evaluation_fixture_guards.sql` | Moves the reservation checks used by ordinary admission, leasing and removal into owner-defined predicates, so a restricted serving login needs no access to the receipt table. |
+| `020_owned_ingestion.sql` | Adds the [owned ingestion](grant-catalog.md#owned-ingestion) entry points and an ownership origin to the grant catalog. |
 | `023_deletion_predicates.sql` | Adds owner-defined predicates that report whether checkpointed deletion is active and whether an unfinished or held deletion reserves a document UUID. Admission and deletion call them, so a restricted serving login needs no access to the marker table. |
 
 The service can roll back to the previous binary with migration 010 and its
-checksum still recorded. After applying migrations 019 and 023, follow the
+checksum still recorded. After applying migration 019, 020 or 023, follow the
 [serving-role upgrade procedure](grant-catalog.md#upgrade-an-existing-serving-role)
 for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).

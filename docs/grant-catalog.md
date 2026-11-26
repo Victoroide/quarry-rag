@@ -90,6 +90,14 @@ GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
 GRANT SELECT (revision) ON public.grant_catalog_policy_revision TO quarry_operator;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_source_snapshot(uuid) TO quarry_operator;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_import_batch(text, boolean) TO quarry_operator;
+GRANT EXECUTE ON FUNCTION public.grant_catalog_authorize_ingest(uuid, uuid, text, uuid),
+  public.grant_catalog_lock_ingest_permission(uuid, uuid, text),
+  public.grant_catalog_bind_accepted_document(uuid, uuid, text, uuid, uuid, boolean),
+  public.grant_catalog_publish_accepted_document(uuid, uuid),
+  public.grant_catalog_document_tenant(uuid, uuid) TO quarry_service;
+GRANT SELECT ON public.grant_catalog_active_principals TO quarry_service;
+GRANT EXECUTE ON FUNCTION public.grant_catalog_backfill_candidates(uuid, integer),
+  public.grant_catalog_publish_verified_document(uuid, uuid, text, text) TO quarry_operator;
 GRANT SELECT ON public.grant_catalog_policy_audit TO quarry_auditor;
 ```
 
@@ -116,7 +124,10 @@ After renaming a corpus schema, reconnect with the new schema first in the
 search path. Catalog entry points and document cleanup stay with the renamed
 corpus.
 
-The serving login needs zero catalog privileges. The catalog owner and database
+The serving login needs no catalog table privilege. Its only catalog access is
+reading `grant_catalog_active_principals` and executing the five owned-ingestion
+functions granted above, each of which runs with the schema owner's rights. The
+catalog owner and database
 administrators have administrative access. Give each operator an internal
 database login name and avoid shared operator logins. The audit records the
 authenticated PostgreSQL session login, revision, batch UUID, payload digest
@@ -145,6 +156,79 @@ GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
   public.evaluation_fixture_reserved(uuid), public.document_deletion_active(),
   public.document_deletion_reserved(uuid) TO quarry_service;
 ```
+
+After applying migration `020_owned_ingestion.sql`, grant reading
+`grant_catalog_active_principals` and execution of the five serving functions
+and the two operator functions before enabling
+[owned ingestion](#owned-ingestion) or the scoped backfill. Service-mode
+ingestion and job leasing need none of them until a document is assigned.
+
+## Owned ingestion
+
+Owned ingestion is the internal ingestion path for a verified principal. No
+public route enables it yet, so the HTTP contract is unchanged. A handler that
+uses it requires the verified subject and refuses every upload unless
+`INGEST_CONTENT_DEDUP=off` and the store supports owners.
+
+Acceptance runs in this order, and every step that can reveal or change shared
+state follows the authorization:
+
+1. The request body is parsed under the usual size limits. For multipart
+   requests the whole body is read before any decision, each field may appear
+   once, and query parameters never supply a field, so field order cannot change
+   what is enforced. Metadata cannot use the names that carry ownership or
+   index labels: tenant, owner, principal, incarnation, document and chunk
+   identifiers, collection, document type, the vector revision and attempt tags,
+   and the stored chunk fields. The match ignores case and covers top-level keys.
+2. The principal's create permission on the tenant-local collection is
+   checked. Without it the request receives `403`.
+3. A server-generated UUID creates a new document. A supplied UUID is usable
+   only as the principal's pending reservation in the same collection or as the
+   principal's own current document, which is a retry. Every other supplied UUID
+   receives the same `404`, whether it is missing, unreserved, deleted,
+   unassigned or owned by someone else, and nothing else runs. The catalog
+   stores no reservation expiry, so a reservation stays usable while it is
+   pending.
+4. Only then does the service detect the file type, extract text, defer OCR and
+   store the original. The object key names the document, the intended
+   incarnation and the attempt. A refused or uncertain acceptance removes only
+   the attempt's own object, and keeps it when the stored key proves the
+   acceptance committed.
+
+The acceptance transaction holds the principal and the collection's create
+permission until it commits, so a revocation waits for it or is already
+visible. It stores the document with private identity and the intended
+incarnation, queues one job and records the ownership with origin `accepted`
+and readiness unset. It then spends the reservation. Revocation before the
+commit returns `403`, and a document replaced since authorization returns
+`404`. A subject credential that has expired when the transaction checks it
+returns `401`, and the attempt's object is removed. An owner's retry meets the usual rules: a completed document is a
+duplicate, a processing one is in progress, a failed one is requeued only with
+current create permission and queue capacity, and different content or
+collection is a conflict. An owner's retry of a historical PDF whose stored
+identity is its parser text receives `409`. Only the owner sees these outcomes.
+No step reads or registers a shared content fingerprint, including retries of
+historical documents and job completion.
+
+The job carries the tenant and incarnation read from the catalog, never a
+subject token, so an accepted job may finish after the user's token expires.
+Every hosted vector of an owned document carries a server-authored `tenant_id`
+label beside the revision and attempt tags that already fence its writes and
+cleanup to one incarnation, so a retired lease or incarnation can neither
+publish into nor remove a replacement's data. Completion publishes readiness
+for accepted documents in the same transaction that completes them.
+
+## Assign historical documents
+
+An assignment of an existing document keeps the document's stored identity
+policy, so a historical retry never registers a shared match once the document
+is assigned. Its ownership starts unreadable and is published only by the
+[scoped backfill](development.md#scoped-metadata-backfill), which verifies the
+current chunks and vectors and requires the document row to match the assignment
+snapshot. A change to the row or its chunks after the snapshot, including a
+retry, leaves the document unreadable until the operator refreshes the
+assignment. Vectors without a validated tenant and incarnation, including those
+in legacy namespaces, are never eligible.
 
 ## Prepare a batch
 

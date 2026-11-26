@@ -331,6 +331,43 @@ interruption or an error, pass `-after` with the last printed `document_id` or
 the value named in the error; without it, a run starts at the first identifier.
 Reapplying the same label is idempotent.
 
+### Scoped Metadata Backfill
+
+Documents assigned through the [grant catalog](grant-catalog.md#assign-historical-documents)
+stay unreadable until their stored data is verified. Pause ingestion and other
+index writers, then run the command with the operator login, which needs
+execution on the two backfill functions:
+
+```sh
+make reconcile ARGS="-backfill-scoped"
+make reconcile ARGS="-backfill-scoped -apply"
+```
+
+This mode skips orphan cleanup. It walks completed, assigned documents that are
+not yet readable in ascending UUID order and prints only counts: `examined`,
+`verified`, `quarantined` and `changed`, plus `resume_after`, the last document
+it finished. A document with an unresolved vector mutation is skipped until the
+mutation settles. A dry run reads only PostgreSQL. With `-apply`, a document is
+verified from its current stored chunks. On `VECTOR_STORE=postgres` the vector
+table must hold exactly those chunks. On the hosted index every current chunk
+must exist under its stored identifier with its `doc_id`, `chunk_index`, `text`
+and `token_count`, and in the format the document was written in, without a
+conflicting `document_incarnation`. The command then labels those vectors
+by identifier: `tenant_id` for a document that already carries revision and
+attempt tags, and `tenant_id` plus `document_incarnation` for an untagged one.
+It reads the labels back and publishes readiness only if the document row and
+chunk list still match the verified snapshot. Vectors of stale or replaced
+chunks and legacy namespaces never receive labels, so no scoped search can
+return them.
+
+A document that fails verification counts as `quarantined` and a document that
+changed after it was read counts as `changed`. Both stay unreadable. Re-ingest a
+quarantined document and refresh its assignment, or refresh the assignment of a
+changed one, then run the mode again. The `-limit` flag bounds documents (100000 by default) and `-page`
+has no effect. Pass `-after` with `resume_after` or the value named in an error
+to continue after an interruption. Labeling and publishing are idempotent, so a
+rerun can repeat any document safely.
+
 An update error stops further updates and returns a nonzero exit status; earlier
 successful updates remain applied. Metadata updates are eventually consistent,
 so allow them to propagate before relying on collection-filtered queries.
