@@ -160,9 +160,15 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 				}
 				matches = true
 			} else if !matches && req.PDF != nil {
-				matches, err = matchesLegacyPDF(ctx, tx, req, policy, *fingerprint)
+				var needsParserText bool
+				matches, needsParserText, err = matchesLegacyPDF(ctx, tx, req, policy, *fingerprint)
 				if err != nil {
 					return result, err
+				}
+				if !matches && needsParserText {
+					// Release the transaction before the caller extracts the parser identity.
+					result.Outcome = domain.AcceptNeedsPDFText
+					return result, nil
 				}
 			}
 			if !matches {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
@@ -121,8 +122,12 @@ func holdGuardedDeletion(ctx context.Context, t *testing.T, c *Client, id domain
 	go func() {
 		held.done <- c.WithLegacyDeletion(ctx, id, func(domain.LegacyDocumentStore) error {
 			close(entered)
-			<-held.release
-			return nil
+			select {
+			case <-held.release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		})
 	}()
 	select {
@@ -141,11 +146,12 @@ func (h *heldCleanup) finish(t *testing.T) {
 	require.NoError(t, <-h.done)
 }
 
-// advisoryLockCount counts every advisory lock any session holds or waits for.
+// advisoryLockCount counts held and waiting advisory locks in the fixture database.
 func advisoryLockCount(ctx context.Context, t *testing.T, observer *pgx.Conn) int {
 	t.Helper()
 	var n int
-	require.NoError(t, observer.QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE locktype='advisory'`).Scan(&n))
+	require.NoError(t, observer.QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE locktype='advisory'
+		AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`).Scan(&n))
 	return n
 }
 
@@ -235,6 +241,12 @@ func TestSlowGuardedDeletionLeavesSinglePoolSlotFree(t *testing.T) {
 
 func TestGuardedDeletionOverTheBoundTakesNoLockOrConnection(t *testing.T) {
 	c, observer := sessionTestClient(t)
+	sibling, err := pgx.Connect(t.Context(), pgtest.Sibling(t, observer.Config().ConnString()))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sibling.Close(context.Background())) })
+	_, err = sibling.Exec(t.Context(), `SELECT pg_advisory_lock_shared($1)`, DeletionActivationLockID)
+	require.NoError(t, err)
+
 	ctx := legacyContext(t)
 	held := holdGuardedDeletion(ctx, t, c, domain.DocumentID(uuid.NewString()))
 	requireDedicatedSessions(t, c, observer, 1)
@@ -242,7 +254,7 @@ func TestGuardedDeletionOverTheBoundTakesNoLockOrConnection(t *testing.T) {
 	require.Equal(t, 1, locks)
 
 	called := false
-	err := c.WithLegacyDeletion(ctx, domain.DocumentID(uuid.NewString()), func(domain.LegacyDocumentStore) error {
+	err = c.WithLegacyDeletion(ctx, domain.DocumentID(uuid.NewString()), func(domain.LegacyDocumentStore) error {
 		called = true
 		return nil
 	})
