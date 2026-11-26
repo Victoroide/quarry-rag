@@ -6,7 +6,8 @@
 // instead a new empty database, created from the empty template, on the
 // matching service and dropped when the test ends. Setting only one of them,
 // a malformed address or an unreachable service fails the test rather than
-// falling back to containers.
+// falling back to containers. StartIsolated always uses a disposable server
+// for tests that measure cluster-wide statistics.
 package pgtest
 
 import (
@@ -44,6 +45,16 @@ var (
 func Start(t testing.TB) string {
 	t.Helper()
 	return start(t, plainServer)
+}
+
+// StartIsolated runs PostgreSQL in its own disposable container even when
+// shared test services are configured.
+func StartIsolated(t testing.TB, opts ...testcontainers.ContainerCustomizer) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("requires a Docker daemon for isolated PostgreSQL statistics")
+	}
+	return startContainer(t, plainServer, opts...)
 }
 
 // StartVector returns the connection URL of a new empty database on a server
