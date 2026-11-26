@@ -341,9 +341,10 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `023_deletion_predicates.sql` | Adds owner-defined predicates that report whether checkpointed deletion is active and whether an unfinished or held deletion reserves a document UUID. Admission and deletion call them, so a restricted serving login needs no access to the marker table. |
 | `024_document_operations.sql` | Adds owner-defined entry points and deletion-owner receipts for [scoped document operations](grant-catalog.md#scoped-document-operations). |
 | `026_authorized_retrieval.sql` | Adds the relation of documents each principal may read now and the policy revision function that [authorized retrieval](grant-catalog.md#authorized-retrieval) reads. Service-mode queries do not use them. |
+| `030_deletion_mode_lock.sql` | Adds an owner-defined function through which admission reads the deletion activation marker while holding it in share mode, so a restricted serving login can select the tagged vector format without access to the marker table. |
 
 The service can roll back to the previous binary with migration 010 and its
-checksum still recorded. After applying migration 019, 020, 023, 024 or 026, follow the
+checksum still recorded. After applying migration 019, 020, 023, 024, 026 or 030, follow the
 [serving-role upgrade procedure](grant-catalog.md#upgrade-an-existing-serving-role)
 for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).
