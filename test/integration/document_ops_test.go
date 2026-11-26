@@ -144,7 +144,7 @@ func TestScopedDocumentOperationsEndToEnd(t *testing.T) {
 	mux.HandleFunc("GET /documents/{doc_id}", guard(handler.DocumentStatusHandler(store, handler.WithScopedStatus())))
 	mux.HandleFunc("GET /documents/{doc_id}/file", guard(handler.FileHandler(store, s3Client, handler.WithScopedFile())))
 	mux.HandleFunc("DELETE /documents/{doc_id}", guard(handler.DeleteHandler(store, vectors, s3Client,
-		handler.WithScopedDeletion(), handler.WithCleanupTargets(cleanup.Targets{SourceBucket: "fixture-bucket", InMemory: true}))))
+		handler.WithScopedDeletion(), handler.WithCleanupTargets(cleanup.Targets{SourceBucket: "fixture-bucket", InMemory: true, Memory: vectors}))))
 
 	doReq := func(method, path, sub string, lifetime time.Duration, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequestWithContext(ctx, method, path, strings.NewReader(body))
