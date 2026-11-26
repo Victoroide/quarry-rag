@@ -326,6 +326,10 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 	if w.hostedManifestEnabled() {
 		w.compensateDeleted(parent, job, ic.Chunks)
 	}
+	if errors.Is(err, domain.ErrAuthzModeMismatch) {
+		w.release(parent, job)
+		return
+	}
 	if permanent(err) || job.Attempts >= w.opts.MaxAttempts {
 		confirmCtx, confirmCancel := context.WithTimeout(leaseCtx, 5*time.Second)
 		owned, confirmErr := w.store.HeartbeatJob(confirmCtx, job, w.opts.Lease)
