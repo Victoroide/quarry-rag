@@ -110,6 +110,7 @@ before thawing writers. See [changing models or vector stores](docs/deployment.m
 
 ### Fixed
 
+- Grants replicas wait for a successful trust-file audit before accepting newly loaded or rotated keys.
 - Mixed PDF JPEG inspection skips bounded runs of extraneous non-marker bytes between segments (up to 64 bytes per gap and 256 bytes per image) instead of rejecting valid scans as `unparseable`.
 - `preserve_code` citation cleanup tracks fence-like openers indented four or more spaces until their matching closing line and closes two- or three-space list-item fences across four- to six-space closing lines, preventing nested fence straddles from hiding later citations.
 - Document deletion can checkpoint each external step under a durable, incarnation-qualified receipt before it removes the document, so a retry resumes the same lifetime instead of returning `404` or reaching a replacement. A database uses [checkpointed deletion](docs/api.md#checkpointed-deletion) only after explicit activation. Migration `023_deletion_predicates.sql` adds owner-defined predicates, and restricted serving logins need the [upgrade grants](docs/grant-catalog.md#upgrade-an-existing-serving-role) before they run upgraded processes.
