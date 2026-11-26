@@ -45,6 +45,7 @@ type scopedMockStore struct {
 	statusErr       error
 	policyErr       error
 	fileErr         error
+	afterSignErr    error
 	beginDeleteErr  error
 	resumeDeleteErr error
 	legacyCalls     int
@@ -224,6 +225,9 @@ func (s *scopedMockStore) WithScopedDocumentFile(ctx context.Context, principal 
 	s.signAttempts++
 	if signErr := sign(ctx, *key); signErr != nil {
 		return domain.ScopedFileResult{Active: true}, signErr
+	}
+	if s.afterSignErr != nil {
+		return domain.ScopedFileResult{}, s.afterSignErr
 	}
 	return domain.ScopedFileResult{Active: true, Found: true}, nil
 }
@@ -730,6 +734,27 @@ func TestScopedFileSigningTTLAndUniformNotFound(t *testing.T) {
 	}
 	require.Len(t, signer.recorded(), beforeCalls, "no signing call after any denial")
 	require.Zero(t, store.legacyCalls)
+}
+
+func TestScopedFileWithholdsAddressOnSigningTransactionFailure(t *testing.T) {
+	owner := domain.Principal{ID: uuid.NewString(), TenantID: uuid.NewString()}
+	id := uuid.NewString()
+	key := "documents/original.pdf"
+	store := newScopedMockStore(owner)
+	store.docs[id] = &scopedMemoryEntry{owner: owner, s3Key: &key}
+	for _, reason := range []string{"audit rejected", "commit rejected"} {
+		t.Run(reason, func(t *testing.T) {
+			store.afterSignErr = errors.New(reason)
+			signer := &expiringSignerSpy{}
+			fileH := FileHandler(store, signer, WithScopedFile())
+			rec := serveScoped(fileH, http.MethodGet, "/documents/"+id+"/file", &owner, time.Now().Add(time.Minute))
+			require.Equal(t, http.StatusInternalServerError, rec.Code)
+			require.Equal(t, "private, no-store", rec.Header().Get("Cache-Control"))
+			require.Len(t, signer.recorded(), 1)
+			require.NotContains(t, rec.Body.String(), "signed.example")
+			require.NotContains(t, rec.Body.String(), key)
+		})
+	}
 }
 
 func TestScopedDeletionAuthorizationFailuresAndCancellation(t *testing.T) {
