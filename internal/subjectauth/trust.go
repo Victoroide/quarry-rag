@@ -38,86 +38,85 @@ type TrustEvent struct {
 type TrustObserver func(TrustEvent) error
 
 type trustFile struct {
-	path        string
-	observer    TrustObserver
-	mu          sync.Mutex
-	last        trustSnapshot
-	unavailable bool
+	path                 string
+	observer             TrustObserver
+	mu                   sync.Mutex
+	last                 trustSnapshot
+	unavailable          bool
+	transitionInProgress bool
 }
 
 func (f *trustFile) load(now func() time.Time) (trustSnapshot, error) {
-	// Read and hash the current file even when the previous snapshot is fresh.
-	// A replacement may remove a key without changing size or timestamps.
-	data, err := credential.ReadFile(f.path, maxTrustBytes, 0o022)
-	if err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.transitionInProgress {
+		return trustSnapshot{}, ErrAuthorityUnavailable
+	}
+	candidate, ok := f.readFresh(now, f.last)
+	if !ok {
 		f.notifyUnavailable()
 		return trustSnapshot{}, ErrAuthorityUnavailable
 	}
-	digest := sha256.Sum256(data)
-	var event *TrustEvent
-	var prev trustSnapshot
-	f.mu.Lock()
-	if f.last.keys == nil || f.last.digest != digest {
-		parsed, ok := parseTrust(data)
-		if !ok {
-			alreadyUnavailable := f.unavailable
-			f.unavailable = true
-			f.mu.Unlock()
-			if !alreadyUnavailable {
-				_ = f.emit(TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"})
-			}
-			return trustSnapshot{}, ErrAuthorityUnavailable
-		}
+	if f.last.keys == nil || candidate.digest != f.last.digest {
 		reason := "trust_loaded"
 		if f.last.keys != nil {
 			reason = "trust_rotated"
 		}
-		prev = f.last
-		parsed.digest = digest
-		f.last = parsed
-		event = &TrustEvent{Action: "trust_key_load", Outcome: "allow", Reason: reason}
-	}
-	if !now().Before(f.last.expiresAt) {
-		alreadyUnavailable := f.unavailable
-		f.unavailable = true
-		f.mu.Unlock()
-		if !alreadyUnavailable {
-			_ = f.emit(TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"})
-		}
-		return trustSnapshot{}, ErrAuthorityUnavailable
-	}
-	f.unavailable = false
-	snap := f.last
-	f.mu.Unlock()
-	if event != nil {
-		if obsErr := f.emit(*event); obsErr != nil {
-			// Restore the prior snapshot so the rotation is not accepted until
-			// the audit event succeeds.
-			f.mu.Lock()
-			if f.last.digest == snap.digest {
-				f.last = prev
-			}
-			f.mu.Unlock()
+		if err := f.observe(TrustEvent{Action: "trust_key_load", Outcome: "allow", Reason: reason}); err != nil {
 			return trustSnapshot{}, ErrAuthorityUnavailable
 		}
+
+		// The file may have been replaced or expired while the audit ran.
+		current, ok := f.readFresh(now, candidate)
+		if !ok {
+			f.notifyUnavailable()
+			return trustSnapshot{}, ErrAuthorityUnavailable
+		}
+		if current.digest != candidate.digest {
+			return trustSnapshot{}, ErrAuthorityUnavailable
+		}
+		f.last = candidate
 	}
-	return snap, nil
+	f.unavailable = false
+	return f.last, nil
 }
 
+// readFresh runs under mu so a caller cannot publish an older read after a
+// newer one. Every read checks the file policy, even on a digest match.
+func (f *trustFile) readFresh(now func() time.Time, cached trustSnapshot) (trustSnapshot, bool) {
+	data, err := credential.ReadFile(f.path, maxTrustBytes, 0o022)
+	if err != nil {
+		return trustSnapshot{}, false
+	}
+	digest := sha256.Sum256(data)
+	if cached.keys != nil && cached.digest == digest {
+		return cached, now().Before(cached.expiresAt)
+	}
+	parsed, ok := parseTrust(data)
+	parsed.digest = digest
+	return parsed, ok && now().Before(parsed.expiresAt)
+}
+
+// notifyUnavailable records one best-effort event until a successful load.
 func (f *trustFile) notifyUnavailable() {
-	f.mu.Lock()
-	already := f.unavailable
-	f.unavailable = true
-	f.mu.Unlock()
-	if !already {
-		_ = f.emit(TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"})
+	if !f.unavailable {
+		f.unavailable = true
+		_ = f.observe(TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"})
 	}
 }
 
-func (f *trustFile) emit(event TrustEvent) error {
+// observe releases mu during the callback and returns with it held, keeping
+// other loads out of the transition without waiting for the audit write.
+func (f *trustFile) observe(event TrustEvent) error {
 	if f.observer == nil {
 		return nil
 	}
+	f.transitionInProgress = true
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.transitionInProgress = false
+	}()
 	return f.observer(event)
 }
 

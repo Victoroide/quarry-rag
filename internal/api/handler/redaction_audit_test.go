@@ -7,6 +7,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +20,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/llm"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
+	"github.com/Victoroide/quarry-rag/internal/subjectauth"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/stretchr/testify/require"
 )
@@ -75,6 +79,64 @@ func TestReadinessEnforcesCorpusModeAndTrust(t *testing.T) {
 	cs.mode = "grants"
 	cs.err = errors.New("db unavailable")
 	require.Equal(t, http.StatusServiceUnavailable, check())
+
+	t.Run("trust rotation audit", func(t *testing.T) {
+		cs := &modeChunkStore{healthChunkStore: &healthChunkStore{}, mode: "grants"}
+		path := filepath.Join(t.TempDir(), "trust.json")
+		replaceTrust := func(expiry time.Time) {
+			data, err := json.Marshal(map[string]any{"keys": []any{}, "expires_at": expiry})
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(path+".new", data, 0o600))
+			require.NoError(t, os.Rename(path+".new", path))
+		}
+		now := time.Now()
+		replaceTrust(now.Add(time.Hour))
+		started := make(chan struct{})
+		release := make(chan struct{})
+		ctx := t.Context()
+		var holdRotation atomic.Bool
+		issuer := (&url.URL{Scheme: "https", Host: "issuer.example"}).String()
+		verifier, err := subjectauth.NewVerifierWithObserver(issuer, "quarry", path, func(event subjectauth.TrustEvent) error {
+			if event.Reason == "trust_rotated" && holdRotation.Swap(false) {
+				close(started)
+				select {
+				case <-release:
+					return context.DeadlineExceeded
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return nil
+		})
+		require.NoError(t, err)
+		status := func(handle http.HandlerFunc, endpoint string) int {
+			rec := httptest.NewRecorder()
+			handle(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody))
+			return rec.Code
+		}
+		ready := func() int {
+			probes := NewProbes(&healthVectorStore{}, cs, nil, time.Minute)
+			probes.SetAuthzChecks("grants", verifier.ValidateTrust)
+			return status(ReadinessHandler(probes), "/readyz")
+		}
+		asyncReady := func() <-chan int {
+			result := make(chan int, 1)
+			go func() { result <- ready() }()
+			return result
+		}
+		require.Equal(t, http.StatusOK, ready())
+		replaceTrust(now.Add(2 * time.Hour))
+		holdRotation.Store(true)
+		rotating := asyncReady()
+		awaitSignal(t, started, "trust rotation audit")
+		require.Equal(t, http.StatusServiceUnavailable, awaitSignal(t, asyncReady(), "readiness during trust audit"))
+		require.Equal(t, http.StatusOK, status(LivenessHandler(), "/livez"))
+
+		close(release)
+		require.Equal(t, http.StatusServiceUnavailable, awaitSignal(t, rotating, "failed trust audit readiness"))
+		require.Equal(t, http.StatusOK, status(LivenessHandler(), "/livez"))
+		require.Equal(t, http.StatusOK, ready())
+	})
 }
 
 type countingModeStore struct {

@@ -1,6 +1,7 @@
 package subjectauth
 
 import (
+	"context"
 	"crypto"
 	"crypto/hmac"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,8 +66,12 @@ func trustFixture(t testing.TB, expiry time.Time, keys ...jose.JSONWebKey) []byt
 
 func replaceTrust(t testing.TB, path string, data []byte) {
 	t.Helper()
-	require.NoError(t, os.WriteFile(path+".new", data, 0o600))
-	require.NoError(t, os.Rename(path+".new", path))
+	dir, err := os.OpenRoot(filepath.Dir(path))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, dir.Close()) }()
+	name := filepath.Base(path)
+	require.NoError(t, dir.WriteFile(name+".new", data, 0o600))
+	require.NoError(t, dir.Rename(name+".new", name))
 }
 
 func newFixtureVerifier(t testing.TB) (*Verifier, *rsa.PrivateKey, string) {
@@ -338,6 +344,317 @@ func TestTrustObserverRecordsLoadRotationFailureAndFailsClosed(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, unavailableCount)
+}
+
+func awaitTrustResult[T any](t *testing.T, results <-chan T) T {
+	t.Helper()
+	select {
+	case result := <-results:
+		return result
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for trust operation")
+		var zero T
+		return zero
+	}
+}
+
+func startTrustCall(call func() error) <-chan error {
+	result := make(chan error, 1)
+	go func() { result <- call() }()
+	return result
+}
+
+func observeTrustFixture(t *testing.T, verifier *Verifier) (events <-chan TrustEvent, blockNext func(), release chan<- error) {
+	t.Helper()
+	seen := make(chan TrustEvent, 16)
+	gate := make(chan error, 1)
+	var block atomic.Bool
+	ctx := t.Context()
+	verifier.trust.observer = func(event TrustEvent) error {
+		pending := block.Swap(false)
+		seen <- event
+		if pending {
+			select {
+			case err := <-gate:
+				return err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	}
+	return seen, func() { block.Store(true) }, gate
+}
+
+func requireTrustEvent(t *testing.T, events <-chan TrustEvent, outcome, reason string) {
+	t.Helper()
+	require.Equal(t, TrustEvent{Action: "trust_key_load", Outcome: outcome, Reason: reason}, awaitTrustResult(t, events))
+}
+
+func TestPendingTrustAuditCannotAuthenticate(t *testing.T) {
+	replacement, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name, kid string
+		rotation  bool
+		auditErr  error
+	}{
+		{name: "initial success", kid: "second"},
+		{name: "initial error", kid: "second", auditErr: context.DeadlineExceeded},
+		{name: "rotation removes a key", kid: "second", rotation: true},
+		{name: "rotation replaces a key with the same kid", kid: "first", rotation: true, auditErr: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verifier, first, path := newFixtureVerifier(t)
+			events, blockNext, release := observeTrustFixture(t, verifier)
+			oldToken := fixtureToken(t, first, fixtureHeader, fixtureClaims(t, nil))
+			newToken := fixtureToken(t, replacement, strings.Replace(fixtureHeader, "first", tc.kid, 1),
+				fixtureClaims(t, map[string]any{"sub": "Replacement-Subject"}))
+			var prior Identity
+			reason := "trust_loaded"
+			if tc.rotation {
+				var verifyErr error
+				prior, verifyErr = verifier.Verify(oldToken)
+				require.NoError(t, verifyErr)
+				requireTrustEvent(t, events, "allow", "trust_loaded")
+				reason = "trust_rotated"
+			}
+			data := trustFixture(t, fixtureTime.Add(time.Hour), jose.JSONWebKey{Key: replacement.Public(), KeyID: tc.kid})
+			replaceTrust(t, path, data)
+			verifyNew := func() error {
+				_, verifyErr := verifier.Verify(newToken)
+				return verifyErr
+			}
+			assertPending := func() {
+				checks := []func() error{
+					verifyNew,
+					func() error { _, verifyErr := verifier.Verify(oldToken); return verifyErr },
+					verifier.ValidateTrust,
+					func() error { return verifier.CheckTrust(prior) },
+				}
+				pending := make([]<-chan error, 0, len(checks))
+				for _, check := range checks {
+					pending = append(pending, startTrustCall(check))
+				}
+				for _, result := range pending {
+					require.ErrorIs(t, awaitTrustResult(t, result), ErrAuthorityUnavailable)
+				}
+				require.Empty(t, events)
+			}
+
+			blockNext()
+			result := startTrustCall(verifyNew)
+			requireTrustEvent(t, events, "allow", reason)
+			assertPending()
+			release <- tc.auditErr
+			if tc.auditErr != nil {
+				require.ErrorIs(t, awaitTrustResult(t, result), ErrAuthorityUnavailable)
+				blockNext()
+				result = startTrustCall(verifyNew)
+				requireTrustEvent(t, events, "allow", reason)
+				assertPending()
+				release <- nil
+			}
+			require.NoError(t, awaitTrustResult(t, result))
+
+			identity, verifyErr := verifier.Verify(newToken)
+			require.NoError(t, verifyErr)
+			require.Equal(t, "Replacement-Subject", identity.Subject)
+			require.NoError(t, verifier.CheckTrust(identity))
+			require.NoError(t, verifier.ValidateTrust())
+			_, verifyErr = verifier.Verify(oldToken)
+			require.ErrorIs(t, verifyErr, ErrInvalidCredential)
+			require.ErrorIs(t, verifier.CheckTrust(prior), ErrInvalidCredential)
+			require.Equal(t, sha256.Sum256(data), verifier.trust.last.digest)
+			require.Empty(t, events)
+		})
+	}
+}
+
+func TestTrustTransitionRejectsSupersededOrExpiredCandidate(t *testing.T) {
+	t.Run("superseded initial load", func(t *testing.T) {
+		verifier, key, path := newFixtureVerifier(t)
+		events, blockNext, release := observeTrustFixture(t, verifier)
+		claims := fixtureClaims(t, nil)
+		oldToken := fixtureToken(t, key, fixtureHeader, claims)
+		currentToken := fixtureToken(t, key, strings.Replace(fixtureHeader, "first", "current", 1), claims)
+		blockNext()
+		result := startTrustCall(func() error { _, err := verifier.Verify(oldToken); return err })
+		requireTrustEvent(t, events, "allow", "trust_loaded")
+		current := trustFixture(t, fixtureTime.Add(time.Hour), jose.JSONWebKey{Key: key.Public(), KeyID: "current"})
+		replaceTrust(t, path, current)
+		release <- nil
+		require.ErrorIs(t, awaitTrustResult(t, result), ErrAuthorityUnavailable)
+		require.Nil(t, verifier.trust.last.keys)
+		require.Empty(t, events)
+
+		identity, err := verifier.Verify(currentToken)
+		require.NoError(t, err)
+		require.NoError(t, verifier.CheckTrust(identity))
+		_, err = verifier.Verify(oldToken)
+		require.ErrorIs(t, err, ErrInvalidCredential)
+		requireTrustEvent(t, events, "allow", "trust_loaded")
+		require.Equal(t, sha256.Sum256(current), verifier.trust.last.digest)
+		require.Empty(t, events)
+	})
+
+	t.Run("return to published bytes", func(t *testing.T) {
+		verifier, key, path := newFixtureVerifier(t)
+		events, blockNext, release := observeTrustFixture(t, verifier)
+		prior := trustFixture(t, fixtureTime.Add(time.Hour), jose.JSONWebKey{Key: key.Public(), KeyID: "first"})
+		replaceTrust(t, path, prior)
+		token := fixtureToken(t, key, fixtureHeader, fixtureClaims(t, nil))
+		_, err := verifier.Verify(token)
+		require.NoError(t, err)
+		requireTrustEvent(t, events, "allow", "trust_loaded")
+		candidate := trustFixture(t, fixtureTime.Add(time.Hour), []jose.JSONWebKey{}...)
+		replaceTrust(t, path, candidate)
+		blockNext()
+		result := startTrustCall(verifier.ValidateTrust)
+		requireTrustEvent(t, events, "allow", "trust_rotated")
+		replaceTrust(t, path, prior)
+		release <- nil
+		require.ErrorIs(t, awaitTrustResult(t, result), ErrAuthorityUnavailable)
+		require.Equal(t, sha256.Sum256(prior), verifier.trust.last.digest)
+		_, err = verifier.Verify(token)
+		require.NoError(t, err)
+		require.Empty(t, events)
+
+		replaceTrust(t, path, candidate)
+		require.NoError(t, verifier.ValidateTrust())
+		requireTrustEvent(t, events, "allow", "trust_rotated")
+		require.Equal(t, sha256.Sum256(candidate), verifier.trust.last.digest)
+	})
+
+	t.Run("expiry before and during audit", func(t *testing.T) {
+		verifier, key, path := newFixtureVerifier(t)
+		events, blockNext, release := observeTrustFixture(t, verifier)
+		var ticks atomic.Int64
+		verifier.now = func() time.Time { return fixtureTime.Add(time.Duration(ticks.Load())) }
+		jwk := jose.JSONWebKey{Key: key.Public(), KeyID: "first"}
+		token := fixtureToken(t, key, fixtureHeader, fixtureClaims(t, nil))
+		verify := func() error { _, err := verifier.Verify(token); return err }
+		replaceTrust(t, path, trustFixture(t, fixtureTime, jwk))
+		require.ErrorIs(t, verify(), ErrAuthorityUnavailable)
+		requireTrustEvent(t, events, "error", "trust_unavailable")
+		require.Empty(t, events)
+
+		replaceTrust(t, path, trustFixture(t, fixtureTime.Add(time.Second), jwk))
+		blockNext()
+		result := startTrustCall(verify)
+		requireTrustEvent(t, events, "allow", "trust_loaded")
+		ticks.Store(int64(time.Second))
+		release <- nil
+		require.ErrorIs(t, awaitTrustResult(t, result), ErrAuthorityUnavailable)
+		require.ErrorIs(t, verify(), ErrAuthorityUnavailable)
+		require.Nil(t, verifier.trust.last.keys)
+		require.Empty(t, events, "failed transitions do not close the availability episode")
+
+		replaceTrust(t, path, trustFixture(t, fixtureTime.Add(time.Hour), jwk))
+		require.NoError(t, verify())
+		requireTrustEvent(t, events, "allow", "trust_loaded")
+		require.NoError(t, os.Remove(path))
+		require.ErrorIs(t, verify(), ErrAuthorityUnavailable)
+		requireTrustEvent(t, events, "error", "trust_unavailable")
+	})
+
+	t.Run("nil observer allows fresh file", func(t *testing.T) {
+		verifier, key, _ := newFixtureVerifier(t)
+		_, err := verifier.Verify(fixtureToken(t, key, fixtureHeader, fixtureClaims(t, nil)))
+		require.NoError(t, err)
+	})
+}
+
+func testTrustTransitionInvalidReread(t *testing.T, invalidate func(*testing.T, string)) {
+	t.Helper()
+	verifier, key, path := newFixtureVerifier(t)
+	events, blockNext, release := observeTrustFixture(t, verifier)
+	token := fixtureToken(t, key, fixtureHeader, fixtureClaims(t, nil))
+	verify := func() error { _, err := verifier.Verify(token); return err }
+	blockNext()
+	result := startTrustCall(verify)
+	requireTrustEvent(t, events, "allow", "trust_loaded")
+	invalidate(t, path)
+	release <- nil
+	require.ErrorIs(t, awaitTrustResult(t, result), ErrAuthorityUnavailable)
+	requireTrustEvent(t, events, "error", "trust_unavailable")
+	require.ErrorIs(t, verify(), ErrAuthorityUnavailable)
+	require.Nil(t, verifier.trust.last.keys)
+	require.Empty(t, events)
+	replaceTrust(t, path, trustFixture(t, fixtureTime.Add(time.Hour), jose.JSONWebKey{Key: key.Public(), KeyID: "first"}))
+	require.NoError(t, verify())
+	requireTrustEvent(t, events, "allow", "trust_loaded")
+}
+
+func TestTrustTransitionRejectsInvalidReread(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		testTrustTransitionInvalidReread(t, func(t *testing.T, path string) {
+			require.NoError(t, os.Remove(path))
+		})
+	})
+	t.Run("malformed", func(t *testing.T) {
+		testTrustTransitionInvalidReread(t, func(t *testing.T, path string) {
+			replaceTrust(t, path, []byte(`{"keys":`))
+		})
+	})
+}
+
+func TestTrustTransitionRecoversAfterObserverCancellation(t *testing.T) {
+	verifier, key, _ := newFixtureVerifier(t)
+	events := make(chan TrustEvent, 3)
+	reentrant := make(chan error, 3)
+	observerErr := context.DeadlineExceeded
+	verifier.trust.observer = func(event TrustEvent) error {
+		events <- event
+		reentrant <- verifier.ValidateTrust()
+		return observerErr
+	}
+	token := fixtureToken(t, key, fixtureHeader, fixtureClaims(t, nil))
+	verify := func() error { _, err := verifier.Verify(token); return err }
+	require.ErrorIs(t, awaitTrustResult(t, startTrustCall(verify)), ErrAuthorityUnavailable)
+	require.ErrorIs(t, awaitTrustResult(t, reentrant), ErrAuthorityUnavailable)
+	requireTrustEvent(t, events, "allow", "trust_loaded")
+	require.Nil(t, verifier.trust.last.keys)
+
+	observerErr = nil
+	require.NoError(t, awaitTrustResult(t, startTrustCall(verify)))
+	require.ErrorIs(t, awaitTrustResult(t, reentrant), ErrAuthorityUnavailable)
+	requireTrustEvent(t, events, "allow", "trust_loaded")
+	require.NoError(t, verify())
+	require.Empty(t, events)
+}
+
+func TestTrustUnavailableObservationSerializesRecovery(t *testing.T) {
+	verifier, key, path := newFixtureVerifier(t)
+	events, blockNext, release := observeTrustFixture(t, verifier)
+	require.NoError(t, os.Remove(path))
+	blockNext()
+	result := startTrustCall(verifier.ValidateTrust)
+	requireTrustEvent(t, events, "error", "trust_unavailable")
+	require.ErrorIs(t, awaitTrustResult(t, startTrustCall(verifier.ValidateTrust)), ErrAuthorityUnavailable)
+	replaceTrust(t, path, trustFixture(t, fixtureTime.Add(time.Hour), jose.JSONWebKey{Key: key.Public(), KeyID: "first"}))
+	require.ErrorIs(t, awaitTrustResult(t, startTrustCall(verifier.ValidateTrust)), ErrAuthorityUnavailable)
+	require.Empty(t, events)
+
+	release <- context.DeadlineExceeded
+	require.ErrorIs(t, awaitTrustResult(t, result), ErrAuthorityUnavailable)
+	require.NoError(t, verifier.ValidateTrust())
+	requireTrustEvent(t, events, "allow", "trust_loaded")
+}
+
+func TestTrustTransitionRecoversAfterObserverPanic(t *testing.T) {
+	verifier, _, _ := newFixtureVerifier(t)
+	fail := true
+	verifier.trust.observer = func(TrustEvent) error {
+		if fail {
+			panic("observer failure")
+		}
+		return nil
+	}
+	require.PanicsWithValue(t, "observer failure", func() { _ = verifier.ValidateTrust() })
+	require.Nil(t, verifier.trust.last.keys)
+	fail = false
+	require.NoError(t, awaitTrustResult(t, startTrustCall(verifier.ValidateTrust)))
 }
 
 func FuzzSubjectTrustAndClaims(f *testing.F) {
