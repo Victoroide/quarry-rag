@@ -55,6 +55,12 @@ func writeQueryError(w http.ResponseWriter, r *http.Request, err error) {
 
 func queryErrorResponse(err error) (code int, retry string, body APIError) {
 	switch {
+	case errors.Is(err, pipeline.ErrCredentialExpired):
+		return http.StatusUnauthorized, "", APIError{Error: "unauthorized", Message: "invalid or missing credentials"}
+	case errors.Is(err, pipeline.ErrReadAuthorityChanged), errors.Is(err, domain.ErrReadDenied):
+		return http.StatusForbidden, "", APIError{Error: "forbidden", Message: "access denied"}
+	case errors.Is(err, pipeline.ErrAuthorizationUnavailable), errors.Is(err, domain.ErrGrantScopeUnsupported):
+		return http.StatusServiceUnavailable, "", APIError{Error: "unavailable", Message: "authorization unavailable"}
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusGatewayTimeout, "", APIError{Error: "timeout", Message: "query processing timed out"}
 	case errors.Is(err, context.Canceled):

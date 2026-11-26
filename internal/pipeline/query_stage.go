@@ -477,7 +477,12 @@ func scopedChunks(ctx context.Context, qc *QueryContext, chunks []domain.ScoredC
 }
 
 func (qc *QueryContext) vectorFilter() domain.VectorFilter {
-	return domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs, Collection: qc.Collection}
+	filter := domain.VectorFilter{DocType: qc.FilterDocType, DocumentIDs: qc.AllowedDocumentIDs, Collection: qc.Collection}
+	if qc.Authorization != nil {
+		scope := qc.Authorization.Scope
+		filter.Authorized = &scope
+	}
+	return filter
 }
 
 func (qc *QueryContext) evidenceAutoRouting() bool {
@@ -486,7 +491,7 @@ func (qc *QueryContext) evidenceAutoRouting() bool {
 }
 
 func (qc *QueryContext) checksCurrentEvidence() bool {
-	return qc.EvidenceVisibility != nil || qc.HostedVisibilityRefill || qc.RequireCitationScope || qc.AnswerMode == domain.AnswerModeEvidence
+	return qc.Authorization != nil || qc.EvidenceVisibility != nil || qc.HostedVisibilityRefill || qc.RequireCitationScope || qc.AnswerMode == domain.AnswerModeEvidence
 }
 
 func (qc *QueryContext) observeUntaggedEvidence(ctx context.Context, ret *retriever.Retriever) error {
@@ -528,6 +533,9 @@ func (qc *QueryContext) matchObservedEvidence(chunks []domain.ScoredChunk) []dom
 
 func filterEvidenceScope(filter domain.VectorFilter, chunks []domain.ScoredChunk) []domain.ScoredChunk {
 	chunks = filterChunksByAllowedDocIDs(chunks, filter.DocumentIDs)
+	if filter.Authorized != nil {
+		chunks = filterAuthorizedHits(filter.Authorized, chunks)
+	}
 	if filter.Collection != "" || filter.DocType != "" {
 		filtered := make([]domain.ScoredChunk, 0, len(chunks))
 		for _, sc := range chunks {
@@ -542,6 +550,28 @@ func filterEvidenceScope(filter domain.VectorFilter, chunks []domain.ScoredChunk
 	return chunks
 }
 
+// filterAuthorizedHits discards candidates whose own metadata contradicts the
+// authorized scope. A hit naming another tenant is never usable. Under an
+// explicit membership, a hit must also be tagged with the incarnation the
+// principal may read. Database checks still decide what is current.
+func filterAuthorizedHits(scope *domain.AuthorizedScope, chunks []domain.ScoredChunk) []domain.ScoredChunk {
+	kept := make([]domain.ScoredChunk, 0, len(chunks))
+	for _, sc := range chunks {
+		if tenant, labeled := sc.Chunk.Metadata[domain.VectorTenantKey].(string); labeled && !strings.EqualFold(tenant, scope.TenantID) {
+			continue
+		}
+		if scope.Incarnations != nil {
+			incarnation, member := scope.IncarnationOf(string(sc.Chunk.DocumentID))
+			revision, _ := sc.Chunk.Metadata[domain.VectorRevisionKey].(string)
+			if !member || revision != incarnation {
+				continue
+			}
+		}
+		kept = append(kept, sc)
+	}
+	return kept
+}
+
 // checkStrictEvidence revalidates the hosted candidate scope and the current
 // rows behind the excerpts that a strict request would send.
 func (qc *QueryContext) checkStrictEvidence(ctx context.Context, excerpts []domain.ScoredChunk) error {
@@ -551,7 +581,7 @@ func (qc *QueryContext) checkStrictEvidence(ctx context.Context, excerpts []doma
 	if qc.EvidenceVisibility == nil {
 		return nil
 	}
-	return qc.checkSynthesisEvidence(ctx, excerpts)
+	return qc.authorizeEvidenceError(ctx, qc.checkSynthesisEvidence(ctx, excerpts))
 }
 
 func (qc *QueryContext) checkSynthesisEvidence(ctx context.Context, excerpts []domain.ScoredChunk) error {
@@ -587,11 +617,47 @@ func (qc *QueryContext) checkSynthesisEvidence(ctx context.Context, excerpts []d
 }
 
 // CheckEvidenceScope verifies the original candidate bodies before a response
-// releases evidence or diagnostics derived from it.
+// releases evidence or diagnostics derived from it. Under a verified principal
+// it first checks the credential lifetime, key trust, principal and policy
+// revision, so even a response without evidence is bounded by that check.
 func (qc *QueryContext) CheckEvidenceScope(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if qc.Authorization == nil {
+		return qc.checkCandidateEvidence(ctx)
+	}
+	if err := qc.Authorization.Check(ctx); err != nil {
+		return err
+	}
+	if err := qc.authorizeEvidenceError(ctx, qc.checkCandidateEvidence(ctx)); err != nil {
+		return err
+	}
+	// The evidence read can outlast the credential. A disclosure that follows
+	// must not start at or after the exact expiry.
+	if qc.Authorization.Expired() {
+		return ErrCredentialExpired
+	}
+	return nil
+}
+
+// authorizeEvidenceError names a failed evidence check by its consequence for a
+// verified principal. A changed document, grant or preview is one uniform
+// denial. An unreadable database is unavailable authority, never a fallback.
+func (qc *QueryContext) authorizeEvidenceError(ctx context.Context, err error) error {
+	switch {
+	case err == nil || qc.Authorization == nil:
+		return err
+	case errors.Is(err, ErrEvidenceScopeChanged):
+		return ErrReadAuthorityChanged
+	case ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, ErrReadAuthorityChanged), errors.Is(err, ErrCredentialExpired), errors.Is(err, ErrAuthorizationUnavailable):
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrAuthorizationUnavailable, err)
+}
+
+func (qc *QueryContext) checkCandidateEvidence(ctx context.Context) error {
 	if !qc.checksCurrentEvidence() {
 		return nil
 	}
@@ -1795,7 +1861,7 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 			return fmt.Errorf("synthesis_stage: %w: output reserve %d exceeds window %d", ErrSynthesisInputTooLarge, reservedOutput, profile.ContextWindow)
 		}
 		builder.modelID, builder.maxTokens = modelID, reservedOutput
-		if qc.EvidenceVisibility != nil || qc.HostedVisibilityRefill || qc.RequireCitationScope {
+		if qc.Authorization != nil || qc.EvidenceVisibility != nil || qc.HostedVisibilityRefill || qc.RequireCitationScope {
 			builder.evidenceCheck = qc.checkStrictEvidence
 		}
 		outcome, err := budgetStrictSynthesisInput(synthesisCtx, s.ambassador, s.cfg, builder, profile, inputBudget, chunks, truncated)

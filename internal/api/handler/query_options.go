@@ -45,6 +45,7 @@ func resolveAnswerMode(req QueryRequest, policy string) (domain.AnswerMode, int,
 }
 
 type queryOptions struct {
+	authority         domain.ReadAuthority
 	reranker          retriever.Reranker
 	noEvidenceCatalog *pipeline.NoEvidenceCatalog
 	citationVerifier  pipeline.CitationVerifier
@@ -66,4 +67,13 @@ func WithNoEvidenceCatalog(catalog *pipeline.NoEvidenceCatalog) QueryOption {
 // WithCitationSupport selects the verifier used for requested citations.
 func WithCitationSupport(verifier pipeline.CitationVerifier) QueryOption {
 	return func(opts *queryOptions) { opts.citationVerifier = verifier }
+}
+
+// WithAuthorizedRetrieval binds every query to the verified principal in its
+// request context. Scope, routing previews, vector searches, model inputs and
+// every response are then limited to what that principal may read now, and the
+// responses are private and uncacheable. Only a route behind subject
+// verification may use it.
+func WithAuthorizedRetrieval(authority domain.ReadAuthority) QueryOption {
+	return func(opts *queryOptions) { opts.authority = authority }
 }

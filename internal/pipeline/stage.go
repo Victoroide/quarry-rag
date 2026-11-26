@@ -91,6 +91,9 @@ type QueryContext struct {
 	// EvidenceVisibility checks vector candidates against current stored chunks.
 	EvidenceVisibility   domain.EvidenceVisibility
 	untaggedIncarnations map[string]string
+	// Authorization, when set, binds the query to a verified principal. Every
+	// search carries its scope and every disclosure boundary rechecks it.
+	Authorization *ReadAuthorization
 	// HostedVisibilityRefill enables strict chunk checks and bounded hosted recovery.
 	HostedVisibilityRefill        bool
 	HostedVisibilityExtraRequests int

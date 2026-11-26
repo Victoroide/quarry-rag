@@ -12,7 +12,7 @@ import (
 )
 
 func evaluationScope(r *http.Request, prefix string, qc *pipeline.QueryContext) (evaluation.Namespace, bool) {
-	if prefix == "" || qc.AnswerMode != domain.AnswerModeGenerated {
+	if prefix == "" || qc.AnswerMode != domain.AnswerModeGenerated || qc.Authorization != nil {
 		return evaluation.Namespace{}, false
 	}
 	values := r.Header.Values(evaluation.FixtureHeader)

@@ -20,6 +20,10 @@ type SubjectResolver interface {
 type VerifiedSubject struct {
 	Principal domain.Principal
 	ExpiresAt time.Time
+	// RecheckTrust, when set, confirms the signing key is still trusted. A
+	// long-running request calls it at every disclosure boundary. The error is
+	// subjectauth.ErrAuthorityUnavailable when trust data cannot be used.
+	RecheckTrust func() error
 }
 
 // ValidAt checks the credential deadline without admission clock skew. Call it
@@ -70,7 +74,8 @@ func RequireSubject(tokens []string, verifier *subjectauth.Verifier, resolver Su
 		ctx, cancel := context.WithDeadline(r.Context(), identity.ExpiresAt)
 		defer cancel()
 		principal, found, err := resolver.ResolvePrincipal(ctx, identity.Issuer, identity.Subject)
-		subject := VerifiedSubject{Principal: principal, ExpiresAt: identity.ExpiresAt}
+		subject := VerifiedSubject{Principal: principal, ExpiresAt: identity.ExpiresAt,
+			RecheckTrust: func() error { return verifier.CheckTrust(identity) }}
 		if !subject.ValidAt(time.Now()) {
 			subjectUnauthorized(w)
 			return

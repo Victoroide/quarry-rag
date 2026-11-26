@@ -7,14 +7,20 @@ import (
 	"github.com/google/uuid"
 )
 
+// maxAllowedDocumentIDs is the largest allowlist, and the largest hosted
+// membership, a single query may carry.
+func maxAllowedDocumentIDs(cfg *config.Config) int {
+	if cfg.MaxAllowedDocumentIDs <= 0 {
+		return 25000
+	}
+	return cfg.MaxAllowedDocumentIDs
+}
+
 func validateQueryAllowlist(req *QueryRequest, cfg *config.Config) *APIError {
 	if cfg.RequireDocumentAllowlist && req.AllowedDocumentIDs == nil {
 		return &APIError{Error: "validation", Message: "allowed_document_ids is required"}
 	}
-	limit := cfg.MaxAllowedDocumentIDs
-	if limit <= 0 {
-		limit = 25000
-	}
+	limit := maxAllowedDocumentIDs(cfg)
 	if len(req.AllowedDocumentIDs) > limit {
 		return &APIError{Error: "validation", Message: fmt.Sprintf("allowed_document_ids exceeds maximum of %d entries", limit)}
 	}

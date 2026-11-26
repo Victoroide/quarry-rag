@@ -170,29 +170,19 @@ func run() error {
 		}
 	}
 
-	provider, vectorSystem := "aws.bedrock", "pinecone"
-	embeddingModel := cfg.BedrockEmbedModel
-	if cfg.EmbeddingProvider == "openai" {
-		provider, embeddingModel = "openai", cfg.OpenAIEmbeddingModel
+	queryDeps, err := assembleQueryComponents(cfg, vectorStore, emb)
+	if err != nil {
+		return err
 	}
-	if cfg.FakeMode {
-		provider, vectorSystem = "offline", "memory"
-		embeddingModel = cfg.BedrockEmbedModel
-	} else if cfg.VectorStore == "postgres" {
-		vectorSystem = "postgresql"
-	}
-	emb = tracing.WrapEmbedder(emb, provider, embeddingModel)
-	vectorStore = tracing.WrapVectorStore(vectorStore, vectorSystem)
-	vecDeleter, ok := vectorStore.(domain.VectorDeleter)
-	if !ok {
-		return errors.New("startup: vector store does not support deletion")
-	}
+	emb = queryDeps.embedder
+	vectorStore = queryDeps.vectorStore
+	vecDeleter := queryDeps.vecDeleter
 
 	// Initialize chunker.
 	chk := chunker.NewChunker(cfg.ChunkTokenSize, cfg.ChunkOverlap)
 
 	// Initialize retriever.
-	ret := retriever.NewRetriever(vectorStore, emb, cfg.LocalRetrievalThreshold, cfg.MaxChunksPerQuery, retriever.WithEmbeddingInputProfile(cfg.EmbeddingInputProfile))
+	ret := queryDeps.retriever
 
 	var reranker retriever.Reranker
 	if !cfg.FakeMode && cfg.RerankModelARN != "" {
@@ -300,6 +290,42 @@ func buildVersion() string {
 		return info.Main.Version
 	}
 	return ""
+}
+
+type queryComponents struct {
+	vectorStore domain.VectorStore
+	vecDeleter  domain.VectorDeleter
+	embedder    domain.EmbeddingProvider
+	retriever   *retriever.Retriever
+}
+
+// assembleQueryComponents wraps the configured embedder and vector store with
+// tracing and builds the retriever used by HTTP handlers and ingestion.
+func assembleQueryComponents(cfg *config.Config, vectorStore domain.VectorStore, emb domain.EmbeddingProvider) (queryComponents, error) {
+	provider, vectorSystem := "aws.bedrock", "pinecone"
+	embeddingModel := cfg.BedrockEmbedModel
+	if cfg.EmbeddingProvider == "openai" {
+		provider, embeddingModel = "openai", cfg.OpenAIEmbeddingModel
+	}
+	if cfg.FakeMode {
+		provider, vectorSystem = "offline", "memory"
+		embeddingModel = cfg.BedrockEmbedModel
+	} else if cfg.VectorStore == "postgres" {
+		vectorSystem = "postgresql"
+	}
+	emb = tracing.WrapEmbedder(emb, provider, embeddingModel)
+	vectorStore = tracing.WrapVectorStore(vectorStore, vectorSystem)
+	vecDeleter, ok := vectorStore.(domain.VectorDeleter)
+	if !ok {
+		return queryComponents{}, errors.New("startup: vector store does not support deletion")
+	}
+	ret := retriever.NewRetriever(vectorStore, emb, cfg.LocalRetrievalThreshold, cfg.MaxChunksPerQuery, retriever.WithEmbeddingInputProfile(cfg.EmbeddingInputProfile))
+	return queryComponents{
+		vectorStore: vectorStore,
+		vecDeleter:  vecDeleter,
+		embedder:    emb,
+		retriever:   ret,
+	}, nil
 }
 
 type httpEndpoint struct {
