@@ -71,6 +71,8 @@ func toolErrorMessage(err error, token string) string {
 		}
 	case errors.As(err, &rejected):
 		message = rejected.Error()
+	case errors.Is(err, client.ErrInvalidIncarnation):
+		message = client.ErrInvalidIncarnation.Error()
 	case errors.Is(err, client.ErrSubjectCredential):
 		message = client.ErrSubjectCredential.Error()
 	case errors.Is(err, context.DeadlineExceeded):
