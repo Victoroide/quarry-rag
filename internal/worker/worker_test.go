@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -483,4 +484,77 @@ func TestManifestedWorkerAbortsUpsertWhenManifestLeaseCheckFails(t *testing.T) {
 		default:
 		}
 	})
+}
+
+type modeFencedLeaseStore struct {
+	*leaseTestStore
+	completed  domain.Job
+	released   domain.Job
+	exists     bool
+	releaseErr error
+}
+
+func (s *modeFencedLeaseStore) CompleteJob(_ context.Context, job domain.Job, _ []domain.Chunk, _ domain.IndexObservation) (bool, error) {
+	s.completed = job
+	return false, fmt.Errorf("publish: %w", domain.ErrAuthzModeMismatch)
+}
+
+func (s *modeFencedLeaseStore) ReleaseJob(ctx context.Context, job domain.Job) error {
+	s.released = job
+	if s.releaseErr != nil {
+		return s.releaseErr
+	}
+	return s.leaseTestStore.ReleaseJob(ctx, job)
+}
+
+func (s *modeFencedLeaseStore) DocumentExists(context.Context, domain.DocumentID) (bool, error) {
+	return s.exists, nil
+}
+
+func TestCorpusModeMismatchReleasesOwnedLease(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		hosted, deleted bool
+		attempt         int
+		releaseErr      error
+	}{
+		{name: "retry budget remains", attempt: 1},
+		{name: "retry budget exhausted", attempt: 5},
+		{name: "lease moved", attempt: 5, releaseErr: domain.ErrJobNotOwned},
+		{name: "hosted document remains", hosted: true, attempt: 5},
+		{name: "hosted document deleted", hosted: true, deleted: true, attempt: 5, releaseErr: domain.ErrJobNotOwned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := leaseStore(1)
+			store := &modeFencedLeaseStore{leaseTestStore: base, exists: !tc.deleted, releaseErr: tc.releaseErr}
+			job := base.jobs[0]
+			job.LeaseOwner, job.Incarnation, job.LeaseToken, job.Attempts = "test", "inc-1", "lease-1", tc.attempt
+
+			var vectors domain.VectorDeleter
+			var recorder *revisionVectorRecorder
+			if tc.hosted {
+				recorder = &revisionVectorRecorder{activeChunks: make(map[string]domain.Chunk)}
+				vectors = recorder
+			}
+			w := New(store, []pipeline.Stage{leaseTestStage{func(context.Context) error { return nil }}}, vectors, Options{
+				HostedVectorManifest: tc.hosted, Owner: "test", MaxAttempts: 5, Lease: time.Minute, JobTimeout: time.Second,
+			})
+			w.process(t.Context(), job)
+			require.Equal(t, job.LeaseToken, store.completed.LeaseToken)
+			require.Equal(t, store.completed, store.released, "release must retain the exact attempt identity")
+			if tc.releaseErr == nil {
+				leaseEvent(t, base, "released")
+			}
+			require.Empty(t, base.events, "fenced publication must neither retry nor fail the job")
+			if tc.hosted {
+				revision := revisionIDForAttempt(job, "test")
+				want := []string{revision}
+				if tc.deleted {
+					want = append(want, revision)
+				}
+				require.Equal(t, want, recorder.revDeletes)
+				require.Zero(t, recorder.docDeletes)
+			}
+		})
+	}
 }
