@@ -174,7 +174,7 @@ type GenerationLedger struct {
 	db ledgerDatabase
 }
 
-func (c *Client) gate(ctx context.Context, q queryRower) error {
+func (c *Client) checkVectorWriterState(ctx context.Context, q queryRower) error {
 	mine := c.servingPin()
 	if !c.vectorStateReady.Load() {
 		// A schema older than migration 016 has no freeze to honor and only the legacy target.
@@ -185,6 +185,9 @@ func (c *Client) gate(ctx context.Context, q queryRower) error {
 		if !present {
 			if mine.generation != LegacyGeneration {
 				return fmt.Errorf("%w: replica serves %q, but no generation is recorded", domain.ErrGenerationMismatch, mine.generation)
+			}
+			if c.configuredAuthzMode() != "" {
+				return fmt.Errorf("%w: configured replica requires vector state", domain.ErrGenerationMismatch)
 			}
 			return nil
 		}
@@ -201,17 +204,29 @@ func (c *Client) gate(ctx context.Context, q queryRower) error {
 	if frozen {
 		return domain.ErrWritersFrozen
 	}
-	return c.checkAuthzMode(ctx, q)
+	return nil
+}
+
+func (c *Client) gateWriter(ctx context.Context, tx pgx.Tx) error {
+	if err := c.checkVectorWriterState(ctx, tx); err != nil {
+		return err
+	}
+	return c.checkWriterAuthzMode(ctx, tx)
 }
 
 // WritersOpen implements domain.WriterGate.
-func (c *Client) WritersOpen(ctx context.Context) error { return c.gate(ctx, c.Pool) }
+func (c *Client) WritersOpen(ctx context.Context) error {
+	if err := c.checkVectorWriterState(ctx, c.Pool); err != nil {
+		return err
+	}
+	return c.checkAuthzMode(ctx, c.Pool, corpusAuthzModeQuery)
+}
 
 var _ domain.WriterGate = (*Client)(nil)
 
-// AcquireWriter holds the freeze barrier across a maintenance operation.
+// AcquireWriter holds the vector freeze and corpus mode barriers across a maintenance operation.
 func (c *Client) AcquireWriter(ctx context.Context) (func(), error) {
-	_, release, err := c.acquireWriterSession(ctx, pgx.TxOptions{}, c.gate)
+	_, release, err := c.acquireWriterSession(ctx, c.gateWriter)
 	return release, err
 }
 
@@ -219,10 +234,10 @@ func (c *Client) AcquireWriter(ctx context.Context) (func(), error) {
 // vector requests. The receipt separately identifies the retired physical index.
 // The returned transaction can also observe the outcome of a release commit.
 func (c *Client) AcquireHeldRecoveryWriter(ctx context.Context) (pgx.Tx, func(), error) {
-	return c.acquireWriterSession(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(ctx context.Context, q queryRower) error {
+	return c.acquireWriterSession(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		var active string
 		var frozen bool
-		if err := q.QueryRow(ctx, `SELECT active, frozen FROM vector_writer_state()`).Scan(&active, &frozen); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT active, frozen FROM vector_writer_state()`).Scan(&active, &frozen); err != nil {
 			return fmt.Errorf("postgres: read vector state: %w", err)
 		}
 		configured := c.servingPin().generation
@@ -232,11 +247,11 @@ func (c *Client) AcquireHeldRecoveryWriter(ctx context.Context) (pgx.Tx, func(),
 		if frozen {
 			return domain.ErrWritersFrozen
 		}
-		return c.checkAuthzMode(ctx, q)
+		return c.checkAuthzMode(ctx, tx, corpusAuthzModeQuery)
 	})
 }
 
-func (c *Client) acquireWriterSession(ctx context.Context, opts pgx.TxOptions, check func(context.Context, queryRower) error) (pgx.Tx, func(), error) {
+func (c *Client) acquireWriterSession(ctx context.Context, check func(context.Context, pgx.Tx) error) (pgx.Tx, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -252,7 +267,7 @@ func (c *Client) acquireWriterSession(ctx context.Context, opts pgx.TxOptions, c
 		<-c.writerSlots
 		return nil, nil, err
 	}
-	tx, err := conn.BeginTx(ctx, opts)
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	release := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()

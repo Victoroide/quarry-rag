@@ -411,6 +411,7 @@ func UpgradedServingRoleDatabase(t *testing.T) (owner, serving *Client) {
 		"-- Serving role upgrade for migrations 019, 023 and 025",
 		"-- Serving role upgrade for migration 029",
 		"-- Serving role upgrade for migration 030",
+		"-- Serving role upgrade for migration 036",
 	} {
 		grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", marker))
 	}

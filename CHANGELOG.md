@@ -25,6 +25,9 @@ Notable changes are grouped by release.
 - Unscoped ingestion with hosted vector manifests can recover from an uncertain legacy vector upsert.
 - Grants-mode document listings and status avoid retries for unrelated policy changes. A stream ends before releasing another batch when the caller's policy changes.
 - Release an exact legacy Pinecone hold through the cleanup command without contacting Pinecone.
+- Grants activation now waits for in-flight service-mode acceptance, claims and
+  job publication. Migration 036 and its serving-role grant are required before
+  deploying updated replicas.
 
 ### Security
 

@@ -1113,10 +1113,15 @@ In `AUTHZ_MODE=grants`, Quarry enforces delegated subject credentials and tenant
 
 ### Grants cutover
 
-Before enabling grants, deploy receipt-capable replicas, close mutating ingress
-and fence older executables using network policy and separate PostgreSQL logins.
+Before enabling grants, apply metadata migrations and complete the
+[serving-role upgrade](grant-catalog.md#upgrade-an-existing-serving-role).
+Deploy receipt-capable service replicas that take the corpus writer lock.
+Close mutating ingress and fence every older executable, including builds
+that only read the migration 029 marker, using network policy and separate
+PostgreSQL logins. A mixed rollout is unsafe while an older build can write.
 Drain in-flight requests, workers and outstanding provider work under the
-[checkpointed deletion upgrade order](#upgrade-order). Complete any required
+[checkpointed deletion upgrade order](#upgrade-order). Provider mutations may
+already be in flight when the database fences publication. Complete any required
 vector reindex under [Changing Models or Vector Stores](#changing-models-or-vector-stores)
 before permitting the new replicas to write. A PostgreSQL reindex target for a
 corpus with incarnation-tagged vectors requires a build that can stage and
@@ -1125,8 +1130,8 @@ delete those records.
 As the schema owner, [activate checkpointed deletion](#activate-checkpointed-deletion)
 and verify that the deletion-mode endpoint reports active. With ingress still
 closed, use the separate [operator preview and activation](grant-catalog.md#corpus-cutover-and-security-audit)
-to switch the corpus to grants. Check grants-mode readiness before reopening
-ingress.
+to switch the corpus to grants. Start replicas with `AUTHZ_MODE=grants` and
+check readiness before reopening ingress.
 
 After upgrading an already-grants corpus whose deletion marker is unset, reads
 and queries remain available and live scoped deletion returns `412`. Follow the

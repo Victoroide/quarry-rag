@@ -76,7 +76,7 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 		return result, err
 	}
-	if gateErr := c.gate(ctx, tx); gateErr != nil {
+	if gateErr := c.gateWriter(ctx, tx); gateErr != nil {
 		if errors.Is(gateErr, domain.ErrWritersFrozen) {
 			result.Outcome = domain.AcceptFrozen
 			return result, nil
@@ -567,12 +567,12 @@ func lockClaimedJob(ctx context.Context, tx pgx.Tx, j domain.Job) (bool, error) 
 // claimJobLease runs the claim statement in a transaction that holds the
 // writer gate until the lease commits.
 func (c *Client) claimJobLease(ctx context.Context, statement string, args []any, scan func(pgx.Row) error) error {
-	tx, err := c.Pool.Begin(ctx)
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if gateErr := c.gate(ctx, tx); gateErr != nil {
+	if gateErr := c.gateWriter(ctx, tx); gateErr != nil {
 		return gateErr
 	}
 	if scanErr := scan(tx.QueryRow(ctx, statement, args...)); scanErr != nil {
@@ -601,11 +601,16 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	if j.Incarnation == "" || j.LeaseToken == "" {
 		return false, nil
 	}
-	tx, err := c.Pool.Begin(ctx)
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	// A leased job can publish during a vector freeze, but must still match
+	// the corpus authorization mode before taking document or job locks.
+	if modeErr := c.checkWriterAuthzMode(ctx, tx); modeErr != nil {
+		return false, modeErr
+	}
 	var policy domain.ContentDedup
 	var fingerprint *string
 	var collection string
