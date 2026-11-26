@@ -5,6 +5,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/google/uuid"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -118,6 +119,57 @@ func TestMemoryIndexFilterHonorsTheExistenceOperator(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestMemoryIndexRanksOnlyScopedManifestAndTaggedMatches(t *testing.T) {
+	client, _ := memoryClient(2)
+	scope, ids := memberScope(2)
+	var chunks []domain.Chunk
+	for _, tc := range []struct {
+		id, doc, tenant, collection, docType, tag string
+		manifest                                  bool
+	}{
+		{"manifest", ids[0], scopeTenant, "archive", "report", "", true},
+		{"tagged", ids[1], scopeTenant, "archive", "report", memberIncarnation(1), false},
+		{"unlisted", memberID(2), scopeTenant, "archive", "report", "", true},
+		{"foreign", ids[0], "foreign-tenant", "archive", "report", "", true},
+		{"wrong-collection", ids[0], scopeTenant, "private", "report", "", true},
+		{"wrong-type", ids[0], scopeTenant, "archive", "note", "", true},
+		{"stale-tag", ids[1], scopeTenant, "archive", "report", memberIncarnation(2), false},
+		{"legacy", ids[0], scopeTenant, "archive", "report", "", false},
+	} {
+		ch := memoryChunk(tc.id, tc.doc, []float32{1, 0}, tc.docType, tc.collection)
+		ch.Metadata[domain.VectorTenantKey] = tc.tenant
+		if tc.manifest {
+			ch.RevisionID = uuid.NewString()
+			ch.VectorID = domain.FormatRevisionVectorID(ch.DocumentID, ch.RevisionID, ch.Index)
+		}
+		if tc.tag != "" {
+			ch.Metadata[domain.VectorRevisionKey] = tc.tag
+		}
+		if tc.id == "manifest" || tc.id == "tagged" {
+			ch.Embedding = []float32{1, 1}
+		}
+		chunks = append(chunks, ch)
+	}
+	require.NoError(t, client.Upsert(t.Context(), "", chunks))
+	driver := NewDriver(client)
+	filter := domain.VectorFilter{DocumentIDs: ids, Authorized: scope, Collection: "archive", DocType: "report"}
+	check := func(hits []domain.ScoredChunk, err error) {
+		t.Helper()
+		require.NoError(t, err)
+		var got []domain.ChunkID
+		for _, hit := range hits {
+			got = append(got, hit.Chunk.ID)
+		}
+		require.ElementsMatch(t, []domain.ChunkID{"manifest", "tagged"}, got)
+	}
+	query := []float32{1, 0}
+	check(driver.QueryFiltered(t.Context(), query, 2, filter))
+	check(driver.QueryCandidates(t.Context(), query, 2, filter))
+	hits, used, err := driver.QueryFilteredBudgeted(t.Context(), query, 2, filter, 1)
+	check(hits, err)
+	require.Equal(t, 1, used)
 }
 
 func TestMemoryIndexUpdateVectorsByMetadata(t *testing.T) {

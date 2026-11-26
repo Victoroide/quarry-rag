@@ -13,6 +13,10 @@ Notable changes are grouped by release.
 
 - With `SOURCE_UPLOAD_JOURNAL=true`, owned multipart uploads journal each incarnation-scoped original before writing it, so reconciliation can reclaim originals that acceptance never adopted.
 
+### Fixed
+
+- Pinecone queries in grants and service mode can retrieve scoped documents with an active hosted vector revision without reindexing.
+
 ## [0.2.0] - 2026-11-26
 
 ### Upgrade from 0.1.0

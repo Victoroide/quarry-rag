@@ -57,19 +57,34 @@ func TestAuthorizedQuerySendsTenantAndIncarnationsInEveryRequest(t *testing.T) {
 	var requests int
 	conn := &fakeIndexConn{query: func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
 		requests++
-		fields := req.MetadataFilter.GetFields()
+		fields := make(map[string]*structpb.Value)
+		clauses := req.MetadataFilter.GetFields()["$and"].GetListValue().GetValues()
+		require.Len(t, clauses, 5)
+		for _, clause := range clauses {
+			for field, value := range clause.GetStructValue().GetFields() {
+				fields[field] = value
+			}
+		}
 		require.Equal(t, scopeTenant, fields[domain.VectorTenantKey].GetStructValue().GetFields()["$eq"].GetStringValue())
-		docs, incarnations := listValues(t, req.MetadataFilter, "doc_id"), listValues(t, req.MetadataFilter, domain.VectorRevisionKey)
+		identity := fields["$or"].GetListValue().GetValues()
+		require.Len(t, identity, 2)
+		require.Equal(t, map[string]any{
+			"revision_id":            map[string]any{"$exists": true},
+			domain.VectorRevisionKey: map[string]any{"$exists": false},
+		}, identity[1].GetStructValue().AsMap())
+		docs := listValues(t, &structpb.Struct{Fields: fields}, "doc_id")
+		incarnations := listValues(t, identity[0].GetStructValue(), domain.VectorRevisionKey)
 		require.LessOrEqual(t, len(docs), maxInValues)
 		require.Equal(t, len(docs), len(incarnations), "each predicate describes the same documents")
 		for i, doc := range docs {
 			require.Equal(t, scope.Incarnations[doc], incarnations[i])
 		}
 		require.Equal(t, "report", fields["doc_type"].GetStructValue().GetFields()["$eq"].GetStringValue())
+		require.Equal(t, "archive", fields["collection"].GetStructValue().GetFields()["$eq"].GetStringValue())
 		return &pinecone.QueryVectorsResponse{Matches: []*pinecone.ScoredVector{hostedHit(t, docs[0], incarnations[0], scopeTenant, "c")}}, nil
 	}}
 	driver := NewDriver(testClient(conn))
-	filter := domain.VectorFilter{DocType: "report", DocumentIDs: ids, Authorized: scope}
+	filter := domain.VectorFilter{DocType: "report", Collection: "archive", DocumentIDs: ids, Authorized: scope}
 	got, err := driver.QueryFiltered(t.Context(), []float32{1}, 3, filter)
 	require.NoError(t, err)
 	require.Equal(t, 3, requests)
@@ -83,6 +98,15 @@ func TestAuthorizedQuerySendsTenantAndIncarnationsInEveryRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 3, used)
 	require.Equal(t, 3, requests)
+}
+
+func scopedFilterClause(filter *structpb.Struct, field string) *structpb.Struct {
+	for _, clause := range filter.GetFields()["$and"].GetListValue().GetValues() {
+		if fields := clause.GetStructValue(); fields.GetFields()[field] != nil {
+			return fields
+		}
+	}
+	return nil
 }
 
 func TestAuthorizedQueryNeverSearchesWithoutExplicitMembership(t *testing.T) {
@@ -118,7 +142,7 @@ func TestAuthorizedQueryDropsUnlistedDocumentsAndSkipsEmptyPartitions(t *testing
 	calls := 0
 	client := testClient(&fakeIndexConn{query: func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
 		calls++
-		require.Equal(t, []string{memberID(0)}, listValues(t, req.MetadataFilter, "doc_id"), "an unlisted document never reaches a predicate")
+		require.Equal(t, []string{memberID(0)}, listValues(t, scopedFilterClause(req.MetadataFilter, "doc_id"), "doc_id"), "an unlisted document never reaches a predicate")
 		return &pinecone.QueryVectorsResponse{}, nil
 	}})
 	filter := domain.VectorFilter{Authorized: scope, DocumentIDs: []string{memberID(0), memberID(7), "not-a-uuid", uuid.NewString()}}
@@ -140,6 +164,14 @@ func TestAuthorizedQueryTreatsHostedMetadataAsUntrusted(t *testing.T) {
 	client := testClient(&fakeIndexConn{query: func(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
 		noTenant := hostedHit(t, ids[0], memberIncarnation(0), "", "no-tenant")
 		delete(noTenant.Vector.Metadata.Fields, domain.VectorTenantKey)
+		manifest := func(doc, tenant, chunk string) *pinecone.ScoredVector {
+			const revision = "5b340356-6a61-4375-a0d2-a578731aaa7f"
+			md, err := structpb.NewStruct(map[string]any{"doc_id": doc, "chunk_id": chunk, domain.VectorTenantKey: tenant, "revision_id": revision})
+			require.NoError(t, err)
+			return &pinecone.ScoredVector{Vector: &pinecone.Vector{Id: domain.FormatRevisionVectorID(domain.DocumentID(doc), revision, 0), Metadata: md}, Score: .5}
+		}
+		contradictory := hostedHit(t, ids[0], memberIncarnation(0), scopeTenant, "both-identities")
+		contradictory.Vector.Metadata.Fields["revision_id"] = structpb.NewStringValue("revision")
 		return &pinecone.QueryVectorsResponse{Matches: []*pinecone.ScoredVector{
 			hostedHit(t, ids[0], memberIncarnation(0), scopeTenant, "good"),
 			hostedHit(t, ids[0], memberIncarnation(0), "00000000-0000-4000-8000-0000000000b0", "other-tenant"),
@@ -148,6 +180,11 @@ func TestAuthorizedQueryTreatsHostedMetadataAsUntrusted(t *testing.T) {
 			hostedHit(t, foreign, memberIncarnation(0), scopeTenant, "foreign-document"),
 			noTenant,
 			hostedHit(t, ids[1], memberIncarnation(1), strings.ToUpper(scopeTenant), "case-folded-tenant"),
+			manifest(ids[0], scopeTenant, "manifest"),
+			manifest(ids[0], "", "unlabeled-manifest"),
+			manifest(ids[0], "foreign-tenant", "foreign-manifest"),
+			manifest(foreign, scopeTenant, "unlisted-manifest"),
+			contradictory,
 		}}, nil
 	}})
 	got, err := NewDriver(client).QueryFiltered(t.Context(), []float32{1}, 10, domain.VectorFilter{Authorized: scope, DocumentIDs: ids})
@@ -156,14 +193,14 @@ func TestAuthorizedQueryTreatsHostedMetadataAsUntrusted(t *testing.T) {
 	for _, sc := range got {
 		kept = append(kept, string(sc.Chunk.ID))
 	}
-	require.ElementsMatch(t, []string{"good", "case-folded-tenant"}, kept)
+	require.ElementsMatch(t, []string{"good", "case-folded-tenant", "manifest"}, kept)
 }
 
 func TestAuthorizedQueryMatchesAliasSpellingsExactly(t *testing.T) {
 	scope, ids := memberScope(1)
 	alias := strings.ToUpper(ids[0])
 	client := testClient(&fakeIndexConn{query: func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
-		require.Equal(t, []string{alias}, listValues(t, req.MetadataFilter, "doc_id"), "the store's spelling is sent byte for byte")
+		require.Equal(t, []string{alias}, listValues(t, scopedFilterClause(req.MetadataFilter, "doc_id"), "doc_id"), "the store's spelling is sent byte for byte")
 		return &pinecone.QueryVectorsResponse{Matches: []*pinecone.ScoredVector{hostedHit(t, alias, memberIncarnation(0), scopeTenant, "aliased")}}, nil
 	}})
 	got, err := NewDriver(client).QueryFiltered(t.Context(), []float32{1}, 10, domain.VectorFilter{Authorized: scope, DocumentIDs: []string{alias}})

@@ -196,15 +196,65 @@ func TestAuthorizedHitsMustAgreeWithTheScope(t *testing.T) {
 		hit(doc, scope.TenantID, "inc"), hit(doc, "00000000-0000-4000-8000-0000000000b0", "inc"), hit(doc, scope.TenantID, "stale"),
 		hit(other, scope.TenantID, "inc"), hit(doc, "", "inc"), hit(doc, "", ""),
 	}
+	manifest := hit(doc, scope.TenantID, "")
+	manifest.Chunk.RevisionID = "hosted-revision"
+	foreignManifest := hit(doc, "another-tenant", "")
+	foreignManifest.Chunk.RevisionID = manifest.Chunk.RevisionID
+	unlistedManifest := hit(other, scope.TenantID, "")
+	unlistedManifest.Chunk.RevisionID = manifest.Chunk.RevisionID
+	unlabeledManifest := hit(doc, "", "")
+	unlabeledManifest.Chunk.RevisionID = manifest.Chunk.RevisionID
+	contradictory := hit(doc, scope.TenantID, "inc")
+	contradictory.Chunk.RevisionID = manifest.Chunk.RevisionID
+	contradictoryAttempt := hit(doc, scope.TenantID, "")
+	contradictoryAttempt.Chunk.RevisionID = manifest.Chunk.RevisionID
+	contradictoryAttempt.Chunk.Metadata[domain.VectorAttemptKey] = "attempt"
 	// Relation stores carry no membership: only a contradicting tenant label rejects a hit.
 	require.Len(t, filterAuthorizedHits(scope, hits), 5)
 	scope.Incarnations = map[string]string{doc: "inc"}
+	hits = append(hits, manifest, foreignManifest, unlistedManifest, unlabeledManifest, contradictory, contradictoryAttempt)
 	kept := filterAuthorizedHits(scope, hits)
-	require.Len(t, kept, 2, "a membership store requires its own incarnation tag on a listed document")
-	for _, sc := range kept {
-		require.Equal(t, domain.DocumentID(doc), sc.Chunk.DocumentID)
-		require.Equal(t, "inc", sc.Chunk.Metadata[domain.VectorRevisionKey])
-	}
+	require.Equal(t, []domain.ScoredChunk{hits[0], manifest}, kept)
+}
+
+func TestManifestEvidenceUsesPublicationIdentityWithoutAnUntaggedObservation(t *testing.T) {
+	const doc = "00000000-0000-4000-8000-000000000001"
+	manifest := domain.ScoredChunk{Chunk: domain.Chunk{DocumentID: doc, RevisionID: "hosted-revision"}}
+	historical := domain.ScoredChunk{Chunk: domain.Chunk{DocumentID: doc}}
+	tagged := domain.ScoredChunk{Chunk: domain.Chunk{DocumentID: doc, Metadata: map[string]any{domain.VectorRevisionKey: "inc"}}}
+	contradictory := manifest
+	contradictory.Chunk.Metadata = tagged.Chunk.Metadata
+	qc := QueryContext{untaggedIncarnations: map[string]string{}}
+	hits := []domain.ScoredChunk{manifest, historical, tagged, contradictory}
+	require.Equal(t, []domain.ScoredChunk{manifest, tagged}, qc.matchObservedEvidence(hits))
+
+	qc.untaggedIncarnations[doc] = "inc"
+	historical.ObservedIncarnation = "inc"
+	require.Equal(t, []domain.ScoredChunk{manifest, historical, tagged}, qc.matchObservedEvidence(hits))
+}
+
+func TestStrictEvidenceRechecksManifestRevisionWithinScope(t *testing.T) {
+	const doc = "00000000-0000-4000-8000-000000000001"
+	now := time.Now()
+	authority := &stateAuthority{state: domain.ReadState{Active: true, Revision: 1}}
+	auth := authorizationAt(&now, now.Add(time.Hour), authority, 1)
+	auth.Scope.Incarnations = map[string]string{doc: "inc"}
+	hits := []domain.ScoredChunk{{Chunk: domain.Chunk{
+		ID: "chunk", DocumentID: doc, Text: "current text", RevisionID: "hosted-revision",
+		Metadata: map[string]any{domain.VectorTenantKey: auth.Scope.TenantID},
+	}}}
+	active := true
+	visibility := currentChunks{check: func(got []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+		require.Equal(t, hits, got)
+		if active {
+			return got, nil
+		}
+		return nil, nil
+	}}
+	qc := QueryContext{Authorization: auth, EvidenceVisibility: visibility, RetrievedChunks: hits}
+	require.NoError(t, qc.checkStrictEvidence(t.Context(), hits))
+	active = false
+	require.ErrorIs(t, qc.checkStrictEvidence(t.Context(), hits), ErrReadAuthorityChanged)
 }
 
 func TestVectorFilterCarriesTheAuthorizedScopeOnlyUnderAuthorization(t *testing.T) {
