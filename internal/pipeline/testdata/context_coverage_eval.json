@@ -1,0 +1,1926 @@
+{
+  "corpus_version": "context-coverage-v1",
+  "chunk_tokens": 128,
+  "chunk_overlap": 32,
+  "max_chunks": 10,
+  "local_threshold": 0.7,
+  "synthesis_context_tokens": 220,
+  "synthesis_relative_score_floor": 0.55,
+  "documents": [
+    {
+      "id": "eval-retention-a1",
+      "collection": "eval",
+      "doc_type": "archive",
+      "visible": true,
+      "content": "Financial ledger retention is seven years in immutable storage. Operational retention manual chapter 1 defines archive governance controls, review checkpoints, and compliance ownership across regional teams. Standard retention procedures require documented sign-off by regional leads before quarterly audits begin. Regional retention handbook section 1 covers archive baseline standards, reporting cadence, and escalation paths for operational supervisors. All retention filings follow the archive template.",
+      "preview": "Financial ledger retention is seven years in immutable storage. Operational retention manual chapter 1 defines archive g"
+    },
+    {
+      "id": "eval-retention-a2",
+      "collection": "eval",
+      "doc_type": "archive",
+      "visible": true,
+      "content": "Financial ledger retention is seven years in immutable storage. Operational retention manual chapter 1 defines archive governance controls, review checkpoints, and compliance ownership across regional teams. Standard retention procedures require documented sign-off by regional leads before quarterly audits begin. Regional retention handbook section 1 covers archive baseline standards, reporting cadence, and escalation paths for operational supervisors. Every retention filing follows the archive template.",
+      "preview": "Financial ledger retention is seven years in immutable storage. Operational retention manual chapter 1 defines archive g"
+    },
+    {
+      "id": "eval-retention-a3",
+      "collection": "eval",
+      "doc_type": "archive",
+      "visible": true,
+      "content": "Financial ledger retention is seven years in immutable storage. Operational retention manual chapter 1 defines archive governance controls, review checkpoints, and compliance ownership across regional teams. Standard retention procedures require documented sign-off by regional leads before quarterly audits begin. Regional retention handbook section 1 covers archive baseline standards, reporting cadence, and escalation paths for operational supervisors. Each retention filing uses the archive template.",
+      "preview": "Financial ledger retention is seven years in immutable storage. Operational retention manual chapter 1 defines archive g"
+    },
+    {
+      "id": "eval-retention-b",
+      "collection": "eval",
+      "doc_type": "archive",
+      "visible": true,
+      "content": "Security access logs expire after ninety days with daily verification. Exception addendum 1 for retention (archive) applies to specialized exemptions and secondary controls outside routine retention baselines.",
+      "preview": "Security access logs expire after ninety days with daily verification. Exception addendum 1 for retention (archive) appl"
+    },
+    {
+      "id": "eval-travel-a1",
+      "collection": "eval",
+      "doc_type": "policy",
+      "visible": true,
+      "content": "Domestic rail reimbursement is capped at five hundred dollars per trip. Operational travel manual chapter 2 defines policy governance controls, review checkpoints, and compliance ownership across regional teams. Standard travel procedures require documented sign-off by regional leads before quarterly audits begin. Regional travel handbook section 2 covers policy baseline standards, reporting cadence, and escalation paths for operational supervisors. All travel filings follow the policy template.",
+      "preview": "Domestic rail reimbursement is capped at five hundred dollars per trip. Operational travel manual chapter 2 defines poli"
+    },
+    {
+      "id": "eval-travel-a2",
+      "collection": "eval",
+      "doc_type": "policy",
+      "visible": true,
+      "content": "Domestic rail reimbursement is capped at five hundred dollars per trip. Operational travel manual chapter 2 defines policy governance controls, review checkpoints, and compliance ownership across regional teams. Standard travel procedures require documented sign-off by regional leads before quarterly audits begin. Regional travel handbook section 2 covers policy baseline standards, reporting cadence, and escalation paths for operational supervisors. Every travel filing follows the policy template.",
+      "preview": "Domestic rail reimbursement is capped at five hundred dollars per trip. Operational travel manual chapter 2 defines poli"
+    },
+    {
+      "id": "eval-travel-a3",
+      "collection": "eval",
+      "doc_type": "policy",
+      "visible": true,
+      "content": "Domestic rail reimbursement is capped at five hundred dollars per trip. Operational travel manual chapter 2 defines policy governance controls, review checkpoints, and compliance ownership across regional teams. Standard travel procedures require documented sign-off by regional leads before quarterly audits begin. Regional travel handbook section 2 covers policy baseline standards, reporting cadence, and escalation paths for operational supervisors. Each travel filing uses the policy template.",
+      "preview": "Domestic rail reimbursement is capped at five hundred dollars per trip. Operational travel manual chapter 2 defines poli"
+    },
+    {
+      "id": "eval-travel-b",
+      "collection": "eval",
+      "doc_type": "policy",
+      "visible": true,
+      "content": "Business class seat upgrades are not approved under any travel tier. Exception addendum 2 for travel (policy) applies to specialized exemptions and secondary controls outside routine travel baselines.",
+      "preview": "Business class seat upgrades are not approved under any travel tier. Exception addendum 2 for travel (policy) applies to"
+    },
+    {
+      "id": "eval-backup-a1",
+      "collection": "eval",
+      "doc_type": "infra",
+      "visible": true,
+      "content": "Primary database snapshots run at 02:00 UTC across all zones. Operational backup manual chapter 3 defines infra governance controls, review checkpoints, and compliance ownership across regional teams. Standard backup procedures require documented sign-off by regional leads before quarterly audits begin. Regional backup handbook section 3 covers infra baseline standards, reporting cadence, and escalation paths for operational supervisors. All backup filings follow the infra template.",
+      "preview": "Primary database snapshots run at 02:00 UTC across all zones. Operational backup manual chapter 3 defines infra governan"
+    },
+    {
+      "id": "eval-backup-a2",
+      "collection": "eval",
+      "doc_type": "infra",
+      "visible": true,
+      "content": "Primary database snapshots run at 02:00 UTC across all zones. Operational backup manual chapter 3 defines infra governance controls, review checkpoints, and compliance ownership across regional teams. Standard backup procedures require documented sign-off by regional leads before quarterly audits begin. Regional backup handbook section 3 covers infra baseline standards, reporting cadence, and escalation paths for operational supervisors. Every backup filing follows the infra template.",
+      "preview": "Primary database snapshots run at 02:00 UTC across all zones. Operational backup manual chapter 3 defines infra governan"
+    },
+    {
+      "id": "eval-backup-a3",
+      "collection": "eval",
+      "doc_type": "infra",
+      "visible": true,
+      "content": "Primary database snapshots run at 02:00 UTC across all zones. Operational backup manual chapter 3 defines infra governance controls, review checkpoints, and compliance ownership across regional teams. Standard backup procedures require documented sign-off by regional leads before quarterly audits begin. Regional backup handbook section 3 covers infra baseline standards, reporting cadence, and escalation paths for operational supervisors. Each backup filing uses the infra template.",
+      "preview": "Primary database snapshots run at 02:00 UTC across all zones. Operational backup manual chapter 3 defines infra governan"
+    },
+    {
+      "id": "eval-backup-b",
+      "collection": "eval",
+      "doc_type": "infra",
+      "visible": true,
+      "content": "Cross-region failover drills run quarterly on the second Sunday. Exception addendum 3 for backup (infra) applies to specialized exemptions and secondary controls outside routine backup baselines.",
+      "preview": "Cross-region failover drills run quarterly on the second Sunday. Exception addendum 3 for backup (infra) applies to spec"
+    },
+    {
+      "id": "eval-badges-a1",
+      "collection": "eval",
+      "doc_type": "security",
+      "visible": true,
+      "content": "Permanent employee facility badges renew every twelve months. Operational badges manual chapter 4 defines security governance controls, review checkpoints, and compliance ownership across regional teams. Standard badges procedures require documented sign-off by regional leads before quarterly audits begin. Regional badges handbook section 4 covers security baseline standards, reporting cadence, and escalation paths for operational supervisors. All badges filings follow the security template.",
+      "preview": "Permanent employee facility badges renew every twelve months. Operational badges manual chapter 4 defines security gover"
+    },
+    {
+      "id": "eval-badges-a2",
+      "collection": "eval",
+      "doc_type": "security",
+      "visible": true,
+      "content": "Permanent employee facility badges renew every twelve months. Operational badges manual chapter 4 defines security governance controls, review checkpoints, and compliance ownership across regional teams. Standard badges procedures require documented sign-off by regional leads before quarterly audits begin. Regional badges handbook section 4 covers security baseline standards, reporting cadence, and escalation paths for operational supervisors. Every badges filing follows the security template.",
+      "preview": "Permanent employee facility badges renew every twelve months. Operational badges manual chapter 4 defines security gover"
+    },
+    {
+      "id": "eval-badges-a3",
+      "collection": "eval",
+      "doc_type": "security",
+      "visible": true,
+      "content": "Permanent employee facility badges renew every twelve months. Operational badges manual chapter 4 defines security governance controls, review checkpoints, and compliance ownership across regional teams. Standard badges procedures require documented sign-off by regional leads before quarterly audits begin. Regional badges handbook section 4 covers security baseline standards, reporting cadence, and escalation paths for operational supervisors. Each badges filing uses the security template.",
+      "preview": "Permanent employee facility badges renew every twelve months. Operational badges manual chapter 4 defines security gover"
+    },
+    {
+      "id": "eval-badges-b",
+      "collection": "eval",
+      "doc_type": "security",
+      "visible": true,
+      "content": "Temporary contractor passes expire automatically after twenty four hours. Exception addendum 4 for badges (security) applies to specialized exemptions and secondary controls outside routine badges baselines.",
+      "preview": "Temporary contractor passes expire automatically after twenty four hours. Exception addendum 4 for badges (security) app"
+    },
+    {
+      "id": "eval-encryption-a1",
+      "collection": "eval",
+      "doc_type": "crypto",
+      "visible": true,
+      "content": "Object storage buckets enforce AES-256 server-side encryption. Operational encryption manual chapter 5 defines crypto governance controls, review checkpoints, and compliance ownership across regional teams. Standard encryption procedures require documented sign-off by regional leads before quarterly audits begin. Regional encryption handbook section 5 covers crypto baseline standards, reporting cadence, and escalation paths for operational supervisors. All encryption filings follow the crypto template.",
+      "preview": "Object storage buckets enforce AES-256 server-side encryption. Operational encryption manual chapter 5 defines crypto go"
+    },
+    {
+      "id": "eval-encryption-a2",
+      "collection": "eval",
+      "doc_type": "crypto",
+      "visible": true,
+      "content": "Object storage buckets enforce AES-256 server-side encryption. Operational encryption manual chapter 5 defines crypto governance controls, review checkpoints, and compliance ownership across regional teams. Standard encryption procedures require documented sign-off by regional leads before quarterly audits begin. Regional encryption handbook section 5 covers crypto baseline standards, reporting cadence, and escalation paths for operational supervisors. Every encryption filing follows the crypto template.",
+      "preview": "Object storage buckets enforce AES-256 server-side encryption. Operational encryption manual chapter 5 defines crypto go"
+    },
+    {
+      "id": "eval-encryption-a3",
+      "collection": "eval",
+      "doc_type": "crypto",
+      "visible": true,
+      "content": "Object storage buckets enforce AES-256 server-side encryption. Operational encryption manual chapter 5 defines crypto governance controls, review checkpoints, and compliance ownership across regional teams. Standard encryption procedures require documented sign-off by regional leads before quarterly audits begin. Regional encryption handbook section 5 covers crypto baseline standards, reporting cadence, and escalation paths for operational supervisors. Each encryption filing uses the crypto template.",
+      "preview": "Object storage buckets enforce AES-256 server-side encryption. Operational encryption manual chapter 5 defines crypto go"
+    },
+    {
+      "id": "eval-encryption-b",
+      "collection": "eval",
+      "doc_type": "crypto",
+      "visible": true,
+      "content": "Hardware security modules rotate tenant master keys every one hundred eighty days. Exception addendum 5 for encryption (crypto) applies to specialized exemptions and secondary controls outside routine encryption baselines.",
+      "preview": "Hardware security modules rotate tenant master keys every one hundred eighty days. Exception addendum 5 for encryption ("
+    },
+    {
+      "id": "eval-incident-a1",
+      "collection": "eval",
+      "doc_type": "ops",
+      "visible": true,
+      "content": "Severity one outages require incident commander paging within five minutes. Operational incident manual chapter 6 defines ops governance controls, review checkpoints, and compliance ownership across regional teams. Standard incident procedures require documented sign-off by regional leads before quarterly audits begin. Regional incident handbook section 6 covers ops baseline standards, reporting cadence, and escalation paths for operational supervisors. All incident filings follow the ops template.",
+      "preview": "Severity one outages require incident commander paging within five minutes. Operational incident manual chapter 6 define"
+    },
+    {
+      "id": "eval-incident-a2",
+      "collection": "eval",
+      "doc_type": "ops",
+      "visible": true,
+      "content": "Severity one outages require incident commander paging within five minutes. Operational incident manual chapter 6 defines ops governance controls, review checkpoints, and compliance ownership across regional teams. Standard incident procedures require documented sign-off by regional leads before quarterly audits begin. Regional incident handbook section 6 covers ops baseline standards, reporting cadence, and escalation paths for operational supervisors. Every incident filing follows the ops template.",
+      "preview": "Severity one outages require incident commander paging within five minutes. Operational incident manual chapter 6 define"
+    },
+    {
+      "id": "eval-incident-a3",
+      "collection": "eval",
+      "doc_type": "ops",
+      "visible": true,
+      "content": "Severity one outages require incident commander paging within five minutes. Operational incident manual chapter 6 defines ops governance controls, review checkpoints, and compliance ownership across regional teams. Standard incident procedures require documented sign-off by regional leads before quarterly audits begin. Regional incident handbook section 6 covers ops baseline standards, reporting cadence, and escalation paths for operational supervisors. Each incident filing uses the ops template.",
+      "preview": "Severity one outages require incident commander paging within five minutes. Operational incident manual chapter 6 define"
+    },
+    {
+      "id": "eval-incident-b",
+      "collection": "eval",
+      "doc_type": "ops",
+      "visible": true,
+      "content": "Post-incident corrective actions close within fourteen calendar days. Exception addendum 6 for incident (ops) applies to specialized exemptions and secondary controls outside routine incident baselines.",
+      "preview": "Post-incident corrective actions close within fourteen calendar days. Exception addendum 6 for incident (ops) applies to"
+    },
+    {
+      "id": "eval-onboarding-a1",
+      "collection": "eval",
+      "doc_type": "hr",
+      "visible": true,
+      "content": "New engineering hires complete privacy training during week one. Operational onboarding manual chapter 7 defines hr governance controls, review checkpoints, and compliance ownership across regional teams. Standard onboarding procedures require documented sign-off by regional leads before quarterly audits begin. Regional onboarding handbook section 7 covers hr baseline standards, reporting cadence, and escalation paths for operational supervisors. All onboarding filings follow the hr template.",
+      "preview": "New engineering hires complete privacy training during week one. Operational onboarding manual chapter 7 defines hr gove"
+    },
+    {
+      "id": "eval-onboarding-a2",
+      "collection": "eval",
+      "doc_type": "hr",
+      "visible": true,
+      "content": "New engineering hires complete privacy training during week one. Operational onboarding manual chapter 7 defines hr governance controls, review checkpoints, and compliance ownership across regional teams. Standard onboarding procedures require documented sign-off by regional leads before quarterly audits begin. Regional onboarding handbook section 7 covers hr baseline standards, reporting cadence, and escalation paths for operational supervisors. Every onboarding filing follows the hr template.",
+      "preview": "New engineering hires complete privacy training during week one. Operational onboarding manual chapter 7 defines hr gove"
+    },
+    {
+      "id": "eval-onboarding-a3",
+      "collection": "eval",
+      "doc_type": "hr",
+      "visible": true,
+      "content": "New engineering hires complete privacy training during week one. Operational onboarding manual chapter 7 defines hr governance controls, review checkpoints, and compliance ownership across regional teams. Standard onboarding procedures require documented sign-off by regional leads before quarterly audits begin. Regional onboarding handbook section 7 covers hr baseline standards, reporting cadence, and escalation paths for operational supervisors. Each onboarding filing uses the hr template.",
+      "preview": "New engineering hires complete privacy training during week one. Operational onboarding manual chapter 7 defines hr gove"
+    },
+    {
+      "id": "eval-onboarding-b",
+      "collection": "eval",
+      "doc_type": "hr",
+      "visible": true,
+      "content": "Production database access requires manager and security officer sign-off. Exception addendum 7 for onboarding (hr) applies to specialized exemptions and secondary controls outside routine onboarding baselines.",
+      "preview": "Production database access requires manager and security officer sign-off. Exception addendum 7 for onboarding (hr) appl"
+    },
+    {
+      "id": "eval-vendor-a1",
+      "collection": "eval",
+      "doc_type": "procurement",
+      "visible": true,
+      "content": "Annual vendor security questionnaires are due before October fifteenth. Operational vendor manual chapter 8 defines procurement governance controls, review checkpoints, and compliance ownership across regional teams. Standard vendor procedures require documented sign-off by regional leads before quarterly audits begin. Regional vendor handbook section 8 covers procurement baseline standards, reporting cadence, and escalation paths for operational supervisors. All vendor filings follow the procurement template.",
+      "preview": "Annual vendor security questionnaires are due before October fifteenth. Operational vendor manual chapter 8 defines proc"
+    },
+    {
+      "id": "eval-vendor-a2",
+      "collection": "eval",
+      "doc_type": "procurement",
+      "visible": true,
+      "content": "Annual vendor security questionnaires are due before October fifteenth. Operational vendor manual chapter 8 defines procurement governance controls, review checkpoints, and compliance ownership across regional teams. Standard vendor procedures require documented sign-off by regional leads before quarterly audits begin. Regional vendor handbook section 8 covers procurement baseline standards, reporting cadence, and escalation paths for operational supervisors. Every vendor filing follows the procurement template.",
+      "preview": "Annual vendor security questionnaires are due before October fifteenth. Operational vendor manual chapter 8 defines proc"
+    },
+    {
+      "id": "eval-vendor-a3",
+      "collection": "eval",
+      "doc_type": "procurement",
+      "visible": true,
+      "content": "Annual vendor security questionnaires are due before October fifteenth. Operational vendor manual chapter 8 defines procurement governance controls, review checkpoints, and compliance ownership across regional teams. Standard vendor procedures require documented sign-off by regional leads before quarterly audits begin. Regional vendor handbook section 8 covers procurement baseline standards, reporting cadence, and escalation paths for operational supervisors. Each vendor filing uses the procurement template.",
+      "preview": "Annual vendor security questionnaires are due before October fifteenth. Operational vendor manual chapter 8 defines proc"
+    },
+    {
+      "id": "eval-vendor-b",
+      "collection": "eval",
+      "doc_type": "procurement",
+      "visible": true,
+      "content": "Subprocessor changes require thirty days written customer advance notice. Exception addendum 8 for vendor (procurement) applies to specialized exemptions and secondary controls outside routine vendor baselines.",
+      "preview": "Subprocessor changes require thirty days written customer advance notice. Exception addendum 8 for vendor (procurement) "
+    },
+    {
+      "id": "eval-payroll-a1",
+      "collection": "eval",
+      "doc_type": "finance",
+      "visible": true,
+      "content": "Salaried payroll disbursements settle on the last business day monthly. Operational payroll manual chapter 9 defines finance governance controls, review checkpoints, and compliance ownership across regional teams. Standard payroll procedures require documented sign-off by regional leads before quarterly audits begin. Regional payroll handbook section 9 covers finance baseline standards, reporting cadence, and escalation paths for operational supervisors. All payroll filings follow the finance template.",
+      "preview": "Salaried payroll disbursements settle on the last business day monthly. Operational payroll manual chapter 9 defines fin"
+    },
+    {
+      "id": "eval-payroll-a2",
+      "collection": "eval",
+      "doc_type": "finance",
+      "visible": true,
+      "content": "Salaried payroll disbursements settle on the last business day monthly. Operational payroll manual chapter 9 defines finance governance controls, review checkpoints, and compliance ownership across regional teams. Standard payroll procedures require documented sign-off by regional leads before quarterly audits begin. Regional payroll handbook section 9 covers finance baseline standards, reporting cadence, and escalation paths for operational supervisors. Every payroll filing follows the finance template.",
+      "preview": "Salaried payroll disbursements settle on the last business day monthly. Operational payroll manual chapter 9 defines fin"
+    },
+    {
+      "id": "eval-payroll-a3",
+      "collection": "eval",
+      "doc_type": "finance",
+      "visible": true,
+      "content": "Salaried payroll disbursements settle on the last business day monthly. Operational payroll manual chapter 9 defines finance governance controls, review checkpoints, and compliance ownership across regional teams. Standard payroll procedures require documented sign-off by regional leads before quarterly audits begin. Regional payroll handbook section 9 covers finance baseline standards, reporting cadence, and escalation paths for operational supervisors. Each payroll filing uses the finance template.",
+      "preview": "Salaried payroll disbursements settle on the last business day monthly. Operational payroll manual chapter 9 defines fin"
+    },
+    {
+      "id": "eval-payroll-b",
+      "collection": "eval",
+      "doc_type": "finance",
+      "visible": true,
+      "content": "Expense reimbursements under fifty dollars skip itemized receipt uploads. Exception addendum 9 for payroll (finance) applies to specialized exemptions and secondary controls outside routine payroll baselines.",
+      "preview": "Expense reimbursements under fifty dollars skip itemized receipt uploads. Exception addendum 9 for payroll (finance) app"
+    },
+    {
+      "id": "eval-release-a1",
+      "collection": "eval",
+      "doc_type": "engineering",
+      "visible": true,
+      "content": "Production container images require signed provenance attestations. Operational release manual chapter 10 defines engineering governance controls, review checkpoints, and compliance ownership across regional teams. Standard release procedures require documented sign-off by regional leads before quarterly audits begin. Regional release handbook section 10 covers engineering baseline standards, reporting cadence, and escalation paths for operational supervisors. All release filings follow the engineering template.",
+      "preview": "Production container images require signed provenance attestations. Operational release manual chapter 10 defines engine"
+    },
+    {
+      "id": "eval-release-a2",
+      "collection": "eval",
+      "doc_type": "engineering",
+      "visible": true,
+      "content": "Production container images require signed provenance attestations. Operational release manual chapter 10 defines engineering governance controls, review checkpoints, and compliance ownership across regional teams. Standard release procedures require documented sign-off by regional leads before quarterly audits begin. Regional release handbook section 10 covers engineering baseline standards, reporting cadence, and escalation paths for operational supervisors. Every release filing follows the engineering template.",
+      "preview": "Production container images require signed provenance attestations. Operational release manual chapter 10 defines engine"
+    },
+    {
+      "id": "eval-release-a3",
+      "collection": "eval",
+      "doc_type": "engineering",
+      "visible": true,
+      "content": "Production container images require signed provenance attestations. Operational release manual chapter 10 defines engineering governance controls, review checkpoints, and compliance ownership across regional teams. Standard release procedures require documented sign-off by regional leads before quarterly audits begin. Regional release handbook section 10 covers engineering baseline standards, reporting cadence, and escalation paths for operational supervisors. Each release filing uses the engineering template.",
+      "preview": "Production container images require signed provenance attestations. Operational release manual chapter 10 defines engine"
+    },
+    {
+      "id": "eval-release-b",
+      "collection": "eval",
+      "doc_type": "engineering",
+      "visible": true,
+      "content": "Emergency hotfixes bypass staging only with two staff approvals. Exception addendum 10 for release (engineering) applies to specialized exemptions and secondary controls outside routine release baselines.",
+      "preview": "Emergency hotfixes bypass staging only with two staff approvals. Exception addendum 10 for release (engineering) applies"
+    },
+    {
+      "id": "eval-support-a1",
+      "collection": "eval",
+      "doc_type": "service",
+      "visible": true,
+      "content": "Enterprise support tickets receive initial triage within thirty minutes. Operational support manual chapter 11 defines service governance controls, review checkpoints, and compliance ownership across regional teams. Standard support procedures require documented sign-off by regional leads before quarterly audits begin. Regional support handbook section 11 covers service baseline standards, reporting cadence, and escalation paths for operational supervisors. All support filings follow the service template.",
+      "preview": "Enterprise support tickets receive initial triage within thirty minutes. Operational support manual chapter 11 defines s"
+    },
+    {
+      "id": "eval-support-a2",
+      "collection": "eval",
+      "doc_type": "service",
+      "visible": true,
+      "content": "Enterprise support tickets receive initial triage within thirty minutes. Operational support manual chapter 11 defines service governance controls, review checkpoints, and compliance ownership across regional teams. Standard support procedures require documented sign-off by regional leads before quarterly audits begin. Regional support handbook section 11 covers service baseline standards, reporting cadence, and escalation paths for operational supervisors. Every support filing follows the service template.",
+      "preview": "Enterprise support tickets receive initial triage within thirty minutes. Operational support manual chapter 11 defines s"
+    },
+    {
+      "id": "eval-support-a3",
+      "collection": "eval",
+      "doc_type": "service",
+      "visible": true,
+      "content": "Enterprise support tickets receive initial triage within thirty minutes. Operational support manual chapter 11 defines service governance controls, review checkpoints, and compliance ownership across regional teams. Standard support procedures require documented sign-off by regional leads before quarterly audits begin. Regional support handbook section 11 covers service baseline standards, reporting cadence, and escalation paths for operational supervisors. Each support filing uses the service template.",
+      "preview": "Enterprise support tickets receive initial triage within thirty minutes. Operational support manual chapter 11 defines s"
+    },
+    {
+      "id": "eval-support-b",
+      "collection": "eval",
+      "doc_type": "service",
+      "visible": true,
+      "content": "Weekend maintenance windows run Sunday between 01:00 and 04:00 UTC. Exception addendum 11 for support (service) applies to specialized exemptions and secondary controls outside routine support baselines.",
+      "preview": "Weekend maintenance windows run Sunday between 01:00 and 04:00 UTC. Exception addendum 11 for support (service) applies "
+    },
+    {
+      "id": "eval-medical-a1",
+      "collection": "eval",
+      "doc_type": "benefits",
+      "visible": true,
+      "content": "Annual preventive dental checkups are covered at one hundred percent. Operational medical manual chapter 12 defines benefits governance controls, review checkpoints, and compliance ownership across regional teams. Standard medical procedures require documented sign-off by regional leads before quarterly audits begin. Regional medical handbook section 12 covers benefits baseline standards, reporting cadence, and escalation paths for operational supervisors. All medical filings follow the benefits template.",
+      "preview": "Annual preventive dental checkups are covered at one hundred percent. Operational medical manual chapter 12 defines bene"
+    },
+    {
+      "id": "eval-medical-a2",
+      "collection": "eval",
+      "doc_type": "benefits",
+      "visible": true,
+      "content": "Annual preventive dental checkups are covered at one hundred percent. Operational medical manual chapter 12 defines benefits governance controls, review checkpoints, and compliance ownership across regional teams. Standard medical procedures require documented sign-off by regional leads before quarterly audits begin. Regional medical handbook section 12 covers benefits baseline standards, reporting cadence, and escalation paths for operational supervisors. Every medical filing follows the benefits template.",
+      "preview": "Annual preventive dental checkups are covered at one hundred percent. Operational medical manual chapter 12 defines bene"
+    },
+    {
+      "id": "eval-medical-a3",
+      "collection": "eval",
+      "doc_type": "benefits",
+      "visible": true,
+      "content": "Annual preventive dental checkups are covered at one hundred percent. Operational medical manual chapter 12 defines benefits governance controls, review checkpoints, and compliance ownership across regional teams. Standard medical procedures require documented sign-off by regional leads before quarterly audits begin. Regional medical handbook section 12 covers benefits baseline standards, reporting cadence, and escalation paths for operational supervisors. Each medical filing uses the benefits template.",
+      "preview": "Annual preventive dental checkups are covered at one hundred percent. Operational medical manual chapter 12 defines bene"
+    },
+    {
+      "id": "eval-medical-b",
+      "collection": "eval",
+      "doc_type": "benefits",
+      "visible": true,
+      "content": "Out-of-network specialist visits carry a forty percent coinsurance cap. Exception addendum 12 for medical (benefits) applies to specialized exemptions and secondary controls outside routine medical baselines.",
+      "preview": "Out-of-network specialist visits carry a forty percent coinsurance cap. Exception addendum 12 for medical (benefits) app"
+    },
+    {
+      "id": "eval-shipping-a1",
+      "collection": "eval",
+      "doc_type": "logistics",
+      "visible": true,
+      "content": "Hazardous lithium battery parcels travel solely by ground freight. Operational shipping manual chapter 13 defines logistics governance controls, review checkpoints, and compliance ownership across regional teams. Standard shipping procedures require documented sign-off by regional leads before quarterly audits begin. Regional shipping handbook section 13 covers logistics baseline standards, reporting cadence, and escalation paths for operational supervisors. All shipping filings follow the logistics template.",
+      "preview": "Hazardous lithium battery parcels travel solely by ground freight. Operational shipping manual chapter 13 defines logist"
+    },
+    {
+      "id": "eval-shipping-a2",
+      "collection": "eval",
+      "doc_type": "logistics",
+      "visible": true,
+      "content": "Hazardous lithium battery parcels travel solely by ground freight. Operational shipping manual chapter 13 defines logistics governance controls, review checkpoints, and compliance ownership across regional teams. Standard shipping procedures require documented sign-off by regional leads before quarterly audits begin. Regional shipping handbook section 13 covers logistics baseline standards, reporting cadence, and escalation paths for operational supervisors. Every shipping filing follows the logistics template.",
+      "preview": "Hazardous lithium battery parcels travel solely by ground freight. Operational shipping manual chapter 13 defines logist"
+    },
+    {
+      "id": "eval-shipping-a3",
+      "collection": "eval",
+      "doc_type": "logistics",
+      "visible": true,
+      "content": "Hazardous lithium battery parcels travel solely by ground freight. Operational shipping manual chapter 13 defines logistics governance controls, review checkpoints, and compliance ownership across regional teams. Standard shipping procedures require documented sign-off by regional leads before quarterly audits begin. Regional shipping handbook section 13 covers logistics baseline standards, reporting cadence, and escalation paths for operational supervisors. Each shipping filing uses the logistics template.",
+      "preview": "Hazardous lithium battery parcels travel solely by ground freight. Operational shipping manual chapter 13 defines logist"
+    },
+    {
+      "id": "eval-shipping-b",
+      "collection": "eval",
+      "doc_type": "logistics",
+      "visible": true,
+      "content": "Cold-chain biologics require continuous telemetry between two and eight Celsius. Exception addendum 13 for shipping (logistics) applies to specialized exemptions and secondary controls outside routine shipping baselines.",
+      "preview": "Cold-chain biologics require continuous telemetry between two and eight Celsius. Exception addendum 13 for shipping (log"
+    },
+    {
+      "id": "eval-customs-a1",
+      "collection": "eval",
+      "doc_type": "trade",
+      "visible": true,
+      "content": "Export declarations must include eight-digit harmonized tariff codes. Operational customs manual chapter 14 defines trade governance controls, review checkpoints, and compliance ownership across regional teams. Standard customs procedures require documented sign-off by regional leads before quarterly audits begin. Regional customs handbook section 14 covers trade baseline standards, reporting cadence, and escalation paths for operational supervisors. All customs filings follow the trade template.",
+      "preview": "Export declarations must include eight-digit harmonized tariff codes. Operational customs manual chapter 14 defines trad"
+    },
+    {
+      "id": "eval-customs-a2",
+      "collection": "eval",
+      "doc_type": "trade",
+      "visible": true,
+      "content": "Export declarations must include eight-digit harmonized tariff codes. Operational customs manual chapter 14 defines trade governance controls, review checkpoints, and compliance ownership across regional teams. Standard customs procedures require documented sign-off by regional leads before quarterly audits begin. Regional customs handbook section 14 covers trade baseline standards, reporting cadence, and escalation paths for operational supervisors. Every customs filing follows the trade template.",
+      "preview": "Export declarations must include eight-digit harmonized tariff codes. Operational customs manual chapter 14 defines trad"
+    },
+    {
+      "id": "eval-customs-a3",
+      "collection": "eval",
+      "doc_type": "trade",
+      "visible": true,
+      "content": "Export declarations must include eight-digit harmonized tariff codes. Operational customs manual chapter 14 defines trade governance controls, review checkpoints, and compliance ownership across regional teams. Standard customs procedures require documented sign-off by regional leads before quarterly audits begin. Regional customs handbook section 14 covers trade baseline standards, reporting cadence, and escalation paths for operational supervisors. Each customs filing uses the trade template.",
+      "preview": "Export declarations must include eight-digit harmonized tariff codes. Operational customs manual chapter 14 defines trad"
+    },
+    {
+      "id": "eval-customs-b",
+      "collection": "eval",
+      "doc_type": "trade",
+      "visible": true,
+      "content": "Sanctioned destination screening blocks shipment release pending compliance hold. Exception addendum 14 for customs (trade) applies to specialized exemptions and secondary controls outside routine customs baselines.",
+      "preview": "Sanctioned destination screening blocks shipment release pending compliance hold. Exception addendum 14 for customs (tra"
+    },
+    {
+      "id": "eval-library-a1",
+      "collection": "eval",
+      "doc_type": "records",
+      "visible": true,
+      "content": "Rare manuscript reading rooms prohibit ink pens and flash photography. Operational library manual chapter 15 defines records governance controls, review checkpoints, and compliance ownership across regional teams. Standard library procedures require documented sign-off by regional leads before quarterly audits begin. Regional library handbook section 15 covers records baseline standards, reporting cadence, and escalation paths for operational supervisors. All library filings follow the records template.",
+      "preview": "Rare manuscript reading rooms prohibit ink pens and flash photography. Operational library manual chapter 15 defines rec"
+    },
+    {
+      "id": "eval-library-a2",
+      "collection": "eval",
+      "doc_type": "records",
+      "visible": true,
+      "content": "Rare manuscript reading rooms prohibit ink pens and flash photography. Operational library manual chapter 15 defines records governance controls, review checkpoints, and compliance ownership across regional teams. Standard library procedures require documented sign-off by regional leads before quarterly audits begin. Regional library handbook section 15 covers records baseline standards, reporting cadence, and escalation paths for operational supervisors. Every library filing follows the records template.",
+      "preview": "Rare manuscript reading rooms prohibit ink pens and flash photography. Operational library manual chapter 15 defines rec"
+    },
+    {
+      "id": "eval-library-a3",
+      "collection": "eval",
+      "doc_type": "records",
+      "visible": true,
+      "content": "Rare manuscript reading rooms prohibit ink pens and flash photography. Operational library manual chapter 15 defines records governance controls, review checkpoints, and compliance ownership across regional teams. Standard library procedures require documented sign-off by regional leads before quarterly audits begin. Regional library handbook section 15 covers records baseline standards, reporting cadence, and escalation paths for operational supervisors. Each library filing uses the records template.",
+      "preview": "Rare manuscript reading rooms prohibit ink pens and flash photography. Operational library manual chapter 15 defines rec"
+    },
+    {
+      "id": "eval-library-b",
+      "collection": "eval",
+      "doc_type": "records",
+      "visible": true,
+      "content": "Microfilm duplication requests ship within ten business days of payment. Exception addendum 15 for library (records) applies to specialized exemptions and secondary controls outside routine library baselines.",
+      "preview": "Microfilm duplication requests ship within ten business days of payment. Exception addendum 15 for library (records) app"
+    },
+    {
+      "id": "eval-energy-a1",
+      "collection": "eval",
+      "doc_type": "facilities",
+      "visible": true,
+      "content": "Server room chilled-water loops maintain supply temperatures at eighteen Celsius. Operational energy manual chapter 16 defines facilities governance controls, review checkpoints, and compliance ownership across regional teams. Standard energy procedures require documented sign-off by regional leads before quarterly audits begin. Regional energy handbook section 16 covers facilities baseline standards, reporting cadence, and escalation paths for operational supervisors. All energy filings follow the facilities template.",
+      "preview": "Server room chilled-water loops maintain supply temperatures at eighteen Celsius. Operational energy manual chapter 16 d"
+    },
+    {
+      "id": "eval-energy-a2",
+      "collection": "eval",
+      "doc_type": "facilities",
+      "visible": true,
+      "content": "Server room chilled-water loops maintain supply temperatures at eighteen Celsius. Operational energy manual chapter 16 defines facilities governance controls, review checkpoints, and compliance ownership across regional teams. Standard energy procedures require documented sign-off by regional leads before quarterly audits begin. Regional energy handbook section 16 covers facilities baseline standards, reporting cadence, and escalation paths for operational supervisors. Every energy filing follows the facilities template.",
+      "preview": "Server room chilled-water loops maintain supply temperatures at eighteen Celsius. Operational energy manual chapter 16 d"
+    },
+    {
+      "id": "eval-energy-a3",
+      "collection": "eval",
+      "doc_type": "facilities",
+      "visible": true,
+      "content": "Server room chilled-water loops maintain supply temperatures at eighteen Celsius. Operational energy manual chapter 16 defines facilities governance controls, review checkpoints, and compliance ownership across regional teams. Standard energy procedures require documented sign-off by regional leads before quarterly audits begin. Regional energy handbook section 16 covers facilities baseline standards, reporting cadence, and escalation paths for operational supervisors. Each energy filing uses the facilities template.",
+      "preview": "Server room chilled-water loops maintain supply temperatures at eighteen Celsius. Operational energy manual chapter 16 d"
+    },
+    {
+      "id": "eval-energy-b",
+      "collection": "eval",
+      "doc_type": "facilities",
+      "visible": true,
+      "content": "Diesel backup generators perform automated thirty-minute load tests biweekly. Exception addendum 16 for energy (facilities) applies to specialized exemptions and secondary controls outside routine energy baselines.",
+      "preview": "Diesel backup generators perform automated thirty-minute load tests biweekly. Exception addendum 16 for energy (faciliti"
+    },
+    {
+      "id": "ctrl-parking",
+      "collection": "eval",
+      "doc_type": "campus",
+      "visible": true,
+      "content": "Visitor parking permits validate for level three north garage only. Detailed parking campus reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Visitor parking permits validate for level three north garage only. Detailed parking campus reference note explains stan"
+    },
+    {
+      "id": "ctrl-cafeteria",
+      "collection": "eval",
+      "doc_type": "dining",
+      "visible": true,
+      "content": "Hot breakfast service closes at 10:15 AM on weekdays. Detailed cafeteria dining reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Hot breakfast service closes at 10:15 AM on weekdays. Detailed cafeteria dining reference note explains standard eligibi"
+    },
+    {
+      "id": "ctrl-printing",
+      "collection": "eval",
+      "doc_type": "office",
+      "visible": true,
+      "content": "Default duplex monochrome printing applies to all shared floor queues. Detailed printing office reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Default duplex monochrome printing applies to all shared floor queues. Detailed printing office reference note explains "
+    },
+    {
+      "id": "ctrl-vpn",
+      "collection": "eval",
+      "doc_type": "network",
+      "visible": true,
+      "content": "Split-tunnel VPN access expires after twelve continuous hours. Detailed tunnel network reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Split-tunnel VPN access expires after twelve continuous hours. Detailed tunnel network reference note explains standard "
+    },
+    {
+      "id": "ctrl-laptop",
+      "collection": "eval",
+      "doc_type": "hardware",
+      "visible": true,
+      "content": "Corporate laptops encrypt local NVMe drives using FileVault escrow. Detailed laptop hardware reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Corporate laptops encrypt local NVMe drives using FileVault escrow. Detailed laptop hardware reference note explains sta"
+    },
+    {
+      "id": "ctrl-sabbatical",
+      "collection": "eval",
+      "doc_type": "leave",
+      "visible": true,
+      "content": "Tenured staff qualify for a six-week paid sabbatical after five years. Detailed sabbatical leave reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Tenured staff qualify for a six-week paid sabbatical after five years. Detailed sabbatical leave reference note explains"
+    },
+    {
+      "id": "ctrl-tuition",
+      "collection": "eval",
+      "doc_type": "learning",
+      "visible": true,
+      "content": "Accredited degree tuition reimbursement caps at five thousand dollars yearly. Detailed tuition learning reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Accredited degree tuition reimbursement caps at five thousand dollars yearly. Detailed tuition learning reference note e"
+    },
+    {
+      "id": "ctrl-gym",
+      "collection": "eval",
+      "doc_type": "stipend",
+      "visible": true,
+      "content": "Monthly fitness club reimbursements require quarterly attendance statements. Detailed wellness stipend reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Monthly fitness club reimbursements require quarterly attendance statements. Detailed wellness stipend reference note ex"
+    },
+    {
+      "id": "ctrl-patent",
+      "collection": "eval",
+      "doc_type": "legal",
+      "visible": true,
+      "content": "Invention disclosure forms route to intellectual property counsel before publication. Detailed patent legal reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Invention disclosure forms route to intellectual property counsel before publication. Detailed patent legal reference no"
+    },
+    {
+      "id": "ctrl-donation",
+      "collection": "eval",
+      "doc_type": "matching",
+      "visible": true,
+      "content": "Charitable gift matching doubles employee donations up to two thousand dollars. Detailed charity matching reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Charitable gift matching doubles employee donations up to two thousand dollars. Detailed charity matching reference note"
+    },
+    {
+      "id": "ctrl-badge-loss",
+      "collection": "eval",
+      "doc_type": "desk",
+      "visible": true,
+      "content": "Lost access cards must be reported to building security within two hours. Detailed lostbadge desk reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Lost access cards must be reported to building security within two hours. Detailed lostbadge desk reference note explain"
+    },
+    {
+      "id": "ctrl-desk",
+      "collection": "eval",
+      "doc_type": "seating",
+      "visible": true,
+      "content": "Unclaimed hot-desk reservations release automatically thirty minutes past start. Detailed hotdesk seating reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Unclaimed hot-desk reservations release automatically thirty minutes past start. Detailed hotdesk seating reference note"
+    },
+    {
+      "id": "ctrl-lockers",
+      "collection": "eval",
+      "doc_type": "storage",
+      "visible": true,
+      "content": "Day-use bicycle lockers clear unassigned locks every Friday evening. Detailed lockers storage reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Day-use bicycle lockers clear unassigned locks every Friday evening. Detailed lockers storage reference note explains st"
+    },
+    {
+      "id": "ctrl-recycling",
+      "collection": "eval",
+      "doc_type": "green",
+      "visible": true,
+      "content": "Compostable food containers belong exclusively in green-lidded pantry bins. Detailed compost green reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Compostable food containers belong exclusively in green-lidded pantry bins. Detailed compost green reference note explai"
+    },
+    {
+      "id": "ctrl-mailroom",
+      "collection": "eval",
+      "doc_type": "parcel",
+      "visible": true,
+      "content": "Inbound personal parcels hold at the ground mailroom for five business days. Detailed mailroom parcel reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "Inbound personal parcels hold at the ground mailroom for five business days. Detailed mailroom parcel reference note exp"
+    },
+    {
+      "id": "ctrl-jp",
+      "collection": "eval",
+      "doc_type": "hours",
+      "visible": true,
+      "content": "東京支社の営業時間は午前九時から午後六時までです。休日は土日祝です。 Detailed tokyo hours reference note explains standard eligibility, submission windows, and verification steps for all participating members.",
+      "preview": "東京支社の営業時間は午前九時から午後六時までです。休日は土日祝です。 Detailed tokyo hours reference note explains standard eligibility, submission windows"
+    },
+    {
+      "id": "hidden-retention-secret",
+      "collection": "eval",
+      "doc_type": "archive",
+      "visible": false,
+      "content": "Secret hidden retention archive policy rules and exceptions must never surface.",
+      "preview": "Secret hidden retention archive policy rules and exceptions must never surface."
+    },
+    {
+      "id": "other-collection-retention",
+      "collection": "restricted",
+      "doc_type": "archive",
+      "visible": true,
+      "content": "Restricted collection retention archive policy rules and exceptions stay isolated.",
+      "preview": "Restricted collection retention archive policy rules and exceptions stay isolated."
+    },
+    {
+      "id": "ctrl-ext-aquarium",
+      "collection": "eval",
+      "doc_type": "marine",
+      "visible": true,
+      "content": "Aquarium chiller maintenance procedure standards govern aquarium chiller maintenance loops and aquarium chiller compressor checks across marine facilities. Aquarium chiller maintenance teams inspect intake strainers, verify glycol concentration, balance manifold pressure, clean condenser tubes, test relief valves, check pump seals, and calibrate flow meters during weekly rounds. Aquarium chiller maintenance procedure crews also verify secondary brine alarms, purge air pockets, check electrical relays, and inspect piping insulation. Operators log baseline chiller compressor telemetry before starting routine aquarium chiller checks. Quarterly aquarium chiller maintenance procedure glycol valve replacements occur on the third Thursday.",
+      "preview": "Aquarium chiller maintenance procedure standards govern aquarium chiller maintenance loops and aquarium chiller compress"
+    },
+    {
+      "id": "ctrl-ext-aquarium-dist",
+      "collection": "eval",
+      "doc_type": "marine",
+      "visible": true,
+      "content": "Aquarium chiller maintenance procedure guides cover aquarium chiller maintenance procedure viewing galleries, public feeding times, coastal touch pools, ticketing kiosks, seasonal school tours, volunteer orientation schedules, gift shop merchandise displays, stroller parking alcoves, harbor shuttle departures, cafe seating layouts, coat check lockers, exhibit audio handsets, souvenir badge counters, group tour staging areas, and seaside walkway benches.",
+      "preview": "Aquarium chiller maintenance procedure guides cover aquarium chiller maintenance procedure viewing galleries, public fee"
+    },
+    {
+      "id": "ctrl-ext-elevator",
+      "collection": "eval",
+      "doc_type": "transport",
+      "visible": true,
+      "content": "Elevator hoistway brake calibration rules govern elevator hoistway brake motors and elevator hoistway governor inspections across passenger towers. Elevator hoistway brake calibration technicians test counterweight cables, verify shaft door interlocks, measure stopping distances, inspect guide rails, grease selector tapes, check buffer oil, and test overspeed trips during monthly rounds. Elevator hoistway brake calibration crews also verify recall relays, inspect pit ladders, check car lighting, and test phone lines. Inspectors record baseline hoistway motor current readings before adjusting elevator hoistway brake springs. Annual elevator hoistway brake calibration lining replacements occur during the second Saturday outage.",
+      "preview": "Elevator hoistway brake calibration rules govern elevator hoistway brake motors and elevator hoistway governor inspectio"
+    },
+    {
+      "id": "ctrl-ext-elevator-dist",
+      "collection": "eval",
+      "doc_type": "transport",
+      "visible": true,
+      "content": "Elevator hoistway brake calibration notices cover elevator hoistway brake calibration lobby turnstiles, freight dock hours, courier check-in desks, visitor escort tags, ground corridor directories, package parcel lockers, bicycle storage racks, shuttle departure boards, cafeteria coffee counters, badge photo booths, mailroom sorting hours, umbrella drying stands, loading ramp signs, and reception coat closets.",
+      "preview": "Elevator hoistway brake calibration notices cover elevator hoistway brake calibration lobby turnstiles, freight dock hou"
+    },
+    {
+      "id": "ctrl-ext-helipad",
+      "collection": "eval",
+      "doc_type": "aviation",
+      "visible": true,
+      "content": "Helipad beacon perimeter lighting standards govern helipad beacon perimeter lighting strobes, helipad beacon perimeter lighting windcones, and helipad beacon perimeter lighting panels across rooftop decks. Helipad beacon perimeter lighting crews check lens seals, verify backup battery voltage, inspect deck drainage grates, test obstruction lamps, clean floodlight housings, check grounding lugs, and verify radio relays during weekly rounds. Helipad beacon perimeter lighting teams also inspect foam nozzles, check wind sock frames, and test deck heaters. Dispatchers log baseline perimeter beacon luminance values before starting helipad beacon checks. Semiannual helipad beacon surge arrestors swap out on Monday.",
+      "preview": "Helipad beacon perimeter lighting standards govern helipad beacon perimeter lighting strobes, helipad beacon perimeter l"
+    },
+    {
+      "id": "ctrl-ext-helipad-dist",
+      "collection": "eval",
+      "doc_type": "aviation",
+      "visible": true,
+      "content": "Helipad beacon perimeter lighting pamphlets cover helipad beacon perimeter lighting weather kiosks, acoustic noise monitors, stair access keypads, emergency stretcher alcoves, courtyard seating benches, security guard desks, visitor escort badges, delivery bay ramps, garage clearance bars, lobby directory screens, coatroom hooks, cafeteria lunch trays, shuttle drop-off curbs, and visitor parking booths.",
+      "preview": "Helipad beacon perimeter lighting pamphlets cover helipad beacon perimeter lighting weather kiosks, acoustic noise monit"
+    },
+    {
+      "id": "ctrl-ext-observatory",
+      "collection": "eval",
+      "doc_type": "astronomy",
+      "visible": true,
+      "content": "Observatory dome shutter alignment protocols govern observatory dome shutter tracks and observatory dome encoder gears across mountain enclosures. Observatory dome shutter alignment crews grease drive pinions, verify limit switches, inspect weather seals, check bogie wheels, tension drive chains, clean optical encoders, and test windscreens during clear-sky checks. Observatory dome shutter alignment teams also verify dehumidifier drains, inspect catwalk rails, and test backup generators. Operators record baseline shutter motor torque curves before starting observatory dome checks. Biannual observatory dome shutter alignment belt tensioning occurs before equinox runs.",
+      "preview": "Observatory dome shutter alignment protocols govern observatory dome shutter tracks and observatory dome encoder gears a"
+    },
+    {
+      "id": "ctrl-ext-observatory-dist",
+      "collection": "eval",
+      "doc_type": "astronomy",
+      "visible": true,
+      "content": "Observatory dome shutter alignment leaflets cover observatory dome shutter alignment planetarium showtimes, gift counter hours, mountain shuttle buses, winter tire chains, trailhead picnic shelters, visitor restroom maps, star chart posters, cafeteria soup menus, parking overflow lots, ranger desk hours, telescope souvenir postcards, hiking boot brushes, lantern loan desks, and lodge coffee counters.",
+      "preview": "Observatory dome shutter alignment leaflets cover observatory dome shutter alignment planetarium showtimes, gift counter"
+    },
+    {
+      "id": "ctrl-ext-botanical-jp",
+      "collection": "eval",
+      "doc_type": "botany",
+      "visible": true,
+      "content": "植物園温室設備点検手順は ISO-GH01 植物園温室設備点検手順および植物園温室設備点検手順の温度帯 A1 B2 C3 D4 基準を定めています。植物園温室設備点検の担当者は毎朝の巡回で灌水ポンプ圧力、遮光カーテン作動、配管継手漏れ、循環ファン回転音、暖房バルブ開度、排水溝状態、センサー校正値、換気ダンパー角度、噴霧ライン圧力を順番に確認します。作業員は点検前にボイラー圧力の基準測定値を記録台帳へ記入します。四半期ごとの植物園温室設備点検手順ノズル交換は第三水曜日に実施します。",
+      "preview": "植物園温室設備点検手順は ISO-GH01 植物園温室設備点検手順および植物園温室設備点検手順の温度帯 A1 B2 C3 D4 基準を定めています。植物園温室設備点検の担当者は毎朝の巡回で灌水ポンプ圧力、遮光カーテン作動、配管継手漏れ、循環"
+    },
+    {
+      "id": "ctrl-ext-botanical-jp-dist",
+      "collection": "eval",
+      "doc_type": "botany",
+      "visible": true,
+      "content": "植物園温室設備点検手順案内書は植物園温室設備点検手順の観覧通路開放時間、季節花壇展示予定、音声ガイド端末貸出窓口、記念スタンプ設置場所、屋外休憩ベンチ配置、売店営業時間、団体受付場所、ベビーカー貸出所、駐車場料金案内、館内地図配布所、傘立て位置、コインロッカー案内、授乳室場所、写真撮影許可区域を掲載しています。",
+      "preview": "植物園温室設備点検手順案内書は植物園温室設備点検手順の観覧通路開放時間、季節花壇展示予定、音声ガイド端末貸出窓口、記念スタンプ設置場所、屋外休憩ベンチ配置、売店営業時間、団体受付場所、ベビーカー貸出所、駐車場料金案内、館内地図配布所、傘立て"
+    },
+    {
+      "id": "ctrl-ext-windtunnel",
+      "collection": "eval",
+      "doc_type": "aerodynamics",
+      "visible": true,
+      "content": "Windtunnel balance sting calibration standards govern windtunnel balance sting calibration gauges and windtunnel balance pitch arcs across aerodynamic bays. Windtunnel balance sting calibration engineers verify bridge excitation, inspect fairing clearances, and check zero-load drift prior to tunnel runs. Lead aerodynamicists systematically record multi-axis calibration matrices, ambient barometric readings, sting deflection offsets, thermal drift compensation curves, reference check-weight certificates, digital acquisition channel mappings, tare load histories, and pitch actuator backlash tolerances before mounting models. Annual windtunnel balance sting calibration deadweight verifications and windtunnel balance sting calibration checks occur on Friday.",
+      "preview": "Windtunnel balance sting calibration standards govern windtunnel balance sting calibration gauges and windtunnel balance"
+    },
+    {
+      "id": "ctrl-ext-windtunnel-dist",
+      "collection": "eval",
+      "doc_type": "aerodynamics",
+      "visible": true,
+      "content": "Windtunnel balance sting calibration summaries cover observation gallery seating, visitor safety glasses, acoustic ear protection bins, cafeteria lunch menus, badge escort rules, shuttle van timetables, coatroom lockers, security gate hours, gift shop pins, corridor water fountains, tour briefing rooms, visitor badge kiosks, lobby umbrella stands, and parking shuttle signs.",
+      "preview": "Windtunnel balance sting calibration summaries cover observation gallery seating, visitor safety glasses, acoustic ear p"
+    },
+    {
+      "id": "ctrl-ext-geothermal",
+      "collection": "eval",
+      "doc_type": "energy2",
+      "visible": true,
+      "content": "Geothermal brine reinjection pressure rules govern geothermal brine reinjection pressure wellheads and geothermal brine scale inhibitors across power plants. Geothermal brine reinjection pressure operators monitor casing gauges, inspect strainer baskets, and log silica saturation indices during shift handovers. Plant reservoir engineers carefully compile wellhead annulus pressures, downhole thermocouple profiles, reinjection pump vibration spectra, chemical dosing rates, corrosion coupon weights, turbine condenser vacuum logs, valve stem leak checks, and brine pH records before dispatch. Monthly geothermal brine reinjection pressure annulus checks and geothermal brine reinjection pressure tests run on Tuesday.",
+      "preview": "Geothermal brine reinjection pressure rules govern geothermal brine reinjection pressure wellheads and geothermal brine "
+    },
+    {
+      "id": "ctrl-ext-geothermal-dist",
+      "collection": "eval",
+      "doc_type": "energy2",
+      "visible": true,
+      "content": "Geothermal brine reinjection pressure brochures cover public visitor overlooks, interpretive trail plaques, regional geology exhibits, parking bus bays, souvenir postcard racks, picnic tables, trail water fountains, shuttle stops, visitor badge desks, gift shop coffee mugs, coat lockers, trailhead signboards, and scenic overlook benches.",
+      "preview": "Geothermal brine reinjection pressure brochures cover public visitor overlooks, interpretive trail plaques, regional geo"
+    },
+    {
+      "id": "ctrl-ext-foundry",
+      "collection": "eval",
+      "doc_type": "metallurgy",
+      "visible": true,
+      "content": "Foundry induction crucible relining standards govern foundry induction crucible relining grout and foundry induction refractory ramming across melt shops. Foundry induction crucible relining crews inspect ground-leakage probes, verify cooling water flow, and measure wall thickness after slagging cycles. Master furnace technicians thoroughly document refractory sinter temperatures, hydraulic ramming stroke counts, coil insulation megohm tests, thermocouple sheath depths, backup crucible inventories, emergency launder clearances, slag skimmer gauges, and cooling tower logs before energizing power. Every forty heats foundry induction crucible relining linings and foundry induction crucible relining shells get ultrasonic scans.",
+      "preview": "Foundry induction crucible relining standards govern foundry induction crucible relining grout and foundry induction ref"
+    },
+    {
+      "id": "ctrl-ext-foundry-dist",
+      "collection": "eval",
+      "doc_type": "metallurgy",
+      "visible": true,
+      "content": "Foundry induction crucible relining guides cover visitor viewing balconies, heat-reflective window tinting, tour group reservations, safety boot loaner lockers, exhibit display cases, lobby vending machines, coat check counters, bus loading bays, reception sign-in sheets, visitor helmets, cafeteria seating charts, hallway restrooms, and guest badges.",
+      "preview": "Foundry induction crucible relining guides cover visitor viewing balconies, heat-reflective window tinting, tour group r"
+    },
+    {
+      "id": "ctrl-ext-museum-jp",
+      "collection": "eval",
+      "doc_type": "museum",
+      "visible": true,
+      "content": "博物館展示室照明調光基準は博物館展示室照明調光基準の紫外線遮断と博物館展示室照明調光基準の照度上限を定めています。展示担当学芸員は古文書や染色資料および木版画や漆工芸品を長期保護するため、各展示ケース内の年間積算照度、紫外線放射量、演色評価数、赤外線吸収フィルタの劣化度合い、調光盤の配線温度、予備ランプ在庫数、緊急停電時の蓄電池切替時間を毎回詳細に点検記録します。特別展の博物館展示室照明調光基準フィルタ交換は最終月曜日に実施します。",
+      "preview": "博物館展示室照明調光基準は博物館展示室照明調光基準の紫外線遮断と博物館展示室照明調光基準の照度上限を定めています。展示担当学芸員は古文書や染色資料および木版画や漆工芸品を長期保護するため、各展示ケース内の年間積算照度、紫外線放射量、演色評価"
+    },
+    {
+      "id": "ctrl-ext-museum-jp-dist",
+      "collection": "eval",
+      "doc_type": "museum",
+      "visible": true,
+      "content": "博物館展示室照明調光基準の案内書は博物館展示室照明調光基準の団体観覧予約方法、図録販売カウンター営業時間、コインロッカー返却手順、車椅子貸出場所、休憩ラウンジ案内、カフェ軽食メニュー、館内案内図、駐輪場利用規定、傘立て配置、ベビーカー置場を記載しています。",
+      "preview": "博物館展示室照明調光基準の案内書は博物館展示室照明調光基準の団体観覧予約方法、図録販売カウンター営業時間、コインロッカー返却手順、車椅子貸出場所、休憩ラウンジ案内、カフェ軽食メニュー、館内案内図、駐輪場利用規定、傘立て配置、ベビーカー置場を"
+    },
+    {
+      "id": "ctrl-ext-kiln-lead",
+      "collection": "eval",
+      "doc_type": "ceramics",
+      "visible": true,
+      "content": "Kiln thermocouple firing curves calibrate kiln thermocouple controller zones and kiln thermocouple soak intervals across ceramic studios. Technicians verify witness cones after every bisque firing cycle. All kiln schedules follow the studio manual.",
+      "preview": "Kiln thermocouple firing curves calibrate kiln thermocouple controller zones and kiln thermocouple soak intervals across"
+    },
+    {
+      "id": "ctrl-ext-kiln-target",
+      "collection": "eval",
+      "doc_type": "ceramics",
+      "visible": true,
+      "content": "Kiln thermocouple firing curves require kiln thermocouple controller batteries to replace annually on May fifteenth before summer workshops begin.",
+      "preview": "Kiln thermocouple firing curves require kiln thermocouple controller batteries to replace annually on May fifteenth befo"
+    },
+    {
+      "id": "ctrl-ext-kiln-para",
+      "collection": "eval",
+      "doc_type": "ceramics",
+      "visible": true,
+      "content": "Kiln thermocouple firing curves calibrate kiln thermocouple controller zones and kiln thermocouple soak intervals across ceramic studios. Technicians verify witness cones after every bisque firing cycle. Every kiln schedule follows the studio manual.",
+      "preview": "Kiln thermocouple firing curves calibrate kiln thermocouple controller zones and kiln thermocouple soak intervals across"
+    },
+    {
+      "id": "ctrl-ext-photonics-lead",
+      "collection": "eval",
+      "doc_type": "optics",
+      "visible": true,
+      "content": "Photonics optical bench isolation tables regulate photonics laser alignment and photonics vibration damping in optics labs. Lab staff inspect pneumatic isolator air regulators weekly. All photonics setups follow the optics guide.",
+      "preview": "Photonics optical bench isolation tables regulate photonics laser alignment and photonics vibration damping in optics la"
+    },
+    {
+      "id": "ctrl-ext-photonics-para",
+      "collection": "eval",
+      "doc_type": "optics",
+      "visible": true,
+      "content": "Photonics optical bench isolation tables regulate photonics laser alignment and photonics vibration damping in optics labs. Lab staff inspect pneumatic isolator air regulators weekly. Every photonics setup uses the optics guide.",
+      "preview": "Photonics optical bench isolation tables regulate photonics laser alignment and photonics vibration damping in optics la"
+    },
+    {
+      "id": "ctrl-ext-photonics-target",
+      "collection": "eval",
+      "doc_type": "optics",
+      "visible": true,
+      "content": "Photonics optical bench isolation nitrogen purge filters swap every ninety days under lab clean rules.",
+      "preview": "Photonics optical bench isolation nitrogen purge filters swap every ninety days under lab clean rules."
+    },
+    {
+      "id": "ctrl-ext-substation-lead",
+      "collection": "eval",
+      "doc_type": "grid",
+      "visible": true,
+      "content": "Substation transformer Buchholz relays guard substation transformer oil tanks and substation transformer gas alarms. All substation inspections follow the grid manual.",
+      "preview": "Substation transformer Buchholz relays guard substation transformer oil tanks and substation transformer gas alarms. All"
+    },
+    {
+      "id": "ctrl-ext-substation-para1",
+      "collection": "eval",
+      "doc_type": "grid",
+      "visible": true,
+      "content": "Substation transformer Buchholz relays guard substation transformer oil tanks and substation transformer gas alarms. Every substation inspection follows the grid manual.",
+      "preview": "Substation transformer Buchholz relays guard substation transformer oil tanks and substation transformer gas alarms. Eve"
+    },
+    {
+      "id": "ctrl-ext-substation-para2",
+      "collection": "eval",
+      "doc_type": "grid",
+      "visible": true,
+      "content": "Substation transformer Buchholz relays guard substation transformer oil tanks and substation transformer gas alarms. Each substation inspection uses the grid manual.",
+      "preview": "Substation transformer Buchholz relays guard substation transformer oil tanks and substation transformer gas alarms. Eac"
+    },
+    {
+      "id": "ctrl-ext-substation-target",
+      "collection": "eval",
+      "doc_type": "grid",
+      "visible": true,
+      "content": "Substation transformer Buchholz relays trigger dissolved gas samples quarterly on the second Wednesday morning.",
+      "preview": "Substation transformer Buchholz relays trigger dissolved gas samples quarterly on the second Wednesday morning."
+    },
+    {
+      "id": "ctrl-ext-aqueduct-es-lead",
+      "collection": "eval",
+      "doc_type": "hydraulics",
+      "visible": true,
+      "content": "El manual de compuertas del acueducto regula compuertas hidráulicas y compuertas de desagüe en canales regionales. Todos los registros del acueducto siguen la guía técnica.",
+      "preview": "El manual de compuertas del acueducto regula compuertas hidráulicas y compuertas de desagüe en canales regionales. Todos"
+    },
+    {
+      "id": "ctrl-ext-aqueduct-es-para",
+      "collection": "eval",
+      "doc_type": "hydraulics",
+      "visible": true,
+      "content": "El manual de compuertas del acueducto regula compuertas hidráulicas y compuertas de desagüe en canales regionales. Cada registro del acueducto utiliza la guía técnica.",
+      "preview": "El manual de compuertas del acueducto regula compuertas hidráulicas y compuertas de desagüe en canales regionales. Cada "
+    },
+    {
+      "id": "ctrl-ext-aqueduct-es-target",
+      "collection": "eval",
+      "doc_type": "hydraulics",
+      "visible": true,
+      "content": "Las juntas de las compuertas del acueducto se engrasan el primer lunes de cada trimestre.",
+      "preview": "Las juntas de las compuertas del acueducto se engrasan el primer lunes de cada trimestre."
+    },
+    {
+      "id": "ctrl-ext-cryogenic-lead",
+      "collection": "eval",
+      "doc_type": "cryo",
+      "visible": true,
+      "content": "Cryogenic vault entry safety rules govern cryogenic vault entry safety oxygen monitors and cryogenic vault thermal gloves for certified technicians working inside liquid nitrogen storage bays after completing safety briefings and routine equipment checks.",
+      "preview": "Cryogenic vault entry safety rules govern cryogenic vault entry safety oxygen monitors and cryogenic vault thermal glove"
+    },
+    {
+      "id": "ctrl-ext-cryogenic-var",
+      "collection": "eval",
+      "doc_type": "cryo",
+      "visible": true,
+      "content": "Cryogenic vault entry safety rules govern cryogenic vault oxygen monitors and cryogenic vault thermal gloves are not approved for trainees working inside liquid nitrogen storage bays after completing safety briefings and routine equipment checks.",
+      "preview": "Cryogenic vault entry safety rules govern cryogenic vault oxygen monitors and cryogenic vault thermal gloves are not app"
+    },
+    {
+      "id": "ctrl-ext-cryogenic-dist",
+      "collection": "eval",
+      "doc_type": "cryo",
+      "visible": true,
+      "content": "Cryogenic vault entry safety bulletins cover cryogenic vault entry safety loading dock delivery hours, cylinder cart parking lanes, corridor intercom numbers, freight elevator weight placards, uniform locker assignments, breakroom coffee schedules, visitor badge returns, shuttle bus timetables, coat hooks, umbrella stands, cafeteria sandwich menus, reception lobby maps, bicycle cage keys, parcel lockers, and security guard desks.",
+      "preview": "Cryogenic vault entry safety bulletins cover cryogenic vault entry safety loading dock delivery hours, cylinder cart par"
+    },
+    {
+      "id": "ctrl-ext-radiology-lead",
+      "collection": "eval",
+      "doc_type": "dosimetry",
+      "visible": true,
+      "content": "Radiology dosimetry badge limit standards govern radiology dosimetry badge limit tracking up to 400 millirem per quarter for clinical imaging operators who wear calibrated wrist rings during routine fluoroscopy procedures across hospital suites.",
+      "preview": "Radiology dosimetry badge limit standards govern radiology dosimetry badge limit tracking up to 400 millirem per quarter"
+    },
+    {
+      "id": "ctrl-ext-radiology-var",
+      "collection": "eval",
+      "doc_type": "dosimetry",
+      "visible": true,
+      "content": "Radiology dosimetry badge limit standards govern radiology dosimetry badge tracking up to 1600 millirem per quarter for clinical imaging operators who wear calibrated wrist rings during routine fluoroscopy procedures across hospital suites.",
+      "preview": "Radiology dosimetry badge limit standards govern radiology dosimetry badge tracking up to 1600 millirem per quarter for "
+    },
+    {
+      "id": "ctrl-ext-radiology-dist",
+      "collection": "eval",
+      "doc_type": "dosimetry",
+      "visible": true,
+      "content": "Radiology dosimetry badge limit handouts cover radiology dosimetry badge limit mailroom drop-off trays, replacement clip requests, clinic coat laundry bags, reception waiting chairs, patient parking validation kiosks, lobby water fountains, elevator directories, gift shop hours, shuttle stops, visitor lounge passes, cafeteria salad bars, coat closets, bicycle racks, badge photo booths, courtyard benches, and security desks.",
+      "preview": "Radiology dosimetry badge limit handouts cover radiology dosimetry badge limit mailroom drop-off trays, replacement clip"
+    },
+    {
+      "id": "ctrl-ext-cleanroom-lead",
+      "collection": "eval",
+      "doc_type": "fab",
+      "visible": true,
+      "content": "Cleanroom gowning garment policy standards govern cleanroom gowning garment policy coverall steps and cleanroom gowning hood seals for semiconductor fab staff entering bay four during wafer shifts after passing air-shower checks.",
+      "preview": "Cleanroom gowning garment policy standards govern cleanroom gowning garment policy coverall steps and cleanroom gowning "
+    },
+    {
+      "id": "ctrl-ext-cleanroom-var",
+      "collection": "eval",
+      "doc_type": "fab",
+      "visible": true,
+      "content": "Cleanroom gowning garment policy standards govern cleanroom gowning coverall steps and cleanroom gowning hood seals only for semiconductor fab staff entering bay four during wafer shifts after passing air-shower checks.",
+      "preview": "Cleanroom gowning garment policy standards govern cleanroom gowning coverall steps and cleanroom gowning hood seals only"
+    },
+    {
+      "id": "ctrl-ext-cleanroom-dist",
+      "collection": "eval",
+      "doc_type": "fab",
+      "visible": true,
+      "content": "Cleanroom gowning garment policy bulletins cover cleanroom gowning garment policy hallway shoe brushes, badge reader mounts, sticky mat vendors, breakroom vending cards, locker combination resets, shuttle bus timetables, visitor escort logs, bike shelter keys, coatroom benches, lobby newsstands, parcel drop boxes, cafeteria soup hours, umbrella stands, parking permit windows, and lobby security booths.",
+      "preview": "Cleanroom gowning garment policy bulletins cover cleanroom gowning garment policy hallway shoe brushes, badge reader mou"
+    },
+    {
+      "id": "ctrl-ext-cleanroom-jp-lead",
+      "collection": "eval",
+      "doc_type": "fabjp",
+      "visible": true,
+      "content": "研究室入室管理規定は研究室入室管理規定の静電気防止靴と研究室入室管理規定の事前登録および保護眼鏡着用を定め、特別許可証を持つ研究員の夜間単独作業は承認されます。",
+      "preview": "研究室入室管理規定は研究室入室管理規定の静電気防止靴と研究室入室管理規定の事前登録および保護眼鏡着用を定め、特別許可証を持つ研究員の夜間単独作業は承認されます。"
+    },
+    {
+      "id": "ctrl-ext-cleanroom-jp-var",
+      "collection": "eval",
+      "doc_type": "fabjp",
+      "visible": true,
+      "content": "研究室入室管理規定は研究室入室管理規定の静電気防止靴と研究室入室の事前登録および保護眼鏡着用を定め、特別許可証を持つ研究員の夜間単独作業は承認されません。",
+      "preview": "研究室入室管理規定は研究室入室管理規定の静電気防止靴と研究室入室の事前登録および保護眼鏡着用を定め、特別許可証を持つ研究員の夜間単独作業は承認されません。"
+    },
+    {
+      "id": "ctrl-ext-cleanroom-jp-dist",
+      "collection": "eval",
+      "doc_type": "fabjp",
+      "visible": true,
+      "content": "研究室入室管理規定案内は研究室入室管理規定の傘立て位置、自販機稼働時間、共用ロッカー鍵返却箱、来客用スリッパ棚、会議室予約端末設置階、駐輪場利用手順、郵便受け回収時刻、給湯室清掃当番表、館内食堂案内、宅配便受付窓口、休憩ベンチ配置、避難経路表示、傘袋設置場所、館内売店営業時間を記載しています。",
+      "preview": "研究室入室管理規定案内は研究室入室管理規定の傘立て位置、自販機稼働時間、共用ロッカー鍵返却箱、来客用スリッパ棚、会議室予約端末設置階、駐輪場利用手順、郵便受け回収時刻、給湯室清掃当番表、館内食堂案内、宅配便受付窓口、休憩ベンチ配置、避難経路"
+    },
+    {
+      "id": "ctrl-ext-dockyard",
+      "collection": "eval",
+      "doc_type": "maritime",
+      "visible": true,
+      "content": "Dockyard drydock caisson sealing procedures govern dockyard drydock caisson flood valves and dockyard drydock keel blocks across vessel repair basins. Dockyard drydock caisson crews test bilge manifold gauges, check timber shore wedges, inspect sump pump floats, verify capstan brakes, and clean sill drains before flooding begins. Dockyard drydock caisson teams also inspect hull shores, check air hoses, and test flood alarms. Harbor engineers record baseline caisson sill gasket readings before starting dockyard drydock checks. Biweekly dockyard drydock caisson cathodic anode inspections occur on Thursday.",
+      "preview": "Dockyard drydock caisson sealing procedures govern dockyard drydock caisson flood valves and dockyard drydock keel block"
+    },
+    {
+      "id": "ctrl-ext-dockyard-dist",
+      "collection": "eval",
+      "doc_type": "maritime",
+      "visible": true,
+      "content": "Dockyard drydock caisson bulletins cover dockyard drydock caisson harbor ferry schedules, visitor gangway rails, crane horn signals, cafeteria chowder specials, parking permit decals, tool crib checkout tags, shuttle bus bays, coat locker keys, lobby reception hours, mailroom parcel bins, bicycle rack gates, and visitor badge desks.",
+      "preview": "Dockyard drydock caisson bulletins cover dockyard drydock caisson harbor ferry schedules, visitor gangway rails, crane h"
+    },
+    {
+      "id": "ctrl-ext-seismology-lead",
+      "collection": "eval",
+      "doc_type": "geo",
+      "visible": true,
+      "content": "Seismology borehole tiltmeter arrays monitor seismology borehole tiltmeter strain sensors and seismology borehole telemetry during routine weekly seismic checks across alpine fault stations and mountain observatories.",
+      "preview": "Seismology borehole tiltmeter arrays monitor seismology borehole tiltmeter strain sensors and seismology borehole teleme"
+    },
+    {
+      "id": "ctrl-ext-seismology-var",
+      "collection": "eval",
+      "doc_type": "geo",
+      "visible": true,
+      "content": "Seismology borehole tiltmeter arrays monitor seismology borehole strain sensors and seismology borehole telemetry are not calibrated during routine weekly seismic checks across alpine fault stations and mountain observatories.",
+      "preview": "Seismology borehole tiltmeter arrays monitor seismology borehole strain sensors and seismology borehole telemetry are no"
+    },
+    {
+      "id": "ctrl-ext-seismology-dist",
+      "collection": "eval",
+      "doc_type": "geo",
+      "visible": true,
+      "content": "Seismology borehole tiltmeter memos cover seismology borehole tiltmeter field truck fuel cards, trail gate keys, battery crate labels, radio repeater channels, seasonal field camp tents, cooler ice packs, first-aid kits, rain gear lockers, trailhead signs, canteen supplies, boot dryers, map tubes, camp stoves, flashlights, and compass pouches.",
+      "preview": "Seismology borehole tiltmeter memos cover seismology borehole tiltmeter field truck fuel cards, trail gate keys, battery"
+    },
+    {
+      "id": "ctrl-ext-tribology-lead",
+      "collection": "eval",
+      "doc_type": "mech",
+      "visible": true,
+      "content": "Tribology bearing wear spectrometers inspect tribology bearing oil samples and tribology bearing iron particles in test bays. All tribology filings follow the lab manual.",
+      "preview": "Tribology bearing wear spectrometers inspect tribology bearing oil samples and tribology bearing iron particles in test "
+    },
+    {
+      "id": "ctrl-ext-tribology-para",
+      "collection": "eval",
+      "doc_type": "mech",
+      "visible": true,
+      "content": "Tribology bearing wear spectrometers inspect tribology bearing oil samples and tribology bearing iron particles in test bays. Every tribology filing follows the lab manual.",
+      "preview": "Tribology bearing wear spectrometers inspect tribology bearing oil samples and tribology bearing iron particles in test "
+    },
+    {
+      "id": "ctrl-ext-tribology-target",
+      "collection": "eval",
+      "doc_type": "mech",
+      "visible": true,
+      "content": "Tribology bearing wear viscosity viscometers calibrate monthly using certified mineral reference oil.",
+      "preview": "Tribology bearing wear viscosity viscometers calibrate monthly using certified mineral reference oil."
+    }
+  ],
+  "overlap_queries": [
+    {
+      "id": "ov-retention",
+      "query": "retention archive policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-retention-a1",
+        "eval-retention-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-retention-a1",
+          "excerpt": "Financial ledger retention is seven years in immutable storage."
+        },
+        {
+          "document_id": "eval-retention-b",
+          "excerpt": "Security access logs expire after ninety days with daily verification."
+        }
+      ]
+    },
+    {
+      "id": "ov-travel",
+      "query": "travel policy policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-travel-a1",
+        "eval-travel-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-travel-a1",
+          "excerpt": "Domestic rail reimbursement is capped at five hundred dollars per trip."
+        },
+        {
+          "document_id": "eval-travel-b",
+          "excerpt": "Business class seat upgrades are not approved under any travel tier."
+        }
+      ]
+    },
+    {
+      "id": "ov-backup",
+      "query": "backup infra policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-backup-a1",
+        "eval-backup-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-backup-a1",
+          "excerpt": "Primary database snapshots run at 02:00 UTC across all zones."
+        },
+        {
+          "document_id": "eval-backup-b",
+          "excerpt": "Cross-region failover drills run quarterly on the second Sunday."
+        }
+      ]
+    },
+    {
+      "id": "ov-badges",
+      "query": "badges security policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-badges-a1",
+        "eval-badges-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-badges-a1",
+          "excerpt": "Permanent employee facility badges renew every twelve months."
+        },
+        {
+          "document_id": "eval-badges-b",
+          "excerpt": "Temporary contractor passes expire automatically after twenty four hours."
+        }
+      ]
+    },
+    {
+      "id": "ov-encryption",
+      "query": "encryption crypto policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-encryption-a1",
+        "eval-encryption-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-encryption-a1",
+          "excerpt": "Object storage buckets enforce AES-256 server-side encryption."
+        },
+        {
+          "document_id": "eval-encryption-b",
+          "excerpt": "Hardware security modules rotate tenant master keys every one hundred eighty days."
+        }
+      ]
+    },
+    {
+      "id": "ov-incident",
+      "query": "incident ops policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-incident-a1",
+        "eval-incident-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-incident-a1",
+          "excerpt": "Severity one outages require incident commander paging within five minutes."
+        },
+        {
+          "document_id": "eval-incident-b",
+          "excerpt": "Post-incident corrective actions close within fourteen calendar days."
+        }
+      ]
+    },
+    {
+      "id": "ov-onboarding",
+      "query": "onboarding hr policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-onboarding-a1",
+        "eval-onboarding-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-onboarding-a1",
+          "excerpt": "New engineering hires complete privacy training during week one."
+        },
+        {
+          "document_id": "eval-onboarding-b",
+          "excerpt": "Production database access requires manager and security officer sign-off."
+        }
+      ]
+    },
+    {
+      "id": "ov-vendor",
+      "query": "vendor procurement policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-vendor-a1",
+        "eval-vendor-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-vendor-a1",
+          "excerpt": "Annual vendor security questionnaires are due before October fifteenth."
+        },
+        {
+          "document_id": "eval-vendor-b",
+          "excerpt": "Subprocessor changes require thirty days written customer advance notice."
+        }
+      ]
+    },
+    {
+      "id": "ov-payroll",
+      "query": "payroll finance policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-payroll-a1",
+        "eval-payroll-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-payroll-a1",
+          "excerpt": "Salaried payroll disbursements settle on the last business day monthly."
+        },
+        {
+          "document_id": "eval-payroll-b",
+          "excerpt": "Expense reimbursements under fifty dollars skip itemized receipt uploads."
+        }
+      ]
+    },
+    {
+      "id": "ov-release",
+      "query": "release engineering policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-release-a1",
+        "eval-release-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-release-a1",
+          "excerpt": "Production container images require signed provenance attestations."
+        },
+        {
+          "document_id": "eval-release-b",
+          "excerpt": "Emergency hotfixes bypass staging only with two staff approvals."
+        }
+      ]
+    },
+    {
+      "id": "ov-support",
+      "query": "support service policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-support-a1",
+        "eval-support-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-support-a1",
+          "excerpt": "Enterprise support tickets receive initial triage within thirty minutes."
+        },
+        {
+          "document_id": "eval-support-b",
+          "excerpt": "Weekend maintenance windows run Sunday between 01:00 and 04:00 UTC."
+        }
+      ]
+    },
+    {
+      "id": "ov-medical",
+      "query": "medical benefits policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-medical-a1",
+        "eval-medical-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-medical-a1",
+          "excerpt": "Annual preventive dental checkups are covered at one hundred percent."
+        },
+        {
+          "document_id": "eval-medical-b",
+          "excerpt": "Out-of-network specialist visits carry a forty percent coinsurance cap."
+        }
+      ]
+    },
+    {
+      "id": "ov-shipping",
+      "query": "shipping logistics policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-shipping-a1",
+        "eval-shipping-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-shipping-a1",
+          "excerpt": "Hazardous lithium battery parcels travel solely by ground freight."
+        },
+        {
+          "document_id": "eval-shipping-b",
+          "excerpt": "Cold-chain biologics require continuous telemetry between two and eight Celsius."
+        }
+      ]
+    },
+    {
+      "id": "ov-customs",
+      "query": "customs trade policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-customs-a1",
+        "eval-customs-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-customs-a1",
+          "excerpt": "Export declarations must include eight-digit harmonized tariff codes."
+        },
+        {
+          "document_id": "eval-customs-b",
+          "excerpt": "Sanctioned destination screening blocks shipment release pending compliance hold."
+        }
+      ]
+    },
+    {
+      "id": "ov-library",
+      "query": "library records policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-library-a1",
+        "eval-library-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-library-a1",
+          "excerpt": "Rare manuscript reading rooms prohibit ink pens and flash photography."
+        },
+        {
+          "document_id": "eval-library-b",
+          "excerpt": "Microfilm duplication requests ship within ten business days of payment."
+        }
+      ]
+    },
+    {
+      "id": "ov-energy",
+      "query": "energy facilities policy rules and exceptions",
+      "collection": "eval",
+      "required_docs": [
+        "eval-energy-a1",
+        "eval-energy-b"
+      ],
+      "required_facts": [
+        {
+          "document_id": "eval-energy-a1",
+          "excerpt": "Server room chilled-water loops maintain supply temperatures at eighteen Celsius."
+        },
+        {
+          "document_id": "eval-energy-b",
+          "excerpt": "Diesel backup generators perform automated thirty-minute load tests biweekly."
+        }
+      ]
+    }
+  ],
+  "single_fact_queries": [
+    {
+      "id": "sq-ctrl-parking",
+      "query": "parking campus rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-parking"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-parking",
+          "excerpt": "Visitor parking permits validate for level three north garage only."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-cafeteria",
+      "query": "cafeteria dining rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-cafeteria"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-cafeteria",
+          "excerpt": "Hot breakfast service closes at 10:15 AM on weekdays."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-printing",
+      "query": "printing office rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-printing"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-printing",
+          "excerpt": "Default duplex monochrome printing applies to all shared floor queues."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-vpn",
+      "query": "tunnel network rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-vpn"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-vpn",
+          "excerpt": "Split-tunnel VPN access expires after twelve continuous hours."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-laptop",
+      "query": "laptop hardware rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-laptop"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-laptop",
+          "excerpt": "Corporate laptops encrypt local NVMe drives using FileVault escrow."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-sabbatical",
+      "query": "sabbatical leave rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-sabbatical"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-sabbatical",
+          "excerpt": "Tenured staff qualify for a six-week paid sabbatical after five years."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-tuition",
+      "query": "tuition learning rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-tuition"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-tuition",
+          "excerpt": "Accredited degree tuition reimbursement caps at five thousand dollars yearly."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-gym",
+      "query": "wellness stipend rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-gym"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-gym",
+          "excerpt": "Monthly fitness club reimbursements require quarterly attendance statements."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-patent",
+      "query": "patent legal rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-patent"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-patent",
+          "excerpt": "Invention disclosure forms route to intellectual property counsel before publication."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-donation",
+      "query": "charity matching rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-donation"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-donation",
+          "excerpt": "Charitable gift matching doubles employee donations up to two thousand dollars."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-badge-loss",
+      "query": "lostbadge desk rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-badge-loss"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-badge-loss",
+          "excerpt": "Lost access cards must be reported to building security within two hours."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-desk",
+      "query": "hotdesk seating rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-desk"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-desk",
+          "excerpt": "Unclaimed hot-desk reservations release automatically thirty minutes past start."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-lockers",
+      "query": "lockers storage rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-lockers"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-lockers",
+          "excerpt": "Day-use bicycle lockers clear unassigned locks every Friday evening."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-recycling",
+      "query": "compost green rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-recycling"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-recycling",
+          "excerpt": "Compostable food containers belong exclusively in green-lidded pantry bins."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-mailroom",
+      "query": "mailroom parcel rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-mailroom"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-mailroom",
+          "excerpt": "Inbound personal parcels hold at the ground mailroom for five business days."
+        }
+      ]
+    },
+    {
+      "id": "sq-ctrl-jp",
+      "query": "tokyo hours rule",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-jp"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-jp",
+          "excerpt": "東京支社の営業時間は午前九時から午後六時までです。休日は土日祝です。"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-aquarium",
+      "query": "aquarium chiller maintenance procedure",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-aquarium"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-aquarium",
+          "excerpt": "Quarterly aquarium chiller maintenance procedure glycol valve replacements occur on the third Thursday."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-elevator",
+      "query": "elevator hoistway brake calibration",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-elevator"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-elevator",
+          "excerpt": "Annual elevator hoistway brake calibration lining replacements occur during the second Saturday outage."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-helipad",
+      "query": "helipad beacon perimeter lighting",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-helipad"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-helipad",
+          "excerpt": "Semiannual helipad beacon surge arrestors swap out on Monday."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-observatory",
+      "query": "observatory dome shutter alignment",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-observatory"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-observatory",
+          "excerpt": "Biannual observatory dome shutter alignment belt tensioning occurs before equinox runs."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-botanical-jp",
+      "query": "植物園温室設備点検手順",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-botanical-jp"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-botanical-jp",
+          "excerpt": "四半期ごとの植物園温室設備点検手順ノズル交換は第三水曜日に実施します。"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-windtunnel",
+      "query": "windtunnel balance sting calibration",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-windtunnel"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-windtunnel",
+          "excerpt": "Annual windtunnel balance sting calibration deadweight verifications and windtunnel balance sting calibration checks occur on Friday."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-geothermal",
+      "query": "geothermal brine reinjection pressure",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-geothermal"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-geothermal",
+          "excerpt": "Monthly geothermal brine reinjection pressure annulus checks and geothermal brine reinjection pressure tests run on Tuesday."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-foundry",
+      "query": "foundry induction crucible relining",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-foundry"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-foundry",
+          "excerpt": "Every forty heats foundry induction crucible relining linings and foundry induction crucible relining shells get ultrasonic scans."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-museum-jp",
+      "query": "博物館展示室照明調光基準",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-museum-jp"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-museum-jp",
+          "excerpt": "特別展の博物館展示室照明調光基準フィルタ交換は最終月曜日に実施します。"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-kiln",
+      "query": "kiln thermocouple firing curves",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-kiln-target"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-kiln-target",
+          "excerpt": "Kiln thermocouple firing curves require kiln thermocouple controller batteries to replace annually on May fifteenth before summer workshops begin."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-photonics",
+      "query": "photonics optical bench isolation",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-photonics-target"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-photonics-target",
+          "excerpt": "Photonics optical bench isolation nitrogen purge filters swap every ninety days under lab clean rules."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-substation",
+      "query": "substation transformer Buchholz relays",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-substation-target"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-substation-target",
+          "excerpt": "Substation transformer Buchholz relays trigger dissolved gas samples quarterly on the second Wednesday morning."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-aqueduct-es",
+      "query": "compuertas del acueducto",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-aqueduct-es-target"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-aqueduct-es-target",
+          "excerpt": "Las juntas de las compuertas del acueducto se engrasan el primer lunes de cada trimestre."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-cryogenic",
+      "query": "cryogenic vault entry safety",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-cryogenic-var"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-cryogenic-var",
+          "excerpt": "are not approved for trainees"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-radiology",
+      "query": "radiology dosimetry badge limit",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-radiology-var"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-radiology-var",
+          "excerpt": "1600 millirem"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-cleanroom",
+      "query": "cleanroom gowning garment policy",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-cleanroom-var"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-cleanroom-var",
+          "excerpt": "only for semiconductor fab staff"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-cleanroom-jp",
+      "query": "研究室入室管理規定",
+      "collection": "eval",
+      "required_docs": [
+        "ctrl-ext-cleanroom-jp-var"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-cleanroom-jp-var",
+          "excerpt": "承認されません"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-dockyard-rerank",
+      "query": "dockyard drydock caisson",
+      "collection": "eval",
+      "rerank_order": [
+        "ctrl-ext-dockyard#0",
+        "ctrl-ext-dockyard#1",
+        "ctrl-ext-dockyard-dist#0"
+      ],
+      "required_docs": [
+        "ctrl-ext-dockyard"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-dockyard",
+          "excerpt": "Biweekly dockyard drydock caisson cathodic anode inspections occur on Thursday."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-seismology-rerank",
+      "query": "seismology borehole tiltmeter",
+      "collection": "eval",
+      "rerank_order": [
+        "ctrl-ext-seismology-lead#0",
+        "ctrl-ext-seismology-var#0",
+        "ctrl-ext-seismology-dist#0"
+      ],
+      "required_docs": [
+        "ctrl-ext-seismology-var"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-seismology-var",
+          "excerpt": "are not calibrated"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-tribology-rerank",
+      "query": "tribology bearing wear",
+      "collection": "eval",
+      "rerank_order": [
+        "ctrl-ext-tribology-lead#0",
+        "ctrl-ext-tribology-para#0",
+        "ctrl-ext-tribology-target#0"
+      ],
+      "required_docs": [
+        "ctrl-ext-tribology-target"
+      ],
+      "required_facts": [
+        {
+          "document_id": "ctrl-ext-tribology-target",
+          "excerpt": "Tribology bearing wear viscosity viscometers calibrate monthly using certified mineral reference oil."
+        }
+      ]
+    }
+  ],
+  "out_of_scope_checks": [
+    {
+      "id": "oos-hidden-doc",
+      "query": "retention archive policy rules and exceptions",
+      "collection": "eval",
+      "forbidden_docs": [
+        "hidden-retention-secret",
+        "other-collection-retention"
+      ]
+    },
+    {
+      "id": "oos-allowlist",
+      "query": "travel policy rules and exceptions",
+      "collection": "eval",
+      "allowed_document_ids": [
+        "eval-travel-b"
+      ],
+      "forbidden_docs": [
+        "eval-travel-a1",
+        "eval-travel-a2",
+        "eval-travel-a3"
+      ]
+    }
+  ]
+}

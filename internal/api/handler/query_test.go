@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -529,4 +530,139 @@ func TestQueryHandlerHonorsRoutingPoliciesAndCalibration(t *testing.T) {
 	uncalCfg.RoutingCalibrationMatched = false
 	uncalResp := runQuery(t, uncalCfg, `{"query":"retention policy"}`)
 	require.Equal(t, "GLOBAL", uncalResp.Mode)
+}
+
+type capturePromptConverser struct {
+	prompts []string
+	answer  string
+}
+
+func (c *capturePromptConverser) Converse(ctx context.Context, messages []brtypes.Message) (*bedrockruntime.ConverseOutput, error) {
+	return c.ConverseWithModelAndSystem(ctx, "", "", messages, 0, 0)
+}
+
+func (c *capturePromptConverser) ConverseWithModelAndSystem(_ context.Context, _, _ string, messages []brtypes.Message, _ float32, _ int) (*bedrockruntime.ConverseOutput, error) {
+	var b strings.Builder
+	for _, m := range messages {
+		for _, blk := range m.Content {
+			if txt, ok := llm.BlockText(blk); ok {
+				b.WriteString(txt)
+			}
+		}
+	}
+	c.prompts = append(c.prompts, b.String())
+	return deadlineOutput(c.answer, brtypes.StopReasonEndTurn), nil
+}
+
+func (c *capturePromptConverser) ConverseStreamWithModelAndSystem(ctx context.Context, model, system string, messages []brtypes.Message, temp float32, maxTok int, delta func(string) error) (*bedrockruntime.ConverseOutput, error) {
+	out, err := c.ConverseWithModelAndSystem(ctx, model, system, messages, temp, maxTok)
+	if err != nil {
+		return nil, err
+	}
+	if err := delta(c.answer); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func TestQueryDiversePolicyJSONAndSSEIdentity(t *testing.T) {
+	firstHead := strings.Repeat("Primary archive retention lasts five years ", 10) + "."
+	firstFull := firstHead + " " + strings.Repeat("appendix detail ", 40)
+	dupChunk := firstFull
+	trailChunk := "Exception: security incidents extend retention by ninety days."
+	chunks := []domain.ScoredChunk{
+		{Chunk: domain.Chunk{ID: "c1", DocumentID: "00000000-0000-4000-8000-000000000001", Index: 0, Text: firstFull}, Score: .95},
+		{Chunk: domain.Chunk{ID: "c2", DocumentID: "00000000-0000-4000-8000-000000000001", Index: 1, Text: dupChunk}, Score: .92},
+		{Chunk: domain.Chunk{ID: "c3", DocumentID: "00000000-0000-4000-8000-000000000002", Index: 3, Text: trailChunk}, Score: .85},
+	}
+
+	cfg := streamQueryConfig()
+	cfg.SynthesisContextTokens = 140
+	cfg.SynthesisRelativeScoreFloor = .55
+	cfg.SynthesisContextPolicy = config.SynthesisContextPolicyDiverse
+
+	conv := &capturePromptConverser{answer: "Primary archive retention lasts five years [1]. Security incidents extend retention by ninety days [2]."}
+	amb := llm.NewAmbassador(cfg)
+	amb.SetClient(conv)
+	ret := retriever.NewRetriever(citationQueryStore{chunks: chunks}, embedder.NewFakeEmbedder(8), .7, 10)
+	h := QueryHandler(ret, amb, cfg, nil)
+
+	reqBody := `{"query":"retention","mode":"global","include_citations":true}`
+	jsonReq := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/query", strings.NewReader(reqBody))
+	jsonReq.Header.Set("Content-Type", "application/json")
+	jsonRec := httptest.NewRecorder()
+	h.ServeHTTP(jsonRec, jsonReq)
+	require.Equal(t, http.StatusOK, jsonRec.Code, jsonRec.Body.String())
+
+	var jsonResp QueryResponse
+	require.NoError(t, json.Unmarshal(jsonRec.Body.Bytes(), &jsonResp))
+	require.Equal(t, 2, jsonResp.ContextChunks)
+	require.Len(t, jsonResp.ScoredChunks, 3)
+	require.Equal(t, 1, jsonResp.ScoredChunks[0].Excerpt)
+	require.True(t, jsonResp.ScoredChunks[0].Truncated)
+	require.Equal(t, 0, jsonResp.ScoredChunks[1].Excerpt)
+	require.False(t, jsonResp.ScoredChunks[1].Truncated)
+	require.Equal(t, 2, jsonResp.ScoredChunks[2].Excerpt)
+	require.False(t, jsonResp.ScoredChunks[2].Truncated)
+	require.Len(t, jsonResp.Citations, 2)
+	require.Equal(t, 2, jsonResp.Citations[1].Excerpt)
+	require.Equal(t, "00000000-0000-4000-8000-000000000002", jsonResp.Citations[1].DocID)
+	require.Equal(t, 3, jsonResp.Citations[1].ChunkIndex)
+
+	sseRec := httptest.NewRecorder()
+	h.ServeHTTP(sseRec, streamQueryRequest(t.Context(), reqBody))
+	require.Equal(t, http.StatusOK, sseRec.Code, sseRec.Body.String())
+	events := recordedEvents(t, sseRec.Body.String())
+	require.GreaterOrEqual(t, len(events), 3)
+	require.Equal(t, "context", events[0].name)
+	doneEvent := events[len(events)-1]
+	require.Equal(t, "done", doneEvent.name)
+
+	var sseScored []ScoredChunkResponse
+	require.NoError(t, json.Unmarshal(events[0].data["scored_chunks"], &sseScored))
+	require.Equal(t, jsonResp.ScoredChunks, sseScored)
+
+	var sseDone QueryStreamDone
+	require.NoError(t, json.Unmarshal(bytesOrRaw(doneEvent.data), &sseDone))
+	require.Equal(t, jsonResp.ContextTokens, sseDone.ContextTokens)
+	require.Len(t, sseDone.Citations, 2)
+	require.Equal(t, jsonResp.Citations[1].Excerpt, sseDone.Citations[1].Excerpt)
+	require.Equal(t, jsonResp.Citations[1].DocID, sseDone.Citations[1].DocID)
+	require.Equal(t, jsonResp.Citations[1].ChunkIndex, sseDone.Citations[1].ChunkIndex)
+
+	require.Len(t, conv.prompts, 2)
+	excerptRe := regexp.MustCompile(`(?s)<excerpt-[0-9a-f]+ id="(\d+)">\n(.*?)\n</excerpt-[0-9a-f]+>`)
+	jsonBodies := excerptRe.FindAllStringSubmatch(conv.prompts[0], -1)
+	sseBodies := excerptRe.FindAllStringSubmatch(conv.prompts[1], -1)
+	require.Len(t, jsonBodies, 2)
+	require.Len(t, sseBodies, 2)
+	for i := range jsonBodies {
+		require.Equal(t, fmt.Sprint(i+1), jsonBodies[i][1])
+		require.Equal(t, jsonBodies[i][1:], sseBodies[i][1:])
+	}
+	require.Equal(t, firstHead, jsonBodies[0][2])
+	require.Equal(t, trailChunk, jsonBodies[1][2])
+
+	// Evidence mode JSON and SSE match the exact selected bodies.
+	evidBody := `{"query":"retention","mode":"global","answer_mode":"evidence"}`
+	evidJSONReq := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/query", strings.NewReader(evidBody))
+	evidJSONReq.Header.Set("Content-Type", "application/json")
+	evidJSONRec := httptest.NewRecorder()
+	h.ServeHTTP(evidJSONRec, evidJSONReq)
+	require.Equal(t, http.StatusOK, evidJSONRec.Code, evidJSONRec.Body.String())
+	var evidJSON QueryResponse
+	require.NoError(t, json.Unmarshal(evidJSONRec.Body.Bytes(), &evidJSON))
+	require.Equal(t, []ScoredChunkResponse{
+		{DocID: "00000000-0000-4000-8000-000000000001", ChunkIndex: 0, Score: .95, Text: firstHead, Excerpt: 1, Truncated: true},
+		{DocID: "00000000-0000-4000-8000-000000000002", ChunkIndex: 3, Score: .85, Text: trailChunk, Excerpt: 2, Truncated: false},
+	}, evidJSON.ScoredChunks)
+
+	evidSSERec := httptest.NewRecorder()
+	h.ServeHTTP(evidSSERec, streamQueryRequest(t.Context(), evidBody))
+	require.Equal(t, http.StatusOK, evidSSERec.Code, evidSSERec.Body.String())
+	evidEvents := recordedEvents(t, evidSSERec.Body.String())
+	require.Len(t, evidEvents, 2)
+	var evidSSEChunks []ScoredChunkResponse
+	require.NoError(t, json.Unmarshal(evidEvents[0].data["scored_chunks"], &evidSSEChunks))
+	require.Equal(t, evidJSON.ScoredChunks, evidSSEChunks)
 }
