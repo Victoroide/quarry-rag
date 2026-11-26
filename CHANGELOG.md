@@ -26,6 +26,10 @@ Notable changes are grouped by release.
 - Grants-mode document listings and status avoid retries for unrelated policy changes. A stream ends before releasing another batch when the caller's policy changes.
 - Release an exact legacy Pinecone hold through the cleanup command without contacting Pinecone.
 
+### Security
+
+- Restrict the PostgreSQL serving audit writer to runtime actions and valid outcomes, reserving cutover and grant import events for operator transactions.
+
 ### Changed
 
 - Delegated trust-file checks can proceed independently while another check reads unchanged trust data.
