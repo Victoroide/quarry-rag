@@ -306,6 +306,16 @@ to run the revision-aware readers before enabling `HOSTED_VECTOR_MANIFEST=true`.
 Enable the flag on one replica first and confirm that
 `quarry_hosted_vector_cleanups_total` reports completions.
 
+On both serverless and pod-based Pinecone indexes, a manifested retry of an
+unscoped ingestion can publish after an unacknowledged legacy upsert or an
+abandoned upsert claim expires. The revisions use separate vector IDs, and
+readers exclude legacy hits after activation. A live mutation claim or an
+uncertain legacy delete still blocks publication. An acknowledged legacy cleanup
+leaves earlier uncertainty intact for deletion safeguards and reconciliation.
+Legacy workers still apply their original publication guard. Finish upgrading
+the workers before relying on this recovery. This recovery requires no schema
+change, and rollback preserves the manifest reader checks.
+
 To roll back, set `HOSTED_VECTOR_MANIFEST=false` and keep at least one replica
 that has the flag enabled and its grants until `scripts/reconcile` reports no
 `retired_revisions`. Retired revisions wait in the database, and only a
