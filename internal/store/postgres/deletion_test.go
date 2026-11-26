@@ -926,3 +926,504 @@ func TestCompatibilityRemovalNeverCompletesACheckpointedDeletion(t *testing.T) {
 	require.False(t, readReceipt(t, c, doc.id).finalized)
 	require.NoError(t, c.DeleteWithCleanup(ctx, doc.id, newDeletionRecorder().ops(doc.incarnation)))
 }
+
+func waitForAdvisoryWaiter(t *testing.T, c *Client, mode string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var waiting bool
+		err := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT FROM pg_locks
+			WHERE locktype='advisory' AND NOT granted AND mode=$1
+			AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))`, mode).Scan(&waiting)
+		return err == nil && waiting
+	}, 10*time.Second, 10*time.Millisecond, "expected an advisory waiter in mode %s", mode)
+}
+
+func TestFileSigningAssignsNoTransactionID(t *testing.T) {
+	c := activatedDatabase(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	doc := acceptDocument(t, c, "no xid signing", true, true)
+	var beforeXmax string
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT xmax::text FROM documents WHERE id=$1`, string(doc.id)).Scan(&beforeXmax))
+
+	inside, finish := make(chan struct{}), make(chan struct{})
+	type signResult struct {
+		found bool
+		err   error
+	}
+	signing := make(chan signResult, 1)
+	go func() {
+		found, err := c.WithDocumentFile(ctx, doc.id, func(context.Context, string) error {
+			close(inside)
+			<-finish
+			return nil
+		})
+		signing <- signResult{found: found, err: err}
+	}()
+	select {
+	case <-inside:
+	case res := <-signing:
+		t.Fatalf("signing ended before its callback ran: found=%v err=%v", res.found, res.err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	var holders int
+	var noXID bool
+	err := c.Pool.QueryRow(ctx, `SELECT count(*), COALESCE(bool_and(a.backend_xid IS NULL), FALSE)
+		FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid=l.pid
+		WHERE l.locktype='advisory' AND l.granted AND l.mode='ShareLock'
+			AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
+			AND a.pid<>pg_backend_pid()`).Scan(&holders, &noXID)
+	require.NoError(t, err)
+	require.Equal(t, 1, holders)
+	require.True(t, noXID, "signing must not assign a transaction ID")
+
+	close(finish)
+	res := <-signing
+	require.NoError(t, res.err)
+	require.True(t, res.found)
+
+	var afterXmax string
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT xmax::text FROM documents WHERE id=$1`, string(doc.id)).Scan(&afterXmax))
+	require.Equal(t, beforeXmax, afterXmax, "signing must leave the row xmax unchanged")
+}
+
+func TestFileSigningLeavesTheRowUnlocked(t *testing.T) {
+	c := activatedDatabase(t)
+	other := otherConnection(t, c)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	doc := acceptDocument(t, c, "unlocked row signing", true, true)
+
+	inside, finish := make(chan struct{}), make(chan struct{})
+	signing := make(chan error, 1)
+	go func() {
+		_, err := c.WithDocumentFile(ctx, doc.id, func(context.Context, string) error {
+			close(inside)
+			<-finish
+			return nil
+		})
+		signing <- err
+	}()
+	select {
+	case <-inside:
+	case err := <-signing:
+		t.Fatalf("signing ended before its callback ran: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	var one int
+	require.NoError(t, other.Pool.QueryRow(ctx, `SELECT 1 FROM documents WHERE id=$1 FOR UPDATE NOWAIT`, string(doc.id)).Scan(&one))
+	require.Equal(t, 1, one)
+
+	close(finish)
+	require.NoError(t, <-signing)
+}
+
+func TestFileSigningReadsAfterTheLockWait(t *testing.T) {
+	c := activatedDatabase(t)
+	other := otherConnection(t, c)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	doc := acceptDocument(t, c, "stale snapshot guard", true, true)
+
+	tx, err := other.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(`+documentIntentLockKey+`)`, string(doc.id))
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `UPDATE documents SET status='deleting' WHERE id=$1`, string(doc.id))
+	require.NoError(t, err)
+
+	var called atomic.Bool
+	type signResult struct {
+		found bool
+		err   error
+	}
+	signing := make(chan signResult, 1)
+	go func() {
+		found, signErr := c.WithDocumentFile(ctx, doc.id, func(context.Context, string) error {
+			called.Store(true)
+			return nil
+		})
+		signing <- signResult{found: found, err: signErr}
+	}()
+
+	waitForAdvisoryWaiter(t, c, "ShareLock")
+	require.NoError(t, tx.Commit(ctx))
+
+	res := <-signing
+	require.NoError(t, res.err)
+	require.False(t, res.found)
+	require.False(t, called.Load(), "signing must observe the committed deleting status")
+}
+
+func TestDeletionIntentWaitsForSigningWithoutTheRowLock(t *testing.T) {
+	c := activatedDatabase(t)
+	deleter := otherConnection(t, c)
+	observer := otherConnection(t, c)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	doc := acceptDocument(t, c, "intent waits without row lock", true, true)
+
+	inside, finish := make(chan struct{}), make(chan struct{})
+	signing := make(chan error, 1)
+	go func() {
+		_, err := c.WithDocumentFile(ctx, doc.id, func(context.Context, string) error {
+			close(inside)
+			<-finish
+			return nil
+		})
+		signing <- err
+	}()
+	select {
+	case <-inside:
+	case err := <-signing:
+		t.Fatalf("signing ended before its callback ran: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	begun := make(chan error, 1)
+	go func() {
+		_, _, err := deleter.beginDeletion(ctx, doc.id, newDeletionRecorder().ops(doc.incarnation))
+		begun <- err
+	}()
+	waitForAdvisoryWaiter(t, observer, "ExclusiveLock")
+
+	var one int
+	require.NoError(t, observer.Pool.QueryRow(ctx, `SELECT 1 FROM documents WHERE id=$1 FOR UPDATE NOWAIT`, string(doc.id)).Scan(&one))
+	require.Equal(t, 1, one)
+
+	close(finish)
+	require.NoError(t, <-signing)
+	require.NoError(t, <-begun)
+	require.Equal(t, "deleting", documentStatus(t, c, doc.id))
+}
+
+func TestConcurrentSigningSharesTheKey(t *testing.T) {
+	c := activatedDatabase(t)
+	other := otherConnection(t, c)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	doc := acceptDocument(t, c, "concurrent signing", true, true)
+
+	inside1, inside2, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	type signResult struct {
+		found bool
+		key   string
+		err   error
+	}
+	res1, res2 := make(chan signResult, 1), make(chan signResult, 1)
+	runSigner := func(client *Client, inside chan struct{}, out chan signResult) {
+		var signedKey string
+		found, err := client.WithDocumentFile(ctx, doc.id, func(_ context.Context, key string) error {
+			signedKey = key
+			close(inside)
+			<-release
+			return nil
+		})
+		out <- signResult{found: found, key: signedKey, err: err}
+	}
+	go runSigner(c, inside1, res1)
+	go runSigner(other, inside2, res2)
+
+	for _, ch := range []chan struct{}{inside1, inside2} {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			t.Fatal("signers could not enter callback concurrently:", ctx.Err())
+		}
+	}
+	close(release)
+
+	for _, ch := range []chan signResult{res1, res2} {
+		res := <-ch
+		require.NoError(t, res.err)
+		require.True(t, res.found)
+		require.Equal(t, doc.key, res.key)
+	}
+}
+
+func TestConcurrentIntentsSerializeOnTheKey(t *testing.T) {
+	c := activatedDatabase(t)
+	other := otherConnection(t, c)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	doc := acceptDocument(t, c, "concurrent intents", true, true)
+
+	type beginResult struct {
+		incarnation string
+		complete    bool
+		err         error
+	}
+	res1, res2 := make(chan beginResult, 1), make(chan beginResult, 1)
+	start := make(chan struct{})
+	go func() {
+		<-start
+		inc, complete, err := c.beginDeletion(ctx, doc.id, newDeletionRecorder().ops(doc.incarnation))
+		res1 <- beginResult{incarnation: inc, complete: complete, err: err}
+	}()
+	go func() {
+		<-start
+		inc, complete, err := other.beginDeletion(ctx, doc.id, newDeletionRecorder().ops(doc.incarnation))
+		res2 <- beginResult{incarnation: inc, complete: complete, err: err}
+	}()
+	close(start)
+
+	for _, ch := range []chan beginResult{res1, res2} {
+		select {
+		case res := <-ch:
+			require.NoError(t, res.err)
+			require.False(t, res.complete)
+			require.Equal(t, doc.incarnation, res.incarnation)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	require.Equal(t, "deleting", documentStatus(t, c, doc.id))
+	require.Equal(t, "qualified_intent", readReceipt(t, c, doc.id).kind)
+}
+
+func TestFileSigningCanBeCancelledWhileWaiting(t *testing.T) {
+	c := activatedDatabase(t)
+	other := otherConnection(t, c)
+	ctx := t.Context()
+	doc := acceptDocument(t, c, "cancel while waiting", true, true)
+
+	tx, err := other.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(`+documentIntentLockKey+`)`, string(doc.id))
+	require.NoError(t, err)
+
+	waitCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	var called atomic.Bool
+	found, err := c.WithDocumentFile(waitCtx, doc.id, func(context.Context, string) error {
+		called.Store(true)
+		return nil
+	})
+	require.Error(t, err)
+	require.False(t, found)
+	require.False(t, called.Load())
+
+	require.NoError(t, tx.Rollback(ctx))
+
+	freshCtx, freshCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer freshCancel()
+	var signedKey string
+	found, err = c.WithDocumentFile(freshCtx, doc.id, func(_ context.Context, key string) error {
+		signedKey = key
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, doc.key, signedKey)
+}
+
+func TestFileSigningReleasesTheKeyAfterAnError(t *testing.T) {
+	c := activatedDatabase(t)
+	other := otherConnection(t, c)
+	ctx := t.Context()
+	doc := acceptDocument(t, c, "sign error releases key", true, true)
+
+	signErr := errors.New("presign failed")
+	found, err := c.WithDocumentFile(ctx, doc.id, func(context.Context, string) error {
+		return signErr
+	})
+	require.ErrorIs(t, err, signErr)
+	require.False(t, found)
+
+	beginCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	incarnation, complete, err := other.beginDeletion(beginCtx, doc.id, newDeletionRecorder().ops(doc.incarnation))
+	require.NoError(t, err)
+	require.False(t, complete)
+	require.Equal(t, doc.incarnation, incarnation)
+	require.Equal(t, "deleting", documentStatus(t, c, doc.id))
+}
+
+func TestFileSigningSkipsUnsignableDocuments(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, c *Client) liveDocument
+		wantErr error
+	}{
+		{
+			name: "missing document",
+			setup: func(*testing.T, *Client) liveDocument {
+				return liveDocument{id: domain.DocumentID(uuid.NewString()), incarnation: uuid.NewString()}
+			},
+			wantErr: domain.ErrDocumentNotFound,
+		},
+		{
+			name: "no stored key",
+			setup: func(t *testing.T, c *Client) liveDocument {
+				return acceptDocument(t, c, "no stored key", true, false)
+			},
+		},
+		{
+			name: "deleting document",
+			setup: func(t *testing.T, c *Client) liveDocument {
+				doc := acceptDocument(t, c, "deleting document", true, true)
+				_, _, err := c.beginDeletion(t.Context(), doc.id, newDeletionRecorder().ops(doc.incarnation))
+				require.NoError(t, err)
+				return doc
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := activatedDatabase(t)
+			other := otherConnection(t, c)
+			ctx := t.Context()
+			doc := tc.setup(t, c)
+
+			var called atomic.Bool
+			found, err := c.WithDocumentFile(ctx, doc.id, func(context.Context, string) error {
+				called.Store(true)
+				return nil
+			})
+			require.NoError(t, err)
+			require.False(t, found)
+			require.False(t, called.Load())
+
+			beginCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			_, _, err = other.beginDeletion(beginCtx, doc.id, newDeletionRecorder().ops(doc.incarnation))
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestFileSigningUsesTheCanonicalKey(t *testing.T) {
+	c := activatedDatabase(t)
+	other := otherConnection(t, c)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	doc := acceptDocument(t, c, "canonical spellings", true, true)
+	raw := string(doc.id)
+
+	for _, tc := range []struct {
+		name string
+		id   domain.DocumentID
+	}{
+		{name: "upper-case", id: domain.DocumentID(strings.ToUpper(raw))},
+		{name: "braced", id: domain.DocumentID("{" + raw + "}")},
+		{name: "32-digit", id: domain.DocumentID(strings.ReplaceAll(raw, "-", ""))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var signedKey string
+			found, err := c.WithDocumentFile(ctx, tc.id, func(_ context.Context, key string) error {
+				signedKey = key
+				return nil
+			})
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, doc.key, signedKey)
+		})
+	}
+
+	inside, finish := make(chan struct{}), make(chan struct{})
+	signing := make(chan error, 1)
+	go func() {
+		_, err := c.WithDocumentFile(ctx, domain.DocumentID(strings.ToUpper(raw)), func(context.Context, string) error {
+			close(inside)
+			<-finish
+			return nil
+		})
+		signing <- err
+	}()
+	select {
+	case <-inside:
+	case err := <-signing:
+		t.Fatalf("signing ended before its callback ran: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	begun := make(chan error, 1)
+	go func() {
+		_, _, err := other.beginDeletion(ctx, doc.id, newDeletionRecorder().ops(doc.incarnation))
+		begun <- err
+	}()
+	waitForAdvisoryWaiter(t, other, "ExclusiveLock")
+
+	close(finish)
+	require.NoError(t, <-signing)
+	require.NoError(t, <-begun)
+
+	found, err := c.WithDocumentFile(ctx, doc.id, func(context.Context, string) error {
+		t.Error("signed after the intent committed")
+		return nil
+	})
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestIntentStillWaitsForRowShareLocks(t *testing.T) {
+	c := activatedDatabase(t)
+	other := otherConnection(t, c)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	doc := acceptDocument(t, c, "rolling upgrade row share", true, true)
+
+	tx, err := c.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var key string
+	require.NoError(t, tx.QueryRow(ctx, `SELECT s3_key FROM documents WHERE id=$1 AND status<>'deleting' AND s3_key IS NOT NULL FOR SHARE`, string(doc.id)).Scan(&key))
+	require.Equal(t, doc.key, key)
+
+	begun := make(chan error, 1)
+	go func() {
+		_, _, beginErr := other.beginDeletion(ctx, doc.id, newDeletionRecorder().ops(doc.incarnation))
+		begun <- beginErr
+	}()
+	require.Eventually(t, func() bool {
+		var waiting bool
+		queryErr := c.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT FROM pg_stat_activity
+			WHERE pid<>pg_backend_pid() AND datname=current_database()
+			AND wait_event_type='Lock' AND query LIKE '%FROM documents%FOR UPDATE%')`).Scan(&waiting)
+		return queryErr == nil && waiting
+	}, 10*time.Second, 10*time.Millisecond, "the intent must wait for the row share lock")
+
+	require.NoError(t, tx.Commit(ctx))
+	require.NoError(t, <-begun)
+	require.Equal(t, "deleting", documentStatus(t, c, doc.id))
+}
+
+func TestIntentKeyIsIndependentOfTheFixtureKey(t *testing.T) {
+	c := activatedDatabase(t)
+	other := otherConnection(t, c)
+	ctx := t.Context()
+	doc := acceptDocument(t, c, "independent advisory keys", true, true)
+
+	var fixtureKey, intentKey int64
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT `+fixtureDocumentLockKey+`, `+documentIntentLockKey, string(doc.id)).Scan(&fixtureKey, &intentKey))
+	require.NotEqual(t, fixtureKey, intentKey)
+
+	tx, err := other.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(`+fixtureDocumentLockKey+`)`, string(doc.id))
+	require.NoError(t, err)
+
+	signCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var signedKey string
+	found, err := c.WithDocumentFile(signCtx, doc.id, func(_ context.Context, key string) error {
+		signedKey = key
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, doc.key, signedKey)
+}

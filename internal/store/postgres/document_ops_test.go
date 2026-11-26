@@ -300,3 +300,68 @@ func TestScopedDeletionCancellationBeforeCommitLeavesDocumentIntact(t *testing.T
 	require.True(t, errors.Is(err, domain.ErrUnauthorized))
 	require.Empty(t, rec.all())
 }
+
+func TestScopedDeletionIntentWaitsForServiceSigning(t *testing.T) {
+	f := newOwnedFixture(t)
+	_, err := f.c.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	require.NoError(t, err)
+	other := otherConnection(t, f.c)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	const expectedKey = "documents/doc/owned/original.pdf"
+	docID := f.acceptOwned(t, f.owner, "", expectedKey)
+
+	inside, finish := make(chan struct{}), make(chan struct{})
+	signing := make(chan error, 1)
+	signed := make(chan string, 1)
+	go func() {
+		found, signErr := f.c.WithDocumentFile(ctx, domain.DocumentID(docID), func(_ context.Context, key string) error {
+			signed <- key
+			close(inside)
+			<-finish
+			return nil
+		})
+		if signErr == nil && !found {
+			signErr = errors.New("expected signable document")
+		}
+		signing <- signErr
+	}()
+	select {
+	case <-inside:
+	case signErr := <-signing:
+		t.Fatalf("signing ended before its callback ran: %v", signErr)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	rec := newDeletionRecorder()
+	ops := rec.ops("")
+	ops.InMemory = true
+	type beginResult struct {
+		complete bool
+		err      error
+	}
+	begun := make(chan beginResult, 1)
+	go func() {
+		_, complete, beginErr := other.BeginScopedDeletion(ctx, f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+		begun <- beginResult{complete: complete, err: beginErr}
+	}()
+	waitForAdvisoryWaiter(t, other, "ExclusiveLock")
+	require.NotEqual(t, "deleting", documentStatus(t, f.c, domain.DocumentID(docID)))
+
+	close(finish)
+	require.NoError(t, <-signing)
+	require.Equal(t, expectedKey, <-signed)
+	res := <-begun
+	require.NoError(t, res.err)
+	require.False(t, res.complete)
+	require.Equal(t, "deleting", documentStatus(t, f.c, domain.DocumentID(docID)))
+
+	found, err := f.c.WithDocumentFile(ctx, domain.DocumentID(docID), func(context.Context, string) error {
+		t.Error("signed after the scoped deletion intent committed")
+		return nil
+	})
+	require.NoError(t, err)
+	require.False(t, found)
+}
