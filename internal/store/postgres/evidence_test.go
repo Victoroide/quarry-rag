@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/pipeline"
+	"github.com/Victoroide/quarry-rag/internal/retriever"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -111,4 +113,64 @@ func TestEvidenceVisibilityMatchesCurrentChunkAndScope(t *testing.T) {
 	got, err = visibility.VisibleEvidence(ctx, candidates)
 	require.ErrorContains(t, err, "visible evidence")
 	require.Nil(t, got)
+}
+
+func TestPgvectorEvidenceRejectsStalePublishedIdentity(t *testing.T) {
+	c, vs := vectorDatabase(t)
+	ctx := t.Context()
+	id, incarnation, attempt := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	insertPublishedDocument := func(inc, att string) {
+		t.Helper()
+		_, err := c.Pool.Exec(ctx, `INSERT INTO documents (id, incarnation, content, status, doc_type, collection, scoped_vectors, vector_attempt)
+ VALUES ($1,$2,'Unchanged text.','completed','report','archive',TRUE,$3)`, id, inc, att)
+		require.NoError(t, err)
+	}
+	insertPublishedDocument(incarnation, attempt)
+	chunk := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(id),
+		Text: "Unchanged text.", Embedding: retrievalQuery, Metadata: map[string]any{"doc_type": "report", "collection": "archive"}}
+	require.NoError(t, c.InsertChunks(ctx, []domain.Chunk{chunk}))
+	require.NoError(t, vs.Upsert(ctx, "", []domain.Chunk{chunk}))
+	rank := func() []domain.ScoredChunk {
+		t.Helper()
+		got, err := vs.QueryFiltered(ctx, retrievalQuery, 1, domain.VectorFilter{Collection: "archive"})
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		return got
+	}
+	vis := Visibility{Pool: c.Pool, Collection: "archive"}
+	check := func(hits []domain.ScoredChunk, count int) {
+		t.Helper()
+		visible, err := vis.VisibleEvidence(ctx, hits)
+		require.NoError(t, err)
+		require.Len(t, visible, count)
+	}
+	original := rank()
+	check(original, 1)
+	nextAttempt := uuid.NewString()
+	_, err := c.Pool.Exec(ctx, `UPDATE documents SET vector_attempt=$2 WHERE id=$1`, id, nextAttempt)
+	require.NoError(t, err)
+	check(original, 0)
+	next := rank()
+	check(next, 1)
+	_, err = c.Pool.Exec(ctx, `UPDATE documents SET vector_mutation_pending=TRUE WHERE id=$1`, id)
+	require.NoError(t, err)
+	check(rank(), 0)
+	_, err = c.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, id)
+	require.NoError(t, err)
+	insertPublishedDocument(uuid.NewString(), nextAttempt)
+	require.NoError(t, c.InsertChunks(ctx, []domain.Chunk{chunk}))
+	require.NoError(t, vs.Upsert(ctx, "", []domain.Chunk{chunk}))
+	check(next, 0)
+	replacement := rank()
+	require.NotEqual(t, next[0].ObservedIncarnation, replacement[0].ObservedIncarnation)
+	check(replacement, 1)
+
+	ret := retriever.NewRetriever(vs, nil, 0.1, 1)
+	qc := &pipeline.QueryContext{
+		EvidenceVisibility: vis, Collection: "archive", MaxChunks: 1,
+		QueryEmbedding: retrievalQuery, RetrievalMode: string(retriever.RetrievalModeGlobal),
+	}
+	require.NoError(t, pipeline.NewRetrievalStage(ret).Run(ctx, qc))
+	require.Len(t, qc.RetrievedChunks, 1)
+	require.Equal(t, chunk.ID, qc.RetrievedChunks[0].Chunk.ID)
 }

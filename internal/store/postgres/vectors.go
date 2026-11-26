@@ -484,8 +484,9 @@ func scanScoredChunks(ctx context.Context, tx pgx.Tx, query string, args ...any)
 	for rows.Next() {
 		var sc domain.ScoredChunk
 		var docType, collection string
-		var kind, quality *string
-		if scanErr := rows.Scan(&sc.Chunk.ID, &sc.Chunk.DocumentID, &sc.Chunk.Index, &docType, &collection, &sc.Chunk.Text, &kind, &quality, &sc.Chunk.TokenCount, &sc.Score, &sc.ObservedIncarnation); scanErr != nil {
+		var kind, quality, revision, attempt *string
+		var incarnationRequired bool
+		if scanErr := rows.Scan(&sc.Chunk.ID, &sc.Chunk.DocumentID, &sc.Chunk.Index, &docType, &collection, &sc.Chunk.Text, &kind, &quality, &sc.Chunk.TokenCount, &sc.Score, &sc.ObservedIncarnation, &revision, &attempt, &incarnationRequired); scanErr != nil {
 			return nil, scanErr
 		}
 		sc.Chunk.Metadata = map[string]any{"doc_type": docType}
@@ -497,6 +498,14 @@ func scanScoredChunks(ctx context.Context, tx pgx.Tx, query string, args ...any)
 		}
 		if quality != nil {
 			sc.Chunk.Metadata["quality"] = *quality
+		}
+		published := revision != nil && attempt != nil
+		if published {
+			sc.Chunk.Metadata[domain.VectorRevisionKey] = *revision
+			sc.Chunk.Metadata[domain.VectorAttemptKey] = *attempt
+		}
+		if published || incarnationRequired {
+			sc.Chunk.VectorIncarnation = sc.ObservedIncarnation
 		}
 		out = append(out, sc)
 	}
@@ -581,6 +590,14 @@ func probeSQL(table string, limit int, filter domain.VectorFilter) (query string
 	return query, args, true
 }
 
+// Capture publication identity from the same document snapshot used to rank the row.
+const rankedIdentitySQL = `COALESCE(d.incarnation,d.id)::text AS observed_incarnation,
+ CASE WHEN d.scoped_vectors AND d.vector_attempt IS NOT NULL AND NOT d.vector_mutation_pending
+      THEN COALESCE(d.incarnation,d.id)::text END AS observed_revision,
+ CASE WHEN d.scoped_vectors AND d.vector_attempt IS NOT NULL AND NOT d.vector_mutation_pending
+      THEN d.vector_attempt::text END AS observed_attempt,
+ d.vector_incarnation_required`
+
 func exactSQL(table, literal string, topK, scopeLimit int, filter domain.VectorFilter) (query string, args []any, matches bool) {
 	predicates, args, ok := appendFilterPredicates([]any{literal}, filter, true)
 	if !ok {
@@ -599,17 +616,18 @@ func exactSQL(table, literal string, topK, scopeLimit int, filter domain.VectorF
 	}
 	query = fmt.Sprintf(`WITH candidates AS MATERIALIZED (
  SELECT v.chunk_id,v.embedding <=> $1::text::vector AS distance,
-        COALESCE(d.incarnation,d.id)::text AS observed_incarnation
+        `+rankedIdentitySQL+`
  FROM %[1]s v JOIN documents d ON d.id=v.document_id AND d.status='completed'%[5]s
  WHERE TRUE%[2]s
  LIMIT $%[3]d
 ),
 ranked AS (
- SELECT chunk_id,distance,observed_incarnation
+ SELECT chunk_id,distance,observed_incarnation,observed_revision,observed_attempt,vector_incarnation_required
  FROM candidates
  ORDER BY distance,chunk_id%[4]s
 )
-SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-r.distance,r.observed_incarnation
+SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-r.distance,
+       r.observed_incarnation,r.observed_revision,r.observed_attempt,r.vector_incarnation_required
 FROM ranked r JOIN %[1]s v ON v.chunk_id=r.chunk_id
 ORDER BY r.distance,v.chunk_id`, pgx.Identifier{table}.Sanitize(), predicates, scopeArg, limitClause, join)
 	return query, args, true
@@ -625,13 +643,14 @@ func searchSQL(table, literal string, topK int, filter domain.VectorFilter, matc
 		return "", nil, false
 	}
 	query = `SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.embedding <=> $1::text::vector AS distance,
- COALESCE(d.incarnation,d.id)::text AS observed_incarnation
+ ` + rankedIdentitySQL + `
  FROM ` + pgx.Identifier{table}.Sanitize() + ` v JOIN documents d ON d.id=v.document_id AND d.status='completed'` + join + ` WHERE TRUE` + predicates
 	if topK > 0 {
 		args = append(args, topK)
 		query += fmt.Sprintf(" ORDER BY distance LIMIT $%d", len(args))
 	}
-	query = `SELECT chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,1-distance,observed_incarnation
+	query = `SELECT chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,1-distance,
+        observed_incarnation,observed_revision,observed_attempt,vector_incarnation_required
  FROM (` + query + `) s ORDER BY distance,chunk_id`
 	return query, args, true
 }
