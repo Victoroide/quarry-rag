@@ -1,5 +1,4 @@
-ARG GO_IMAGE=golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd
-FROM $GO_IMAGE AS base
+FROM golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd AS base
 RUN apk add --no-cache gcc musl-dev git
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -20,7 +19,7 @@ RUN golangci-lint run --config=.golangci.yml
 # ── builder stage ───────────────────────────────────────
 # Compiles on the build host for the requested target, so a foreign architecture
 # is never emulated. The dependency walk uses the same target as the build.
-FROM --platform=$BUILDPLATFORM $GO_IMAGE AS build-base
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd AS build-base
 RUN apk add --no-cache git
 ENV GOTOOLCHAIN=local
 WORKDIR /app
