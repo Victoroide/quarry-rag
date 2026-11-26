@@ -15,6 +15,10 @@ func FuzzCitationCodeRanges(f *testing.F) {
 	for _, seed := range []string{
 		"a `b[0]` c", "``a`b``", "`foo\\`bar`", "\\`x`", "```go\nx\n\ny\n```\n[1]", "~~~\na\n~~~~", "```\r\nx\r\n```\r\n",
 		"```\ncode\n``` [1]", "   ```\nx", "    ```\nx\n    ```", "```x`y```", "> ```\n> a\n> ```", "档案 `x[0]` 记录", "\xff`\xfe`", "~~~`",
+		"1. Install:\n    ```bash\n    npm i x[0]\n   ```\nThen restart [1].",
+		"- Install:\n  ```bash\n  npm i x[0]\n    ```\nThen restart [1].",
+		"   ```bash\n   x[0]\n      ```\n[1]",
+		"```\n    ```\n[1]\n```",
 	} {
 		f.Add(seed)
 	}
@@ -65,6 +69,8 @@ func FuzzVerifyCitationsPreservingCode(f *testing.F) {
 		"The first station is `stations[0]` [1].", "Use `a[01]` here [1].", "Use `items[1]` for the second item [1].",
 		"```go\nx := a[0]\n\ny := b[1]\n```\nDone [1].", "Press the ` key [0].\n\nThen run `ls` [1].", "`a[9]` b [9] [1]",
 		"Archive [see `x` 1] [1]", "`a`[0]`b`", "~~~\na[0]\n~~~~\n[1]", "```\ncode\n``` [1]", "[1[99]]", "plain [1, 2][999]", "\xff`[1]`",
+		"1. Install:\n    ```bash\n    npm i x[0]\n   ```\nThen restart [1].",
+		"- Install:\n  ```bash\n  npm i x[0]\n    ```\nThen restart [1].",
 	} {
 		f.Add(seed, uint8(1))
 	}

@@ -38,7 +38,17 @@ func TestCitationCodeRanges(t *testing.T) {
 		{"lone fence", "```", []string{"```"}},
 		{"three-space indent is a fence", "   ```\nx\n   ```\n[1]", []string{"```\nx\n   ```"}},
 		{"four-space indent is not a fence", "    ```\nx\n    ```", nil},
+		{"four-space opener closed at three spaces", "1. Install:\n    ```bash\n    npm i x[0]\n   ``` \nThen restart [1].", nil},
+		{"two-space opener closed at four spaces", "- Install:\n  ```bash\n  npm i x[0]\n    ``` \nThen restart [1].", []string{"```bash\n  npm i x[0]\n    ```"}},
+		{"three-space opener closed at six spaces", "1. Install:\n   ```bash\n   npm i x[0]\n      ```\nThen restart [1].", []string{"```bash\n   npm i x[0]\n      ```"}},
+		{"top-level fence ignores four-space literal fence", "```markdown\n    ```\n```\nThen [1].", []string{"```markdown\n    ```\n```"}},
+		{"one-space fence ignores four-space literal fence", " ```markdown\n    ```\n ```\nThen [1].", []string{"```markdown\n    ```\n ```"}},
+		{"tilde straddle and length mismatch", "    ~~~~\n    a[0]\n   ~~~\n   ~~~~\n`b` [1]\n  ~~~\n  x[0]\n     ~~\n     ~~~~\nDone [2].", []string{"`b`", "~~~\n  x[0]\n     ~~\n     ~~~~"}},
+		{"indented backtick in info string is not an opener", "    ```a`b\n   ```\nx\n   ```\n`c`", []string{"```\nx\n   ```", "`c`"}},
 		{"tab indent is not a fence", "\t```\nx[0]\n\t```", nil},
+		{"inline span inside unrecognized fence", "    ```bash\n    `x[0]`\n   ``` \n`y[0]` [1]", []string{"`y[0]`"}},
+		{"unclosed four-space fence", "    ```bash\n`x[0]`\nThen [1].", nil},
+		{"CRLF straddle fences", "1. Install:\r\n    ```bash\r\n    npm i x[0]\r\n   ```\r\n- Next:\r\n  ```bash\r\n  npm i y[0]\r\n    ```\r\nThen [1].", []string{"```bash\r\n  npm i y[0]\r\n    ```"}},
 		{"fence inside a block quote is not recognized", "> ```\n> x[0]\n> ```", nil},
 		{"backtick in the info string is not a fence", "```a`b\nx[0]", nil},
 		{"single-line triple backtick span", "```x`y``` [1]", []string{"```x`y```"}},
@@ -121,6 +131,11 @@ func TestVerifyCitationsPreservingCode(t *testing.T) {
 		{"fence closed by a longer run", "~~~\na[0]\n~~~~\n[1]", "", "~~~\na\n~~~~\n[1]", []int{14}, []int{11}},
 		{"unclosed fence hides the marker", "```\ncode\n``` [1]", "", "", nil, []int{13}},
 		{"no code at all", "Archive [99] open [1, 1, 99] now.", "Archive open [1] now.", "Archive open [1] now.", []int{13}, []int{13}},
+		{"nested fence straddle four-to-three", "1. Install:\n    ```bash\n    npm i x[0]\n   ```\nThen restart [1].", "1. Install:\n    ```bash\n    npm i x\n   ```\nThen restart [1].", "1. Install:\n    ```bash\n    npm i x\n   ```\nThen restart [1].", []int{56}, []int{56}},
+		{"nested fence straddle four-to-three without numbers in code", "1. Install:\n    ```bash\n    npm i x\n   ```\nThen restart [1].", "", "", []int{56}, []int{56}},
+		{"nested fence straddle cleans outside markers", "1. Install:\n    ```bash\n    npm i x[0]\n   ```\nThen [99] restart [1].", "1. Install:\n    ```bash\n    npm i x\n   ```\nThen restart [1].", "1. Install:\n    ```bash\n    npm i x\n   ```\nThen restart [1].", []int{56}, []int{56}},
+		{"nested fence straddle two-to-four", "- Install:\n  ```bash\n  npm i x[0]\n    ```\nThen restart [1].", "", "- Install:\n  ```bash\n  npm i x\n    ```\nThen restart [1].", []int{55}, []int{52}},
+		{"nested fence straddle two-to-four without numbers in code", "- Install:\n  ```bash\n  npm i x\n    ```\nThen restart [1].", "", "", []int{52}, []int{52}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			orDefault := func(answer string) string {
@@ -191,4 +206,39 @@ func TestStreamCitationsPreservingCode(t *testing.T) {
 
 	_, legacy := preservingFinalize(t, answer, 1, true, false)
 	require.Len(t, legacy, 5)
+
+	for _, tc := range []struct {
+		name, answer  string
+		offsets       []int
+		legacyOffsets []int
+	}{
+		{
+			name:          "four-to-three straddle",
+			answer:        "1. Install:\n    ```bash\n    npm i x[0]\n   ```\nThen restart [1].",
+			offsets:       []int{59},
+			legacyOffsets: []int{59},
+		},
+		{
+			name:          "two-to-four straddle",
+			answer:        "- Install:\n  ```bash\n  npm i x[1]\n    ```\nThen restart [1].",
+			offsets:       []int{55},
+			legacyOffsets: []int{30, 55},
+		},
+		{
+			name:          "two-to-four straddle without numbers in code",
+			answer:        "- Install:\n  ```bash\n  npm i x\n    ```\nThen restart [1].",
+			offsets:       []int{52},
+			legacyOffsets: []int{52},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, citations := preservingFinalize(t, tc.answer, 1, true, true)
+			require.Equal(t, tc.answer, got)
+			require.Equal(t, tc.offsets, citationOffsets(citations))
+
+			gotLegacy, legacyCitations := preservingFinalize(t, tc.answer, 1, true, false)
+			require.Equal(t, tc.answer, gotLegacy)
+			require.Equal(t, tc.legacyOffsets, citationOffsets(legacyCitations))
+		})
+	}
 }
