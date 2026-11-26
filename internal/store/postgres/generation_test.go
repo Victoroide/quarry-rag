@@ -857,3 +857,186 @@ func TestQuiesceIgnoresFinalizedHeldReceipts(t *testing.T) {
 	require.True(t, q.Quiet())
 	require.NoError(t, c.ActivateGeneration(t.Context(), "g2", "digest", 0))
 }
+
+func TestUntaggedRevisionIsUnchanged(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+	docID := uuid.NewString()
+	incID := uuid.NewString()
+	chunkID := uuid.NewString()
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id,incarnation,content,status,collection,doc_type,chunk_count) VALUES($1,$2,'body','completed','alpha','report',1)`, docID, incID)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,'hello world',2)`, chunkID, docID)
+	require.NoError(t, err)
+
+	revs, err := c.DocumentRevisions(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, revs, 1)
+	rev := revs[0]
+	require.False(t, rev.ScopedVectors)
+	require.Empty(t, rev.VectorAttempt)
+	require.False(t, rev.MutationPending)
+
+	var want string
+	err = c.Pool.QueryRow(ctx, `SELECT encode(sha256(convert_to(jsonb_build_array('v4', $1::text, 'report', 'alpha', '', '', 1,
+		$2::text || ':0:2:' || encode(sha256(convert_to('hello world', 'UTF8')), 'hex'))::text, 'UTF8')), 'hex')`, incID, chunkID).Scan(&want)
+	require.NoError(t, err)
+	require.Equal(t, want, rev.Revision)
+}
+
+func TestTaggedRevisionFollowsPublishedAttempt(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+	docID := uuid.NewString()
+	incID := uuid.NewString()
+	att1 := uuid.NewString()
+	att2 := uuid.NewString()
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id,incarnation,content,status,collection,doc_type,chunk_count,scoped_vectors,vector_attempt) VALUES($1,$2,'body','completed','alpha','report',1,TRUE,$3)`, docID, incID, att1)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,'tagged chunk',2)`, uuid.NewString(), docID)
+	require.NoError(t, err)
+
+	revs, err := c.DocumentRevisions(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, revs, 1)
+	require.True(t, revs[0].ScopedVectors)
+	require.Equal(t, att1, revs[0].VectorAttempt)
+	require.False(t, revs[0].MutationPending)
+
+	total, unresolved, err := c.TaggedVectorDocuments(ctx)
+	require.NoError(t, err)
+	require.Equal(t, [2]int{1, 0}, [2]int{total, unresolved})
+
+	_, err = c.Pool.Exec(ctx, `UPDATE documents SET vector_attempt=$2 WHERE id=$1`, docID, att2)
+	require.NoError(t, err)
+	after, err := c.DocumentRevisions(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, after, 1)
+	require.Equal(t, att2, after[0].VectorAttempt)
+	require.NotEqual(t, revs[0].Revision, after[0].Revision)
+
+	_, err = c.Pool.Exec(ctx, `UPDATE documents SET vector_mutation_pending=TRUE WHERE id=$1`, docID)
+	require.NoError(t, err)
+	pendingRevs, err := c.DocumentRevisions(ctx, "", 10)
+	require.NoError(t, err)
+	require.True(t, pendingRevs[0].MutationPending)
+	total, unresolved, err = c.TaggedVectorDocuments(ctx)
+	require.NoError(t, err)
+	require.Equal(t, [2]int{1, 1}, [2]int{total, unresolved})
+
+	_, err = c.Pool.Exec(ctx, `UPDATE documents SET vector_mutation_pending=FALSE, vector_attempt=NULL WHERE id=$1`, docID)
+	require.NoError(t, err)
+	total, unresolved, err = c.TaggedVectorDocuments(ctx)
+	require.NoError(t, err)
+	require.Equal(t, [2]int{1, 1}, [2]int{total, unresolved})
+}
+
+func TestUnexpectedTaggedKeys(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+	doc1, inc1, att1 := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	doc2, inc2, att2 := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	untaggedID, untaggedInc, untaggedAtt := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	delID, delInc, delAtt := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	chunk1 := uuid.New()
+	chunk2 := uuid.New()
+	chunkUntagged := uuid.New()
+	chunkDel := uuid.New()
+	chunk1Hex := fmt.Sprintf("%x", chunk1[:])
+	chunk2Hex := fmt.Sprintf("%x", chunk2[:])
+	chunkUntaggedHex := fmt.Sprintf("%x", chunkUntagged[:])
+	chunkDelHex := fmt.Sprintf("%x", chunkDel[:])
+
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id,incarnation,content,status,chunk_count,scoped_vectors,vector_attempt) VALUES
+		($1,$2,'b','completed',1,TRUE,$3),
+		($4,$5,'b','completed',1,TRUE,$6),
+		($7,$8,'b','completed',1,FALSE,$9),
+		($10,$11,'b','completed',1,TRUE,$12)`,
+		doc1, inc1, att1,
+		doc2, inc2, att2,
+		untaggedID, untaggedInc, untaggedAtt,
+		delID, delInc, delAtt)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES
+		($1,$2,0,'c1',1), ($3,$4,0,'c2',1), ($5,$6,0,'cu',1), ($7,$8,0,'cd',1)`,
+		chunk1.String(), doc1, chunk2.String(), doc2, chunkUntagged.String(), untaggedID, chunkDel.String(), delID)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'quarantine','revision')`, delID, delInc)
+	require.NoError(t, err)
+
+	validKey := doc1 + "/" + inc1 + "/" + att1 + "/" + chunk1Hex
+	staleAttemptKey := doc1 + "/" + inc1 + "/" + att2 + "/" + chunk1Hex
+	staleIncKey := doc1 + "/" + inc2 + "/" + att1 + "/" + chunk1Hex
+	otherChunkKey := doc1 + "/" + inc1 + "/" + att1 + "/" + chunk2Hex
+	untaggedKey := untaggedID + "/" + untaggedInc + "/" + untaggedAtt + "/" + chunkUntaggedHex
+	deletingKey := delID + "/" + delInc + "/" + delAtt + "/" + chunkDelHex
+	malformedDocKey := "not-a-uuid/" + inc1 + "/" + att1 + "/" + chunk1Hex
+	dashedChunkKey := doc1 + "/" + inc1 + "/" + att1 + "/" + chunk1.String()
+
+	keys := []TaggedVectorKey{
+		{Key: validKey, DocumentID: doc1, Revision: inc1, Attempt: att1, ChunkID: chunk1Hex},
+		{Key: staleAttemptKey, DocumentID: doc1, Revision: inc1, Attempt: att2, ChunkID: chunk1Hex},
+		{Key: staleIncKey, DocumentID: doc1, Revision: inc2, Attempt: att1, ChunkID: chunk1Hex},
+		{Key: otherChunkKey, DocumentID: doc1, Revision: inc1, Attempt: att1, ChunkID: chunk2Hex},
+		{Key: untaggedKey, DocumentID: untaggedID, Revision: untaggedInc, Attempt: untaggedAtt, ChunkID: chunkUntaggedHex},
+		{Key: deletingKey, DocumentID: delID, Revision: delInc, Attempt: delAtt, ChunkID: chunkDelHex},
+		{Key: malformedDocKey, DocumentID: "not-a-uuid", Revision: inc1, Attempt: att1, ChunkID: chunk1Hex},
+		{Key: dashedChunkKey, DocumentID: doc1, Revision: inc1, Attempt: att1, ChunkID: chunk1.String()},
+	}
+	extra, err := c.UnexpectedTaggedKeys(ctx, keys)
+	require.NoError(t, err)
+	require.Equal(t, []string{staleAttemptKey, staleIncKey, otherChunkKey, untaggedKey, deletingKey, malformedDocKey, dashedChunkKey}, extra)
+
+	malformedOnly, err := c.UnexpectedTaggedKeys(ctx, []TaggedVectorKey{{Key: malformedDocKey, DocumentID: "not-a-uuid", Revision: inc1, Attempt: att1, ChunkID: chunk1Hex}})
+	require.NoError(t, err)
+	require.Equal(t, []string{malformedDocKey}, malformedOnly)
+
+	emptyExtra, err := c.UnexpectedTaggedKeys(ctx, nil)
+	require.NoError(t, err)
+	require.Empty(t, emptyExtra)
+}
+
+func TestManifestedDocumentKeepsManifestKeys(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+	docID, incID, attempt, revID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	chunk := uuid.New()
+	chunkHex := fmt.Sprintf("%x", chunk[:])
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id,incarnation,content,status,collection,doc_type,chunk_count,scoped_vectors,vector_attempt) VALUES($1,$2,'body','completed','alpha','report',1,TRUE,$3)`, docID, incID, attempt)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,'manifested chunk',2)`, chunk.String(), docID)
+	require.NoError(t, err)
+
+	tagged, err := c.DocumentRevisions(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, tagged, 1)
+	require.Empty(t, tagged[0].ActiveRevisionID)
+	taggedKey := docID + "/" + incID + "/" + attempt + "/" + chunkHex
+	extra, err := c.UnexpectedTaggedKeys(ctx, []TaggedVectorKey{{Key: taggedKey, DocumentID: docID, Revision: incID, Attempt: attempt, ChunkID: chunkHex}})
+	require.NoError(t, err)
+	require.Empty(t, extra)
+
+	_, err = c.Pool.Exec(ctx, `INSERT INTO hosted_vector_manifests(revision_id,document_id,incarnation,attempt,id_prefix,vector_ids,chunk_ids,state)
+		VALUES($1,$2,$3,1,$4,ARRAY[$5::text],ARRAY[$6::uuid],'active')`, revID, docID, incID, docID+"#"+revID+"#", docID+"#"+revID+"#0", chunk.String())
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO hosted_vector_revisions(document_id,incarnation,active_revision_id) VALUES($1,$2,$3)`, docID, incID, revID)
+	require.NoError(t, err)
+
+	manifested, err := c.DocumentRevisions(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, manifested, 1)
+	require.Equal(t, revID, manifested[0].ActiveRevisionID)
+	require.NotEqual(t, tagged[0].Revision, manifested[0].Revision)
+	var want string
+	err = c.Pool.QueryRow(ctx, `SELECT encode(sha256(convert_to(jsonb_build_array('v4', $1::text, 'report', 'alpha', '', $3::text, 1,
+		$2::text || ':0:2:' || encode(sha256(convert_to('manifested chunk', 'UTF8')), 'hex'))::text, 'UTF8')), 'hex')`, incID, chunk.String(), revID).Scan(&want)
+	require.NoError(t, err)
+	require.Equal(t, want, manifested[0].Revision, "a manifested document hashes like an untagged one, whatever its tagged marker")
+
+	total, unresolved, err := c.TaggedVectorDocuments(ctx)
+	require.NoError(t, err)
+	require.Equal(t, [2]int{0, 0}, [2]int{total, unresolved})
+	extra, err = c.UnexpectedTaggedKeys(ctx, []TaggedVectorKey{{Key: taggedKey, DocumentID: docID, Revision: incID, Attempt: attempt, ChunkID: chunkHex}})
+	require.NoError(t, err)
+	require.Equal(t, []string{taggedKey}, extra)
+}
