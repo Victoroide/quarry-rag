@@ -114,3 +114,24 @@ func TestFirstPostgresCleanupRefusesNonVectorTableAndForeignBinding(t *testing.T
 	require.Equal(t, "pinecone", state.LegacyStore)
 	require.Equal(t, "corpus", state.LegacyTarget)
 }
+
+func TestDirectRecoverySkipsTargetPinning(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires the PostgreSQL integration harness")
+	}
+	ctx := t.Context()
+	dsn := pgtest.Start(t)
+	owner, err := pg.NewClient(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, owner.Close(context.Background())) })
+	require.NoError(t, owner.RunMigrations(ctx))
+
+	cfg := &config.Config{VectorStore: "pinecone", PineconeIndexName: "idx-direct", DatabaseURL: dsn}
+	for _, includeObjects := range []bool{false, true} {
+		cleaner, openErr := New(ctx, cfg, WithDirectRecovery(includeObjects))
+		require.NoError(t, openErr)
+		require.Equal(t, "idx-direct", cleaner.targets.VectorIndex)
+		require.Nil(t, cleaner.vectors)
+		require.NoError(t, cleaner.Close(ctx))
+	}
+}

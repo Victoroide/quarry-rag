@@ -86,20 +86,27 @@ func TestDeleteReturnsStorageUnavailable(t *testing.T) {
 }
 
 func TestDeleteRejectsReservedIncarnationSelectors(t *testing.T) {
+	incHeader := http.Header{"X-Document-Incarnation": {"e22e083c-1695-4f93-841f-829c5e9e0978"}}
 	for _, tc := range []struct {
 		name, query string
 		headers     http.Header
 		status      int
 	}{
-		{name: "header", headers: http.Header{"X-Document-Incarnation": {"e22e083c-1695-4f93-841f-829c5e9e0978"}}, status: http.StatusPreconditionFailed},
+		{name: "header", headers: incHeader, status: http.StatusPreconditionFailed},
 		{name: "empty header", headers: http.Header{"X-Document-Incarnation": {""}}, status: http.StatusPreconditionFailed},
 		{name: "duplicate header", headers: http.Header{"X-Document-Incarnation": {"", "value"}}, status: http.StatusPreconditionFailed},
-		{name: "release", query: "release_held=true", status: http.StatusPreconditionFailed},
-		{name: "false release", query: "release_held=false", status: http.StatusPreconditionFailed},
-		{name: "empty release", query: "release_held=", status: http.StatusPreconditionFailed},
-		{name: "encoded duplicate release", query: "release_held=false&release%5fheld=true", status: http.StatusPreconditionFailed},
-		{name: "malformed query", query: "release_held=%zz", status: http.StatusBadRequest},
-		{name: "ambiguous separator", query: "flag=on;release_held=true", status: http.StatusBadRequest},
+		{name: "release without incarnation", query: "release_held=true", status: http.StatusPreconditionRequired},
+		{name: "release on non-offline store", query: "release_held=true", headers: incHeader, status: http.StatusPreconditionFailed},
+		{name: "false release uses ordinary delete", query: "release_held=false", status: http.StatusOK},
+		{name: "empty release", query: "release_held=", headers: incHeader, status: http.StatusBadRequest},
+		{name: "noncanonical True release", query: "release_held=True", headers: incHeader, status: http.StatusBadRequest},
+		{name: "duplicate false then true", query: "release_held=false&release_held=true", headers: incHeader, status: http.StatusBadRequest},
+		{name: "duplicate true then false", query: "release_held=true&release_held=false", headers: incHeader, status: http.StatusBadRequest},
+		{name: "duplicate true then true", query: "release_held=true&release_held=true", headers: incHeader, status: http.StatusBadRequest},
+		{name: "duplicate false then false", query: "release_held=false&release_held=false", status: http.StatusBadRequest},
+		{name: "encoded duplicate release", query: "release_held=false&release%5fheld=true", headers: incHeader, status: http.StatusBadRequest},
+		{name: "malformed query", query: "release_held=%zz", headers: incHeader, status: http.StatusBadRequest},
+		{name: "ambiguous separator", query: "flag=on;release_held=true", headers: incHeader, status: http.StatusBadRequest},
 		{name: "bare control", query: "unrelated=value", status: http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,6 +120,9 @@ func TestDeleteRejectsReservedIncarnationSelectors(t *testing.T) {
 
 func FuzzDeleteReservedIncarnationSelectors(f *testing.F) {
 	f.Add("release%5fheld=true", false, "")
+	f.Add("release_held=false", false, "")
+	f.Add("release_held=True", false, "")
+	f.Add("release_held=false&release_held=true", false, "")
 	f.Add("release_held=%", false, "")
 	f.Add("", true, "")
 	f.Add("unrelated=1", false, "")
@@ -122,7 +132,8 @@ func FuzzDeleteReservedIncarnationSelectors(f *testing.F) {
 			headers = http.Header{"x-document-incarnation": {value}}
 		}
 		params, err := url.ParseQuery(query)
-		wantCleanup := err == nil && !params.Has("release_held") && !headerPresent
+		release, validRelease := parseReleaseHeld(params)
+		wantCleanup := err == nil && validRelease && !release && !headerPresent
 		rec, accessed, deleted := exerciseDeletion(t, query, headers)
 		require.Equal(t, wantCleanup, rec.Code == http.StatusOK)
 		require.Equal(t, wantCleanup, accessed)

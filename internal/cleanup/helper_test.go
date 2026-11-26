@@ -638,3 +638,82 @@ func TestRemoveOfAManifestedDocumentHonorsTheDrainWindowAtClaim(t *testing.T) {
 	require.NotNil(t, claimed)
 	require.Equal(t, revision, claimed.RevisionID)
 }
+
+func TestHeldReleaseHonorsTheWriterGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	for _, terminatedOffline := range []bool{false, true} {
+		name := "release_held"
+		if terminatedOffline {
+			name = "release_terminated_offline_held"
+		}
+		t.Run(name, func(t *testing.T) {
+			databaseURL := pgtest.StartVector(t)
+			metadata, err := pgstore.NewClient(t.Context(), databaseURL)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
+			require.NoError(t, metadata.RunMigrations(t.Context()))
+			_, err = pgstore.NewVectorStore(t.Context(), metadata, 3)
+			require.NoError(t, err)
+			cfg := &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL, EmbeddingDimensions: 3}
+			require.NoError(t, metadata.PinVectorGeneration(t.Context(), pgstore.LegacyGeneration, "postgres", "chunk_vectors", "", cfg.EmbeddingSettings()))
+
+			id := domain.DocumentID(uuid.NewString())
+			inc := uuid.NewString()
+			owner := uuid.NewString()
+			mode := "legacy"
+			var ownerArg any
+			if terminatedOffline {
+				mode = "memory"
+				ownerArg = owner
+			}
+			_, err = metadata.Pool.Exec(t.Context(), `INSERT INTO document_deletions
+				(document_id, incarnation, kind, source_key, source_bucket, vector_mode, memory_owner, step, held, finalized)
+				VALUES ($1, $2, 'legacy_reservation', 'document-source', 'originals', $3, $4, 0, TRUE, FALSE)`,
+				string(id), inc, mode, ownerArg)
+			require.NoError(t, err)
+
+			var opts []Option
+			if terminatedOffline {
+				opts = append(opts, WithDirectRecovery(true))
+			}
+			cleaner, err := New(t.Context(), cfg, opts...)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
+			cleaner.targets.SourceBucket = "originals"
+
+			runRelease := func() error {
+				if terminatedOffline {
+					return cleaner.ReleaseTerminatedOfflineHeld(t.Context(), string(id), inc, owner)
+				}
+				return cleaner.ReleaseHeld(t.Context(), string(id), inc)
+			}
+
+			require.NoError(t, metadata.FreezeWriters(t.Context(), "g2"))
+			require.ErrorIs(t, runRelease(), domain.ErrWritersFrozen)
+			held, err := metadata.ListHeldDeletions(t.Context())
+			require.NoError(t, err)
+			require.Len(t, held, 1, "a paused release leaves the receipt held")
+
+			require.NoError(t, metadata.ThawWriters(t.Context()))
+			objects := blockingObjectDelete{make(chan struct{}), make(chan struct{})}
+			cleaner.objects = objects
+			result := make(chan error, 1)
+			go func() { result <- runRelease() }()
+			select {
+			case <-objects.started:
+			case relErr := <-result:
+				t.Fatalf("release finished without deleting the object: %v", relErr)
+			case <-time.After(5 * time.Second):
+				t.Fatal("release did not reach object deletion")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+			defer cancel()
+			require.Error(t, metadata.FreezeWriters(ctx, "g2"))
+			close(objects.finish)
+			require.NoError(t, <-result)
+			require.NoError(t, metadata.FreezeWriters(t.Context(), "g2"))
+		})
+	}
+}

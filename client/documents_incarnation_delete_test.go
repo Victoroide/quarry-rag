@@ -137,3 +137,36 @@ func FuzzDeleteDocumentIncarnation(f *testing.F) {
 		require.Len(t, headers[0][0], 36)
 	})
 }
+
+func TestReleaseHeldOfflineDeletionSendsQueryAndHeaderOnce(t *testing.T) {
+	var requests atomic.Int32
+	var rawQuery string
+	var headers []string
+	c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		rawQuery = r.URL.RawQuery
+		headers = r.Header.Values("X-Document-Incarnation")
+		assert.Equal(t, http.MethodDelete+" /api/documents/"+deleteDocumentID, r.Method+" "+r.URL.Path)
+		writeJSON(t, w, client.DeleteResponse{Deleted: true, DocID: deleteDocumentID})
+	})
+	resp, err := c.ReleaseHeldOfflineDeletion(t.Context(), deleteDocumentID, strings.ToUpper(deleteLifetime))
+	require.NoError(t, err)
+	require.Equal(t, &client.DeleteResponse{Deleted: true, DocID: deleteDocumentID}, resp)
+	require.EqualValues(t, 1, requests.Load())
+	require.Equal(t, "release_held=true", rawQuery)
+	require.Equal(t, []string{deleteLifetime}, headers)
+}
+
+func TestReleaseHeldOfflineDeletionRejectsInvalidIncarnation(t *testing.T) {
+	for _, value := range []string{"", " ", "latest", "{" + deleteLifetime + "}"} {
+		var requests atomic.Int32
+		c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			requests.Add(1)
+			w.WriteHeader(http.StatusOK)
+		})
+		resp, err := c.ReleaseHeldOfflineDeletion(t.Context(), deleteDocumentID, value)
+		require.ErrorIs(t, err, client.ErrInvalidIncarnation)
+		require.Nil(t, resp)
+		require.Zero(t, requests.Load())
+	}
+}

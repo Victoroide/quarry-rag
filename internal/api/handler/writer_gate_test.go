@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/cleanup"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
 	"github.com/google/uuid"
@@ -211,6 +212,61 @@ func TestScopedDeletionHonorsTheWriterGate(t *testing.T) {
 			}
 			h := DeleteHandler(store, nil, nil, WithScopedDeletion())
 			rec := serveScoped(h, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute))
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			require.Equal(t, tc.wantEvents, store.events)
+			if tc.body != "" {
+				require.JSONEq(t, tc.body, rec.Body.String())
+			}
+			if tc.status == http.StatusServiceUnavailable {
+				require.Equal(t, "30", rec.Header().Get("Retry-After"))
+			}
+		})
+	}
+}
+
+type gatedReleaseStore struct {
+	*releasableStore
+	gate   error
+	events []string
+}
+
+func (s *gatedReleaseStore) AcquireWriter(context.Context) (func(), error) {
+	s.events = append(s.events, "acquire")
+	if s.gate != nil {
+		return nil, s.gate
+	}
+	return func() { s.events = append(s.events, "release") }, nil
+}
+
+func (s *gatedReleaseStore) ReleaseHeldDeletion(ctx context.Context, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
+	s.events = append(s.events, "release_held")
+	return s.releasableStore.ReleaseHeldDeletion(ctx, id, incarnation, ops)
+}
+
+func TestReleaseHeldHonorsTheWriterGate(t *testing.T) {
+	inc := uuid.NewString()
+	offlineOpts := WithCleanupTargets(cleanup.Targets{InMemory: true, Memory: stubMemoryIndex{owner: "owner-1"}})
+	for _, tc := range []struct {
+		name       string
+		query      string
+		gate       error
+		status     int
+		body       string
+		wantEvents []string
+	}{
+		{name: "open", query: "release_held=true", status: http.StatusOK, wantEvents: []string{"acquire", "release_held", "release"}},
+		{name: "frozen", query: "release_held=true", gate: domain.ErrWritersFrozen, status: http.StatusServiceUnavailable, body: frozenBody, wantEvents: []string{"acquire"}},
+		{name: "other generation", query: "release_held=true", gate: domain.ErrGenerationMismatch, status: http.StatusServiceUnavailable, body: `{"error":"unavailable","message":"this replica does not serve the active vector generation"}`, wantEvents: []string{"acquire"}},
+		{name: "gate failure", query: "release_held=true", gate: errors.New("database unavailable"), status: http.StatusServiceUnavailable, body: `{"error":"unavailable","message":"document store unavailable"}`, wantEvents: []string{"acquire"}},
+		{name: "invalid query rejected before gate", query: "release_held=True", gate: domain.ErrWritersFrozen, status: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &gatedReleaseStore{releasableStore: &releasableStore{checkpointedStore: &checkpointedStore{}}, gate: tc.gate}
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/"+deletionTestDocument+"?"+tc.query, http.NoBody)
+			req.SetPathValue("doc_id", deletionTestDocument)
+			req.Header.Set("X-Document-Incarnation", inc)
+			rec := httptest.NewRecorder()
+			DeleteHandler(store, nil, nil, offlineOpts)(rec, req)
 			require.Equal(t, tc.status, rec.Code, rec.Body.String())
 			require.Equal(t, tc.wantEvents, store.events)
 			if tc.body != "" {
