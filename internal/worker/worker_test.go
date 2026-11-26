@@ -336,3 +336,151 @@ func TestProcessorPassesCollection(t *testing.T) {
 	leaseEvent(t, s, "completed")
 	require.Equal(t, "archive", <-got)
 }
+
+type revisionVectorRecorder struct {
+	mu           sync.Mutex
+	docDeletes   int
+	revDeletes   []string
+	revKnownIDs  [][]string
+	activeChunks map[string]domain.Chunk
+}
+
+func (r *revisionVectorRecorder) DeleteAllVectorsInNamespace(context.Context, string) error {
+	return nil
+}
+
+func (r *revisionVectorRecorder) DeleteByDocID(context.Context, string) error {
+	r.mu.Lock()
+	r.docDeletes++
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *revisionVectorRecorder) DeleteByManifestRevision(_ context.Context, _, revisionID string, knownIDs []string) error {
+	r.mu.Lock()
+	r.revDeletes = append(r.revDeletes, revisionID)
+	r.revKnownIDs = append(r.revKnownIDs, append([]string(nil), knownIDs...))
+	for id, ch := range r.activeChunks {
+		if ch.RevisionID == revisionID {
+			delete(r.activeChunks, id)
+		}
+	}
+	r.mu.Unlock()
+	return nil
+}
+
+func TestManifestedWorkerTargetsOnlyFencedRevision(t *testing.T) {
+	s := leaseStore(2)
+	s.jobs[0].Incarnation = "inc-1"
+	s.jobs[0].Attempts = 1
+	s.jobs[0].LeaseToken = "lease-1"
+	s.jobs[1].Incarnation = "inc-1"
+	s.jobs[1].Attempts = 2
+	s.jobs[1].LeaseToken = "lease-2"
+
+	vecs := &revisionVectorRecorder{activeChunks: map[string]domain.Chunk{}}
+	rev2 := revisionIDForAttempt(s.jobs[1], "test")
+	vecs.activeChunks[domain.FormatRevisionVectorID("doc", rev2, 0)] = domain.Chunk{
+		ID: "pub-0", DocumentID: "doc", Index: 0, RevisionID: rev2,
+	}
+
+	// Delayed attempt 1 fails permanently (exercising both pre-upsert at run() and terminal cleanup in process()).
+	w := New(s, []pipeline.Stage{leaseTestStage{func(_ context.Context) error {
+		return domain.Permanent(errors.New("delayed attempt 1 failed"))
+	}}}, vecs, Options{
+		HostedVectorManifest: true, Workers: 1, MaxAttempts: 5,
+		Lease: 50 * time.Millisecond, JobTimeout: time.Second, PollInterval: time.Millisecond, Owner: "test",
+	})
+	w.process(t.Context(), s.jobs[0])
+	leaseEvent(t, s, "failed")
+
+	vecs.mu.Lock()
+	defer vecs.mu.Unlock()
+	require.Zero(t, vecs.docDeletes, "manifested mode must never call document-wide DeleteByDocID")
+	rev1 := revisionIDForAttempt(s.jobs[0], "test")
+	require.Equal(t, []string{rev1, rev1}, vecs.revDeletes, "both pre-upsert and terminal cleanup must target attempt 1's fenced revision")
+	require.Contains(t, vecs.activeChunks, domain.FormatRevisionVectorID("doc", rev2, 0), "attempt 2's active vectors must remain intact")
+}
+
+type manifestRejectingStore struct {
+	*leaseTestStore
+	persistCalls int
+	persistErr   error
+}
+
+func (s *manifestRejectingStore) PersistVectorManifest(context.Context, domain.Job, domain.VectorManifest) error {
+	s.persistCalls++
+	return s.persistErr
+}
+func (*manifestRejectingStore) GetVectorManifest(context.Context, string) (*domain.VectorManifest, error) {
+	return nil, nil
+}
+func (*manifestRejectingStore) ListDocumentVectorManifests(context.Context, domain.DocumentID, string) ([]domain.VectorManifest, error) {
+	return nil, nil
+}
+func (*manifestRejectingStore) ClaimVectorCleanup(context.Context, string, time.Duration, time.Duration) (*domain.VectorCleanupTask, error) {
+	return nil, nil
+}
+func (*manifestRejectingStore) RenewVectorCleanup(context.Context, domain.VectorCleanupTask, time.Duration) (bool, error) {
+	return true, nil
+}
+func (*manifestRejectingStore) AdvanceVectorCleanup(context.Context, domain.VectorCleanupTask, int) (bool, error) {
+	return true, nil
+}
+func (*manifestRejectingStore) DeferVectorCleanup(context.Context, domain.VectorCleanupTask, string, time.Duration, int, string) (bool, error) {
+	return true, nil
+}
+func (*manifestRejectingStore) CompleteVectorCleanup(context.Context, domain.VectorCleanupTask) (bool, error) {
+	return true, nil
+}
+func (*manifestRejectingStore) ReleaseVectorCleanup(context.Context, domain.VectorCleanupTask) error {
+	return nil
+}
+
+type upsertSpyStore struct {
+	domain.VectorStore
+	upserts int
+}
+
+func (u *upsertSpyStore) Upsert(context.Context, string, []domain.Chunk) error {
+	u.upserts++
+	return nil
+}
+
+func TestManifestedWorkerAbortsUpsertWhenManifestLeaseCheckFails(t *testing.T) {
+	t.Run("transient manifest error retries without upsert", func(t *testing.T) {
+		base := leaseStore(1)
+		s := &manifestRejectingStore{leaseTestStore: base, persistErr: errors.New("db unavailable")}
+		vecs := &revisionVectorRecorder{activeChunks: map[string]domain.Chunk{}}
+		spy := &upsertSpyStore{}
+		stages := []pipeline.Stage{visibilityEmbedStage{}, pipeline.NewPersistStage(spy)}
+		w := New(s, stages, vecs, Options{
+			HostedVectorManifest: true, Workers: 1, MaxAttempts: 5,
+			Lease: 50 * time.Millisecond, JobTimeout: time.Second, PollInterval: time.Millisecond, Owner: "test",
+		})
+		w.process(t.Context(), s.jobs[0])
+		leaseEvent(t, base, "retry")
+		require.Equal(t, 1, s.persistCalls)
+		require.Zero(t, spy.upserts, "no upsert may run after manifest failure")
+	})
+
+	t.Run("lost lease aborts cleanly without upsert or retry", func(t *testing.T) {
+		base := leaseStore(1)
+		s := &manifestRejectingStore{leaseTestStore: base, persistErr: domain.ErrJobNotOwned}
+		vecs := &revisionVectorRecorder{activeChunks: map[string]domain.Chunk{}}
+		spy := &upsertSpyStore{}
+		stages := []pipeline.Stage{visibilityEmbedStage{}, pipeline.NewPersistStage(spy)}
+		w := New(s, stages, vecs, Options{
+			HostedVectorManifest: true, Workers: 1, MaxAttempts: 5,
+			Lease: 50 * time.Millisecond, JobTimeout: time.Second, PollInterval: time.Millisecond, Owner: "test",
+		})
+		w.process(t.Context(), s.jobs[0])
+		require.Equal(t, 1, s.persistCalls)
+		require.Zero(t, spy.upserts, "no upsert may run after manifest lease rejection")
+		select {
+		case ev := <-base.events:
+			t.Fatalf("unexpected job state transition %q on ErrJobNotOwned", ev)
+		default:
+		}
+	})
+}

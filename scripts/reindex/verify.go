@@ -40,17 +40,18 @@ type expectedCounts struct {
 }
 
 type coverageReport struct {
-	KeyCoverage      float64 `json:"key_coverage"`
-	ProfileCoverage  float64 `json:"profile_coverage"`
-	Missing          int     `json:"missing_keys"`
-	BadVectors       int     `json:"invalid_vectors"`
-	Mismatched       int     `json:"mismatched_records"`
-	DocumentsMissing int     `json:"documents_without_checkpoint"`
-	DocumentsStale   int     `json:"documents_with_stale_checkpoint"`
-	Unstable         int     `json:"documents_changed_during_scan"`
-	Inconsistent     int     `json:"inconsistent_documents"`
-	TaggedVectors    int     `json:"documents_with_tagged_vectors"`
-	NotReembedded    int     `json:"documents_without_full_reembedding,omitempty"`
+	KeyCoverage       float64 `json:"key_coverage"`
+	ProfileCoverage   float64 `json:"profile_coverage"`
+	Missing           int     `json:"missing_keys"`
+	BadVectors        int     `json:"invalid_vectors"`
+	Mismatched        int     `json:"mismatched_records"`
+	DocumentsMissing  int     `json:"documents_without_checkpoint"`
+	DocumentsStale    int     `json:"documents_with_stale_checkpoint"`
+	Unstable          int     `json:"documents_changed_during_scan"`
+	Inconsistent      int     `json:"inconsistent_documents"`
+	TaggedVectors     int     `json:"documents_with_tagged_vectors"`
+	ManifestedVectors int     `json:"documents_with_manifested_vectors,omitempty"`
+	NotReembedded     int     `json:"documents_without_full_reembedding,omitempty"`
 }
 
 type unexpectedReport struct {
@@ -76,7 +77,7 @@ type sampleReport struct {
 	ChunkIDs        []string `json:"chunk_ids,omitempty"`
 }
 
-type scopeDoc struct{ id, collection string }
+type scopeDoc struct{ id, chunkID, revisionID, collection string }
 
 type sampleChunk struct {
 	id, doc, collection string
@@ -137,13 +138,17 @@ scan:
 			after = rev.ID
 			rep.Expected.Documents++
 			_, _ = fmt.Fprintf(digest, "%s|%s\n", rev.ID, rev.Revision)
-			docs = append(docs, scopeDoc{rev.ID, rev.Collection})
+			docs = append(docs, scopeDoc{id: rev.ID, collection: rev.Collection})
 			if rev.DeclaredChunks != rev.Chunks {
 				rep.Coverage.Inconsistent++
 				continue
 			}
 			if rev.ScopedVectors {
 				rep.Coverage.TaggedVectors++
+				continue
+			}
+			if !v.taggedTarget && rev.ActiveRevisionID != "" {
+				rep.Coverage.ManifestedVectors++
 				continue
 			}
 			cp, seen := checkpoints[rev.ID]
@@ -218,8 +223,8 @@ scan:
 func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSnapshot, rep *verifyReport, expected map[string]scopeDoc, sample *[]sampleChunk) (present, valid int, err error) {
 	ids := make([]string, len(snap.Chunks))
 	for i, c := range snap.Chunks {
-		ids[i] = string(c.ID)
-		expected[ids[i]] = scopeDoc{id: snap.ID, collection: snap.Collection}
+		ids[i] = targetVectorID(snap.ID, snap.ActiveRevisionID, c, v.taggedTarget)
+		expected[ids[i]] = scopeDoc{id: snap.ID, chunkID: string(c.ID), revisionID: snap.ActiveRevisionID, collection: snap.Collection}
 		*sample = append(*sample, sampleChunk{id: ids[i], doc: snap.ID, collection: snap.Collection, index: c.Index, textHash: sha256.Sum256([]byte(c.Text))})
 	}
 	got := make(map[string]domain.Chunk, len(ids))
@@ -233,7 +238,7 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 		}
 	}
 	for _, want := range snap.Chunks {
-		record, ok := got[string(want.ID)]
+		record, ok := got[targetVectorID(snap.ID, snap.ActiveRevisionID, want, v.taggedTarget)]
 		if !ok {
 			rep.Coverage.Missing++
 			continue
@@ -245,9 +250,9 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 		switch {
 		case validVector(record.Embedding, v.profile.Dimensions) != nil:
 			rep.Coverage.BadVectors++
-		case record.DocumentID != want.DocumentID || record.Index != want.Index || record.Text != want.Text ||
+		case record.DocumentID != want.DocumentID || record.ID != want.ID || record.Index != want.Index || record.Text != want.Text ||
 			record.TokenCount != want.TokenCount || collection != snap.Collection || docType != snap.DocType ||
-			v.taggedTarget && (record.VectorIncarnation != snap.Incarnation || tenant != snap.TenantID):
+			v.taggedTarget && (record.VectorIncarnation != snap.Incarnation || tenant != snap.TenantID || record.RevisionID != snap.ActiveRevisionID):
 			rep.Coverage.Mismatched++
 		default:
 			valid++
@@ -342,23 +347,32 @@ func (v *verifier) matchedQueries(ctx context.Context, seed string, chunks []sam
 		for _, id := range allow {
 			allowed[id] = struct{}{}
 		}
+		expectedHit := func(chunk domain.Chunk) (string, bool) {
+			hitCollection, _ := chunk.Metadata["collection"].(string)
+			key := hitKey(chunk)
+			want, ok := expected[key]
+			if !ok {
+				return key, false
+			}
+			_, inScope := allowed[want.id]
+			if !inScope || want.id != string(chunk.DocumentID) || want.collection != hitCollection ||
+				want.chunkID != string(chunk.ID) || (v.taggedTarget && want.revisionID != chunk.RevisionID) {
+				return key, false
+			}
+			return key, true
+		}
 		inTarget := map[string]struct{}{}
 		for _, h := range targetHits {
-			hitCollection, _ := h.Chunk.Metadata["collection"].(string)
-			want, expectedKey := expected[string(h.Chunk.ID)]
-			_, inScope := allowed[want.id]
-			if !expectedKey || !inScope || want.id != string(h.Chunk.DocumentID) || want.collection != hitCollection {
+			key, ok := expectedHit(h.Chunk)
+			if !ok {
 				rep.Sample.ForbiddenHits++
 				continue
 			}
-			inTarget[string(h.Chunk.ID)] = struct{}{}
+			inTarget[key] = struct{}{}
 		}
 		baseline := make(map[string]struct{}, len(sourceHits))
 		for _, h := range sourceHits {
-			id := string(h.Chunk.ID)
-			want, expectedKey := expected[id]
-			hitCollection, _ := h.Chunk.Metadata["collection"].(string)
-			if _, inScope := allowed[want.id]; expectedKey && inScope && want.id == string(h.Chunk.DocumentID) && want.collection == hitCollection {
+			if id, ok := expectedHit(h.Chunk); ok {
 				baseline[id] = struct{}{}
 			}
 		}
@@ -387,6 +401,13 @@ func (v *verifier) matchedQueries(ctx context.Context, seed string, chunks []sam
 		rep.Sample.P95Milliseconds = float64(p95) / float64(time.Millisecond)
 	}
 	return nil
+}
+
+func hitKey(c domain.Chunk) string {
+	if c.VectorID != "" {
+		return c.VectorID
+	}
+	return string(c.ID)
 }
 
 func fetchAll(ctx context.Context, r vectorReader, ids []string) (map[string]domain.Chunk, error) {
@@ -425,6 +446,9 @@ func (v *verifier) judge(rep *verifyReport) {
 	if c.TaggedVectors > 0 {
 		v.fail(rep, "%d documents store tagged vectors, which a reindex does not stage", c.TaggedVectors)
 	}
+	if c.ManifestedVectors > 0 {
+		v.fail(rep, "%d documents own hosted vector revisions, which this target does not store", c.ManifestedVectors)
+	}
 	if c.DocumentsMissing > 0 || c.DocumentsStale > 0 {
 		v.fail(rep, "%d documents lack a current checkpoint and %d have a stale one", c.DocumentsMissing, c.DocumentsStale)
 	}
@@ -441,7 +465,7 @@ func (v *verifier) judge(rep *verifyReport) {
 		v.fail(rep, "%d vectors have the wrong dimension or an invalid value", c.BadVectors)
 	}
 	if c.Mismatched > 0 {
-		v.fail(rep, "%d records differ from PostgreSQL in document, position, text, token count, type, collection, tenant or incarnation", c.Mismatched)
+		v.fail(rep, "%d records differ from PostgreSQL in document, chunk, position, text, token count, type, collection, tenant, revision or incarnation", c.Mismatched)
 	}
 	if rep.Unexpected.Records > 0 {
 		v.fail(rep, "%d records in the target are outside the expected set", rep.Unexpected.Records)

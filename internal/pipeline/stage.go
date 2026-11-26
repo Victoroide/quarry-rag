@@ -71,6 +71,11 @@ type IngestContext struct {
 
 	// LayoutSections holds ordered PDF layout units with coordinate provenance.
 	LayoutSections []domain.LayoutSection
+
+	// RevisionID fences hosted external vector writes to one immutable attempt.
+	RevisionID string
+	// PersistManifest records the write-intent manifest before any external upsert.
+	PersistManifest func(context.Context, []domain.Chunk) error
 }
 
 // NewIngestContext creates an initialized IngestContext.

@@ -337,3 +337,63 @@ func TestPersistDefersTransactionalVectors(t *testing.T) {
 		require.Equal(t, "archive", ch.Metadata["collection"])
 	}
 }
+
+func TestPersistWritesManifestBeforeUpsertAndFiltersSampleByRevision(t *testing.T) {
+	var events []string
+	probeCalls := 0
+	vs := &persistFilteredStore{}
+	vs.query = func(context.Context, []float32, int, domain.VectorFilter) ([]domain.ScoredChunk, error) {
+		events = append(events, "probe")
+		probeCalls++
+		if probeCalls == 1 {
+			// Stale revision hit with the same public chunk ID must not satisfy the probe.
+			return []domain.ScoredChunk{{Chunk: domain.Chunk{ID: "target", DocumentID: "document-a", RevisionID: "rev-old"}}}, nil
+		}
+		return []domain.ScoredChunk{{Chunk: domain.Chunk{ID: "target", DocumentID: "document-a", RevisionID: "rev-new"}}}, nil
+	}
+	origUpsert := &persistVectorRecorder{}
+	vs.VectorStore = origUpsert
+
+	ic := visibilityIngest()
+	ic.RevisionID = "rev-new"
+	ic.PersistManifest = func(_ context.Context, chunks []domain.Chunk) error {
+		events = append(events, "manifest")
+		require.Equal(t, "document-a#rev-new#0", chunks[0].VectorID)
+		require.Equal(t, "rev-new", chunks[0].RevisionID)
+		return nil
+	}
+
+	stage := NewPersistStage(&orderedPersistStore{
+		persistFilteredStore: vs,
+		onUpsert:             func() { events = append(events, "upsert") },
+	}, WithVisibilityWait(time.Second))
+	require.NoError(t, stage.Run(t.Context(), ic))
+	require.Equal(t, []string{"manifest", "upsert", "probe", "probe"}, events)
+	require.Equal(t, domain.VisibilitySampleSeen, ic.IndexObservation.Visibility)
+
+	// Manifest failure must abort before any Upsert call.
+	icFail := visibilityIngest()
+	icFail.RevisionID = "rev-fail"
+	upserted := 0
+	icFail.PersistManifest = func(context.Context, []domain.Chunk) error {
+		return domain.ErrJobNotOwned
+	}
+	err := NewPersistStage(&orderedPersistStore{
+		persistFilteredStore: vs,
+		onUpsert:             func() { upserted++ },
+	}).Run(t.Context(), icFail)
+	require.ErrorIs(t, err, domain.ErrJobNotOwned)
+	require.Zero(t, upserted)
+}
+
+type orderedPersistStore struct {
+	*persistFilteredStore
+	onUpsert func()
+}
+
+func (s *orderedPersistStore) Upsert(ctx context.Context, namespace string, chunks []domain.Chunk) error {
+	if s.onUpsert != nil {
+		s.onUpsert()
+	}
+	return s.persistFilteredStore.Upsert(ctx, namespace, chunks)
+}

@@ -16,10 +16,14 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type options struct {
@@ -272,11 +276,11 @@ func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Cl
 		}
 	}()
 	return pinAndRunMaintenance(ctx, startupCtx, cfg, pg, idx.Host, opts, func() error {
-		return reconcileIndex(ctx, conn, pg, collectionDocuments, documentIDs, opts)
+		return reconcileIndex(ctx, cfg, conn, pg, collectionDocuments, documentIDs, opts)
 	})
 }
 
-func reconcileIndex(ctx context.Context, conn *pinecone.IndexConnection, pg *pgstore.Client, collectionDocuments []collectionDocument, documentIDs []string, opts options) error {
+func reconcileIndex(ctx context.Context, cfg *config.Config, conn *pinecone.IndexConnection, pg *pgstore.Client, collectionDocuments []collectionDocument, documentIDs []string, opts options) error {
 	if opts.CanonicalDocumentIDs {
 		result, canonicalErr := canonicalizeDocumentKeys(ctx, conn, documentIDs, opts)
 		if canonicalErr != nil {
@@ -304,7 +308,8 @@ func reconcileIndex(ctx context.Context, conn *pinecone.IndexConnection, pg *pgs
 	deleteNamespace := func(deleteCtx context.Context, name string) error {
 		return conn.WithNamespace(name).DeleteAllVectorsInNamespace(deleteCtx)
 	}
-	result, err := reconcile(ctx, conn, deleteNamespace, lookup, opts, os.Stderr)
+	result, err := reconcileRevisions(ctx, pg, &indexChecker{conn: conn}, conn, deleteNamespace, lookup, opts,
+		sweepSettings{DrainDelay: cfg.HostedVectorDrainDelay, WriteFence: cfg.IndexVisibilityMode == "lsn"}, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -340,6 +345,84 @@ func runSourceUploads(opts options) error {
 	return json.NewEncoder(os.Stdout).Encode(result)
 }
 
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
+}
+
+type indexChecker struct {
+	conn *pinecone.IndexConnection
+}
+
+var _ domain.VectorPresenceChecker = (*indexChecker)(nil)
+
+func (c *indexChecker) nsConn(namespace string) *pinecone.IndexConnection {
+	if namespace == "" {
+		return c.conn
+	}
+	return c.conn.WithNamespace(namespace)
+}
+
+func (c *indexChecker) DeleteVectorIDs(ctx context.Context, namespace string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	err := c.nsConn(namespace).DeleteVectorsById(ctx, ids)
+	if status.Code(err) == codes.NotFound {
+		return nil
+	}
+	return err
+}
+
+func (c *indexChecker) FetchPresentVectorIDs(ctx context.Context, namespace string, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	res, err := c.nsConn(namespace).FetchVectors(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return nil, nil
+	}
+	var present []string
+	for _, id := range ids {
+		if res.Vectors[id] != nil {
+			present = append(present, id)
+		}
+	}
+	return present, nil
+}
+
+func (c *indexChecker) ListPrefixVectorIDs(ctx context.Context, namespace, prefix string, limit int, token string) (ids []string, nextToken string, supported bool, err error) {
+	page := uint32(limit) // #nosec G115 -- limit is bounded by options validation (1-1000).
+	req := &pinecone.ListVectorsRequest{Prefix: &prefix, Limit: &page}
+	if token != "" {
+		req.PaginationToken = &token
+	}
+	res, listErr := c.nsConn(namespace).ListVectors(ctx, req)
+	if listErr != nil {
+		if pcstore.IsListUnsupported(listErr) {
+			return nil, "", false, nil
+		}
+		return nil, "", true, listErr
+	}
+	if res == nil {
+		return nil, "", true, nil
+	}
+	out := make([]string, 0, len(res.VectorIds))
+	for _, id := range res.VectorIds {
+		if id != nil && *id != "" {
+			out = append(out, *id)
+		}
+	}
+	next := ""
+	if res.NextPaginationToken != nil {
+		next = *res.NextPaginationToken
+	}
+	return out, next, true, nil
+}
+
 func lookupDocuments(ctx context.Context, pg *pgstore.Client, ids []string) (map[string]documentState, error) {
 	canonical := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -351,6 +434,38 @@ func lookupDocuments(ctx context.Context, pg *pgstore.Client, ids []string) (map
 	if len(canonical) == 0 {
 		return states, nil
 	}
+	rows, err := pg.Pool.Query(ctx, `SELECT d.id::text, d.status,
+        EXISTS (SELECT 1 FROM ingest_jobs j WHERE j.document_id = d.id),
+        COALESCE(r.active_revision_id::text, '')
+        FROM documents d
+        LEFT JOIN hosted_vector_revisions r ON r.document_id = d.id
+        WHERE d.id = ANY($1::uuid[])`, canonical)
+	if err != nil {
+		if !isUndefinedTable(err) {
+			return nil, fmt.Errorf("look up documents: %w", err)
+		}
+		return lookupLegacyDocuments(ctx, pg, canonical)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var state documentState
+		if scanErr := rows.Scan(&id, &state.Status, &state.HasJob, &state.ActiveRevision); scanErr != nil {
+			return nil, fmt.Errorf("read document state: %w", scanErr)
+		}
+		states[id] = state
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := addManifestRevisions(ctx, pg, canonical, states); err != nil && !isUndefinedTable(err) {
+		return nil, err
+	}
+	return states, nil
+}
+
+func lookupLegacyDocuments(ctx context.Context, pg *pgstore.Client, canonical []string) (map[string]documentState, error) {
+	states := make(map[string]documentState)
 	rows, err := pg.Pool.Query(ctx, `SELECT d.id::text, d.status,
         EXISTS (SELECT 1 FROM ingest_jobs j WHERE j.document_id = d.id)
         FROM documents d WHERE d.id = ANY($1::uuid[])`, canonical)
@@ -367,4 +482,51 @@ func lookupDocuments(ctx context.Context, pg *pgstore.Client, ids []string) (map
 		states[id] = state
 	}
 	return states, rows.Err()
+}
+
+func addManifestRevisions(ctx context.Context, pg *pgstore.Client, canonical []string, states map[string]documentState) error {
+	pendingRows, err := pg.Pool.Query(ctx, `
+		SELECT document_id::text, revision_id::text
+		FROM hosted_vector_manifests
+		WHERE document_id = ANY($1::uuid[]) AND state = 'writing'`, canonical)
+	if err != nil {
+		return fmt.Errorf("look up pending vector manifests: %w", err)
+	}
+	defer pendingRows.Close()
+	for pendingRows.Next() {
+		var docID, revID string
+		if scanErr := pendingRows.Scan(&docID, &revID); scanErr != nil {
+			return fmt.Errorf("read pending vector manifest: %w", scanErr)
+		}
+		st := states[docID]
+		if st.PendingRevisions == nil {
+			st.PendingRevisions = make(map[string]bool)
+		}
+		st.PendingRevisions[revID] = true
+		states[docID] = st
+	}
+	if rowsErr := pendingRows.Err(); rowsErr != nil {
+		return rowsErr
+	}
+	cleanupRows, err := pg.Pool.Query(ctx, `
+		SELECT document_id::text, revision_id::text
+		FROM hosted_vector_cleanups
+		WHERE document_id = ANY($1::uuid[])`, canonical)
+	if err != nil {
+		return fmt.Errorf("look up vector cleanups: %w", err)
+	}
+	defer cleanupRows.Close()
+	for cleanupRows.Next() {
+		var docID, revID string
+		if scanErr := cleanupRows.Scan(&docID, &revID); scanErr != nil {
+			return fmt.Errorf("read vector cleanup: %w", scanErr)
+		}
+		st := states[docID]
+		if st.TrackedRevisions == nil {
+			st.TrackedRevisions = make(map[string]bool)
+		}
+		st.TrackedRevisions[revID] = true
+		states[docID] = st
+	}
+	return cleanupRows.Err()
 }

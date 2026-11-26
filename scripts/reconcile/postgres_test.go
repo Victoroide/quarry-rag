@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func TestDocumentLookupPreservesRetryJobs(t *testing.T) {
 	states, err := lookupDocuments(t.Context(), pg, []string{storedID, missingID, "invalid", "00000000-0000-4000-8000-000000000099"})
 	require.NoError(t, err)
 	require.Equal(t, map[string]documentState{storedID: {Status: "failed", HasJob: true}, missingID: {Status: "failed"}}, states)
-	require.Equal(t, []string{"terminal"}, selectOrphanVectors([]vectorRef{{"retry", storedID}, {"terminal", missingID}}, states, 100))
+	require.Equal(t, []string{"terminal"}, selectOrphanVectors([]vectorRef{{ID: "retry", DocID: storedID}, {ID: "terminal", DocID: missingID}}, states, 100))
 }
 
 func TestCollectionBackfillSelectsLabeledDocuments(t *testing.T) {
@@ -218,4 +219,188 @@ func TestScopedBackfillApplyAcquiresWriterAndRefusesGenerationMismatch(t *testin
 	var report scopedReport
 	require.NoError(t, json.Unmarshal(out.Bytes(), &report))
 	require.Equal(t, scopedReport{Examined: 1, Verified: 1, ResumeAfter: docID}, report)
+}
+
+func TestLookupDocumentsIncludesManifestedRevisions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pg.Close(t.Context())) })
+	require.NoError(t, pg.RunMigrations(t.Context()))
+
+	ctx := t.Context()
+	activeRev, pendingRev, trackedRev, untrackedRev := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	_, err = pg.Pool.Exec(ctx, `INSERT INTO documents(id, content, status) VALUES ($1, 'manifested', 'completed')`, storedID)
+	require.NoError(t, err)
+	for _, m := range []struct {
+		rev, doc, state string
+	}{
+		{activeRev, storedID, "active"},
+		{pendingRev, storedID, "writing"},
+		{trackedRev, storedID, "retired"},
+	} {
+		_, err = pg.Pool.Exec(ctx, `INSERT INTO hosted_vector_manifests(revision_id, document_id, incarnation, attempt, id_prefix, vector_ids, chunk_ids, state)
+			VALUES($1, $2, $2, 1, $3, ARRAY[$4], ARRAY[]::uuid[], $5)`,
+			m.rev, m.doc, domain.RevisionVectorPrefix(domain.DocumentID(m.doc), m.rev), domain.FormatRevisionVectorID(domain.DocumentID(m.doc), m.rev, 0), m.state)
+		require.NoError(t, err)
+	}
+	_, err = pg.Pool.Exec(ctx, `INSERT INTO hosted_vector_revisions(document_id, incarnation, active_revision_id) VALUES($1, $1, $2)`, storedID, activeRev)
+	require.NoError(t, err)
+	_, err = pg.Pool.Exec(ctx, `INSERT INTO hosted_vector_cleanups(revision_id, document_id, incarnation, id_prefix, vector_ids) VALUES($1, $2, $2, $3, ARRAY[$4])`,
+		trackedRev, storedID, domain.RevisionVectorPrefix(domain.DocumentID(storedID), trackedRev), domain.FormatRevisionVectorID(domain.DocumentID(storedID), trackedRev, 0))
+	require.NoError(t, err)
+
+	states, err := lookupDocuments(ctx, pg, []string{storedID})
+	require.NoError(t, err)
+	refs := []vectorRef{
+		{ID: storedID + "#" + activeRev + "#0", DocID: storedID, RevisionID: activeRev},
+		{ID: storedID + "#" + pendingRev + "#0", DocID: storedID, RevisionID: pendingRev},
+		{ID: storedID + "#" + trackedRev + "#0", DocID: storedID, RevisionID: trackedRev},
+		{ID: storedID + "#" + untrackedRev + "#0", DocID: storedID, RevisionID: untrackedRev},
+	}
+	require.Equal(t, []string{storedID + "#" + untrackedRev + "#0"}, selectOrphanVectors(refs, states, 10))
+}
+
+type blockingSweepVectors struct {
+	started chan struct{}
+	finish  chan struct{}
+	deleted []string
+	once    sync.Once
+}
+
+func (b *blockingSweepVectors) DeleteVectorIDs(ctx context.Context, _ string, ids []string) error {
+	if b.started != nil {
+		b.once.Do(func() { close(b.started) })
+		select {
+		case <-b.finish:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	b.deleted = append(b.deleted, ids...)
+	return nil
+}
+
+func TestBlockingSweepVectorsSignalsOnce(t *testing.T) {
+	b := &blockingSweepVectors{started: make(chan struct{}), finish: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- b.DeleteVectorIDs(t.Context(), "", []string{"first"})
+	}()
+	<-b.started
+	close(b.finish)
+	require.NoError(t, <-done)
+	require.NoError(t, b.DeleteVectorIDs(t.Context(), "", []string{"second"}))
+	require.Equal(t, []string{"first", "second"}, b.deleted)
+}
+
+func (*blockingSweepVectors) FetchPresentVectorIDs(context.Context, string, []string) ([]string, error) {
+	return nil, nil
+}
+
+func (*blockingSweepVectors) ListPrefixVectorIDs(context.Context, string, string, int, string) (ids []string, nextToken string, supported bool, err error) {
+	return nil, "", true, nil
+}
+
+func TestRevisionSweepApplyPinsGenerationAndHoldsWriterBarrier(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	ctx := t.Context()
+	pg, err := pgstore.NewClient(ctx, pgtest.Start(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pg.Close(context.Background())) })
+	require.NoError(t, pg.RunMigrations(ctx))
+
+	cfg := &config.Config{
+		VectorStore:            "pinecone",
+		PineconeIndexName:      "quarry-g1",
+		EmbeddingProvider:      domain.EmbeddingProviderOpenAI,
+		OpenAIEmbeddingModel:   "text-embedding-3-small",
+		EmbeddingModelRevision: "rev-1",
+		ExtractionChunkVersion: "chunk-1",
+		ChunkTokenSize:         512,
+		ChunkOverlap:           64,
+		OCRProvider:            "none",
+		EmbeddingDimensions:    3,
+	}
+	require.NoError(t, pg.PinVectorGeneration(ctx, pgstore.LegacyGeneration, "pinecone", "quarry-g1", "quarry-g1-host", cfg.EmbeddingSettings()))
+
+	revID := uuid.NewString()
+	vecID := domain.FormatRevisionVectorID(domain.DocumentID(storedID), revID, 0)
+	_, err = pg.Pool.Exec(ctx, `INSERT INTO hosted_vector_manifests(revision_id, document_id, incarnation, attempt, id_prefix, vector_ids, chunk_ids, state, retired_at) VALUES($1,$2,$2,1,$3,ARRAY[$4],ARRAY[]::uuid[],'retired',NOW()-interval '2 hours')`, revID, storedID, domain.RevisionVectorPrefix(domain.DocumentID(storedID), revID), vecID)
+	require.NoError(t, err)
+	_, err = pg.Pool.Exec(ctx, `INSERT INTO hosted_vector_cleanups(revision_id, document_id, incarnation, id_prefix, vector_ids, retired_at)
+		VALUES($1, $2, $2, $3, ARRAY[$4], NOW() - interval '2 hours')`,
+		revID, storedID, domain.RevisionVectorPrefix(domain.DocumentID(storedID), revID), vecID)
+	require.NoError(t, err)
+
+	blocker := &blockingSweepVectors{started: make(chan struct{}), finish: make(chan struct{})}
+	idx := &reconcileFakeIndex{}
+	opts := options{Apply: true, Limit: 10, Page: 5}
+	done := make(chan error, 1)
+	go func() {
+		done <- pinAndRunMaintenance(ctx, ctx, cfg, pg, "quarry-g1-host", opts, func() error {
+			_, runErr := reconcileRevisions(ctx, pg, blocker, idx, idx.deleteNamespace, noDocuments, opts, sweepSettings{DrainDelay: time.Minute}, &bytes.Buffer{})
+			return runErr
+		})
+	}()
+
+	select {
+	case <-blocker.started:
+	case runErr := <-done:
+		t.Fatalf("sweep returned before entering delete barrier: %v", runErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweep did not enter delete barrier")
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	require.Error(t, pg.FreezeWriters(waitCtx, "g2"), "freeze must wait for an in-flight applied revision sweep")
+	close(blocker.finish)
+	require.NoError(t, <-done)
+
+	var remaining int
+	require.NoError(t, pg.Pool.QueryRow(ctx, `SELECT count(*) FROM hosted_vector_cleanups WHERE revision_id=$1`, revID).Scan(&remaining))
+	require.Zero(t, remaining)
+	require.Equal(t, []string{vecID}, blocker.deleted)
+
+	rev2 := uuid.NewString()
+	vec2 := domain.FormatRevisionVectorID(domain.DocumentID(storedID), rev2, 0)
+	_, err = pg.Pool.Exec(ctx, `INSERT INTO hosted_vector_manifests(revision_id, document_id, incarnation, attempt, id_prefix, vector_ids, chunk_ids, state, retired_at) VALUES($1,$2,$2,1,$3,ARRAY[$4],ARRAY[]::uuid[],'retired',NOW()-interval '2 hours')`, rev2, storedID, domain.RevisionVectorPrefix(domain.DocumentID(storedID), rev2), vec2)
+	require.NoError(t, err)
+	_, err = pg.Pool.Exec(ctx, `INSERT INTO hosted_vector_cleanups(revision_id, document_id, incarnation, id_prefix, vector_ids, retired_at)
+		VALUES($1, $2, $2, $3, ARRAY[$4], NOW() - interval '2 hours')`,
+		rev2, storedID, domain.RevisionVectorPrefix(domain.DocumentID(storedID), rev2), vec2)
+	require.NoError(t, err)
+
+	require.NoError(t, pg.FreezeWriters(ctx, "g2"))
+	sweepG2 := func() (report, error) {
+		var rep report
+		var sweepErr error
+		sweepErr = pinAndRunMaintenance(ctx, ctx, cfg, pg, cfg.PineconeIndexName+"-host", opts, func() error {
+			rep, sweepErr = reconcileRevisions(ctx, pg, &blockingSweepVectors{}, idx, idx.deleteNamespace, noDocuments, opts, sweepSettings{DrainDelay: time.Minute}, &bytes.Buffer{})
+			return sweepErr
+		})
+		return rep, sweepErr
+	}
+	_, err = sweepG2()
+	require.ErrorIs(t, err, domain.ErrWritersFrozen)
+
+	_, err = pg.RegisterGeneration(ctx, pgstore.Generation{Name: "g2", Store: "pinecone", Target: "quarry-g2", Host: "quarry-g2-host", Profile: cfg.EmbeddingSettings(), Origin: pgstore.OriginRecorded})
+	require.NoError(t, err)
+	require.NoError(t, pg.RecordVerification(ctx, "g2", "digest", json.RawMessage(`{}`)))
+	require.NoError(t, pg.ActivateGeneration(ctx, "g2", "digest", 0))
+	require.NoError(t, pg.ThawWriters(ctx))
+
+	_, err = sweepG2()
+	require.ErrorIs(t, err, domain.ErrGenerationMismatch)
+
+	cfg.VectorGeneration = "g2"
+	cfg.PineconeIndexName = "quarry-g2"
+	rep, err := sweepG2()
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.SweptRevisions)
+	require.Equal(t, 1, rep.SweptVectors)
 }

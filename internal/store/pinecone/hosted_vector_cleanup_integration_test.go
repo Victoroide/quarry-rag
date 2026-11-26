@@ -41,7 +41,7 @@ type delayedHTTPIndex struct {
 	vectors            map[string]delayedHTTPVectorRecord
 	upsertFailOnBatch  int
 	upsertCalls        int
-	deleteFailOnce     bool
+	deleteOutage       bool
 	disableList        bool
 	ignoreNextDeleteID map[string]int
 }
@@ -104,8 +104,7 @@ func (idx *delayedHTTPIndex) server() *httptest.Server {
 				return
 			}
 			idx.mu.Lock()
-			if idx.deleteFailOnce {
-				idx.deleteFailOnce = false
+			if idx.deleteOutage {
 				idx.mu.Unlock()
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = io.WriteString(w, "injected transient delete outage")
@@ -236,6 +235,12 @@ func (idx *delayedHTTPIndex) flushLateWrite(ns, id string, vec []float32, meta m
 	idx.vectors[idx.key(ns, id)] = delayedHTTPVectorRecord{ID: id, Namespace: ns, Values: vec, Metadata: meta}
 }
 
+func (idx *delayedHTTPIndex) setDeleteOutage(on bool) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.deleteOutage = on
+}
+
 func (idx *delayedHTTPIndex) idsInNamespace(ns string) []string {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -296,12 +301,35 @@ func setupPostgresClient(t *testing.T) *pgstore.Client {
 	return client
 }
 
+// makeCleanupsDue moves every tombstone past its drain window and retry time
+// in SQL, so a test controls each transition instead of waiting on a clock.
+func makeCleanupsDue(t *testing.T, client *pgstore.Client) {
+	t.Helper()
+	_, err := client.Pool.Exec(t.Context(), `UPDATE hosted_vector_cleanups
+		SET retired_at = retired_at - interval '2 hours', next_attempt_at = now() - interval '1 second'`)
+	require.NoError(t, err)
+}
+
+func cleanupState(t *testing.T, client *pgstore.Client, revision string) string {
+	t.Helper()
+	var state string
+	require.NoError(t, client.Pool.QueryRow(t.Context(), `SELECT state FROM hosted_vector_cleanups WHERE revision_id = $1`, revision).Scan(&state))
+	return state
+}
+
+func manifestCount(t *testing.T, client *pgstore.Client, revision string) int {
+	t.Helper()
+	var count int
+	require.NoError(t, client.Pool.QueryRow(t.Context(), `SELECT count(*) FROM hosted_vector_manifests WHERE revision_id = $1`, revision).Scan(&count))
+	return count
+}
+
 func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires a Docker daemon")
 	}
 	client := setupPostgresClient(t)
-	client.SetVectorDrainDelay(time.Second)
+	client.EnableHostedVectorManifests(true)
 
 	idx := newDelayedHTTPIndex()
 	srv := idx.server()
@@ -349,7 +377,7 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 		DocumentID:  docID,
 		Incarnation: incarnation1,
 		Attempt:     1,
-		LeaseToken:  &lease1,
+		LeaseToken:  lease1,
 		Collection:  "archive",
 		IDPrefix:    domain.RevisionVectorPrefix(docID, rev1),
 		VectorIDs:   []string{chunks1[0].VectorID, chunks1[1].VectorID},
@@ -402,7 +430,7 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 				DocumentID:  docID,
 				Incarnation: incarnation1,
 				Attempt:     2,
-				LeaseToken:  &lease2,
+				LeaseToken:  lease2,
 				Collection:  "archive",
 				IDPrefix:    domain.RevisionVectorPrefix(docID, rev2),
 				VectorIDs:   vectorIDs,
@@ -421,33 +449,51 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, rev2, activeRev)
 
+	// Every delay is far beyond the test, so each pass performs exactly one transition.
 	sweeper := worker.NewSweeper(client, drv, worker.SweepOptions{
 		Owner:            "test-sweeper",
 		PageSize:         1,
 		Budget:           10,
-		ConvergenceDelay: 20 * time.Millisecond,
+		DrainDelay:       time.Hour,
+		ConvergenceDelay: time.Hour,
+		RetryBaseDelay:   time.Hour,
+		RetryMaxDelay:    time.Hour,
 	})
 	rep, err := sweeper.SweepOnce(t.Context())
 	require.NoError(t, err)
-	require.Zero(t, rep.TasksClaimed)
+	require.Zero(t, rep.TasksClaimed, "the superseded revision waits out its drain window")
 
-	// Re-insert rev1 vector to verify transient delete failure backoff + recovery after drain delay.
+	// A transient provider failure defers the task without losing the tombstone.
 	idx.flushLateWrite("", chunks1[0].VectorID, []float32{1, 0, 0, 0}, map[string]any{"doc_id": docUUID, "revision_id": rev1, "chunk_id": string(chunk0ID)})
-	time.Sleep(1100 * time.Millisecond)
-	idx.mu.Lock()
-	idx.deleteFailOnce = true
-	idx.mu.Unlock()
+	// The adapter retries a failed delete on its own, so the outage lasts until
+	// the test ends it rather than for a fixed number of requests.
+	idx.setDeleteOutage(true)
+	makeCleanupsDue(t, client)
 	rep, err = sweeper.SweepOnce(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 1, rep.TasksClaimed)
 	require.Equal(t, 1, rep.TasksDeferred)
+	require.Zero(t, rep.TasksCompleted)
+	require.Equal(t, "pending", cleanupState(t, client, rev1))
+	require.Contains(t, idx.idsInNamespace(""), chunks1[0].VectorID, "the outage left the vector in place")
+	idx.setDeleteOutage(false)
 
-	_, err = client.Pool.Exec(t.Context(), `UPDATE hosted_vector_cleanups SET next_attempt_at = now() - interval '1 second'`)
+	// The retry deletes the revision and moves to verification.
+	makeCleanupsDue(t, client)
+	rep, err = sweeper.SweepOnce(t.Context())
 	require.NoError(t, err)
+	require.Equal(t, 1, rep.TasksDeferred)
+	require.Zero(t, rep.TasksCompleted)
+	require.Equal(t, "verifying", cleanupState(t, client, rev1))
+	require.Equal(t, []string{domain.FormatRevisionVectorID(docID, rev2, 0)}, idx.idsInNamespace(""))
+
+	// Verification finds nothing, so the tombstone and its retired manifest go.
+	makeCleanupsDue(t, client)
 	rep, err = sweeper.SweepOnce(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 1, rep.TasksCompleted)
-	require.Equal(t, []string{domain.FormatRevisionVectorID(docID, rev2, 0)}, idx.idsInNamespace(""))
+	require.Zero(t, manifestCount(t, client, rev1), "a completed cleanup leaves no retired manifest")
+	require.Equal(t, 1, manifestCount(t, client, rev2), "the active manifest is untouched")
 
 	// Delete document while delayed write is pending, then reuse the same doc UUID immediately.
 	require.NoError(t, client.DeleteDocument(t.Context(), docID))
@@ -488,7 +534,7 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 				DocumentID:  docID,
 				Incarnation: incarnation2,
 				Attempt:     1,
-				LeaseToken:  &lease3,
+				LeaseToken:  lease3,
 				Collection:  "archive",
 				IDPrefix:    domain.RevisionVectorPrefix(docID, rev3),
 				VectorIDs:   []string{prepared[0].VectorID},
@@ -505,11 +551,17 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 	rev2VecID := domain.FormatRevisionVectorID(docID, rev2, 0)
 	idx.flushLateWrite("", rev2VecID, []float32{1, 0, 0, 0}, map[string]any{"doc_id": docUUID, "revision_id": rev2, "chunk_id": string(chunk0ID)})
 
-	time.Sleep(1100 * time.Millisecond)
+	// The deleted revision outlived the document, its UUID reuse and a late write.
+	makeCleanupsDue(t, client)
+	rep, err = sweeper.SweepOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.TasksDeferred)
+	makeCleanupsDue(t, client)
 	rep, err = sweeper.SweepOnce(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 1, rep.TasksCompleted)
 	require.Equal(t, []string{domain.FormatRevisionVectorID(docID, rev3, 0)}, idx.idsInNamespace(""))
+	require.Zero(t, manifestCount(t, client, rev2))
 }
 
 func TestHostedVectorSweeperPodResidueConvergenceAndReaderVisibilityGate(t *testing.T) {
@@ -533,7 +585,7 @@ func TestHostedVectorSweeperPodResidueConvergenceAndReaderVisibilityGate(t *test
 	_, err = client.Pool.Exec(t.Context(), `INSERT INTO hosted_vector_manifests (revision_id, document_id, incarnation, attempt, lease_token, collection, vector_namespace, id_prefix, vector_ids, chunk_ids, state) VALUES ($1,$2,$3,1,$4,'archive','', $5, ARRAY[$6], ARRAY[$7::uuid], 'retired')`,
 		revOld, docOldUUID, incOld, uuid.NewString(), domain.RevisionVectorPrefix(docOld, revOld), vecOld0, uuid.NewString())
 	require.NoError(t, err)
-	_, err = client.Pool.Exec(t.Context(), `INSERT INTO hosted_vector_cleanups (revision_id, document_id, incarnation, collection, vector_namespace, id_prefix, vector_ids, drain_after, next_attempt_at, reason) VALUES ($1,$2,$3,'archive','', $4, ARRAY[$5], now() - interval '1 second', now() - interval '1 second', 'superseded')`,
+	_, err = client.Pool.Exec(t.Context(), `INSERT INTO hosted_vector_cleanups (revision_id, document_id, incarnation, collection, vector_namespace, id_prefix, vector_ids, next_attempt_at, retired_at, reason) VALUES ($1,$2,$3,'archive','', $4, ARRAY[$5], now() - interval '1 second', now() - interval '2 hours', 'superseded')`,
 		revOld, docOldUUID, incOld, domain.RevisionVectorPrefix(docOld, revOld), vecOld0)
 	require.NoError(t, err)
 
@@ -542,23 +594,42 @@ func TestHostedVectorSweeperPodResidueConvergenceAndReaderVisibilityGate(t *test
 	idx.ignoreNextDeleteID[vecOld0] = 1
 	idx.mu.Unlock()
 
+	// A pod index has no write fence: a vector may reappear after its delete, so
+	// the task verifies twice and each pass performs exactly one transition.
 	sweeper := worker.NewSweeper(client, drv, worker.SweepOptions{
 		Owner:            "pod-sweeper",
 		PageSize:         10,
 		Budget:           10,
-		ConvergenceDelay: 10 * time.Millisecond,
+		DrainDelay:       time.Hour,
+		ConvergenceDelay: time.Hour,
+		RetryBaseDelay:   time.Hour,
+		RetryMaxDelay:    time.Hour,
 	})
 	rep, err := sweeper.SweepOnce(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, 1, rep.TasksUnresolved)
+	require.Equal(t, 1, rep.TasksDeferred, "the delete reports success while the vector is still indexed")
+	require.Equal(t, "verifying", cleanupState(t, client, revOld))
 	require.Equal(t, []string{vecOld0}, idx.idsInNamespace(""))
 
-	_, err = client.Pool.Exec(t.Context(), `UPDATE hosted_vector_cleanups SET next_attempt_at = now() - interval '1 second' WHERE revision_id = $1`, revOld)
+	makeCleanupsDue(t, client)
+	rep, err = sweeper.SweepOnce(t.Context())
 	require.NoError(t, err)
+	require.Equal(t, 1, rep.TasksUnresolved)
+	require.Equal(t, 1, rep.UnresolvedVectors)
+	require.Equal(t, "unresolved", cleanupState(t, client, revOld))
+
+	makeCleanupsDue(t, client)
+	rep, err = sweeper.SweepOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.TasksDeferred)
+	require.Equal(t, "verifying", cleanupState(t, client, revOld))
+
+	makeCleanupsDue(t, client)
 	rep, err = sweeper.SweepOnce(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 1, rep.TasksCompleted)
 	require.Empty(t, idx.idsInNamespace(""))
+	require.Zero(t, manifestCount(t, client, revOld))
 
 	docManUUID, docLegUUID := uuid.NewString(), uuid.NewString()
 	docMan := domain.DocumentID(docManUUID)
@@ -580,6 +651,17 @@ func TestHostedVectorSweeperPodResidueConvergenceAndReaderVisibilityGate(t *test
 	activeChunkID := uuid.NewString()
 	staleChunkID := uuid.NewString()
 	legacyChunkID := uuid.NewString()
+	// Evidence is admitted only when the vector hit matches a stored chunk of a
+	// completed document, so every vector has its chunk row. The stale vector's
+	// chunk exists too: only the active-revision gate may exclude it.
+	for _, c := range []struct{ id, doc, text string }{
+		{activeChunkID, docManUUID, "ACTIVE REVISION SECRET PHRASE"},
+		{staleChunkID, docManUUID, "STALE SUPPRESSED PHRASE"},
+		{legacyChunkID, docLegUUID, "LEGACY ACTIVE PHRASE"},
+	} {
+		_, insertErr := client.Pool.Exec(t.Context(), `INSERT INTO chunks (id, document_id, chunk_index, text, token_count) VALUES ($1, $2, 0, $3, 3)`, c.id, c.doc, c.text)
+		require.NoError(t, insertErr)
+	}
 	idx.flushLateWrite("", domain.FormatRevisionVectorID(docMan, revA, 0), []float32{1, 0, 0, 0}, map[string]any{
 		"doc_id": docManUUID, "revision_id": revA, "chunk_id": activeChunkID, "chunk_index": 0, "collection": "archive", "text": "ACTIVE REVISION SECRET PHRASE",
 	})

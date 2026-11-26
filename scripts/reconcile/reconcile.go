@@ -5,20 +5,27 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
+	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 )
 
 type vectorRef struct {
-	ID    string
-	DocID string
+	ID         string
+	DocID      string
+	RevisionID string
 }
 
 type documentState struct {
-	Status string
-	HasJob bool
+	Status           string
+	HasJob           bool
+	ActiveRevision   string
+	PendingRevisions map[string]bool
+	TrackedRevisions map[string]bool
 }
 
 type documentLookup func(context.Context, []string) (map[string]documentState, error)
@@ -31,9 +38,16 @@ type vectorIndex interface {
 }
 
 type report struct {
-	OrphanVectors    int      `json:"orphan_vectors"`
-	OrphanNamespaces int      `json:"orphan_namespaces"`
-	Sample           []string `json:"sample"`
+	OrphanVectors       int      `json:"orphan_vectors"`
+	OrphanNamespaces    int      `json:"orphan_namespaces"`
+	RetiredRevisions    int      `json:"retired_revisions,omitempty"`
+	RetiredVectors      int      `json:"retired_vectors,omitempty"`
+	UnresolvedRevisions int      `json:"unresolved_revisions,omitempty"`
+	UnresolvedVectors   int      `json:"unresolved_vectors,omitempty"`
+	SweptRevisions      int      `json:"swept_revisions,omitempty"`
+	SweptVectors        int      `json:"swept_vectors,omitempty"`
+	SweepError          string   `json:"sweep_error,omitempty"`
+	Sample              []string `json:"sample"`
 }
 
 func selectOrphanVectors(refs []vectorRef, states map[string]documentState, limit int) []string {
@@ -43,8 +57,22 @@ func selectOrphanVectors(refs []vectorRef, states map[string]documentState, limi
 			break
 		}
 		id, err := uuid.Parse(ref.DocID)
-		state, exists := states[id.String()]
-		if err != nil || !exists || (state.Status == "failed" && !state.HasJob) {
+		if err != nil {
+			ids = append(ids, ref.ID)
+			continue
+		}
+		state, hasState := states[id.String()]
+		exists := hasState && state.Status != ""
+		if ref.RevisionID != "" {
+			if hasState && (state.ActiveRevision == ref.RevisionID || state.PendingRevisions[ref.RevisionID] || state.TrackedRevisions[ref.RevisionID]) {
+				continue
+			}
+			if !exists || (state.Status == "failed" && !state.HasJob) || state.ActiveRevision != "" {
+				ids = append(ids, ref.ID)
+			}
+			continue
+		}
+		if !exists || (state.Status == "failed" && !state.HasJob) {
 			ids = append(ids, ref.ID)
 		}
 	}
@@ -64,7 +92,7 @@ func selectOrphanNamespaces(counts map[string]uint32, states map[string]document
 		if err != nil {
 			continue
 		}
-		if _, exists := states[id.String()]; exists {
+		if _, exists := states[id.String()]; exists && states[id.String()].Status != "" {
 			continue
 		}
 		cost := max(uint64(counts[name]), 1)
@@ -79,6 +107,9 @@ func selectOrphanNamespaces(counts map[string]uint32, states map[string]document
 
 func reconcile(ctx context.Context, idx vectorIndex, deleteNamespace func(context.Context, string) error, lookup documentLookup, opts options, warnings io.Writer) (report, error) {
 	result := report{Sample: []string{}}
+	if opts.Limit <= 0 {
+		return result, nil
+	}
 	stats, err := idx.DescribeIndexStats(ctx)
 	if err != nil {
 		return result, fmt.Errorf("describe index statistics: %w", err)
@@ -197,7 +228,9 @@ func fetchReferences(ctx context.Context, idx vectorIndex, ids []string) ([]vect
 		}
 		ref := vectorRef{ID: id}
 		if vector.Metadata != nil {
-			ref.DocID = vector.Metadata.GetFields()["doc_id"].GetStringValue()
+			fields := vector.Metadata.GetFields()
+			ref.DocID = fields["doc_id"].GetStringValue()
+			ref.RevisionID = fields["revision_id"].GetStringValue()
 		}
 		refs = append(refs, ref)
 	}
@@ -205,3 +238,74 @@ func fetchReferences(ctx context.Context, idx vectorIndex, ids []string) ([]vect
 }
 
 func listUnsupported(err error) bool { return pcstore.ListingUnsupported(err) }
+
+// retiredRevisionStore is the metadata that tracks hosted vector revisions
+// awaiting cleanup.
+type retiredRevisionStore interface {
+	domain.VectorManifestStore
+	ListPendingVectorCleanups(ctx context.Context, limit int) ([]domain.VectorCleanupTask, error)
+}
+
+// sweepSettings carries the deployment values that shape a retired-revision sweep.
+type sweepSettings struct {
+	DrainDelay time.Duration
+	WriteFence bool
+}
+
+// reconcileRevisions sweeps retired revisions when applying, then scans for
+// legacy orphans and reports both. Residue and a deferred provider failure are
+// outcomes of the sweep and appear in the report. Only a failure that aborts the
+// sweep, such as a claim or database error, stops the run.
+func reconcileRevisions(ctx context.Context, store retiredRevisionStore, checker domain.VectorPresenceChecker, idx vectorIndex,
+	deleteNamespace func(context.Context, string) error, lookup documentLookup, opts options, settings sweepSettings, warnings io.Writer) (report, error) {
+	var swept worker.SweepReport
+	if opts.Apply {
+		sweeper := worker.NewSweeper(store, checker, worker.SweepOptions{
+			Owner:            "reconcile-cli",
+			Lease:            2 * time.Minute,
+			PageSize:         opts.Page,
+			Budget:           opts.Limit,
+			ConvergenceDelay: 0,
+			DrainDelay:       settings.DrainDelay,
+			HasWriteFence:    settings.WriteFence,
+		})
+		var sweepErr error
+		swept, sweepErr = sweeper.SweepOnce(ctx)
+		if sweepErr != nil && !isUndefinedTable(sweepErr) {
+			return report{Sample: []string{}}, sweepErr
+		}
+	}
+	scanOpts := opts
+	if opts.Apply {
+		scanOpts.Limit = max(opts.Limit-swept.VectorsDeleted, 0)
+	}
+	result, err := reconcile(ctx, idx, deleteNamespace, lookup, scanOpts, warnings)
+	if err != nil {
+		return result, err
+	}
+	result.SweptRevisions = swept.TasksCompleted
+	result.SweptVectors = swept.VectorsDeleted
+	result.SweepError = swept.LastError
+	cleanups, listErr := store.ListPendingVectorCleanups(ctx, opts.Limit)
+	if listErr != nil {
+		if isUndefinedTable(listErr) {
+			return result, nil
+		}
+		return result, listErr
+	}
+	for _, task := range cleanups {
+		rem := max(len(task.VectorIDs)-task.NextOffset, 0)
+		result.RetiredRevisions++
+		result.RetiredVectors += rem
+		if task.State == "unresolved" {
+			// Verification found residue after every recorded ID was deleted, so
+			// the cursor is at its end. Every recorded vector stays unverified.
+			result.UnresolvedRevisions++
+			result.UnresolvedVectors += len(task.VectorIDs)
+		}
+		if len(result.Sample) < 20 {
+			result.Sample = append(result.Sample, "retired:"+task.RevisionID)
+		}
+	}
+	return result, nil
+}

@@ -168,6 +168,18 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 		return ctx.Err()
 	}
 
+	if ic.RevisionID != "" {
+		for i := range ic.Chunks {
+			ic.Chunks[i].RevisionID = ic.RevisionID
+			ic.Chunks[i].VectorID = domain.FormatRevisionVectorID(ic.DocumentID, ic.RevisionID, ic.Chunks[i].Index)
+		}
+		if ic.PersistManifest != nil {
+			if err := ic.PersistManifest(ctx, ic.Chunks); err != nil {
+				return fmt.Errorf("persist_stage: manifest: %w", err)
+			}
+		}
+	}
+
 	// Upsert vectors to the default namespace with doc_id metadata.
 	var probe domain.VisibilityProbe
 	upsert := func(ctx context.Context) error {
@@ -248,8 +260,11 @@ func (s *PersistStage) sampleProbe(ic *IngestContext, target domain.Chunk, topK 
 		for _, chunk := range chunks {
 			revision, _ := chunk.Chunk.Metadata[domain.VectorRevisionKey].(string)
 			attempt, _ := chunk.Chunk.Metadata[domain.VectorAttemptKey].(string)
-			if chunk.Chunk.ID == target.ID && revision == ic.VectorRevision && attempt == ic.VectorAttempt &&
-				chunk.Chunk.VectorIncarnation == target.VectorIncarnation {
+			if chunk.Chunk.ID == target.ID &&
+				revision == ic.VectorRevision &&
+				attempt == ic.VectorAttempt &&
+				chunk.Chunk.VectorIncarnation == target.VectorIncarnation &&
+				(target.RevisionID == "" || chunk.Chunk.RevisionID == target.RevisionID) {
 				return domain.VisibilitySampleSeen, nil
 			}
 		}

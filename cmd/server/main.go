@@ -90,6 +90,7 @@ func run() error {
 			slog.Error("close postgres", "error", closeErr)
 		}
 	}()
+	pgClient.EnableHostedVectorManifests(cfg.HostedVectorManifest)
 	if migrationErr := pgClient.RunMigrations(startupCtx); migrationErr != nil {
 		return fmt.Errorf("startup: migrations: %w", migrationErr)
 	}
@@ -230,7 +231,8 @@ func run() error {
 		}
 		textDetector = detector
 	}
-	w := worker.New(pgClient, ingestStages, vecDeleter, worker.Options{FixtureVectorIdentity: fixtureVectorIdentity, Metrics: serviceMetrics, Workers: cfg.IngestWorkers, MaxAttempts: cfg.IngestMaxAttempts, Lease: cfg.IngestLease, JobTimeout: cfg.IngestJobTimeout, PollInterval: cfg.IngestPollInterval, Owner: hostname + "-" + uuid.NewString(), OCR: textDetector})
+	owner := hostname + "-" + uuid.NewString()
+	w := worker.New(pgClient, ingestStages, vecDeleter, worker.Options{FixtureVectorIdentity: fixtureVectorIdentity, HostedVectorManifest: cfg.HostedVectorManifest, Metrics: serviceMetrics, Workers: cfg.IngestWorkers, MaxAttempts: cfg.IngestMaxAttempts, Lease: cfg.IngestLease, JobTimeout: cfg.IngestJobTimeout, PollInterval: cfg.IngestPollInterval, Owner: owner, OCR: textDetector})
 	w.Start(ctx)
 	defer func() {
 		shutdownCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
@@ -239,6 +241,29 @@ func run() error {
 			slog.Error("worker shutdown", "error", shutdownErr)
 		}
 	}()
+	if cfg.HostedVectorManifest && cfg.HostedVectorSweepInterval > 0 {
+		if checker, ok := vectorStore.(domain.VectorPresenceChecker); ok {
+			sweeper := worker.NewSweeper(pgClient, checker, worker.SweepOptions{
+				Owner:            owner,
+				Lease:            cfg.IngestLease,
+				PollInterval:     cfg.HostedVectorSweepInterval,
+				PageSize:         cfg.HostedVectorSweepPageSize,
+				Budget:           cfg.HostedVectorSweepBudget,
+				ConvergenceDelay: cfg.HostedVectorConvergenceDelay,
+				DrainDelay:       cfg.HostedVectorDrainDelay,
+				HasWriteFence:    cfg.IndexVisibilityMode == "lsn",
+				Metrics:          serviceMetrics,
+			})
+			sweeper.Start(ctx)
+			defer func() {
+				shutdownCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
+				defer stop()
+				if shutdownErr := sweeper.ShutdownContext(shutdownCtx); shutdownErr != nil {
+					slog.Error("vector sweeper shutdown", "error", shutdownErr)
+				}
+			}()
+		}
+	}
 
 	// Build HTTP router.
 	probes := handler.NewProbes(vectorStore, pgClient, s3Client, cfg.HealthCacheTTL)
