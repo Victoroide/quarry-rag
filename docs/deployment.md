@@ -448,15 +448,36 @@ the login and privilege requirements.
    bypassing the freeze:
 
    1. Thaw writers: `make reindex ARGS="-thaw -apply"`.
-   2. For each reported document ID, repeat the deletion with its saved
-      incarnation via `X-Document-Incarnation`, `Client.DeleteDocumentIncarnation`,
-      or `make cleanup IDS="<document-uuid>@<incarnation-uuid>"`. Because
-      status endpoints return `404` once a document enters `deleting` or its row
-      is gone, use the incarnation recorded before deletion or inspect the open
-      receipt in `document_deletions` when recovering an abandoned deletion or
-      an unfinished legacy reservation whose document row is already gone.
-   3. Freeze writers again:
-      `make reindex ARGS="-freeze -apply -generation <name>"`.
+   2. Run `make cleanup IDS="--list-held"` and find each reported
+      `document_id`. Use the recorded `incarnation` and confirm it matches the
+      incarnation saved before deletion, if available. Use `document_present`
+      to decide how to finish the receipt. The status endpoint returns `404`
+      both for a hidden `deleting` row and for an absent row.
+
+      - If `document_present=true`, repeat the deletion with the saved
+        incarnation via `X-Document-Incarnation`,
+        `Client.DeleteDocumentIncarnation`, or
+        `make cleanup IDS="<document-uuid>@<incarnation-uuid>"`.
+      - If `document_present=false` and the receipt is an unfinished
+        `legacy_reservation`, a qualified retry returns `404` when checkpointed
+        deletion is active. Follow [Quarantine and Hold Release](#quarantine-and-hold-release)
+        to pause affected mutators, including pre-upgrade processes, and verify
+        settlement in the original backend. Confirm that no claim is active and
+        that the configured backend and source match the receipt before running
+        `make cleanup IDS="--release-held <document-uuid> <incarnation-uuid>"`
+        with the permissions and credentials for that backend and source. The
+        existing receipt already reserves the UUID. Use `--quarantine` only
+        for an absent UUID that requires quarantine, as described in that
+        procedure.
+      - If the identity differs, the receipt is missing, or the absent row
+        has an unsupported open receipt, stop and investigate before taking
+        any recovery action.
+
+      A finalized quarantine hold can still prevent UUID reuse while allowing
+      reindex to proceed.
+   3. After finishing the reported open receipts, freeze writers again with
+      `make reindex ARGS="-freeze -apply -generation <name>"`. If the report
+      lists more open receipts, repeat recovery before resuming catch-up.
 5. Start staging again from the beginning and finish catch-up. Verify with declared
    thresholds and `-apply` to record the result, then activate. Verification and
    activation fail if anything changed after the catch-up. For different embedding

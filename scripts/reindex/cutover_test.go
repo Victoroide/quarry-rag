@@ -528,6 +528,82 @@ func TestFreezeReportsOpenDeletionReceiptsAndRecoversAfterQualifiedRetry(t *test
 	require.False(t, hasIDs)
 }
 
+func TestFreezeRecoversAfterReleaseOfRowGoneLegacyReservation(t *testing.T) {
+	f := newFixture(t)
+	h := newHarness(t, f, "pinecone")
+	ctx := t.Context()
+	target := newDoc("alpha", "report", "Original stored in the source bucket.")
+	target.Incarnation = uuid.NewString()
+	target.S3Key = "originals/" + target.ID + "/source.txt"
+	const sourceBucket = "originals"
+	_, vectorIndex := h.deps.cfg.VectorTarget()
+	insertDoc(t, f.pg, target)
+	_, err := f.pg.Pool.Exec(ctx, `INSERT INTO document_deletions
+		(document_id,incarnation,kind,source_key,source_bucket,vector_mode,vector_index,step,held,finalized)
+		VALUES($1,$2,'legacy_reservation',$3,$4,'legacy',$5,0,TRUE,FALSE)`,
+		target.ID, target.Incarnation, target.S3Key, sourceBucket, vectorIndex)
+	require.NoError(t, err)
+	// An older executable removed the document while the reservation was still open.
+	removed, err := f.pg.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, target.ID)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, removed.RowsAffected())
+	_, err = f.pg.Pool.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	require.NoError(t, err)
+
+	freeze := options{Generation: "g2", Freeze: true, Apply: true, Quiesce: 0}
+	h.requireFreezeBlockedByDeletion(freeze, target.ID)
+	_, err = h.run(options{Thaw: true, Apply: true})
+	require.NoError(t, err)
+	require.NoError(t, f.pg.WritersOpen(ctx))
+
+	err = f.pg.DeleteWithCleanup(ctx, domain.DocumentID(target.ID), domain.DeleteOperations{
+		ExpectedIncarnation: target.Incarnation,
+	})
+	require.ErrorIs(t, err, domain.ErrDocumentNotFound)
+
+	held, err := f.pg.ListHeldDeletions(ctx)
+	require.NoError(t, err)
+	require.Len(t, held, 1)
+	receipt := held[0]
+	require.Equal(t, domain.DocumentID(target.ID), receipt.DocumentID)
+	require.Equal(t, target.Incarnation, receipt.Incarnation)
+	require.Equal(t, "legacy_reservation", receipt.Kind)
+	require.Equal(t, "legacy", receipt.VectorMode)
+	require.Equal(t, vectorIndex, receipt.VectorIndex)
+	require.Equal(t, sourceBucket, receipt.SourceBucket)
+	require.Equal(t, target.S3Key, receipt.SourceKey)
+	require.True(t, receipt.Held)
+	require.False(t, receipt.Finalized)
+	require.False(t, receipt.DocumentPresent)
+	require.False(t, receipt.Claimed)
+
+	var deletedKeys []string
+	require.NoError(t, f.pg.ReleaseHeldDeletion(ctx, receipt.DocumentID, receipt.Incarnation, domain.DeleteOperations{
+		SourceBucket: sourceBucket,
+		VectorIndex:  vectorIndex,
+		Source: func(_ context.Context, key string) error {
+			deletedKeys = append(deletedKeys, key)
+			return nil
+		},
+	}))
+	require.Equal(t, []string{target.S3Key}, deletedKeys)
+	var finalized, stillHeld bool
+	require.NoError(t, f.pg.Pool.QueryRow(ctx, `SELECT finalized, held FROM document_deletions
+		WHERE document_id=$1 AND incarnation=$2`, target.ID, target.Incarnation).Scan(&finalized, &stillHeld))
+	require.True(t, finalized)
+	require.False(t, stillHeld)
+	held, err = f.pg.ListHeldDeletions(ctx)
+	require.NoError(t, err)
+	require.Empty(t, held)
+
+	report, err := h.run(freeze)
+	require.NoError(t, err, "%v", report)
+	quiesce := report["quiesce"].(map[string]any)
+	require.EqualValues(t, 0, quiesce["OpenDeletions"])
+	require.NotContains(t, quiesce, "open_deletion_ids")
+	require.ErrorIs(t, f.pg.WritersOpen(ctx), domain.ErrWritersFrozen)
+}
+
 func TestActivateRefusesAndNamesOpenDeletionReceipts(t *testing.T) {
 	f := newFixture(t)
 	h := newHarness(t, f, "postgres")
