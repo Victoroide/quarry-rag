@@ -442,7 +442,7 @@ Run `go run ./scripts/citationsupport -input /path/to/calibration.json` and publ
 
 Moves completed documents to a new vector target, a vector generation, without changing document or chunk identities. PostgreSQL stays the source of truth: the command reads documents, chunks, document types and collections from it and never writes the `documents`, `chunks`, `document_fingerprints` or `ingest_jobs` tables. The [deployment guide](deployment.md#changing-models-or-vector-stores) gives the order of operations; this section is the command reference.
 
-Use the live deployment's `DATABASE_URL`, `VECTOR_STORE`, `VECTOR_GENERATION` and Pinecone settings to identify the source. For staging with model calls, configure the embedding provider for the target profile. The database must already have migration 016 and an active target binding. Without `-apply` every mode only reads. The command reports JSON on stdout and exits with a nonzero status on errors.
+Use the live deployment's `DATABASE_URL`, `VECTOR_STORE`, `VECTOR_GENERATION` and Pinecone settings to identify the source. For staging with model calls, configure the embedding provider for the target profile. The database must already have migration 016 and an active target binding. Without `-apply` every mode only reads. The command reports JSON on stdout and exits with a nonzero status on errors. See [vector reindex database privileges](deployment.md#vector-reindex-database-privileges) when running with a non-owner maintenance login.
 
 ```sh
 make reindex ARGS="-generation g2 -profile profile.json"
