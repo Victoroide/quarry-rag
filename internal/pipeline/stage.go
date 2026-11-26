@@ -96,6 +96,9 @@ type QueryContext struct {
 	HostedVisibilityExtraRequests int
 	// IncludeCitations asks synthesis for inline citation markers and verifies them.
 	IncludeCitations bool
+	// PreserveCode keeps Markdown code unchanged during citation cleanup and
+	// excludes bracketed numbers inside it from citation checks.
+	PreserveCode bool
 	// RequireCitationScope pins current evidence for semantic citation assessment.
 	RequireCitationScope bool
 	// AllowedDocumentIDs, when non-nil, restricts retrieved chunks to this
