@@ -134,50 +134,70 @@ func (f *GenerationFence) ClearActiveCleanup(ctx context.Context, epoch time.Tim
 	return nil
 }
 
-// RequireAcknowledged checks that no preceding operation lost its response.
-// The operator may clear an uncertain write once the target has drained it.
-func (f *GenerationFence) RequireAcknowledged(ctx context.Context, confirmedDrained bool) error {
+// RequireAcknowledged blocks staging until an operator confirms settlement of
+// the write currently recorded for this generation.
+func (f *GenerationFence) RequireAcknowledged(ctx context.Context, confirmation uuid.UUID) error {
 	row, err := readGeneration(ctx, f.conn, f.name, "")
-	if err != nil || row == nil || !row.PendingWrite {
+	if err != nil {
 		return err
 	}
-	if !confirmedDrained {
-		return fmt.Errorf("generation %q has an unconfirmed target write; resolve the outstanding request before resuming staging", f.name)
+	if row == nil || !row.PendingWrite {
+		if confirmation != uuid.Nil {
+			return fmt.Errorf("generation %q: stale confirmation for target write %s, as no write is pending", f.name, confirmation)
+		}
+		return nil
 	}
-	return f.acknowledge(ctx)
+	pending := row.PendingWriteID.UUID
+	if confirmation == uuid.Nil {
+		return fmt.Errorf("generation %q has an unconfirmed target write %s. Resolve it before resuming staging with -confirm-target-drained=%s", f.name, pending, pending)
+	}
+	if confirmation != pending {
+		return fmt.Errorf("generation %q: stale confirmation for target write %s. The pending write is %s (recovery: -confirm-target-drained=%s)", f.name, confirmation, pending, pending)
+	}
+	return f.acknowledge(ctx, pending)
 }
 
 // Write persists a barrier before dispatching a mutation and clears it only
-// when the target acknowledges it. Losing either connection leaves the barrier
-// visible to the next invocation, even after the advisory lock is released.
+// when the target acknowledges that write. If either response is lost, the
+// durable journal determines whether the next invocation can proceed.
 func (f *GenerationFence) Write(ctx context.Context, write func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	tag, err := f.conn.Exec(ctx, `UPDATE vector_generations
- SET pending_write=TRUE, state='staging', corpus_digest=NULL, verification=NULL, verified_at=NULL, updated_at=NOW()
+	var writeID uuid.UUID
+	err := f.conn.QueryRow(ctx, `UPDATE vector_generations
+ SET pending_write=TRUE, pending_write_id=gen_random_uuid(),
+ state='staging', corpus_digest=NULL, verification=NULL, verified_at=NULL, updated_at=NOW()
  WHERE name=$1 AND NOT pending_write AND state IN ('staging','verified','retired')
- AND name <> (SELECT active_generation FROM vector_state)`, f.name)
-	if err != nil {
-		return fmt.Errorf("postgres: record target write: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
+ AND name <> (SELECT active_generation FROM vector_state)
+ RETURNING pending_write_id`, f.name).Scan(&writeID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("generation %q is missing, active or has an unconfirmed target write", f.name)
 	}
-	if writeErr := write(); writeErr != nil {
-		return writeErr
+	if err != nil {
+		return fmt.Errorf("postgres: record target write for generation %q: %w", f.name, err)
 	}
-	return f.acknowledge(ctx)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("generation %q: dispatch target write %s: %w", f.name, writeID, err)
+	}
+	if err := write(); err != nil {
+		return fmt.Errorf("generation %q: target write %s: %w", f.name, writeID, err)
+	}
+	return f.acknowledge(ctx, writeID)
 }
 
-func (f *GenerationFence) acknowledge(ctx context.Context) error {
-	tag, err := f.conn.Exec(ctx, `UPDATE vector_generations SET pending_write=FALSE
- WHERE name=$1 AND pending_write AND name <> (SELECT active_generation FROM vector_state)`, f.name)
+func (f *GenerationFence) acknowledge(ctx context.Context, writeID uuid.UUID) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("postgres: acknowledge target write %s for generation %q: %w", writeID, f.name, err)
+	}
+	tag, err := f.conn.Exec(ctx, `UPDATE vector_generations SET pending_write=FALSE, pending_write_id=NULL
+ WHERE name=$1 AND pending_write AND pending_write_id=$2 AND state IN ('staging','verified','retired')
+ AND name <> (SELECT active_generation FROM vector_state)`, f.name, writeID)
 	if err != nil {
-		return fmt.Errorf("postgres: acknowledge target write: %w", err)
+		return fmt.Errorf("postgres: acknowledge target write %s for generation %q: %w", writeID, f.name, err)
 	}
 	if tag.RowsAffected() != 1 {
-		return errors.New("postgres: target write lost its generation")
+		return fmt.Errorf("postgres: target write %s is no longer pending for an eligible generation %q", writeID, f.name)
 	}
 	return nil
 }

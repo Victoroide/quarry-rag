@@ -844,9 +844,9 @@ func TestSourceCorpusSkipsDocumentsBeingDeleted(t *testing.T) {
 
 func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
 	c := migrationTestClient(t, startTestDatabase(t))
-	// The current admission and claim paths need later migrations. Omit the
-	// vector state and its cleanup journal to exercise only the gate fallback.
-	applyMigrationsExcept(t, c, 16, 33)
+	// Admission and claims need later migrations. Omit the vector state
+	// and the migrations that extend its cleanup and generation journals.
+	applyMigrationsExcept(t, c, 16, 33, 41)
 	require.NoError(t, c.WritersOpen(t.Context()), "no record can freeze writers before migration 016")
 	accepted, err := c.AcceptDocument(t.Context(), jobsRequest("accepted before the generation records exist"))
 	require.NoError(t, err)

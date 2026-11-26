@@ -135,7 +135,7 @@ func schemaColumnBaseline(index int) float64 {
 }
 
 func dataModel() diagram {
-	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", MaxW: 840, MaxH: 2200,
+	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", MaxW: 840, MaxH: 2220,
 		Description: "Data model. The chunks, document_fingerprints, ingest_jobs, document_pdf_extractions and hosted_vector_revisions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. The vector_generations table records each vector target and its embedding profile, vector_generation_documents holds the per-document write ledger of a generation and references vector_generations.name, and vector_state records the active generation, the writer freeze and any pending active cleanup reservation. The hosted_vector_manifests and hosted_vector_cleanups tables record write intents and retired vector tombstones independently of live document rows, so deletion and UUID reuse cannot drop pending vector cleanup. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column."}
 	d.Nodes = []node{
 		{ID: "documents", Title: "documents", Columns: []column{
@@ -159,7 +159,7 @@ func dataModel() diagram {
 		{ID: "source_uploads", Title: "source_uploads", Columns: []column{
 			{"id", "UUID", "PK", ""}, {"document_id", "UUID", "", ""}, {"collection", "TEXT", "", ""}, {"bucket", "TEXT", "", ""}, {"object_key", "TEXT", "", ""}, {"state", "TEXT", "", ""}, {"version_id", "TEXT", "", ""}, {"acknowledged_at", "TIMESTAMPTZ", "", ""}, {"write_state", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"expires_at", "TIMESTAMPTZ", "", ""}, {"linked_document_id", "UUID", "FK", "documents.id"}, {"linked_at", "TIMESTAMPTZ", "", ""}, {"claim", "UUID", "", ""}, {"claim_until", "TIMESTAMPTZ", "", ""}, {"claimed_at", "TIMESTAMPTZ", "", ""}, {"checks", "INTEGER", "", ""}, {"last_checked_at", "TIMESTAMPTZ", "", ""}, {"next_check_at", "TIMESTAMPTZ", "", ""}, {"reason", "TEXT", "", ""}}},
 		{ID: "vector_generations", Title: "vector_generations", Columns: []column{
-			{"name", "TEXT", "PK", ""}, {"store", "TEXT", "", ""}, {"target", "TEXT", "", ""}, {"host", "TEXT", "", ""}, {"profile", "JSONB", "", ""}, {"profile_hash", "TEXT", "", ""}, {"profile_origin", "TEXT", "", ""}, {"state", "TEXT", "", ""}, {"corpus_digest", "TEXT", "", ""}, {"verification", "JSONB", "", ""}, {"verified_at", "TIMESTAMPTZ", "", ""}, {"ever_active", "BOOLEAN", "", ""}, {"pending_write", "BOOLEAN", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
+			{"name", "TEXT", "PK", ""}, {"store", "TEXT", "", ""}, {"target", "TEXT", "", ""}, {"host", "TEXT", "", ""}, {"profile", "JSONB", "", ""}, {"profile_hash", "TEXT", "", ""}, {"profile_origin", "TEXT", "", ""}, {"state", "TEXT", "", ""}, {"corpus_digest", "TEXT", "", ""}, {"verification", "JSONB", "", ""}, {"verified_at", "TIMESTAMPTZ", "", ""}, {"ever_active", "BOOLEAN", "", ""}, {"pending_write", "BOOLEAN", "", ""}, {"pending_write_id", "UUID", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "vector_generation_documents", Title: "vector_generation_documents", Columns: []column{
 			{"generation", "TEXT", "FK", "vector_generations.name"}, {"document_id", "UUID", "", ""}, {"source_revision", "TEXT", "", ""}, {"incarnation", "UUID", "", ""}, {"chunk_ids", "TEXT[]", "", ""}, {"complete", "BOOLEAN", "", ""}, {"copied", "INTEGER", "", ""}, {"embedded", "INTEGER", "", ""}, {"checkpointed_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "vector_state", Title: "vector_state", Columns: []column{{"singleton", "BOOLEAN", "PK", ""}, {"active_generation", "TEXT", "", ""}, {"active_profile_hash", "TEXT", "", ""}, {"frozen", "BOOLEAN", "", ""}, {"frozen_at", "TIMESTAMPTZ", "", ""}, {"freeze_generation", "TEXT", "", ""}, {"legacy_store", "TEXT", "", ""}, {"legacy_target", "TEXT", "", ""}, {"legacy_host", "TEXT", "", ""}, {"active_cleanup_ids", "TEXT[]", "", ""}, {"active_cleanup_reservation", "UUID", "", ""}}},
@@ -187,7 +187,7 @@ func dataModel() diagram {
 		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {484, v.y}}})
 	}
 	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs", "documents-pdf-extractions", "documents-evaluation", "documents-uploads", "documents-hosted-vector-revisions"})
-	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 2172, Size: sublabelSize, Kind: "muted"}}
+	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 2190, Size: sublabelSize, Kind: "muted"}}
 	return d
 }
 
