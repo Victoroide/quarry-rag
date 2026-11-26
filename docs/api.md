@@ -398,8 +398,9 @@ decoded-stream budget in the
 and progressive JPEG images with `DCTDecode` as the only filter (optionally with
 `ColorTransform` 0 or 1), 8-bit samples and one, three or four components are
 checked without decoding pixels: Quarry verifies the marker structure through
-the end-of-image marker and requires the frame's dimensions and components to
-match the image dictionary. Device, indexed (non-JPEG) and ICC-based color
+the end-of-image marker—skipping bounded runs of extraneous non-marker bytes
+between segments (up to 64 bytes per gap and 256 bytes per image)—and requires
+the frame's dimensions and components to match the image dictionary. Device, indexed (non-JPEG) and ICC-based color
 spaces with one, three or four components are supported. Inline images, JPEG in
 encrypted PDFs, arithmetic, lossless, hierarchical and 12-bit JPEG, JPEG 2000,
 JBIG2, CCITT and other unverifiable streams return an extraction error before
