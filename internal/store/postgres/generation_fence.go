@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -57,6 +59,79 @@ func closeFenceConnection(ctx context.Context, conn *pgx.Conn) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	_ = conn.Close(cleanupCtx)
+}
+
+const activeCleanupEpoch = `singleton AND active_generation=$1 AND frozen
+ AND freeze_generation=$1 AND frozen_at=$2`
+
+// ActiveCleanupBatch identifies a single reservation of exact provider IDs.
+type ActiveCleanupBatch struct {
+	Reservation uuid.UUID
+	IDs         []string
+}
+
+// ActiveCleanupBatch reads the unresolved batch for the held freeze, if any.
+func (f *GenerationFence) ActiveCleanupBatch(ctx context.Context, epoch time.Time) (*ActiveCleanupBatch, error) {
+	var batch ActiveCleanupBatch
+	var reservation uuid.NullUUID
+	if err := f.conn.QueryRow(ctx, `SELECT active_cleanup_ids, active_cleanup_reservation FROM vector_state WHERE `+activeCleanupEpoch,
+		f.name, epoch).Scan(&batch.IDs, &reservation); err != nil {
+		return nil, fmt.Errorf("postgres: read active cleanup journal under the pinned freeze: %w", err)
+	}
+	if !reservation.Valid {
+		return nil, nil
+	}
+	batch.Reservation = reservation.UUID
+	return &batch, nil
+}
+
+// ReserveActiveCleanup commits an exact batch before the caller contacts Pinecone.
+func (f *GenerationFence) ReserveActiveCleanup(ctx context.Context, epoch time.Time, target, host string, profile domain.EmbeddingProfile, ids []string) (uuid.UUID, error) {
+	if err := ctx.Err(); err != nil {
+		return uuid.Nil, err
+	}
+	if len(ids) < 1 || len(ids) > 1000 {
+		return uuid.Nil, errors.New("postgres: reserve between 1 and 1000 active cleanup IDs")
+	}
+	tx, err := f.conn.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: start active cleanup reservation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var reservation uuid.UUID
+	err = tx.QueryRow(ctx, `UPDATE vector_state SET active_cleanup_ids=$3, active_cleanup_reservation=gen_random_uuid()
+ WHERE `+activeCleanupEpoch+` AND active_cleanup_reservation IS NULL RETURNING active_cleanup_reservation`,
+		f.name, epoch, ids).Scan(&reservation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, errors.New("postgres: active cleanup freeze changed or a batch is already pending")
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: reserve active cleanup: %w", err)
+	}
+	// The UPDATE holds the singleton lock before this binding check.
+	if err := checkActiveVectorBinding(ctx, tx, f.name, "pinecone", target, host, profile.Hash()); err != nil {
+		return uuid.Nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: commit active cleanup reservation: %w", err)
+	}
+	return reservation, nil
+}
+
+// ClearActiveCleanup clears only the acknowledged or externally settled batch.
+func (f *GenerationFence) ClearActiveCleanup(ctx context.Context, epoch time.Time, reservation uuid.UUID, ids []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tag, err := f.conn.Exec(ctx, `UPDATE vector_state SET active_cleanup_ids=NULL, active_cleanup_reservation=NULL
+ WHERE `+activeCleanupEpoch+` AND active_cleanup_reservation=$3 AND active_cleanup_ids=$4`, f.name, epoch, reservation, ids)
+	if err != nil {
+		return fmt.Errorf("postgres: clear active cleanup: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("postgres: active cleanup freeze or recorded batch changed")
+	}
+	return nil
 }
 
 // RequireAcknowledged checks that no preceding operation lost its response.

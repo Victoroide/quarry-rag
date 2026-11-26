@@ -1,6 +1,6 @@
 {
   "Width": 840,
-  "Height": 2140,
+  "Height": 2176,
   "Nodes": {
     "documents": {
       "X": 16,
@@ -58,7 +58,7 @@
     },
     "vector_generations": {
       "X": 16,
-      "Y": 1392,
+      "Y": 1428,
       "W": 352,
       "H": 312
     },
@@ -72,7 +72,7 @@
       "X": 16,
       "Y": 1180,
       "W": 352,
-      "H": 204
+      "H": 240
     },
     "hosted_vector_revisions": {
       "X": 484,
@@ -88,7 +88,7 @@
     },
     "hosted_vector_cleanups": {
       "X": 16,
-      "Y": 1712,
+      "Y": 1748,
       "W": 352,
       "H": 366
     }

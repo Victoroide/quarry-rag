@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 2140" role="img" fill="#1f2328">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 2176" role="img" fill="#1f2328">
 <title>PostgreSQL data model</title>
-<desc>Data model. The chunks, document_fingerprints, ingest_jobs, document_pdf_extractions and hosted_vector_revisions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. The vector_generations table records each vector target and its embedding profile, vector_generation_documents holds the per-document write ledger of a generation and references vector_generations.name, and vector_state records the active generation and the writer freeze. The hosted_vector_manifests and hosted_vector_cleanups tables record write intents and retired vector tombstones independently of live document rows, so deletion and UUID reuse cannot drop pending vector cleanup. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column. The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes.</desc>
+<desc>Data model. The chunks, document_fingerprints, ingest_jobs, document_pdf_extractions and hosted_vector_revisions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. The vector_generations table records each vector target and its embedding profile, vector_generation_documents holds the per-document write ledger of a generation and references vector_generations.name, and vector_state records the active generation, the writer freeze and any pending active cleanup reservation. The hosted_vector_manifests and hosted_vector_cleanups tables record write intents and retired vector tombstones independently of live document rows, so deletion and UUID reuse cannot drop pending vector cleanup. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column. The evaluation_fixtures table keeps receipt-qualified UUID reservations. Its active document reference restricts deletion until cleanup completes.</desc>
 <style>@keyframes n0{0%{opacity:0}0.385%{opacity:0}1.923%{opacity:1}15.886%{opacity:1}17.424%{opacity:0}18.173%{opacity:0}19.712%{opacity:1}22.788%{opacity:1}24.327%{opacity:0}28.565%{opacity:0}30.103%{opacity:1}33.18%{opacity:1}34.718%{opacity:0}43.571%{opacity:0}45.11%{opacity:1}48.187%{opacity:1}49.725%{opacity:0}62.315%{opacity:0}63.853%{opacity:1}66.93%{opacity:1}68.468%{opacity:0}100%{opacity:0}}@keyframes n1{0%{opacity:0}3.846%{opacity:0}5.385%{opacity:1}8.462%{opacity:1}10%{opacity:0}100%{opacity:0}}@keyframes n2{0%{opacity:0}9.732%{opacity:0}11.271%{opacity:1}14.348%{opacity:1}15.886%{opacity:0}100%{opacity:0}}@keyframes n3{0%{opacity:0}16.635%{opacity:0}18.173%{opacity:1}21.25%{opacity:1}22.788%{opacity:0}100%{opacity:0}}@keyframes n4{0%{opacity:0}27.026%{opacity:0}28.565%{opacity:1}31.641%{opacity:1}33.18%{opacity:0}100%{opacity:0}}@keyframes n7{0%{opacity:0}42.033%{opacity:0}43.571%{opacity:1}46.648%{opacity:1}48.187%{opacity:0}100%{opacity:0}}@keyframes n8{0%{opacity:0}60.776%{opacity:0}62.315%{opacity:1}65.391%{opacity:1}66.93%{opacity:0}100%{opacity:0}}@keyframes n13{0%{opacity:0}82.266%{opacity:0}83.805%{opacity:1}86.882%{opacity:1}88.42%{opacity:0}100%{opacity:0}}@keyframes e0{0%{opacity:0;stroke-dashoffset:13.25}0.385%{opacity:0;stroke-dashoffset:13.25}0.388%{opacity:1;stroke-dashoffset:13.25}3.458%{opacity:1;stroke-dashoffset:-129.25}3.462%{opacity:0;stroke-dashoffset:-129.25}3.465%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e1{0%{opacity:0;stroke-dashoffset:13.25}5.385%{opacity:0;stroke-dashoffset:13.25}5.388%{opacity:1;stroke-dashoffset:13.25}9.344%{opacity:1;stroke-dashoffset:-275.25}9.348%{opacity:0;stroke-dashoffset:-275.25}9.351%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e2{0%{opacity:0;stroke-dashoffset:13.25}11.271%{opacity:0;stroke-dashoffset:13.25}11.274%{opacity:1;stroke-dashoffset:13.25}16.246%{opacity:1;stroke-dashoffset:-349.25}16.25%{opacity:0;stroke-dashoffset:-349.25}16.254%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e3{0%{opacity:0;stroke-dashoffset:13.25}18.173%{opacity:0;stroke-dashoffset:13.25}18.177%{opacity:1;stroke-dashoffset:13.25}26.638%{opacity:1;stroke-dashoffset:-603.25}26.641%{opacity:0;stroke-dashoffset:-603.25}26.645%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e4{0%{opacity:0;stroke-dashoffset:13.25}28.565%{opacity:0;stroke-dashoffset:13.25}28.568%{opacity:1;stroke-dashoffset:13.25}41.645%{opacity:1;stroke-dashoffset:-939.25}41.648%{opacity:0;stroke-dashoffset:-939.25}41.652%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e5{0%{opacity:0;stroke-dashoffset:13.25}43.571%{opacity:0;stroke-dashoffset:13.25}43.575%{opacity:1;stroke-dashoffset:13.25}60.388%{opacity:1;stroke-dashoffset:-1211.25}60.391%{opacity:0;stroke-dashoffset:-1211.25}60.395%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@keyframes e6{0%{opacity:0;stroke-dashoffset:13.25}62.315%{opacity:0;stroke-dashoffset:13.25}62.318%{opacity:1;stroke-dashoffset:13.25}81.878%{opacity:1;stroke-dashoffset:-1411.25}81.882%{opacity:0;stroke-dashoffset:-1411.25}81.886%{opacity:0;stroke-dashoffset:13.25}100%{opacity:0;stroke-dashoffset:13.25}}@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>
 <defs>
 <path id="r2e" d="M144 6Q117 6 97 -13Q78 -32 78 -60Q78 -87 97 -106Q117 -125 144 -125Q171 -125 190 -106Q210 -87 210 -60Q210 -32 190 -13Q171 6 144 6"/>
@@ -494,7 +494,7 @@
 <path d="M0 0L8 3.5L0 7Z" fill="#8c959f"/>
 </marker>
 </defs>
-<rect class="background" x="0" y="0" width="840" height="2140" rx="14" fill="#ffffff"/>
+<rect class="background" x="0" y="0" width="840" height="2176" rx="14" fill="#ffffff"/>
 <g fill="none" stroke="#8c959f" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#arrow)">
 <path class="edge" d="M368 126L446 126Q452 126 452 132L452 132Q452 138 458 138L484 138"/>
 <path class="edge" d="M368 138L434 138Q440 138 440 144L440 290Q440 296 446 296L484 296"/>
@@ -523,12 +523,12 @@
 <rect class="node" x="484" y="818" width="340" height="74" rx="10"/>
 <rect class="node" x="484" y="900" width="340" height="132" rx="10"/>
 <rect class="node" x="484" y="1040" width="340" height="402" rx="10"/>
-<rect class="node" x="16" y="1392" width="352" height="312" rx="10"/>
+<rect class="node" x="16" y="1428" width="352" height="312" rx="10"/>
 <rect class="node" x="16" y="968" width="352" height="204" rx="10"/>
-<rect class="node" x="16" y="1180" width="352" height="204" rx="10"/>
+<rect class="node" x="16" y="1180" width="352" height="240" rx="10"/>
 <rect class="node" x="484" y="1572" width="340" height="294" rx="10"/>
 <rect class="node" x="484" y="1450" width="340" height="114" rx="10"/>
-<rect class="node" x="16" y="1712" width="352" height="366" rx="10"/>
+<rect class="node" x="16" y="1748" width="352" height="366" rx="10"/>
 </g>
 <g fill="#d4e8ff">
 <rect class="hit" x="17" y="79" width="350" height="580" rx="9" opacity="0" style="animation:n0 26s cubic-bezier(0.45,0,0.55,1) infinite"/>
@@ -564,12 +564,12 @@
 <path d="M484 860H824"/>
 <path d="M484 942H824"/>
 <path d="M484 1082H824"/>
-<path d="M16 1434H368"/>
+<path d="M16 1470H368"/>
 <path d="M16 1010H368"/>
 <path d="M16 1222H368"/>
 <path d="M484 1614H824"/>
 <path d="M484 1492H824"/>
-<path d="M16 1754H368"/>
+<path d="M16 1790H368"/>
 </g>
 <g>
 <g transform="translate(16 32) scale(0.014)">
@@ -1650,7 +1650,7 @@
 <use href="#r74" x="6386"/>
 </g>
 <use href="#run-30" x="548" y="1430"/>
-<g transform="translate(32 1413) scale(0.014)">
+<g transform="translate(32 1449) scale(0.014)">
 <use href="#s76"/>
 <use href="#s65" x="587"/>
 <use href="#s63" x="1178"/>
@@ -1670,20 +1670,20 @@
 <use href="#s6e" x="8204"/>
 <use href="#s73" x="8815"/>
 </g>
-<g transform="translate(80 1440) scale(0.012)">
+<g transform="translate(80 1476) scale(0.012)">
 <use href="#r6e"/>
 <use href="#r61" x="591"/>
 <use href="#r6d" x="1152"/>
 <use href="#r65" x="2028"/>
 </g>
-<g transform="translate(80 1458) scale(0.012)">
+<g transform="translate(80 1494) scale(0.012)">
 <use href="#r73"/>
 <use href="#r74" x="528"/>
 <use href="#r6f" x="855"/>
 <use href="#r72" x="1455"/>
 <use href="#r65" x="1831"/>
 </g>
-<g transform="translate(80 1476) scale(0.012)">
+<g transform="translate(80 1512) scale(0.012)">
 <use href="#r74"/>
 <use href="#r61" x="327"/>
 <use href="#r72" x="889"/>
@@ -1691,14 +1691,14 @@
 <use href="#r65" x="1878"/>
 <use href="#r74" x="2461"/>
 </g>
-<g transform="translate(80 1494) scale(0.012)">
+<g transform="translate(80 1530) scale(0.012)">
 <use href="#r68"/>
 <use href="#r6f" x="591"/>
 <use href="#r73" x="1191"/>
 <use href="#r74" x="1719"/>
 </g>
-<use href="#run-29" x="80" y="1512"/>
-<g transform="translate(80 1530) scale(0.012)">
+<use href="#run-29" x="80" y="1548"/>
+<g transform="translate(80 1566) scale(0.012)">
 <use href="#r70"/>
 <use href="#r72" x="612"/>
 <use href="#r6f" x="989"/>
@@ -1712,7 +1712,7 @@
 <use href="#r73" x="4635"/>
 <use href="#r68" x="5163"/>
 </g>
-<g transform="translate(80 1548) scale(0.012)">
+<g transform="translate(80 1584) scale(0.012)">
 <use href="#r70"/>
 <use href="#r72" x="612"/>
 <use href="#r6f" x="989"/>
@@ -1728,8 +1728,8 @@
 <use href="#r69" x="5314"/>
 <use href="#r6e" x="5556"/>
 </g>
-<use href="#run-34" x="80" y="1566"/>
-<g transform="translate(80 1584) scale(0.012)">
+<use href="#run-34" x="80" y="1602"/>
+<g transform="translate(80 1620) scale(0.012)">
 <use href="#r63"/>
 <use href="#r6f" x="571"/>
 <use href="#r72" x="1171"/>
@@ -1744,7 +1744,7 @@
 <use href="#r73" x="5786"/>
 <use href="#r74" x="6314"/>
 </g>
-<g transform="translate(80 1602) scale(0.012)">
+<g transform="translate(80 1638) scale(0.012)">
 <use href="#r76"/>
 <use href="#r65" x="562"/>
 <use href="#r72" x="1145"/>
@@ -1758,7 +1758,7 @@
 <use href="#r6f" x="4078"/>
 <use href="#r6e" x="4678"/>
 </g>
-<g transform="translate(80 1620) scale(0.012)">
+<g transform="translate(80 1656) scale(0.012)">
 <use href="#r76"/>
 <use href="#r65" x="562"/>
 <use href="#r72" x="1145"/>
@@ -1771,7 +1771,7 @@
 <use href="#r61" x="4027"/>
 <use href="#r74" x="4589"/>
 </g>
-<g transform="translate(80 1638) scale(0.012)">
+<g transform="translate(80 1674) scale(0.012)">
 <use href="#r65"/>
 <use href="#r76" x="583"/>
 <use href="#r65" x="1145"/>
@@ -1784,7 +1784,7 @@
 <use href="#r76" x="4263"/>
 <use href="#r65" x="4825"/>
 </g>
-<g transform="translate(80 1656) scale(0.012)">
+<g transform="translate(80 1692) scale(0.012)">
 <use href="#r70"/>
 <use href="#r65" x="612"/>
 <use href="#r6e" x="1195"/>
@@ -1799,8 +1799,8 @@
 <use href="#r74" x="5738"/>
 <use href="#r65" x="6065"/>
 </g>
-<use href="#run-18" x="80" y="1674"/>
-<use href="#run-35" x="80" y="1692"/>
+<use href="#run-18" x="80" y="1710"/>
+<use href="#run-35" x="80" y="1728"/>
 <g transform="translate(32 989) scale(0.014)">
 <use href="#s76"/>
 <use href="#s65" x="587"/>
@@ -2042,6 +2042,54 @@
 <use href="#r73" x="4780"/>
 <use href="#r74" x="5308"/>
 </g>
+<g transform="translate(80 1390) scale(0.012)">
+<use href="#r61"/>
+<use href="#r63" x="562"/>
+<use href="#r74" x="1133"/>
+<use href="#r69" x="1460"/>
+<use href="#r76" x="1702"/>
+<use href="#r65" x="2264"/>
+<use href="#r5f" x="2847"/>
+<use href="#r63" x="3303"/>
+<use href="#r6c" x="3875"/>
+<use href="#r65" x="4117"/>
+<use href="#r61" x="4700"/>
+<use href="#r6e" x="5261"/>
+<use href="#r75" x="5852"/>
+<use href="#r70" x="6443"/>
+<use href="#r5f" x="7056"/>
+<use href="#r69" x="7512"/>
+<use href="#r64" x="7754"/>
+<use href="#r73" x="8366"/>
+</g>
+<g transform="translate(80 1408) scale(0.012)">
+<use href="#r61"/>
+<use href="#r63" x="562"/>
+<use href="#r74" x="1133"/>
+<use href="#r69" x="1460"/>
+<use href="#r76" x="1702"/>
+<use href="#r65" x="2264"/>
+<use href="#r5f" x="2847"/>
+<use href="#r63" x="3303"/>
+<use href="#r6c" x="3875"/>
+<use href="#r65" x="4117"/>
+<use href="#r61" x="4700"/>
+<use href="#r6e" x="5261"/>
+<use href="#r75" x="5852"/>
+<use href="#r70" x="6443"/>
+<use href="#r5f" x="7056"/>
+<use href="#r72" x="7512"/>
+<use href="#r65" x="7888"/>
+<use href="#r73" x="8471"/>
+<use href="#r65" x="8999"/>
+<use href="#r72" x="9582"/>
+<use href="#r76" x="9959"/>
+<use href="#r61" x="10521"/>
+<use href="#r74" x="11082"/>
+<use href="#r69" x="11409"/>
+<use href="#r6f" x="11652"/>
+<use href="#r6e" x="12251"/>
+</g>
 <g transform="translate(500 1593) scale(0.014)">
 <use href="#s68"/>
 <use href="#s6f" x="612"/>
@@ -2137,7 +2185,7 @@
 <use href="#r64" x="7726"/>
 </g>
 <use href="#run-35" x="548" y="1552"/>
-<g transform="translate(32 1733) scale(0.014)">
+<g transform="translate(32 1769) scale(0.014)">
 <use href="#s68"/>
 <use href="#s6f" x="612"/>
 <use href="#s73" x="1221"/>
@@ -2161,14 +2209,14 @@
 <use href="#s70" x="10631"/>
 <use href="#s73" x="11255"/>
 </g>
-<use href="#run-32" x="80" y="1760"/>
-<use href="#run-19" x="80" y="1778"/>
-<use href="#run-23" x="80" y="1796"/>
-<use href="#run-17" x="80" y="1814"/>
-<use href="#run-37" x="80" y="1832"/>
-<use href="#run-22" x="80" y="1850"/>
-<use href="#run-36" x="80" y="1868"/>
-<g transform="translate(80 1886) scale(0.012)">
+<use href="#run-32" x="80" y="1796"/>
+<use href="#run-19" x="80" y="1814"/>
+<use href="#run-23" x="80" y="1832"/>
+<use href="#run-17" x="80" y="1850"/>
+<use href="#run-37" x="80" y="1868"/>
+<use href="#run-22" x="80" y="1886"/>
+<use href="#run-36" x="80" y="1904"/>
+<g transform="translate(80 1922) scale(0.012)">
 <use href="#r6e"/>
 <use href="#r65" x="591"/>
 <use href="#r78" x="1174"/>
@@ -2181,9 +2229,9 @@
 <use href="#r65" x="4371"/>
 <use href="#r74" x="4954"/>
 </g>
-<use href="#run-34" x="80" y="1904"/>
-<use href="#run-13" x="80" y="1922"/>
-<g transform="translate(80 1940) scale(0.012)">
+<use href="#run-34" x="80" y="1940"/>
+<use href="#run-13" x="80" y="1958"/>
+<g transform="translate(80 1976) scale(0.012)">
 <use href="#r63"/>
 <use href="#r6f" x="571"/>
 <use href="#r6e" x="1171"/>
@@ -2203,13 +2251,13 @@
 <use href="#r6b" x="8998"/>
 <use href="#r73" x="9546"/>
 </g>
-<use href="#run-24" x="80" y="1958"/>
-<use href="#run-25" x="80" y="1976"/>
-<use href="#run-26" x="80" y="1994"/>
-<use href="#run-27" x="80" y="2012"/>
-<use href="#run-28" x="80" y="2030"/>
-<use href="#run-31" x="80" y="2048"/>
-<use href="#run-30" x="80" y="2066"/>
+<use href="#run-24" x="80" y="1994"/>
+<use href="#run-25" x="80" y="2012"/>
+<use href="#run-26" x="80" y="2030"/>
+<use href="#run-27" x="80" y="2048"/>
+<use href="#run-28" x="80" y="2066"/>
+<use href="#run-31" x="80" y="2084"/>
+<use href="#run-30" x="80" y="2102"/>
 </g>
 <g fill="#59636e">
 <g transform="translate(16 56) scale(0.012)">
@@ -2246,7 +2294,7 @@
 <use href="#s59" x="22589"/>
 <use href="#s53" x="23363"/>
 </g>
-<g transform="translate(16 2118) scale(0.012)">
+<g transform="translate(16 2154) scale(0.012)">
 <use href="#r50"/>
 <use href="#r4b" x="639"/>
 <use href="#r3a" x="1311"/>
@@ -2408,21 +2456,21 @@
 <use id="table-label-222" href="#run-10" x="712" y="1394"/>
 <use id="table-label-224" href="#run-10" x="712" y="1412"/>
 <use id="table-label-226" href="#run-8" x="712" y="1430"/>
-<use href="#run-8" x="244" y="1440"/>
-<use href="#run-8" x="244" y="1458"/>
 <use href="#run-8" x="244" y="1476"/>
 <use href="#run-8" x="244" y="1494"/>
-<use href="#run-5" x="244" y="1512"/>
+<use href="#run-8" x="244" y="1512"/>
 <use href="#run-8" x="244" y="1530"/>
-<use href="#run-8" x="244" y="1548"/>
+<use href="#run-5" x="244" y="1548"/>
 <use href="#run-8" x="244" y="1566"/>
 <use href="#run-8" x="244" y="1584"/>
-<use href="#run-5" x="244" y="1602"/>
-<use href="#run-10" x="244" y="1620"/>
-<use href="#run-2" x="244" y="1638"/>
-<use href="#run-2" x="244" y="1656"/>
-<use href="#run-10" x="244" y="1674"/>
-<use href="#run-10" x="244" y="1692"/>
+<use href="#run-8" x="244" y="1602"/>
+<use href="#run-8" x="244" y="1620"/>
+<use href="#run-5" x="244" y="1638"/>
+<use href="#run-10" x="244" y="1656"/>
+<use href="#run-2" x="244" y="1674"/>
+<use href="#run-2" x="244" y="1692"/>
+<use href="#run-10" x="244" y="1710"/>
+<use href="#run-10" x="244" y="1728"/>
 <use href="#run-8" x="244" y="1016"/>
 <use href="#run-11" x="244" y="1034"/>
 <use href="#run-8" x="244" y="1052"/>
@@ -2441,6 +2489,8 @@
 <use href="#run-8" x="244" y="1336"/>
 <use href="#run-8" x="244" y="1354"/>
 <use href="#run-8" x="244" y="1372"/>
+<use href="#run-9" x="244" y="1390"/>
+<use href="#run-11" x="244" y="1408"/>
 <use href="#run-11" x="712" y="1620"/>
 <use href="#run-11" x="712" y="1638"/>
 <use href="#run-11" x="712" y="1656"/>
@@ -2462,28 +2512,28 @@
 <use href="#run-10" x="712" y="1818"/>
 <use href="#run-10" x="712" y="1836"/>
 <use href="#run-10" x="712" y="1854"/>
-<use id="table-label-332" href="#run-11" x="712" y="1498"/>
-<use id="table-label-334" href="#run-11" x="712" y="1516"/>
-<use id="table-label-337" href="#run-11" x="712" y="1534"/>
-<use id="table-label-339" href="#run-10" x="712" y="1552"/>
-<use href="#run-11" x="244" y="1760"/>
-<use href="#run-11" x="244" y="1778"/>
+<use id="table-label-336" href="#run-11" x="712" y="1498"/>
+<use id="table-label-338" href="#run-11" x="712" y="1516"/>
+<use id="table-label-341" href="#run-11" x="712" y="1534"/>
+<use id="table-label-343" href="#run-10" x="712" y="1552"/>
 <use href="#run-11" x="244" y="1796"/>
-<use href="#run-8" x="244" y="1814"/>
-<use href="#run-8" x="244" y="1832"/>
+<use href="#run-11" x="244" y="1814"/>
+<use href="#run-11" x="244" y="1832"/>
 <use href="#run-8" x="244" y="1850"/>
-<use href="#run-9" x="244" y="1868"/>
-<use href="#run-4" x="244" y="1886"/>
-<use href="#run-8" x="244" y="1904"/>
+<use href="#run-8" x="244" y="1868"/>
+<use href="#run-8" x="244" y="1886"/>
+<use href="#run-9" x="244" y="1904"/>
 <use href="#run-4" x="244" y="1922"/>
-<use href="#run-4" x="244" y="1940"/>
-<use href="#run-8" x="244" y="1958"/>
-<use href="#run-8" x="244" y="1976"/>
-<use href="#run-11" x="244" y="1994"/>
-<use href="#run-10" x="244" y="2012"/>
-<use href="#run-10" x="244" y="2030"/>
+<use href="#run-8" x="244" y="1940"/>
+<use href="#run-4" x="244" y="1958"/>
+<use href="#run-4" x="244" y="1976"/>
+<use href="#run-8" x="244" y="1994"/>
+<use href="#run-8" x="244" y="2012"/>
+<use href="#run-11" x="244" y="2030"/>
 <use href="#run-10" x="244" y="2048"/>
-<use href="#run-8" x="244" y="2066"/>
+<use href="#run-10" x="244" y="2066"/>
+<use href="#run-10" x="244" y="2084"/>
+<use href="#run-8" x="244" y="2102"/>
 <use href="#run-1" x="459.01" y="124"/>
 <use href="#run-1" x="459.01" y="282"/>
 <use href="#run-0" x="461.127" y="368"/>
@@ -2506,13 +2556,13 @@
 <use id="table-label-179" href="#run-3" x="496" y="1002"/>
 <use id="table-label-185" href="#run-6" x="496" y="1088"/>
 <use id="table-label-208" href="#run-3" x="496" y="1286"/>
-<use href="#run-6" x="28" y="1440"/>
+<use href="#run-6" x="28" y="1476"/>
 <use href="#run-3" x="28" y="1016"/>
 <use href="#run-6" x="28" y="1228"/>
 <use href="#run-6" x="496" y="1620"/>
-<use id="table-label-330" href="#run-7" x="496" y="1498"/>
-<use id="table-label-335" href="#run-3" x="496" y="1534"/>
-<use href="#run-7" x="28" y="1760"/>
+<use id="table-label-334" href="#run-7" x="496" y="1498"/>
+<use id="table-label-339" href="#run-3" x="496" y="1534"/>
+<use href="#run-7" x="28" y="1796"/>
 </g>
 <g class="ink" opacity="0" fill="#1f2328" style="animation:n0 26s cubic-bezier(0.45,0,0.55,1) infinite">
 <use href="#table-label-4"/>
@@ -2625,11 +2675,11 @@
 <use href="#table-label-226"/>
 </g>
 <g class="ink" opacity="0" fill="#1f2328" style="animation:n13 26s cubic-bezier(0.45,0,0.55,1) infinite">
-<use href="#table-label-330"/>
-<use href="#table-label-332"/>
 <use href="#table-label-334"/>
-<use href="#table-label-335"/>
-<use href="#table-label-337"/>
+<use href="#table-label-336"/>
+<use href="#table-label-338"/>
 <use href="#table-label-339"/>
+<use href="#table-label-341"/>
+<use href="#table-label-343"/>
 </g>
 </svg>

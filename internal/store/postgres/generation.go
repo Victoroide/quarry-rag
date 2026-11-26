@@ -412,8 +412,20 @@ WHERE a.attrelid = to_regclass(format('%I.chunk_vectors', current_schema()))
 		}
 	case legacyBindExisting:
 	}
+	profileHash := configured.Hash()
+	if err := checkActiveVectorBinding(ctx, tx, generation, store, target, host, profileHash); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	c.vectorPin.Store(&vectorPin{generation: generation, profileHash: profileHash})
+	return nil
+}
+
+func checkActiveVectorBinding(ctx context.Context, q queryRower, generation, store, target, host, profileHash string) error {
 	var active, activeHash, recordedStore, recordedTarget, recordedHost string
-	err = tx.QueryRow(ctx, `SELECT active, profile_hash, store, target, host FROM vector_writer_state()`).
+	err := q.QueryRow(ctx, `SELECT active, profile_hash, store, target, host FROM vector_writer_state()`).
 		Scan(&active, &activeHash, &recordedStore, &recordedTarget, &recordedHost)
 	if err != nil {
 		return fmt.Errorf("postgres: read active vector target: %w", err)
@@ -427,14 +439,9 @@ WHERE a.attrelid = to_regclass(format('%I.chunk_vectors', current_schema()))
 	if recordedStore != store || recordedTarget != target || recordedHost != host {
 		return fmt.Errorf("%w: generation %q targets %s %q (%s), configured %s %q (%s)", ErrGenerationDrift, generation, recordedStore, recordedTarget, recordedHost, store, target, host)
 	}
-	profileHash := configured.Hash()
 	if activeHash != "" && activeHash != profileHash {
 		return fmt.Errorf("%w: generation %q records profile %s, configured %s", ErrGenerationDrift, generation, activeHash, profileHash)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	c.vectorPin.Store(&vectorPin{generation: generation, profileHash: profileHash})
 	return nil
 }
 
