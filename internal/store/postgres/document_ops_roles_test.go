@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,9 @@ func TestScopedDocumentOperationsNeedOnlyDocumentedFunctionPrivileges(t *testing
 		"grant_catalog_list_documents(uuid,uuid,uuid,integer,text,boolean)",
 		"grant_catalog_get_document(uuid,uuid,uuid,boolean)",
 		"grant_catalog_authorize_file(uuid,uuid,uuid)",
+		"grant_catalog_authorize_file_advisory(uuid,uuid,uuid)",
+		"grant_catalog_lock_file_principal(uuid,uuid)",
+		"grant_catalog_file_principal_key(uuid,uuid)",
 		"grant_catalog_authorize_delete(uuid,uuid,uuid,uuid)",
 		"grant_catalog_record_deletion_owner(uuid,uuid,uuid,uuid)",
 	}
@@ -75,6 +79,39 @@ func TestScopedDocumentOperationsNeedOnlyDocumentedFunctionPrivileges(t *testing
 	require.NoError(t, err)
 	require.True(t, fileRes.Active && fileRes.Found)
 
+	grantExec(t, admin, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	fileRes, err = service.WithScopedDocumentFile(t.Context(), f.owner, req.Document.ID, func(ctx context.Context, _ string) error {
+		var held bool
+		lockErr := admin.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_locks
+			WHERE locktype='advisory' AND granted AND mode='ShareLock' AND objsubid=2
+			AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+			AND classid::bigint=$1 AND objid::bigint=(grant_catalog_file_principal_key($2,$3)::bigint & 4294967295))`,
+			scopedFilePrincipalLockClass, f.owner.TenantID, f.owner.ID).Scan(&held)
+		require.NoError(t, lockErr)
+		require.True(t, held)
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, fileRes.Active && fileRes.Found)
+	// An old serving replica can still call the row-locked function after migration and activation.
+	var active bool
+	var oldKey string
+	require.NoError(t, service.Pool.QueryRow(t.Context(), `SELECT active,s3_key FROM grant_catalog_authorize_file($1,$2,$3)`,
+		f.owner.TenantID, f.owner.ID, string(req.Document.ID)).Scan(&active, &oldKey))
+	require.True(t, active)
+	require.Equal(t, key, oldKey)
+	_, err = service.Pool.Exec(t.Context(), `SELECT grant_catalog_file_principal_key($1,$2)`, f.owner.TenantID, f.owner.ID)
+	require.Error(t, err)
+	_, err = operator.Pool.Exec(t.Context(), `SELECT grant_catalog_lock_file_principal($1,$2)`, f.owner.TenantID, f.owner.ID)
+	require.Error(t, err)
+	_, err = operator.Pool.Exec(t.Context(), `SELECT * FROM grant_catalog_authorize_file_advisory($1,$2,$3)`, f.owner.TenantID, f.owner.ID, string(req.Document.ID))
+	require.Error(t, err)
+	for _, table := range []string{"grant_catalog_principals", "grant_catalog_document_ownership", "grant_catalog_document_grants"} {
+		var permitted bool
+		require.NoError(t, service.Pool.QueryRow(t.Context(), `SELECT has_table_privilege($1,'SELECT,INSERT,UPDATE,DELETE')`, table).Scan(&permitted))
+		require.False(t, permitted, table)
+	}
+
 	rec := newDeletionRecorder()
 	ops := rec.ops(summary.Document.Incarnation)
 	ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
@@ -86,6 +123,32 @@ func TestScopedDocumentOperationsNeedOnlyDocumentedFunctionPrivileges(t *testing
 	// Operator login cannot invoke serving document-operation functions.
 	_, err = operator.ScopedPolicyState(t.Context(), f.owner)
 	require.Error(t, err, "operator logins cannot query serving policy state")
+
+	t.Run("alternate corpus schema", func(t *testing.T) {
+		grantExec(t, admin, `CREATE SCHEMA alternate_file_corpus`)
+		const path = `SET search_path TO alternate_file_corpus, public`
+		alternate := grantRoleClient(t, databaseURL, path)
+		require.NoError(t, alternate.RunMigrations(t.Context()))
+		grants := publishedServingSQL(t, roles, "grant-catalog.md", "GRANT USAGE ON SCHEMA public")
+		grantExec(t, alternate, strings.ReplaceAll(strings.ReplaceAll(grants, "public.", "alternate_file_corpus."),
+			"SCHEMA public", "SCHEMA alternate_file_corpus"))
+		f := provisionOwnedFixture(t, alternate)
+		id := domain.DocumentID(f.acceptOwned(t, f.owner, "", key))
+		grantExec(t, alternate, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+
+		alternateService := grantRoleClient(t, databaseURL, roles.sql("SET SESSION AUTHORIZATION {quarry_service}; "+path))
+		alternateOperator := grantRoleClient(t, databaseURL, roles.sql("SET SESSION AUTHORIZATION {quarry_operator}; "+path))
+		res, err := alternateService.WithScopedDocumentFile(t.Context(), f.owner, id, noopFileSign)
+		require.NoError(t, err)
+		require.True(t, res.Found)
+
+		changes := map[string]any{"principals": []grantEntry{grantPrincipal(f.tenant, f.owner.ID, "owner", false)}}
+		_, err = alternateOperator.Pool.Exec(t.Context(), `SELECT * FROM grant_catalog_import_batch($1,false)`, fileImportBody(t, f, changes))
+		require.NoError(t, err)
+		res, err = alternateService.WithScopedDocumentFile(t.Context(), f.owner, id, unexpectedScopedFileSignature)
+		require.NoError(t, err)
+		require.False(t, res.Active)
+	})
 }
 
 func TestScopedDeletionUpgradeWithUnsetMarker(t *testing.T) {

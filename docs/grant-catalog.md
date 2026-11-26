@@ -113,6 +113,8 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_authorize_ingest(uuid, uuid, text
   public.grant_catalog_list_documents(uuid, uuid, uuid, integer, text, boolean),
   public.grant_catalog_get_document(uuid, uuid, uuid, boolean),
   public.grant_catalog_authorize_file(uuid, uuid, uuid),
+  public.grant_catalog_lock_file_principal(uuid, uuid),
+  public.grant_catalog_authorize_file_advisory(uuid, uuid, uuid),
   public.grant_catalog_authorize_delete(uuid, uuid, uuid, uuid),
   public.grant_catalog_record_deletion_owner(uuid, uuid, uuid, uuid),
   public.grant_catalog_read_revision(uuid, uuid),
@@ -278,6 +280,17 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_create_document_set(uuid, uuid, i
   public.grant_catalog_purge_document_sets(integer) TO quarry_operator;
 ```
 
+Pause operator grant imports and let in-flight imports finish before applying
+`034_scoped_file_advisory.sql`. Apply the migration as schema owner, grant the
+following permissions, then deploy upgraded serving replicas. Operator imports
+can resume after the migration and keep their existing entry point. Keep the
+existing file authorization grant for older replicas and rollback.
+
+```sql
+GRANT EXECUTE ON FUNCTION public.grant_catalog_lock_file_principal(uuid, uuid),
+  public.grant_catalog_authorize_file_advisory(uuid, uuid, uuid) TO quarry_service;
+```
+
 After applying `037_inventory_policy_revisions.sql`, grant the serving login
 execution of the new inventory state function before starting upgraded
 processes. Keep execution of `grant_catalog_policy_state` for older replicas
@@ -375,9 +388,24 @@ unscoped stores (`503`).
   internal `last_error` messages on failed rows are mapped to a bounded public
   category (`no_text`, `ocr_result_expired`, `ocr_text_too_large`,
   `embedding_limit`, `no_chunks`, `ocr_failed` or `processing_failed`).
-- **Original-file signing:** Shared row locks verify active principal status
-  and ownership or `read` plus `download` grants directly before signing. The
-  requested presigned URL lifetime is the smaller of `900` seconds and the whole
+- **Original-file signing:** The store checks active principal status and
+  ownership or `read` plus `download` grants directly before signing. Before
+  checkpointed deletion is active, shared document and principal row locks
+  protect this check. Once active, signing takes shared advisory locks for
+  the document intent key and then the tenant/principal key. It reads
+  authorization in a fresh statement after both waits and holds the keys
+  through the commit of the mandatory allow audit. Checkpointed deletion takes
+  the document key exclusively. Grant imports take distinct affected principal
+  keys exclusively in sorted order before locking documents or policy revision.
+  A mutation that wins the key is visible to the subsequent signing check.
+  A mutation that waits for signing can take effect only after the signing
+  transaction ends. Already issued presigned addresses retain their original
+  expiry. The advisory path avoids authorization tuple-lock writes and their
+  multixacts, while the allow audit still writes WAL and commits. Apply
+  principal and grant changes through the operator import. For trusted
+  owner-only SQL that bypasses these locks, drain scoped signing and keep it
+  paused until the change has committed. The requested presigned URL lifetime
+  is the smaller of `900` seconds and the whole
   seconds remaining before token expiry, and signing is refused (`401`) when
   fewer than one second remains. A missing, unassigned, unverified, denied,
   read-only, deleting, absent-original or storage-disabled lookup returns the

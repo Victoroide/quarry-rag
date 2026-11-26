@@ -595,18 +595,19 @@ func readSignableSource(ctx context.Context, tx pgx.Tx, id string) (key string, 
 	}
 }
 
-// WithScopedDocumentFile verifies active principal status and owner or
-// read-plus-download access under shared row locks while the caller signs.
+// WithScopedDocumentFile fences authorization through signing and its allow
+// audit. Before activation, legacy deletion still requires the row locks.
 func (c *Client) WithScopedDocumentFile(ctx context.Context, principal domain.Principal, id domain.DocumentID, sign func(context.Context, string) error) (domain.ScopedFileResult, error) {
 	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return domain.ScopedFileResult{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	var active bool
-	var key *string
-	err = tx.QueryRow(ctx, `SELECT active, s3_key FROM grant_catalog_authorize_file($1::uuid,$2::uuid,$3::uuid)`,
-		principal.TenantID, principal.ID, string(id)).Scan(&active, &key)
+	var checkpointed bool
+	if activationErr := tx.QueryRow(ctx, `SELECT document_deletion_active()`).Scan(&checkpointed); activationErr != nil {
+		return domain.ScopedFileResult{}, fmt.Errorf("postgres: read deletion activation: %w", activationErr)
+	}
+	active, key, err := readScopedSignableSource(ctx, tx, principal, id, checkpointed)
 	if err != nil {
 		return domain.ScopedFileResult{}, err
 	}
@@ -634,6 +635,26 @@ func (c *Client) WithScopedDocumentFile(ctx context.Context, principal domain.Pr
 		return domain.ScopedFileResult{}, err
 	}
 	return domain.ScopedFileResult{Active: true, Found: true}, nil
+}
+
+func readScopedSignableSource(ctx context.Context, tx pgx.Tx, principal domain.Principal, id domain.DocumentID, checkpointed bool) (active bool, key *string, err error) {
+	if !checkpointed {
+		err = tx.QueryRow(ctx, `SELECT active, s3_key FROM grant_catalog_authorize_file($1::uuid,$2::uuid,$3::uuid)`,
+			principal.TenantID, principal.ID, string(id)).Scan(&active, &key)
+		return active, key, err
+	}
+
+	// A separate statement after both lock waits gets a fresh snapshot of
+	// deletions and grant imports that committed while signing was waiting.
+	batch := &pgx.Batch{}
+	batch.Queue(`SELECT pg_advisory_xact_lock_shared(`+documentIntentLockKey+`)`, string(id))
+	batch.Queue(`SELECT grant_catalog_lock_file_principal($1::uuid,$2::uuid)`, principal.TenantID, principal.ID)
+	batch.Queue(`SELECT active, s3_key FROM grant_catalog_authorize_file_advisory($1::uuid,$2::uuid,$3::uuid)`,
+		principal.TenantID, principal.ID, string(id)).QueryRow(func(row pgx.Row) error {
+		return row.Scan(&active, &key)
+	})
+	err = tx.SendBatch(ctx, batch).Close()
+	return active, key, err
 }
 
 // BeginScopedDeletion atomically verifies owner-only deletion against the live
