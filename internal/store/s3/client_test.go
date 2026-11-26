@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -242,6 +243,30 @@ func TestPresignRequestsFullLifetimeWithTemporaryCredentials(t *testing.T) {
 	}
 	if got := parsed.Query().Get("X-Amz-Expires"); got != "900" {
 		t.Errorf("requested expiry = %q, want 900", got)
+	}
+}
+
+func TestPresignWithTTLBoundsAndAppliesExpiry(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	client := s3EndpointClient(t, server.URL, "")
+	for _, bad := range []time.Duration{-time.Second, 0, 999 * time.Millisecond, 15*time.Minute + time.Second} {
+		if _, err := client.PresignGetWithTTL(t.Context(), "documents/report.pdf", bad); err == nil {
+			t.Fatalf("expected error for TTL %s", bad)
+		}
+	}
+	for _, seconds := range []int{1, 45, 900} {
+		raw, err := client.PresignGetWithTTL(t.Context(), "documents/report.pdf", time.Duration(seconds)*time.Second)
+		if err != nil {
+			t.Fatalf("TTL %ds: %v", seconds, err)
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse URL: %v", err)
+		}
+		if got := parsed.Query().Get("X-Amz-Expires"); got != strconv.Itoa(seconds) {
+			t.Errorf("TTL %ds: X-Amz-Expires = %q", seconds, got)
+		}
 	}
 }
 

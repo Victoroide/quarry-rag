@@ -76,3 +76,31 @@ type CollectionDocumentLister interface {
 	StreamDocumentsInCollection(ctx context.Context, collection string, visit func(DocumentSummary) error) error
 	ListDocumentsPageInCollection(ctx context.Context, after string, limit int, collection string) ([]DocumentSummary, error)
 }
+
+// ScopedPolicyState captures whether a principal is active and the catalog
+// policy revision observed in the same snapshot.
+type ScopedPolicyState struct {
+	Active   bool
+	Revision int64
+}
+
+// ScopedDocumentPage contains one page of summaries visible to a verified principal.
+type ScopedDocumentPage struct {
+	Active    bool
+	Revision  int64
+	Documents []DocumentSummary
+}
+
+// ScopedDocumentSummary contains one summary visible to a verified principal.
+type ScopedDocumentSummary struct {
+	Active   bool
+	Revision int64
+	Document *DocumentSummary
+}
+
+// ScopedDocumentLister enforces tenant and read grants inside inventory and status lookups.
+type ScopedDocumentLister interface {
+	ScopedPolicyState(ctx context.Context, principal Principal) (ScopedPolicyState, error)
+	ListScopedDocumentsPage(ctx context.Context, principal Principal, after string, limit int, collection string, includeIncarnation bool) (ScopedDocumentPage, error)
+	GetScopedDocumentSummary(ctx context.Context, principal Principal, id DocumentID, includeIncarnation bool) (ScopedDocumentSummary, error)
+}

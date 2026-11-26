@@ -126,6 +126,14 @@ func (c *Client) PutSource(ctx context.Context, key string, ft extractor.FileTyp
 
 // PresignGet returns a presigned GET URL with a requested lifetime of 15 minutes.
 func (c *Client) PresignGet(ctx context.Context, s3Key string) (string, error) {
+	return c.PresignGetWithTTL(ctx, s3Key, 15*time.Minute)
+}
+
+// PresignGetWithTTL returns a presigned GET URL with a requested lifetime in [1s, 15m].
+func (c *Client) PresignGetWithTTL(ctx context.Context, s3Key string, ttl time.Duration) (string, error) {
+	if ttl < time.Second || ttl > 15*time.Minute {
+		return "", fmt.Errorf("s3: presign %s: invalid TTL %s", s3Key, ttl)
+	}
 	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(s3Key)})
 	contentType := mime.TypeByExtension(strings.ToLower(path.Ext(s3Key)))
 	if contentType == "" {
@@ -136,7 +144,7 @@ func (c *Client) PresignGet(ctx context.Context, s3Key string) (string, error) {
 		Key:                        &s3Key,
 		ResponseContentDisposition: &disposition,
 		ResponseContentType:        &contentType,
-	}, s3.WithPresignExpires(15*time.Minute))
+	}, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", fmt.Errorf("s3: presign %s: %w", s3Key, err)
 	}

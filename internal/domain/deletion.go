@@ -3,11 +3,16 @@ package domain
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 var (
 	// ErrDocumentNotFound indicates that the requested document is absent.
 	ErrDocumentNotFound = errors.New("document not found")
+	// ErrUnauthorized indicates that the caller's subject credential is missing or expired.
+	ErrUnauthorized = errors.New("invalid or missing credentials")
+	// ErrForbidden indicates that the caller's principal is absent or disabled.
+	ErrForbidden = errors.New("access denied")
 	// ErrFileStorageUnavailable indicates a stored source cannot be deleted without object storage.
 	ErrFileStorageUnavailable = errors.New("file storage is not configured")
 	// ErrVectorStorageUnavailable indicates the vectors of a document cannot be deleted without their store.
@@ -128,4 +133,24 @@ type InMemoryIndex interface {
 	// LockDocument takes the single local deletion slot of one document, or
 	// reports ok as false while another caller holds it.
 	LockDocument(documentID string) (unlock func(), ok bool)
+}
+
+// ScopedFileResult reports whether the principal was active and a downloadable
+// original object was found and signed.
+type ScopedFileResult struct {
+	Active bool
+	Found  bool
+}
+
+// ScopedDocumentFileReader checks owner or read-plus-download grants under a
+// shared row lock while the caller signs the stored object key.
+type ScopedDocumentFileReader interface {
+	WithScopedDocumentFile(ctx context.Context, principal Principal, id DocumentID, sign func(ctx context.Context, key string) error) (ScopedFileResult, error)
+}
+
+// ScopedDocumentDeleter atomically authorizes owner-only deletion against the
+// live incarnation and completes detached cleanup for that target.
+type ScopedDocumentDeleter interface {
+	BeginScopedDeletion(ctx context.Context, principal Principal, validUntil time.Time, id DocumentID, ops DeleteOperations) (incarnation string, complete bool, err error)
+	ResumeScopedDeletion(ctx context.Context, id DocumentID, incarnation string, ops DeleteOperations) error
 }
