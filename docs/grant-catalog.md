@@ -282,6 +282,9 @@ After applying `037_inventory_policy_revisions.sql`, grant the serving login
 execution of the new inventory state function before starting upgraded
 processes. Keep execution of `grant_catalog_policy_state` for older replicas
 and binary rollback. Both inventory revision tables are private.
+During database-owner maintenance on a serving corpus, use ordinary catalog
+row writes with the inventory constraint deferred and the capture triggers
+enabled.
 
 ```sql
 GRANT EXECUTE ON FUNCTION public.grant_catalog_inventory_policy_state(uuid, uuid) TO quarry_service;
