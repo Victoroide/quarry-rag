@@ -28,7 +28,8 @@ func main() {
 func run(ctx context.Context, args []string, databaseURL string, input io.Reader, output io.Writer) error {
 	flags := flag.NewFlagSet("grant-catalog", flag.ContinueOnError)
 	migrate := flags.Bool("migrate", false, "apply the metadata schema as its owner")
-	dryRun := flags.Bool("dry-run", false, "validate the JSON batch from stdin without writing")
+	dryRun := flags.Bool("dry-run", false, "validate the JSON batch or cutover preconditions without writing")
+	activateGrants := flags.Bool("activate-grants", false, "transition the corpus authorization mode marker to grants")
 	dimensions := flags.Int("vector-dimensions", 0, "prepare pgvector with this dimension when applying migrations")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -42,8 +43,8 @@ func run(ctx context.Context, args []string, databaseURL string, input io.Reader
 			dimensionSet = true
 		}
 	})
-	if flags.NArg() != 0 || (*migrate && *dryRun) || (!*migrate && dimensionSet) {
-		return errors.New("use -migrate with optional -vector-dimensions, -dry-run, or no flags to apply a batch")
+	if flags.NArg() != 0 || (*migrate && (*dryRun || *activateGrants)) || (!*migrate && dimensionSet) {
+		return errors.New("use -migrate with optional -vector-dimensions, -activate-grants with optional -dry-run, -dry-run, or no flags to apply a batch")
 	}
 	if dimensionSet {
 		if _, err := postgres.ValidateVectorDimensions(*dimensions); err != nil {
@@ -54,7 +55,7 @@ func run(ctx context.Context, args []string, databaseURL string, input io.Reader
 		return errors.New("DATABASE_URL is required")
 	}
 	var batch postgres.GrantBatch
-	if !*migrate {
+	if !*migrate && !*activateGrants {
 		prepared, err := readBatch(ctx, input)
 		if err != nil {
 			return err
@@ -77,6 +78,13 @@ func run(ctx context.Context, args []string, databaseURL string, input io.Reader
 			return vectorErr
 		}
 		return nil
+	}
+	if *activateGrants {
+		result, activateErr := client.ActivateGrants(databaseCtx, *dryRun)
+		if activateErr != nil {
+			return activateErr
+		}
+		return json.NewEncoder(output).Encode(result)
 	}
 	result, err := client.ImportPreparedGrantBatch(databaseCtx, batch, *dryRun)
 	if err != nil {

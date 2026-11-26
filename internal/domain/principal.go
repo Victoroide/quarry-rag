@@ -45,3 +45,27 @@ type OwnedIngestStore interface {
 	AuthorizeOwnedIngest(ctx context.Context, principal Principal, collection string, supplied DocumentID) (OwnedTarget, error)
 	DocumentAcceptor
 }
+
+// CorpusModeReader reports the authorization mode recorded on the corpus.
+type CorpusModeReader interface {
+	CorpusAuthzMode(ctx context.Context) (string, error)
+}
+
+// SecurityAuditEvent records an authorization decision, policy change, or key event
+// using bounded fields without credentials, raw subjects, signed addresses, or text.
+type SecurityAuditEvent struct {
+	RequestID      string
+	TenantID       string
+	PrincipalID    string
+	PolicyRevision *int64
+	Action         string
+	Outcome        string
+	Reason         string
+	DocumentID     string
+	Incarnation    string
+}
+
+// SecurityAuditRecorder persists bounded security audit events.
+type SecurityAuditRecorder interface {
+	RecordSecurityAudit(ctx context.Context, event SecurityAuditEvent) error
+}

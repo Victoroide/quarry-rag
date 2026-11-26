@@ -11,6 +11,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/logctx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -101,6 +102,9 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 	}
 	var id, state string
 	owned := req.Owner != nil
+	if !owned && c.configuredAuthzMode() == "grants" {
+		return result, errors.New("postgres: grants mode requires an owner binding")
+	}
 	var ownedTarget domain.OwnedTarget
 	if owned {
 		if ownedTarget, err = authorizeOwnedAcceptance(ctx, tx, req); err != nil {
@@ -194,9 +198,21 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 			return result, nil
 		case "completed":
 			result.Outcome = domain.AcceptDuplicate
+			if owned {
+				if auditErr := recordOwnedIngestAudit(ctx, tx, req, result.Outcome); auditErr != nil {
+					return result, auditErr
+				}
+				return result, tx.Commit(ctx)
+			}
 			return result, nil
 		case "processing":
 			result.Outcome = domain.AcceptInProgress
+			if owned {
+				if auditErr := recordOwnedIngestAudit(ctx, tx, req, result.Outcome); auditErr != nil {
+					return result, auditErr
+				}
+				return result, tx.Commit(ctx)
+			}
 			return result, nil
 		case "failed":
 			// Terminal failure removed the job, so a retry needs queue capacity.
@@ -258,6 +274,11 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 			return result, err
 		}
 		result.Outcome = domain.AcceptRequeued
+		if owned {
+			if auditErr := recordOwnedIngestAudit(ctx, tx, req, result.Outcome); auditErr != nil {
+				return result, auditErr
+			}
+		}
 		return result, tx.Commit(ctx)
 	}
 	if req.RequireSource && req.Document.S3Key == nil {
@@ -286,7 +307,11 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 	// needs no table privilege.
 	scoped := false
 	if req.SupportsScopedVectors && c.vectorDimensions.Load() == 0 {
-		if err = tx.QueryRow(ctx, `SELECT document_deletion_active_shared()`).Scan(&scoped); err != nil {
+		query := `SELECT document_deletion_active_shared()`
+		if owned {
+			query = `SELECT grant_catalog_corpus_authz_mode() = 'grants' OR document_deletion_active_shared()`
+		}
+		if err = tx.QueryRow(ctx, query).Scan(&scoped); err != nil {
 			return result, fmt.Errorf("postgres: read deletion mode: %w", err)
 		}
 	}
@@ -361,7 +386,34 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 		}
 	}
 	result.Outcome = domain.AcceptAccepted
+	if owned {
+		if auditErr := recordOwnedIngestAudit(ctx, tx, req, result.Outcome); auditErr != nil {
+			return result, auditErr
+		}
+	}
 	return result, tx.Commit(ctx)
+}
+
+func recordOwnedIngestAudit(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest, outcome domain.AcceptOutcome) error {
+	reason := "accepted"
+	switch outcome {
+	case domain.AcceptDuplicate:
+		reason = "already_ingested"
+	case domain.AcceptInProgress:
+		reason = "in_progress"
+	case domain.AcceptRequeued:
+		reason = "requeued"
+	}
+	return recordSecurityAuditTx(ctx, tx, domain.SecurityAuditEvent{
+		RequestID:   logctx.RequestID(ctx),
+		TenantID:    req.Owner.Principal.TenantID,
+		PrincipalID: req.Owner.Principal.ID,
+		Action:      "ingest",
+		Outcome:     "allow",
+		Reason:      reason,
+		DocumentID:  string(req.Document.ID),
+		Incarnation: req.Owner.Incarnation,
+	})
 }
 
 const claimJobPrefix = `WITH claimed AS (
@@ -609,7 +661,7 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	}
 	// A document assigned in the grant catalog never registers a shared match,
 	// even when a historical row kept the collection policy.
-	if policy == domain.ContentDedupCollection && !assigned {
+	if policy == domain.ContentDedupCollection && !assigned && c.configuredAuthzMode() != "grants" {
 		if fingerprint == nil {
 			legacy := chunker.ScopedFingerprint(collection, j.Document.Content)
 			fingerprint = &legacy

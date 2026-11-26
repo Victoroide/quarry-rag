@@ -282,6 +282,64 @@ func TestSubjectVerifierRequiresConfiguredAuthority(t *testing.T) {
 	}
 }
 
+func TestTrustObserverRecordsLoadRotationFailureAndFailsClosed(t *testing.T) {
+	first, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	second, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "trust.json")
+	expiry := fixtureTime.Add(time.Hour)
+	replaceTrust(t, path, trustFixture(t, expiry, jose.JSONWebKey{Key: first.Public(), KeyID: "first"}))
+
+	var events []TrustEvent
+	var failAudit bool
+	verifier, err := NewVerifierWithObserver(fixtureIssuer(), fixtureAudience, path, func(ev TrustEvent) error {
+		events = append(events, ev)
+		if failAudit {
+			return fmt.Errorf("audit unavailable")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	verifier.now = func() time.Time { return fixtureTime }
+
+	require.NoError(t, verifier.ValidateTrust())
+	require.Equal(t, []TrustEvent{{Action: "trust_key_load", Outcome: "allow", Reason: "trust_loaded"}}, events)
+
+	token := fixtureToken(t, first, fixtureHeader, fixtureClaims(t, nil))
+	_, err = verifier.Verify(token)
+	require.NoError(t, err)
+	require.Len(t, events, 1, "unchanged digest must not re-emit audit load event")
+
+	// Rotate to second key while audit fails: must reject rotation and not cache it.
+	replaceTrust(t, path, trustFixture(t, expiry, jose.JSONWebKey{Key: second.Public(), KeyID: "second"}))
+	failAudit = true
+	secondHeader := strings.Replace(fixtureHeader, "first", "second", 1)
+	secondToken := fixtureToken(t, second, secondHeader, fixtureClaims(t, nil))
+	_, err = verifier.Verify(secondToken)
+	require.ErrorIs(t, err, ErrAuthorityUnavailable)
+
+	failAudit = false
+	_, err = verifier.Verify(secondToken)
+	require.NoError(t, err)
+	require.Equal(t, TrustEvent{Action: "trust_key_load", Outcome: "allow", Reason: "trust_rotated"}, events[len(events)-1])
+
+	// Remove trust file -> emits trust_unavailable once while unavailable.
+	require.NoError(t, os.Remove(path))
+	_, err = verifier.Verify(secondToken)
+	require.ErrorIs(t, err, ErrAuthorityUnavailable)
+	_, err = verifier.Verify(secondToken)
+	require.ErrorIs(t, err, ErrAuthorityUnavailable)
+	require.Equal(t, TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"}, events[len(events)-1])
+	unavailableCount := 0
+	for _, ev := range events {
+		if ev.Reason == "trust_unavailable" {
+			unavailableCount++
+		}
+	}
+	require.Equal(t, 1, unavailableCount)
+}
+
 func FuzzSubjectTrustAndClaims(f *testing.F) {
 	verifier, key, _ := newFixtureVerifier(f)
 	trust := trustFixture(f, fixtureTime.Add(time.Hour), jose.JSONWebKey{Key: key.Public(), KeyID: "first"})

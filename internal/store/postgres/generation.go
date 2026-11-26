@@ -199,7 +199,7 @@ func (c *Client) gate(ctx context.Context, q queryRower) error {
 	if frozen {
 		return domain.ErrWritersFrozen
 	}
-	return nil
+	return c.checkAuthzMode(ctx, q)
 }
 
 // WritersOpen implements domain.WriterGate.

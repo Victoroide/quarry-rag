@@ -25,10 +25,24 @@ type trustSnapshot struct {
 	keys      map[string]*rsa.PublicKey
 }
 
+// TrustEvent describes a trust-file load, key rotation, or availability failure
+// without exposing key material or file paths.
+type TrustEvent struct {
+	Action  string
+	Outcome string
+	Reason  string
+}
+
+// TrustObserver records trust-file transitions. Returning an error on a key
+// load or rotation rejects the transition so unaudited keys cannot be used.
+type TrustObserver func(TrustEvent) error
+
 type trustFile struct {
-	path string
-	mu   sync.Mutex
-	last trustSnapshot
+	path        string
+	observer    TrustObserver
+	mu          sync.Mutex
+	last        trustSnapshot
+	unavailable bool
 }
 
 func (f *trustFile) load(now func() time.Time) (trustSnapshot, error) {
@@ -36,23 +50,75 @@ func (f *trustFile) load(now func() time.Time) (trustSnapshot, error) {
 	// A replacement may remove a key without changing size or timestamps.
 	data, err := credential.ReadFile(f.path, maxTrustBytes, 0o022)
 	if err != nil {
+		f.notifyUnavailable()
 		return trustSnapshot{}, ErrAuthorityUnavailable
 	}
 	digest := sha256.Sum256(data)
+	var event *TrustEvent
+	var prev trustSnapshot
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.last.keys == nil || f.last.digest != digest {
 		parsed, ok := parseTrust(data)
 		if !ok {
+			alreadyUnavailable := f.unavailable
+			f.unavailable = true
+			f.mu.Unlock()
+			if !alreadyUnavailable {
+				_ = f.emit(TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"})
+			}
 			return trustSnapshot{}, ErrAuthorityUnavailable
 		}
+		reason := "trust_loaded"
+		if f.last.keys != nil {
+			reason = "trust_rotated"
+		}
+		prev = f.last
 		parsed.digest = digest
 		f.last = parsed
+		event = &TrustEvent{Action: "trust_key_load", Outcome: "allow", Reason: reason}
 	}
 	if !now().Before(f.last.expiresAt) {
+		alreadyUnavailable := f.unavailable
+		f.unavailable = true
+		f.mu.Unlock()
+		if !alreadyUnavailable {
+			_ = f.emit(TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"})
+		}
 		return trustSnapshot{}, ErrAuthorityUnavailable
 	}
-	return f.last, nil
+	f.unavailable = false
+	snap := f.last
+	f.mu.Unlock()
+	if event != nil {
+		if obsErr := f.emit(*event); obsErr != nil {
+			// Restore the prior snapshot so the rotation is not accepted until
+			// the audit event succeeds.
+			f.mu.Lock()
+			if f.last.digest == snap.digest {
+				f.last = prev
+			}
+			f.mu.Unlock()
+			return trustSnapshot{}, ErrAuthorityUnavailable
+		}
+	}
+	return snap, nil
+}
+
+func (f *trustFile) notifyUnavailable() {
+	f.mu.Lock()
+	already := f.unavailable
+	f.unavailable = true
+	f.mu.Unlock()
+	if !already {
+		_ = f.emit(TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"})
+	}
+}
+
+func (f *trustFile) emit(event TrustEvent) error {
+	if f.observer == nil {
+		return nil
+	}
+	return f.observer(event)
 }
 
 func parseTrust(raw []byte) (trustSnapshot, bool) {

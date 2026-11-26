@@ -48,6 +48,12 @@ type Verifier struct {
 // NewVerifier validates the authority settings. Trust is loaded at verification
 // time so an unavailable or replaced file is reflected at each admission.
 func NewVerifier(issuer, audience, path string) (*Verifier, error) {
+	return NewVerifierWithObserver(issuer, audience, path, nil)
+}
+
+// NewVerifierWithObserver validates the authority settings and reports trust
+// file loads, rotations, and availability failures to observer.
+func NewVerifierWithObserver(issuer, audience, path string, observer TrustObserver) (*Verifier, error) {
 	u, err := url.Parse(issuer)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || strings.ContainsAny(issuer, "?#") || len(issuer) > maxIdentityBytes {
 		return nil, errors.New("AUTHZ_ISSUER must be an HTTPS issuer without credentials, query or fragment")
@@ -58,7 +64,14 @@ func NewVerifier(issuer, audience, path string) (*Verifier, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("AUTHZ_JWKS_FILE is required")
 	}
-	return &Verifier{issuer: issuer, audience: audience, trust: trustFile{path: path}, now: time.Now}, nil
+	return &Verifier{issuer: issuer, audience: audience, trust: trustFile{path: path, observer: observer}, now: time.Now}, nil
+}
+
+// ValidateTrust loads and validates the configured local JWKS file without
+// verifying a token. Missing, malformed, or expired files return ErrAuthorityUnavailable.
+func (v *Verifier) ValidateTrust() error {
+	_, err := v.trust.load(v.now)
+	return err
 }
 
 // Verify authenticates a single compact bearer token. The caller checks the

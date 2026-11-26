@@ -16,6 +16,13 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 	"github.com/Victoroide/quarry-rag/internal/evaluation"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
+	"github.com/Victoroide/quarry-rag/internal/subjectauth"
+)
+
+// Authorization modes control whether the service trusts the caller or enforces grants.
+const (
+	AuthzModeService = "service"
+	AuthzModeGrants  = "grants"
 )
 
 // Query answer policies control which answer modes callers can use.
@@ -119,6 +126,7 @@ type Config struct {
 	// ServiceToken is merged with ServiceTokens to protect service routes.
 	ServiceToken string
 
+	AuthzMode        string
 	SubjectAuthority SubjectAuthorityConfig
 
 	S3ExpectedBucketOwner string
@@ -204,10 +212,8 @@ type Config struct {
 // Load reads configuration from environment variables, applies defaults,
 // and validates required fields.
 func Load() (*Config, error) {
-	if mode := os.Getenv("AUTHZ_MODE"); mode != "" && mode != "service" {
-		return nil, fmt.Errorf("config: AUTHZ_MODE must be service")
-	}
 	cfg := &Config{
+		AuthzMode:                 envOrDefault("AUTHZ_MODE", AuthzModeService),
 		MetricsAddr:               os.Getenv("METRICS_ADDR"),
 		ServerPort:                envOrDefault("SERVER_PORT", "8081"),
 		BedrockEmbedModel:         envOrDefault("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0"),
@@ -671,7 +677,49 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("config: LOG_LEVEL must be debug, info, warn or error")
 	}
+	if err := c.validateAuthzMode(); err != nil {
+		return err
+	}
 	return c.validateAndResolveRouting()
+}
+
+func (c *Config) validateAuthzMode() error {
+	if c.AuthzMode == "" {
+		c.AuthzMode = AuthzModeService
+	}
+	switch c.AuthzMode {
+	case AuthzModeService:
+		return nil
+	case AuthzModeGrants:
+	default:
+		return fmt.Errorf("config: AUTHZ_MODE must be %s or %s", AuthzModeService, AuthzModeGrants)
+	}
+	if c.FakeMode {
+		return fmt.Errorf("config: AUTHZ_MODE=%s requires GO_RAG_FAKE_MODE=false", AuthzModeGrants)
+	}
+	if len(c.ServiceTokens) == 0 {
+		return fmt.Errorf("config: AUTHZ_MODE=%s requires SERVICE_TOKEN or SERVICE_TOKENS", AuthzModeGrants)
+	}
+	if c.IngestContentDedup != domain.ContentDedupOff {
+		return fmt.Errorf("config: AUTHZ_MODE=%s requires INGEST_CONTENT_DEDUP=off", AuthzModeGrants)
+	}
+	if c.VectorStore != "postgres" && c.VectorStore != "pinecone" {
+		return fmt.Errorf("config: AUTHZ_MODE=%s requires VECTOR_STORE=postgres or pinecone", AuthzModeGrants)
+	}
+	if c.Tracing.CaptureContent {
+		return fmt.Errorf("config: AUTHZ_MODE=%s requires OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false", AuthzModeGrants)
+	}
+	if c.EvaluationCollectionPrefix != "" {
+		return fmt.Errorf("config: AUTHZ_MODE=%s does not support EVALUATION_COLLECTION_PREFIX", AuthzModeGrants)
+	}
+	verifier, err := subjectauth.NewVerifier(c.SubjectAuthority.Issuer, c.SubjectAuthority.Audience, c.SubjectAuthority.JWKSFile)
+	if err != nil {
+		return fmt.Errorf("config: AUTHZ_MODE=%s: %w", AuthzModeGrants, err)
+	}
+	if err := verifier.ValidateTrust(); err != nil {
+		return fmt.Errorf("config: AUTHZ_MODE=%s: AUTHZ_JWKS_FILE is missing, invalid or expired", AuthzModeGrants)
+	}
+	return nil
 }
 
 func envBoolOrDefault(key string, fallback bool) (bool, error) {

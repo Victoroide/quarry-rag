@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/logctx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -595,6 +596,17 @@ func (c *Client) WithScopedDocumentFile(ctx context.Context, principal domain.Pr
 	if signErr := sign(ctx, *key); signErr != nil {
 		return domain.ScopedFileResult{Active: true}, signErr
 	}
+	if auditErr := recordSecurityAuditTx(ctx, tx, domain.SecurityAuditEvent{
+		RequestID:   logctx.RequestID(ctx),
+		TenantID:    principal.TenantID,
+		PrincipalID: principal.ID,
+		Action:      "file_sign",
+		Outcome:     "allow",
+		Reason:      "ok",
+		DocumentID:  string(id),
+	}); auditErr != nil {
+		return domain.ScopedFileResult{}, auditErr
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.ScopedFileResult{}, err
 	}
@@ -685,6 +697,18 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 			principal.TenantID, principal.ID, string(id), incarnation); recErr != nil {
 			return "", false, recErr
 		}
+		if auditErr := recordSecurityAuditTx(ctx, tx, domain.SecurityAuditEvent{
+			RequestID:   logctx.RequestID(ctx),
+			TenantID:    principal.TenantID,
+			PrincipalID: principal.ID,
+			Action:      "document_delete",
+			Outcome:     "allow",
+			Reason:      "intent_recorded",
+			DocumentID:  string(id),
+			Incarnation: incarnation,
+		}); auditErr != nil {
+			return "", false, auditErr
+		}
 		return incarnation, false, tx.Commit(ctx)
 	}
 	if intentErr := insertDeletionIntentTx(ctx, tx, id, incarnation, source, mode, ops); intentErr != nil {
@@ -693,6 +717,18 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 	if _, err = tx.Exec(ctx, `SELECT grant_catalog_record_deletion_owner($1::uuid,$2::uuid,$3::uuid,$4::uuid)`,
 		principal.TenantID, principal.ID, string(id), incarnation); err != nil {
 		return "", false, err
+	}
+	if auditErr := recordSecurityAuditTx(ctx, tx, domain.SecurityAuditEvent{
+		RequestID:   logctx.RequestID(ctx),
+		TenantID:    principal.TenantID,
+		PrincipalID: principal.ID,
+		Action:      "document_delete",
+		Outcome:     "allow",
+		Reason:      "intent_recorded",
+		DocumentID:  string(id),
+		Incarnation: incarnation,
+	}); auditErr != nil {
+		return "", false, auditErr
 	}
 	return incarnation, false, tx.Commit(ctx)
 }
