@@ -35,6 +35,8 @@ var (
 // DeleteOperations supplies the configured external operations for one deletion.
 // A nil operation means the corresponding store is not configured.
 type DeleteOperations struct {
+	// TransactionalVectors marks a relational target whose vectors cascade at finalization.
+	TransactionalVectors bool
 	// ExpectedIncarnation names the document lifetime the caller observed.
 	ExpectedIncarnation string
 	// InMemory marks vectors that live in the serving process.

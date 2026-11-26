@@ -375,3 +375,32 @@ func TestBareCleanupWaitsForTheActivationLock(t *testing.T) {
 	require.False(t, documentExists(t, c, id))
 	require.Nil(t, recordedActivation(t, c))
 }
+
+func TestCleanupCLIQualifiedDeletionOfTaggedPostgresDocument(t *testing.T) {
+	c := cleanupDatabase(t)
+	ctx := t.Context()
+	vectors, err := pgstore.OpenGenerationVectorStore(ctx, c, 3, pgstore.LegacyGeneration)
+	require.NoError(t, err)
+	id, inc := uuid.NewString(), uuid.NewString()
+	_, err = c.Pool.Exec(ctx, `INSERT INTO documents(id, incarnation, status, content, scoped_vectors, vector_attempt)
+		VALUES ($1,$2,'completed','Tagged record.',TRUE,$3)`, id, inc, uuid.NewString())
+	require.NoError(t, err)
+	chunk := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(id), Embedding: []float32{1, 0, 0}}
+	require.NoError(t, vectors.Upsert(ctx, "", []domain.Chunk{chunk}))
+	_, err = c.Pool.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	require.ErrorIs(t, runArgs([]string{id + "@" + uuid.NewString()}, &out), domain.ErrDeletionPreconditionFailed)
+	require.NoError(t, runArgs([]string{id + "@" + inc}, &out))
+	require.NoError(t, runArgs([]string{id + "@" + inc}, &out))
+	got, err := vectors.Fetch(ctx, []string{string(chunk.ID)})
+	require.NoError(t, err)
+	require.Empty(t, got)
+	var mode string
+	var finalized bool
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT vector_mode, finalized FROM document_deletions
+		WHERE document_id=$1 AND incarnation=$2`, id, inc).Scan(&mode, &finalized))
+	require.Equal(t, "local", mode)
+	require.True(t, finalized)
+}

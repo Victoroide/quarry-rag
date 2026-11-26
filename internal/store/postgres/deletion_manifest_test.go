@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -63,6 +64,78 @@ func TestCoordinatorResumesAManifestedDeletionAfterAProviderFailure(t *testing.T
 	require.Equal(t, "deleted", cleanupReason(t, c, attempt.revision))
 }
 
+func TestTransactionalDeletionRefusesUnretiredHostedManifests(t *testing.T) {
+	owner, serving, roles := restrictedDatabase(t)
+	ctx := t.Context()
+	grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "SELECT (document_id, incarnation, state)"))
+	_, err := owner.Pool.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	require.NoError(t, err)
+	owner.EnableHostedVectorManifests(true)
+	f := provisionOwnedFixture(t, owner)
+
+	acceptTagged := func(ctx context.Context, t *testing.T, text string) domain.AcceptRequest {
+		t.Helper()
+		req := ownedRequest(f.owner, "", text)
+		req.SupportsScopedVectors = true
+		result, acceptErr := owner.AcceptDocument(ctx, req)
+		require.NoError(t, acceptErr)
+		require.Equal(t, domain.AcceptAccepted, result.Outcome)
+		var scoped bool
+		require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT scoped_vectors FROM documents WHERE id=$1`, req.Document.ID).Scan(&scoped))
+		require.True(t, scoped)
+		return req
+	}
+	active := acceptTagged(ctx, t, "published hosted revision")
+	published := startManifestAttempt(t, owner, active.Document.ID, "worker")
+	ok, err := owner.CompleteJob(ctx, published.job, published.chunks(active.Document.ID, active.Document.Content), domain.IndexObservation{})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	writing := acceptTagged(ctx, t, "abandoned hosted revision")
+	abandoned := startManifestAttempt(t, owner, writing.Document.ID, "worker")
+	expireJobLease(t, owner, writing.Document.ID)
+
+	for _, mode := range []string{"service", "scoped"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			remove := func(req domain.AcceptRequest) error {
+				id := req.Document.ID
+				ops := domain.DeleteOperations{ExpectedIncarnation: req.Owner.Incarnation, TransactionalVectors: true}
+				if mode == "service" {
+					return serving.DeleteWithCleanup(ctx, id, ops)
+				}
+				incarnation, complete, err := serving.BeginScopedDeletion(ctx, f.owner, time.Now().Add(time.Minute), id, ops)
+				if err != nil || complete {
+					return err
+				}
+				return serving.ResumeScopedDeletion(ctx, id, incarnation, ops)
+			}
+			for _, tc := range []struct {
+				req                     domain.AcceptRequest
+				revision, status, state string
+			}{
+				{active, published.revision, "completed", "active"},
+				{writing, abandoned.revision, "processing", "writing"},
+			} {
+				id := tc.req.Document.ID
+				require.ErrorIs(t, remove(tc.req), domain.ErrVectorStorageUnavailable, tc.state)
+				require.Equal(t, tc.status, documentStatus(t, owner, id))
+				require.Equal(t, tc.state, manifestState(t, owner, tc.revision))
+				require.Empty(t, cleanupReason(t, owner, tc.revision))
+				var receipts int
+				require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT count(*) FROM document_deletions WHERE document_id=$1`, id).Scan(&receipts))
+				require.Zero(t, receipts)
+			}
+			plain := acceptTagged(ctx, t, "tagged without a hosted revision in "+mode)
+			require.NoError(t, remove(plain))
+			require.Empty(t, documentStatus(t, owner, plain.Document.ID))
+			receipt := readReceipt(t, owner, plain.Document.ID)
+			require.Equal(t, localVectors, receipt.mode)
+			require.True(t, receipt.finalized)
+		})
+	}
+}
+
 func TestCoordinatorResumesAManifestedDeletionOnFlagOffRestrictedLogin(t *testing.T) {
 	owner, serving, _ := restrictedDatabase(t)
 	ctx := t.Context()
@@ -87,6 +160,12 @@ func TestCoordinatorResumesAManifestedDeletionOnFlagOffRestrictedLogin(t *testin
 	require.Equal(t, manifestVectors, receipt.mode)
 	require.Equal(t, stepVectors, receipt.step)
 	require.False(t, receipt.finalized)
+
+	transactional := recorder.ops(doc.incarnation)
+	transactional.TransactionalVectors = true
+	transactional.ManifestVectors = nil
+	require.ErrorIs(t, serving.DeleteWithCleanup(ctx, doc.id, transactional), domain.ErrVectorStorageUnavailable)
+	require.Equal(t, receipt, readReceipt(t, owner, doc.id))
 
 	require.NoError(t, serving.DeleteWithCleanup(ctx, doc.id, recorder.ops(doc.incarnation)))
 	require.Equal(t, 1, recorder.count("manifest"))

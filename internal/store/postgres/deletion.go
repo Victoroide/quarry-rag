@@ -120,6 +120,8 @@ func vectorMode(scoped, manifested bool, ops domain.DeleteOperations) (string, e
 			return "", domain.ErrVectorStorageUnavailable
 		}
 		return manifestVectors, nil
+	case ops.TransactionalVectors:
+		return localVectors, nil
 	case scoped:
 		if ops.RevisionVectors == nil {
 			return "", domain.ErrVectorStorageUnavailable
@@ -224,17 +226,17 @@ func (c *Client) beginDeletion(ctx context.Context, id domain.DocumentID, ops do
 	if source != nil && ops.Source == nil {
 		return "", false, domain.ErrFileStorageUnavailable
 	}
-	manifested, err := c.ownsManifests(ctx, tx, id, ops)
+	if state == "deleting" {
+		// Resume with the backend recorded in the existing receipt.
+		return incarnation, false, nil
+	}
+	manifested, err := c.ownsManifests(ctx, tx, id, incarnation, scoped, ops)
 	if err != nil {
 		return "", false, err
 	}
 	mode, err := vectorMode(scoped, manifested, ops)
 	if err != nil {
 		return "", false, err
-	}
-	if state == "deleting" {
-		// The intent is already durable; the caller resumes it.
-		return incarnation, false, nil
 	}
 	if intentErr := insertDeletionIntentTx(ctx, tx, id, incarnation, source, mode, ops); intentErr != nil {
 		return "", false, intentErr
@@ -311,15 +313,22 @@ func insertDeletionIntentTx(ctx context.Context, tx pgx.Tx, id domain.DocumentID
 }
 
 // ownsManifests reports whether the document owns unretired manifested
-// revisions. Only a node that enabled manifests and can delete by revision asks,
-// so no other login reads the manifest tables.
-func (c *Client) ownsManifests(ctx context.Context, tx pgx.Tx, id domain.DocumentID, ops domain.DeleteOperations) (bool, error) {
-	if !c.hostedManifests.Load() || ops.ManifestVectors == nil {
+// revisions before creating a receipt. A tagged transactional delete must also
+// check for external write intents even when the hosted backend is disabled.
+func (c *Client) ownsManifests(ctx context.Context, tx pgx.Tx, id domain.DocumentID, incarnation string, scoped bool, ops domain.DeleteOperations) (bool, error) {
+	const unretired = `SELECT EXISTS(SELECT 1 FROM hosted_vector_manifests WHERE document_id=$1 AND state IN ('writing','active')`
+	var row pgx.Row
+	switch {
+	case scoped && ops.TransactionalVectors:
+		// The document row is locked, serializing this check with manifest writers.
+		row = tx.QueryRow(ctx, unretired+` AND incarnation=$2)`, string(id), incarnation)
+	case c.hostedManifests.Load() && ops.ManifestVectors != nil:
+		row = tx.QueryRow(ctx, unretired+`)`, string(id))
+	default:
 		return false, nil
 	}
 	var owns bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM hosted_vector_manifests WHERE document_id=$1 AND state<>'retired')`, string(id)).Scan(&owns)
-	if err != nil {
+	if err := row.Scan(&owns); err != nil {
 		return false, fmt.Errorf("postgres: read document manifests: %w", err)
 	}
 	return owns, nil
@@ -698,14 +707,6 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 	if source != nil && ops.Source == nil {
 		return "", false, domain.ErrFileStorageUnavailable
 	}
-	manifested, err := c.ownsManifests(ctx, tx, id, ops)
-	if err != nil {
-		return "", false, err
-	}
-	mode, err := vectorMode(scoped, manifested, ops)
-	if err != nil {
-		return "", false, err
-	}
 	if state == "deleting" {
 		if _, recErr := tx.Exec(ctx, `SELECT grant_catalog_record_deletion_owner($1::uuid,$2::uuid,$3::uuid,$4::uuid)`,
 			principal.TenantID, principal.ID, string(id), incarnation); recErr != nil {
@@ -724,6 +725,14 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 			return "", false, auditErr
 		}
 		return incarnation, false, tx.Commit(ctx)
+	}
+	manifested, err := c.ownsManifests(ctx, tx, id, incarnation, scoped, ops)
+	if err != nil {
+		return "", false, err
+	}
+	mode, err := vectorMode(scoped, manifested, ops)
+	if err != nil {
+		return "", false, err
 	}
 	if intentErr := insertDeletionIntentTx(ctx, tx, id, incarnation, source, mode, ops); intentErr != nil {
 		return "", false, intentErr

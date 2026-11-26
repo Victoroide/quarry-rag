@@ -29,10 +29,9 @@ type Client struct {
 	hostedManifests  atomic.Bool
 }
 
-// EnableHostedVectorManifests marks a node whose login may read the manifest
-// tables. Such a node tells deletion which revisions a document owns. Any other
-// node never touches those tables, so a restricted serving login needs no
-// privilege on them while the feature is off.
+// EnableHostedVectorManifests enables writing and sweeping hosted revisions.
+// Tagged transactional deletion checks for external manifests independently of
+// this setting and reads only their document, incarnation and state.
 func (c *Client) EnableHostedVectorManifests(enabled bool) {
 	c.hostedManifests.Store(enabled)
 }
