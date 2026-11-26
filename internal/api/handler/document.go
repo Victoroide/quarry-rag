@@ -84,6 +84,18 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), domain.WriteRequestTimeout)
 		defer cancel()
+		guard, guarded := cs.(domain.LegacyDeletionGuard)
+		guarded = guarded && options.legacyReservations && !qualified
+		legacyCtx, releaseSlot := ctx, func() {}
+		if limiter, ok := cs.(domain.LegacyDeletionLimiter); ok && guarded {
+			// A request over the replica's bound is refused before it takes a writer
+			// session, a lock or a connection.
+			if legacyCtx, releaseSlot, err = limiter.ReserveLegacyDeletion(ctx); err != nil {
+				writeDeleteResult(ctx, w, docIDStr, err)
+				return
+			}
+			defer releaseSlot()
+		}
 		release, gateErr := acquireDeleteWriter(ctx, cs)
 		if gateErr != nil {
 			writeDeleteGateError(ctx, w, docIDStr, gateErr)
@@ -107,10 +119,11 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 			writeDeleteResult(ctx, w, canonical, err)
 			return
 		}
-		if guard, ok := cs.(domain.LegacyDeletionGuard); ok && options.legacyReservations && !qualified {
+		if guarded {
 			// The activation lock decides the contract. A request that loses the race
 			// to an activation continues below as an activated ID-only request.
-			err = cleanup.RemoveLegacy(ctx, guard, pcDriver, objects, options.targets, docID)
+			err = cleanup.RemoveLegacy(legacyCtx, guard, pcDriver, objects, options.targets, docID)
+			releaseSlot()
 			if !errors.Is(err, domain.ErrDeletionActivated) {
 				writeDeleteResult(ctx, w, docIDStr, err)
 				return
@@ -228,6 +241,9 @@ func writeDeleteResult(ctx context.Context, w http.ResponseWriter, docID string,
 	case errors.Is(err, domain.ErrDeletionBusy):
 		w.Header().Set("Retry-After", "5")
 		writeJSONError(w, http.StatusServiceUnavailable, "busy", "document cleanup is in progress; retry the same request")
+	case errors.Is(err, domain.ErrTooManyLegacyDeletions):
+		w.Header().Set("Retry-After", "5")
+		writeJSONError(w, http.StatusServiceUnavailable, "busy", "too many concurrent deletions; retry later")
 	case errors.Is(err, domain.ErrDeletionInactive):
 		writeJSONError(w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
 	default:

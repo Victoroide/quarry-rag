@@ -187,6 +187,10 @@ type Config struct {
 	Warnings          []string
 	Tracing           TracingConfig
 
+	// LegacyDeletionConcurrency caps the guarded ID-only deletions one replica
+	// runs at once. Zero derives the cap from the pool size.
+	LegacyDeletionConcurrency int
+
 	EvaluationCollectionPrefix string
 	NoEvidenceCatalogFile      string
 
@@ -276,6 +280,7 @@ func Load() (*Config, error) {
 		{"MAX_ALLOWED_DOCUMENT_IDS", &cfg.MaxAllowedDocumentIDs, 25000},
 		{"PGVECTOR_EXACT_SCOPE_MAX", &cfg.PGVectorExactScopeMax, 0},
 		{"QUERY_CONCURRENCY", &cfg.QueryConcurrency, 32},
+		{"LEGACY_DELETION_CONCURRENCY", &cfg.LegacyDeletionConcurrency, 0},
 	} {
 		value, err := envIntOrDefault(setting.key, setting.fallback)
 		if err != nil {
@@ -656,6 +661,9 @@ func (c *Config) validate() error {
 	}
 	if c.QueryConcurrency < 1 || c.QueryConcurrency > 1024 {
 		return fmt.Errorf("config: QUERY_CONCURRENCY must be between 1 and 1024")
+	}
+	if c.LegacyDeletionConcurrency < 0 || c.LegacyDeletionConcurrency > 64 {
+		return fmt.Errorf("config: LEGACY_DELETION_CONCURRENCY must be between 0 and 64")
 	}
 	if c.QueryQueueTimeout < 0 || c.QueryQueueTimeout > time.Minute {
 		return fmt.Errorf("config: QUERY_QUEUE_TIMEOUT must be between 0s and 60s")

@@ -335,6 +335,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Cleaner, err
 		return nil, errors.Join(fmt.Errorf("prepare cleanup schema: %w", migrationErr), pg.Close(ctx))
 	}
 	pg.EnableHostedVectorManifests(cfg.HostedVectorManifest)
+	pg.SetLegacyDeletionConcurrency(cfg.LegacyDeletionConcurrency)
 	cleaner.metadata = pg
 	cleaner.targets = Targets{SourceBucket: cfg.S3Bucket, InMemory: cfg.FakeMode}
 	if !cfg.FakeMode && cfg.VectorStore != "postgres" {
