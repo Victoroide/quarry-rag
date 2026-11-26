@@ -20,6 +20,10 @@ func FuzzCitationCodeRanges(f *testing.F) {
 	for _, tc := range citationFenceRegressions {
 		f.Add(tc.answer)
 	}
+	for _, tc := range citationListStartCases {
+		answer, _ := tc.fenceAnswer("```", tc.indent)
+		f.Add(answer)
+	}
 	for _, seed := range citationFenceContainerSeeds {
 		f.Add(seed)
 	}
@@ -78,6 +82,10 @@ func FuzzCitationCodeRanges(f *testing.F) {
 func FuzzVerifyCitationsPreservingCode(f *testing.F) {
 	for _, tc := range citationFenceRegressions {
 		f.Add(tc.answer, uint8(1))
+	}
+	for _, tc := range citationListStartCases {
+		answer, _ := tc.fenceAnswer("~~~", tc.indent)
+		f.Add(answer, uint8(1))
 	}
 	for _, seed := range citationFenceContainerSeeds {
 		f.Add(seed, uint8(1))
