@@ -55,9 +55,13 @@ When `SERVICE_TOKEN` or `SERVICE_TOKENS` is configured, all mutating and sensiti
 - `GET /documents/{doc_id}/file`
 - `DELETE /documents/{doc_id}`
 
-Requests missing or presenting an empty or incorrect token receive `401 Unauthorized`. Each request hashes the header with SHA-256 and compares it against every configured digest in constant time, without stopping at a match. An empty combined token list is allowed only in offline mode and leaves service routes open. The `GET /livez`, `GET /readyz` and `GET /health` endpoints are public and do not require authentication. To change tokens without downtime, follow [Service Token Rotation](deployment.md#service-token-rotation).
+Requests missing or presenting an empty or incorrect token receive `401 Unauthorized`. Each request hashes the header with SHA-256 and compares it against every configured digest in constant time, without stopping at a match. An empty combined token list is allowed only in offline mode and leaves service routes open.
 
-See [subject identity](grant-catalog.md#subject-identity) for the staged grant catalog verifier.
+When `AUTHZ_MODE=grants`, all six data routes (`POST /ingest`, `POST /query`, `GET /documents`, `GET /documents/{doc_id}`, `GET /documents/{doc_id}/file`, `DELETE /documents/{doc_id}`) also require a valid delegated `Authorization: Bearer <jwt>` credential verified against `AUTHZ_ISSUER`, `AUTHZ_AUDIENCE`, and `AUTHZ_JWKS_FILE`, fail closed with `403` for unprovisioned or disabled principals and unauthorized operations (`not_found` is returned for unauthorized status/file lookups where existence would leak), fail closed with `503` on verifier unavailability, audit failure, or corpus mode mismatch, and disable `/evaluation/fixtures*` (`503`). `POST /query` returns `422 scope_too_large` when a membership-filtered store scope exceeds `MAX_ALLOWED_DOCUMENT_IDS`.
+
+The `GET /livez`, `GET /readyz` and `GET /health` endpoints are public and do not require authentication. In `AUTHZ_MODE=grants` (and whenever the database records a corpus mode marker), `GET /readyz` also checks that PostgreSQL's `grant_catalog_corpus_authz_mode()` matches the replica's `AUTHZ_MODE` and (in `grants` mode) that the local JWKS trust file is valid (`503 unavailable` otherwise). To change service tokens without downtime, follow [Service Token Rotation](deployment.md#service-token-rotation).
+
+See [subject identity](grant-catalog.md#subject-identity) and [corpus cutover](grant-catalog.md#corpus-cutover-and-security-audit) for delegated credential details.
 
 ---
 

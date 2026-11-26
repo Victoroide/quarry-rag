@@ -39,8 +39,7 @@ Add the entry to the client's map of stdio servers. Omit `QUARRY_SERVICE_TOKEN` 
 
 ### Subject credential
 
-For a deployment that uses delegated credentials, point `QUARRY_SUBJECT_TOKEN_FILE`
-to the current access token for the one subject assigned to this stdio process.
+For a deployment that uses delegated credentials (including `AUTHZ_MODE=grants`), point `QUARRY_SUBJECT_TOKEN_FILE` to the current access token for the one subject assigned to this stdio process; all six MCP tools attach both `X-Service-Token` and the subject bearer token.
 Keep the file outside the allowed upload roots. Use mode `0600` on POSIX.
 On Windows, use filesystem ACLs to grant read access only to the stdio process
 identity and the trusted operator who rotates the file. Protect the parent
@@ -76,7 +75,7 @@ For collection-scoped ingestion, pass a `collection` argument to either ingestio
 
 ## Security
 
-The service token grants full service access. Share it only with trusted clients. Read-only mode limits the available tools; it does not reduce the credential's permissions at the HTTP service. For restricted queries, pass the caller's authorized document IDs as `allowed_document_ids`; the [HTTP API reference](api.md) defines omitted and empty lists.
+The service token grants full service access in `service` mode; share it only with trusted clients, and pass caller-enforced `allowed_document_ids` for restricted queries in that mode. In `AUTHZ_MODE=grants`, tenant isolation and document permissions are enforced server-side from the delegated subject credential (see [grants mode operations](deployment.md#grants-mode-operations-and-benchmarks)). Read-only mode limits the available tools; it does not reduce credentials' permissions at the HTTP service. The [HTTP API reference](api.md) defines omitted and empty lists.
 
 Collections scope ingestion deduplication. A `collection` argument restricts queries and listings to one collection and intersects `allowed_document_ids`; like the allowlist, it is chosen by the caller and does not limit what the service token can access.
 

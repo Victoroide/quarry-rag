@@ -8,10 +8,10 @@ The table below lists the environment variables recognized by the service:
 
 | Variable | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `AUTHZ_AUDIENCE` | string | `""` | Quarry-specific audience reserved at the issuer | Staged [subject authority](grant-catalog.md#subject-identity) setting. |
-| `AUTHZ_ISSUER` | string | `""` | Exact HTTPS issuer without credentials, query or fragment | Staged subject authority setting. |
-| `AUTHZ_JWKS_FILE` | path | `""` | Local public key set | Staged subject authority setting. |
-| `AUTHZ_MODE` | string | `service` | `service` or unset | Other values prevent startup. |
+| `AUTHZ_AUDIENCE` | string | `""` | Quarry-specific audience reserved at the issuer | [Subject authority](grant-catalog.md#subject-identity) audience required when `AUTHZ_MODE=grants`. |
+| `AUTHZ_ISSUER` | string | `""` | Exact HTTPS issuer without credentials, query or fragment | Subject authority issuer required when `AUTHZ_MODE=grants`. |
+| `AUTHZ_JWKS_FILE` | path | `""` | Local public key set | Local JWKS trust file required and validated at startup when `AUTHZ_MODE=grants`. |
+| `AUTHZ_MODE` | string | `service` | `service` or `grants` | Selects authorization enforcement. `grants` enables per-subject tenant/grant checks on all routes and requires `GO_RAG_FAKE_MODE=false`, at least one `SERVICE_TOKEN`/`SERVICE_TOKENS`, valid `AUTHZ_ISSUER`/`AUTHZ_AUDIENCE`/`AUTHZ_JWKS_FILE`, `INGEST_CONTENT_DEDUP=off`, `VECTOR_STORE` in `{postgres,pinecone}`, `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false`, and empty `EVALUATION_COLLECTION_PREFIX`. See [corpus cutover](grant-catalog.md#corpus-cutover-and-security-audit). |
 | `AWS_ACCESS_KEY_ID` | string | `""` | Set together with `AWS_SECRET_ACCESS_KEY`, or leave both empty | Optional static AWS access key ID. When both keys are empty, AWS clients use the default credential chain. |
 | `AWS_MAX_ATTEMPTS` | integer | `4` | 1 to 10 | Maximum AWS request attempts, including the first attempt. See [AWS retries](deployment.md#aws-retries-and-deadlines) for retry policy details. |
 | `AWS_REGION` | string | `""` | Valid AWS region identifier | AWS region used for AWS Bedrock API calls, Bedrock reranking and S3 object storage. Required outside offline mode when either provider uses Bedrock, reranking is enabled, or original-file storage is enabled. |
@@ -348,10 +348,11 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `024_document_operations.sql` | Adds owner-defined entry points and deletion-owner receipts for [scoped document operations](grant-catalog.md#scoped-document-operations). |
 | `025_hosted_vector_manifest.sql` | Adds `hosted_vector_manifests`, `hosted_vector_revisions` and `hosted_vector_cleanups`, the `hosted_vector_revision_visible` reader predicate, and owner-defined triggers that retire every unretired revision of a document when it is deleted or its status becomes `failed`. It also lets a deletion receipt record a manifested vector target. A restricted serving login needs no privilege on the three tables unless it enables `HOSTED_VECTOR_MANIFEST`. |
 | `026_authorized_retrieval.sql` | Adds the relation of documents each principal may read now and the policy revision function that [authorized retrieval](grant-catalog.md#authorized-retrieval) reads. Service-mode queries do not use them. |
+| `029_authz_corpus_mode.sql` | Adds the corpus authorization mode marker and security audit log. |
 | `030_deletion_mode_lock.sql` | Adds an owner-defined function through which admission reads the deletion activation marker while holding it in share mode, so a restricted serving login can select the tagged vector format without access to the marker table. |
 
 The service can roll back to the previous binary with migration 010 and its
-checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026 or 030, follow the
+checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026, 029 or 030, follow the
 [serving-role upgrade procedure](grant-catalog.md#upgrade-an-existing-serving-role)
 for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).

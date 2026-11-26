@@ -9,7 +9,7 @@ excludes the query string; the remote address is the connecting peer, including
 its port. `bytes` counts response body bytes written, and `duration_ms` measures
 elapsed request handling time in milliseconds.
 
-The `X-Request-ID` response header carries the correlation value. Structured logs
+The `X-Request-ID` response header carries the correlation value. In `AUTHZ_MODE=grants`, access logs record route templates (for example `/documents/{doc_id}` or `unmatched`) instead of raw path UUIDs, and query and ingestion logs omit document IDs, S3 keys, signed URLs, prompts, and text excerpts. Structured logs
 written with the request context include it as `request_id`; startup and other
 logs without that context omit it. Recovered panics are logged at error severity
 with a stack trace. Panics before a response starts produce a JSON 500 and an
@@ -876,3 +876,32 @@ The service accepts any token configured in [`SERVICE_TOKENS` or `SERVICE_TOKEN`
 1. Add the new token to `SERVICE_TOKENS`, keep the old token configured, and roll the deployment. Wait until every replica accepts both tokens before updating callers.
 2. Move callers to the new token and verify authenticated requests succeed.
 3. Remove the old token from `SERVICE_TOKENS` and `SERVICE_TOKEN`, wherever configured, and roll the deployment again. After all replicas restart, the old token receives `401 Unauthorized`.
+
+---
+
+## Grants Mode Operations and Benchmarks
+
+In `AUTHZ_MODE=grants`, Quarry enforces delegated subject credentials and tenant/document grants inside the service alongside `X-Service-Token`. In `AUTHZ_MODE=service`, authorization scopes (`allowed_document_ids`) remain the caller's responsibility; in `grants` mode, callers present both `X-Service-Token` and a short-lived signed JWT bearer token (`Authorization: Bearer <jwt>`).
+
+### Identity, Keys, Retention and Storage Boundaries
+
+- **Trusted issuance and key rotation**: Provision principals into the grant catalog before issuing bearer tokens for them. Distribute issuer public keys to replicas in the local `AUTHZ_JWKS_FILE` (`0600`) with bounded key-set expiry. Rotate keys with overlap via atomic rename (`temp` then `rename`); removing a key invalidates tokens signed with it on the very next check across both `/readyz` and data routes, while missing or expired trust files fail `/readyz` and all data routes closed with `503`.
+- **Cross-replica revocation**: Revoking a grant or disabling a principal in PostgreSQL increments `grant_catalog_policy_revision`. Replicas do not cache positive grants across requests and re-check policy state on pagination, file signing, deletion, and each SSE query disclosure frame.
+- **Metrics, telemetry and S3 storage**: Keep `METRICS_ADDR` bound to a private operator interface. In `grants` mode telemetry forces content capture off and omits document IDs, object keys, presigned URLs, raw `sub`, prompts, excerpts, and membership lists from logs, traces and metrics. Audit rows carry internal document and incarnation UUIDs, but no credentials, raw subjects, signed addresses or text. Original objects remain private in `S3_BUCKET`, and presigned URLs returned by `GET /documents/{doc_id}/file` are bounded to the lesser of `900s` or the remaining bearer token lifetime.
+- **Upstream provider retention**: Vector indexes (`pinecone` when used), embedding providers, rerankers, and LLM endpoints still process submitted text outside Quarry during ingest or synthesis; configure provider data-retention and zero-retention agreements to match tenant sensitivity, and use `answer_mode=evidence` when synthesis must be omitted.
+
+### Benchmarks: `service` vs `grants`
+
+No backend comparison figures are published yet. No Pinecone figures are published.
+
+To measure PostgreSQL pgvector query paths (`service` vs `grants` across 0, 1, 10,000, and 25,000 documents) with Docker available:
+
+```sh
+go test -run=^$ -bench=BenchmarkPGVectorAuthzModes -benchmem ./internal/store/postgres
+```
+
+To compare live Pinecone vector queries (`service` allowlists vs `grants` tenant+incarnation filters) with live credentials:
+
+```sh
+QUARRY_BENCHMARK_LIVE=1 PINECONE_API_KEY=<key> PINECONE_INDEX_NAME=<index> go test -run=^$ -bench=BenchmarkPineconeAuthzModes -benchmem ./internal/store/pinecone
+```

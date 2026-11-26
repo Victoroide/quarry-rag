@@ -7,6 +7,12 @@ Notable changes are grouped by release.
 ### Added
 
 - `make reconcile ARGS=-canonical-document-ids` rewrites hosted vector document IDs written in another UUID spelling, such as upper case, so allowlisted queries, deletions and backfills match them.
+- Public `AUTHZ_MODE=service|grants` configuration switch (default `service`) activating per-subject tenant and document grant enforcement across HTTP data routes, `cmd/server`, the worker, Go client, and stdio MCP (`QUARRY_SUBJECT_TOKEN_FILE`).
+- Existing restricted serving roles must receive EXECUTE on `grant_catalog_corpus_authz_mode()` after migration 029 and before upgraded processes start; see the serving-role upgrade procedure.
+- Fenced corpus cutover in migration `029_authz_corpus_mode.sql` and `scripts/grant-catalog -activate-grants` (with `-dry-run`), enforcing corpus-mode parity on `/readyz`, HTTP routes, and database gates (`ErrAuthzModeMismatch`) while keeping unassigned historical documents quarantined and invisible in `grants` mode.
+- Restricted PostgreSQL security audit table `grant_catalog_security_audit` (`SELECT`-only for `quarry_auditor`), mirroring policy catalog audit events and failing closed on missing trust audit or query/list/status audit writes.
+- Benchmarks comparing `service` and `grants` authorization paths across scopes `0`, `1`, `10,000`, and `25,000` (`BenchmarkQueryHandlerAuthzModes`, `BenchmarkPGVectorAuthzModes`, and opt-in live `BenchmarkPineconeAuthzModes`).
+
 - Qualified document deletion for callers: `Client.DeleteDocumentIncarnation`, `UUID@incarnation` arguments for `make cleanup` and an optional `incarnation` for `quarry_delete_document`. An empty or malformed incarnation is rejected and never becomes an ID-only request.
 - Opt-in legacy deletion reservations commit a durable receipt before ID-only cleanup mutates a vector store, so activating checkpointed deletion or losing a database session cannot let a replacement overtake the last call. Document and administrative deletion enable them only in the activation release.
 - Queries with `include_citations` can set `preserve_code` to keep Markdown code unchanged and exclude bracketed numbers in code from citations, including through the Go client and MCP query tool.
@@ -85,6 +91,8 @@ Notable changes are grouped by release.
 - **Breaking:** Startup rejects `CHUNK_OVERLAP` above `CHUNK_TOKEN_SIZE/2`, which was previously accepted, and chunk output now grows linearly with document size. Chunks keep the source spacing between sentences instead of adding a space after full-width terminators such as `。`.
 
 ### Security
+
+- In `AUTHZ_MODE=grants`, access logs log route templates rather than raw path identifiers, OpenTelemetry tracing forces content capture off and omits `document_id`, object storage errors/debug logs omit `s3_key`, and startup rejects incompatible debug/unsafe combinations (`GO_RAG_FAKE_MODE=true`, empty `SERVICE_TOKEN`/`SERVICE_TOKENS`, invalid JWKS/issuer/audience, `INGEST_CONTENT_DEDUP!=off`, tracing message content capture, or evaluation fixture prefixes).
 
 - Build Quarry with Go 1.27.4 to fix GO-2026-6859 in the HTTP server.
 - Update pgx to 5.13.0, which fixes GHSA-w9rp-vfrh-q8vv in row decoding.
