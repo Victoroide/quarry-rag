@@ -46,20 +46,24 @@ func requestedPDFProfile(req domain.AcceptRequest) string {
 	return domain.MixedPDFProfile
 }
 
-func matchesLegacyPDF(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest, policy domain.ContentDedup, stored string) (bool, error) {
+// matchesLegacyPDF reports whether a historical identity matches and whether an
+// owned retry of a historical parser PDF needs the parser-text fingerprint.
+func matchesLegacyPDF(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest, policy domain.ContentDedup, stored string) (matches, needsParserText bool, err error) {
 	if requestedPDFProfile(req) == domain.LayoutPDFProfile {
-		return false, nil
+		return false, false, nil
 	}
 	parser := req.LegacyParserFingerprint != "" && stored == identityFingerprint(policy, req.Document.ID, req.LegacyParserFingerprint)
 	detection := req.LegacyOCRFingerprint != "" && stored == identityFingerprint(policy, req.Document.ID, req.LegacyOCRFingerprint)
-	if !parser && !detection {
-		return false, nil
+	mayNeedParserText := req.Owner != nil && req.LegacyParserFingerprint == ""
+	if !parser && !detection && !mayNeedParserText {
+		return false, false, nil
 	}
-	var legacy bool
-	err := tx.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM document_pdf_extractions WHERE document_id=d.id)
-		AND ((d.text_source='parser' AND $2) OR (d.text_source IN ('ocr_pending','ocr') AND $3))
-		FROM documents d WHERE d.id=$1`, string(req.Document.ID), parser, detection).Scan(&legacy)
-	return legacy, err
+	var parserLegacy, detectionLegacy, pdf bool
+	err = tx.QueryRow(ctx, `SELECT p.document_id IS NULL AND d.text_source='parser',
+		p.document_id IS NULL AND d.text_source IN ('ocr_pending','ocr'), COALESCE(d.file_type='pdf',FALSE)
+		FROM documents d LEFT JOIN document_pdf_extractions p ON p.document_id=d.id WHERE d.id=$1`,
+		string(req.Document.ID)).Scan(&parserLegacy, &detectionLegacy, &pdf)
+	return parserLegacy && parser || detectionLegacy && detection, mayNeedParserText && parserLegacy && pdf, err
 }
 
 func matchExistingPDF(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest, policy domain.ContentDedup, stored string, includeLegacy bool) (domain.AcceptOutcome, error) {
