@@ -517,6 +517,9 @@ func TestArchitectureGridAndDirections(t *testing.T) {
 		}
 		if n.Row == "entry" {
 			want := 56.0
+			if n.ID == "router" {
+				want = 76
+			}
 			if n.ID == "probes" {
 				want = 96
 			}

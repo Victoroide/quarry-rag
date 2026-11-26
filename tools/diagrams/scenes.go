@@ -62,12 +62,12 @@ func buildDiagrams(root string) (result []diagram, err error) {
 
 func architecture() diagram {
 	d := diagram{Name: "system-architecture", Title: "Quarry service architecture", MaxW: 840, MaxH: 760,
-		Description: "Quarry service architecture. The Go client and local stdio MCP server call the HTTP API. Public probes serve GET /health, GET /livez and GET /readyz. Token-protected routes serve ingestion, queries and document operations. Ingestion normally extracts binary uploads in a sandbox, decodes text uploads in process, optionally saves originals in S3, and accepts documents and durable jobs in PostgreSQL. The ingestion processor claims a job, chunks text, embeds with Bedrock Titan V2, persists vectors in Pinecone, then completes the job and saves chunks in PostgreSQL. Queries decompose, route LOCAL or GLOBAL with Bedrock embeddings, retrieve scoped visible evidence from Pinecone, and synthesize with Bedrock Converse. A representative ingestion span flows through OpenTelemetry to optional OTLP and LangSmith exporters. Document handlers serve GET /documents, GET /documents/{doc_id}, GET /documents/{doc_id}/file and DELETE /documents/{doc_id}."}
+		Description: "Quarry service architecture. The Go client and local stdio MCP server call the HTTP API. Public probes serve GET /health, GET /livez and GET /readyz. Token-protected routes serve ingestion, queries and document operations, and the router also serves the token-protected GET /deletion-mode, which reads the deletion mode recorded in PostgreSQL. Ingestion normally extracts binary uploads in a sandbox, decodes text uploads in process, optionally saves originals in S3, and accepts documents and durable jobs in PostgreSQL. The ingestion processor claims a job, chunks text, embeds with Bedrock Titan V2, persists vectors in Pinecone, then completes the job and saves chunks in PostgreSQL. Queries decompose, route LOCAL or GLOBAL with Bedrock embeddings, retrieve scoped visible evidence from Pinecone, and synthesize with Bedrock Converse. A representative ingestion span flows through OpenTelemetry to optional OTLP and LangSmith exporters. Document handlers serve GET /documents, GET /documents/{doc_id}, GET /documents/{doc_id}/file and DELETE /documents/{doc_id}."}
 	add := func(id, title string, lines ...string) {
 		d.Nodes = append(d.Nodes, node{ID: id, Title: title, Lines: lines})
 	}
 	add("client", "API clients", "Go client · MCP stdio")
-	add("router", "HTTP router", "ID · metrics · logs · auth")
+	add("router", "HTTP router", "ID · metrics · logs · auth", "GET /deletion-mode")
 	add("probes", "Public probes", "GET /health", "GET /livez", "GET /readyz")
 	add("documents", "Document handlers", "GET /", "GET /{doc_id}", "GET /{doc_id}/file", "DELETE /{doc_id}")
 	d.Nodes[len(d.Nodes)-1].Prefix = "/documents"
@@ -98,9 +98,9 @@ func architecture() diagram {
 
 	e("client-router", "client", "router", point{200, 152}, point{224, 152})
 	e("router-probes", "router", "probes", point{408, 152}, point{432, 152})
-	e("router-documents", "router", "documents", point{368, 124}, point{368, 68}, point{732, 68}, point{732, 84})
-	e("router-ingest", "router", "ingest", point{260, 180}, point{260, 240}, point{108, 240}, point{108, 260})
-	e("router-query", "router", "query", point{316, 180}, point{316, 228}, point{524, 228}, point{524, 260})
+	e("router-documents", "router", "documents", point{368, 114}, point{368, 68}, point{732, 68}, point{732, 84})
+	e("router-ingest", "router", "ingest", point{260, 190}, point{260, 240}, point{108, 240}, point{108, 260})
+	e("router-query", "router", "query", point{316, 190}, point{316, 228}, point{524, 228}, point{524, 260})
 	e("ingest-sandbox", "ingest", "sandbox", point{200, 288}, point{224, 288})
 	e("ingest-s3", "ingest", "s3", point{108, 316}, point{108, 452})
 	e("ingest-postgres", "ingest", "postgres", point{200, 300}, point{212, 300}, point{212, 468}, point{224, 468})

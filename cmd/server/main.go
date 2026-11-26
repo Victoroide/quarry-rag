@@ -323,6 +323,10 @@ func run() error {
 		SubjectResolver:       subjectResolver,
 		ReadAuthority:         readAuthority,
 		AuditRecorder:         auditRecorder,
+		// ID-only deletion reserves its targets under the activation lock. The
+		// database decides the contract, and only the administrative
+		// activation command sets the marker.
+		LegacyDeletionReservations: true,
 	})
 
 	srv := &http.Server{

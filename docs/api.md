@@ -54,8 +54,11 @@ When `SERVICE_TOKEN` or `SERVICE_TOKENS` is configured, all mutating and sensiti
 - `GET /documents/{doc_id}`
 - `GET /documents/{doc_id}/file`
 - `DELETE /documents/{doc_id}`
+- `GET /deletion-mode`
 
 Requests missing or presenting an empty or incorrect token receive `401 Unauthorized`. Each request hashes the header with SHA-256 and compares it against every configured digest in constant time, without stopping at a match. An empty combined token list is allowed only in offline mode and leaves service routes open.
+
+`GET /deletion-mode` needs only the service token in every authorization mode.
 
 When `AUTHZ_MODE=grants`, all six data routes (`POST /ingest`, `POST /query`, `GET /documents`, `GET /documents/{doc_id}`, `GET /documents/{doc_id}/file`, `DELETE /documents/{doc_id}`) also require a valid delegated `Authorization: Bearer <jwt>` credential verified against `AUTHZ_ISSUER`, `AUTHZ_AUDIENCE`, and `AUTHZ_JWKS_FILE`, fail closed with `403` for unprovisioned or disabled principals and unauthorized operations (`not_found` is returned for unauthorized status/file lookups where existence would leak), fail closed with `503` on verifier unavailability, audit failure, or corpus mode mismatch, and disable `/evaluation/fixtures*` (`503`). `POST /query` returns `422 scope_too_large` when a membership-filtered store scope exceeds `MAX_ALLOWED_DOCUMENT_IDS`.
 
@@ -971,7 +974,7 @@ curl -X DELETE localhost:8081/documents/8a3e792c-5df6-4b6e-a612-4f7db4959db2 \
 
 #### Checkpointed deletion
 
-A database that has set its deletion activation marker uses checkpointed deletion. No release sets the marker, and the service never sets it while deleting. A request names the lifetime it observed in `X-Document-Incarnation`: read the value once with `include_incarnation=true`, then send the same canonical UUID on every attempt, including after a lost response. A missing value for a live document returns `428`, a different value returns `412`, and an empty, repeated or non-canonical value returns `400`. An absent UUID without a matching completed receipt returns `404`.
+A database that has set its deletion activation marker uses checkpointed deletion. Only the explicit [activation command](deployment.md#activate-checkpointed-deletion) sets the marker, once. Startup, requests, cleanup and tests only read it, and a replica's local settings cannot override it. [`GET /deletion-mode`](#get-deletion-mode) reports it. A request names the lifetime it observed in `X-Document-Incarnation`: read the value once with `include_incarnation=true`, then send the same canonical UUID on every attempt, including after a lost response. A missing value for a live document returns `428`, a different value returns `412`, and an empty, repeated or non-canonical value returns `400`. An absent UUID without a matching completed receipt returns `404`.
 
 1. **Intent.** One short transaction locks the live row, checks the incarnation and the required storage, records the exact source key and vector target, marks the document `deleting` and cancels its ingestion job. From this commit status and listings omit the document and file requests sign no new address. Queries over JSON and SSE exclude it, and its worker can no longer complete or write vectors. An upload that supplies its `document_id` returns `409 Conflict`. Shared content no longer matches it, so a multipart duplicate stages its own source before it is accepted. A signature issued earlier keeps its normal storage semantics.
 2. **Steps.** One request at a time holds a bounded claim. It removes the historical per-document namespace where one exists, then the vectors of that incarnation, then the recorded source object, and records each acknowledged step. For a document with manifested revisions, the vector step deletes each unretired revision by its recorded IDs and no namespace or document-wide deletion runs. A replica with `HOSTED_VECTOR_MANIFEST` disabled that resumes a manifested receipt skips the vector step and leaves unretired revisions for completion's trigger to hand to the drained cleanup queue, where a flag-enabled replica or `scripts/reconcile -apply` removes them. A step that fails or whose outcome is unknown stays pending. A step whose reply was lost is repeated, and a step whose acknowledgment was recorded is never repeated. A claim that has elapsed lets another request resume. It does not prove that a provider has settled an earlier request. Cleanup also waits for a worker vector write that is still in flight.
@@ -983,7 +986,7 @@ A retry through a configured object bucket or vector index that differs from the
 
 #### ID-only deletion across activation
 
-An ID-only request addresses the live document until the database activates checkpointed deletion, and a repeat after removal returns `404`. Where [legacy deletion reservations](deployment.md#legacy-deletion-reservations) are enabled, the request reserves its original lifetime before it mutates any external store.
+An ID-only request addresses the live document until the database activates checkpointed deletion, and a repeat after removal returns `404`. The request reserves its original lifetime before it mutates any external store, as [legacy deletion reservations](deployment.md#legacy-deletion-reservations) describe.
 
 1. **Mode.** The request holds the activation lock shared while it checks the marker. Activation commits only after a healthy request has returned. A request that meets an activated database follows the activated contract: `428` for a live document, `404` for an absent one.
 2. **Reservation.** Before the first vector call the request commits a receipt for the observed incarnation, source object, vector backend and owner. It first waits for a worker vector write that is still in flight, and the reservation stops new worker leases and vector writes for the UUID. Duplicate requests do not share a claim: one that meets a live claim returns `503` with `Retry-After`. A claim that was released lets the same request resume. A retry through a source bucket, vector index or vector backend that differs from the recorded ones fails with `500` before it touches either store, and the receipt keeps the original target.
@@ -993,3 +996,35 @@ An ID-only request addresses the live document until the database activates chec
 While a reservation exists and the row is live, status, `GET /documents/{doc_id}/file` and a same-content duplicate admission still succeed. An activated request that qualifies the original incarnation converts the reservation, keeps its hold and commits the visibility fence of [checkpointed deletion](#checkpointed-deletion). From that commit status and file requests return `404`, the signer is silent and a conflicting admission returns `409`. A reservation owned by another in-memory index is converted only by that index's service.
 
 An incarnation-qualified request while the database is inactive returns `412` and deletes nothing. Send qualified requests only after every endpoint in the pool enforces the header, since an older endpoint ignores it.
+
+---
+
+### GET /deletion-mode
+
+Reports whether the database the service itself uses has activated [checkpointed deletion](#checkpointed-deletion). The answer comes from the database marker, not from a local setting, so it describes the deployment that replies. The request only reads. Only the [activation command](deployment.md#activate-checkpointed-deletion) can change the mode.
+
+- **Method**: `GET`
+- **Path**: `/deletion-mode`
+- **Auth**: Required (`X-Service-Token`) in every authorization mode. The response discloses no document, so no delegated credential is needed.
+- **Request Body**: None
+
+Response fields (200 OK):
+
+| Field | Type | Description |
+|---|---|---|
+| `deletion_mode` | string | `inactive` before activation, `active` afterwards |
+
+Error Status Codes:
+
+| Status | Error Category | Condition |
+|---|---|---|
+| `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
+| `503 Service Unavailable` | `unavailable` | The database could not be read. No mode is assumed and nothing was changed |
+
+Tools that write documents check this mode before their first ingest, because their cleanup needs a saved incarnation. See the [staging procedure](deployment.md#smoke-testing-a-staging-deployment).
+
+Example:
+
+```sh
+curl localhost:8081/deletion-mode -H "X-Service-Token: dev-token"
+```

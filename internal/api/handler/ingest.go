@@ -144,6 +144,7 @@ func handleJSONIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		MaxPending:               opts.maxPending,
 		EvaluationReceipt:        receipt,
 		EvaluationVectorIdentity: opts.fixtureVectorIdentity,
+		SupportsScopedVectors:    opts.scopedVectors,
 	})
 }
 
@@ -234,12 +235,13 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	}
 	formDocType = req.DocType
 	acceptReq := domain.AcceptRequest{
-		Document:       domain.Document{ID: domain.DocumentID(docID), Metadata: metadata, FileName: &fileName, FileType: &ftStr, TextSource: "parser"},
-		CallerSupplied: suppliedID != "",
-		DocType:        formDocType,
-		Collection:     req.Collection,
-		ContentDedup:   opts.contentDedup,
-		MaxPending:     opts.maxPending,
+		Document:              domain.Document{ID: domain.DocumentID(docID), Metadata: metadata, FileName: &fileName, FileType: &ftStr, TextSource: "parser"},
+		CallerSupplied:        suppliedID != "",
+		DocType:               formDocType,
+		Collection:            req.Collection,
+		ContentDedup:          opts.contentDedup,
+		MaxPending:            opts.maxPending,
+		SupportsScopedVectors: opts.scopedVectors,
 	}
 	if ft == extractor.FileTypePDF && (acceptReq.CallerSupplied || opts.extractPages != nil || opts.pdfLayout) {
 		setPDFOriginalFingerprints(&acceptReq, fileData, activePDFProfile(opts))

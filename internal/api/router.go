@@ -50,8 +50,8 @@ type RouterDeps struct {
 	ReadAuthority         domain.ReadAuthority
 	AuditRecorder         domain.SecurityAuditRecorder
 	// LegacyDeletionReservations makes ID-only deletion reserve its targets under
-	// the activation lock. The server entry point leaves it off until the
-	// deployment can also quarantine, release and activate.
+	// the activation lock. The server entry point enables it. A router without
+	// it, as in most tests, leaves ID-only deletion unreserved.
 	LegacyDeletionReservations bool
 }
 
@@ -72,6 +72,12 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		handler.WithUploadLimiter(extractor.NewLimiter(deps.Config.ExtractConcurrency, deps.Config.ExtractQueueTimeout)),
 		handler.WithContentDedup(deps.Config.IngestContentDedup),
 		handler.WithOCR(deps.Config.OCRProvider == "textract" && !deps.Config.FakeMode),
+	}
+	// A backend that can delete one incarnation's vectors may hold tagged vectors.
+	// A manifested index already fences its revisions by exact vector IDs. The
+	// admission transaction still decides the format from the database marker.
+	if _, scoped := deps.PineconeDriver.(domain.RevisionVectorDeleter); scoped && !deps.Config.HostedVectorManifest {
+		ingestOpts = append(ingestOpts, handler.WithScopedVectors())
 	}
 	needsPDFPages := deps.Config.OCRPDFMode == config.OCRPDFMixed || deps.Config.PDFLayoutMode == config.PDFLayoutTextract
 	if deps.Config.ExtractIsolation {
@@ -174,6 +180,9 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		deleteOpts = append(deleteOpts, handler.WithScopedDeletion(), handler.WithDeleteAudit(deps.AuditRecorder))
 	}
 	mux.HandleFunc("DELETE /documents/{doc_id}", protectData(handler.DeleteHandler(deps.ChunkStore, deps.PineconeDriver, objects, deleteOpts...)))
+	// The mode check reads the activation marker for operators and smoke checks.
+	// It is a service route: it discloses no document and needs no subject.
+	mux.HandleFunc("GET /deletion-mode", middleware.RequireServiceTokens(tokens, handler.DeletionModeHandler(deps.ChunkStore)))
 	// Offline fake mode keeps vectors in process memory. A receipt bound to a
 	// store that disappears on restart could never be proved clean again.
 	fixtureStore := deps.FixtureVectorIdentity

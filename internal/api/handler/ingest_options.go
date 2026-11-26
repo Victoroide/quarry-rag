@@ -20,6 +20,16 @@ type ingestOptions struct {
 	journal               domain.SourceUploadJournal
 	owned                 bool
 	audit                 domain.SecurityAuditRecorder
+	scopedVectors         bool
+}
+
+// WithScopedVectors lets the document store qualify the vectors of a new
+// document by its incarnation. It states only that the vector backend can; the
+// store selects the tagged format inside the admission transaction while it
+// holds the database's activation marker, so no local setting of a replica can
+// create an untagged document after activation, or a tagged one before it.
+func WithScopedVectors() IngestOption {
+	return func(opts *ingestOptions) { opts.scopedVectors = true }
 }
 
 // WithOwnedIngestion binds every upload to the verified principal in the

@@ -528,6 +528,31 @@ paths:
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/Error'
+  /deletion-mode:
+    parameters:
+      - $ref: '#/components/parameters/RequestID'
+    get:
+      operationId: getDeletionMode
+      summary: Read the deletion mode of the service database
+      description: 'See [GET /deletion-mode](api.md#get-deletion-mode).'
+      security:
+        - ServiceToken: []
+      responses:
+        '200':
+          description: Deletion mode recorded in the database
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeletionModeResponse'
+        '401':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
 components:
   securitySchemes:
     ServiceToken:
@@ -1153,6 +1178,15 @@ components:
         doc_id:
           type: string
           format: uuid
+    DeletionModeResponse:
+      type: object
+      description: 'See [GET /deletion-mode](api.md#get-deletion-mode).'
+      additionalProperties: false
+      required: [deletion_mode]
+      properties:
+        deletion_mode:
+          type: string
+          enum: [inactive, active]
     APIError:
       type: object
       description: 'See [error envelopes](api.md).'
