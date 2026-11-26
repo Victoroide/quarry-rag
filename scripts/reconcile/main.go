@@ -27,6 +27,7 @@ type options struct {
 	Page  int
 
 	BackfillCollections bool
+	BackfillScoped      bool
 	After               string
 
 	// SourceUploads selects the object-store mode for journaled originals.
@@ -48,9 +49,10 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.SetOutput(output)
 	flags.BoolVar(&opts.Apply, "apply", false, "apply the selected deletions or collection updates")
 	flags.BoolVar(&opts.BackfillCollections, "backfill-collections", false, "label existing vectors with their document collection instead of deleting orphans")
+	flags.BoolVar(&opts.BackfillScoped, "backfill-scoped", false, "verify assigned historical documents and label their current vectors with tenant and incarnation")
 	flags.IntVar(&opts.Limit, "limit", 100000, "maximum vectors and namespace vectors selected, documents for collection backfill, or uploads examined (default 1000 with -source-uploads)")
 	flags.IntVar(&opts.Page, "page", 100, "vector listing page size (1-1000)")
-	flags.StringVar(&opts.After, "after", "", "continue a collection backfill after this document UUID")
+	flags.StringVar(&opts.After, "after", "", "continue a backfill after this document UUID")
 	flags.BoolVar(&opts.SourceUploads, "source-uploads", false, "reclaim journaled original files that no document adopted, independent of the vector store")
 	flags.DurationVar(&opts.MinAge, "min-age", time.Hour, "with -source-uploads, leave uploads younger than this untouched")
 	flags.DurationVar(&opts.Settle, "settle", 30*time.Minute, "with -source-uploads, minimum time between a claim and the settlement of a fully accounted-for write (at least 1m)")
@@ -62,8 +64,8 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	set := map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	if opts.SourceUploads {
-		if opts.BackfillCollections || set["after"] || set["page"] {
-			return opts, errors.New("-source-uploads cannot be combined with -backfill-collections, -after or -page")
+		if opts.BackfillCollections || opts.BackfillScoped || set["after"] || set["page"] {
+			return opts, errors.New("-source-uploads cannot be combined with -backfill-collections, -backfill-scoped, -after or -page")
 		}
 		if !set["limit"] {
 			opts.Limit = defaultSourceUploadLimit
@@ -81,10 +83,13 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	if flags.NArg() != 0 || opts.Limit < 1 || opts.Page < 1 || opts.Page > 1000 {
 		return opts, errors.New("provide -limit greater than zero and -page between 1 and 1000, with no positional arguments")
 	}
+	if opts.BackfillCollections && opts.BackfillScoped {
+		return opts, errors.New("choose one backfill mode")
+	}
 	if opts.After != "" {
 		id, err := uuid.Parse(opts.After)
-		if err != nil || !opts.BackfillCollections {
-			return opts, errors.New("-after requires -backfill-collections and a document UUID")
+		if err != nil || (!opts.BackfillCollections && !opts.BackfillScoped) {
+			return opts, errors.New("-after requires a backfill mode and a document UUID")
 		}
 		opts.After = id.String()
 	}
@@ -113,7 +118,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if (!opts.BackfillCollections || opts.Apply) && (cfg.FakeMode || cfg.PineconeAPIKey == "" || cfg.PineconeIndexName == "") {
+	scopedLocal := opts.BackfillScoped && cfg.VectorStore == "postgres"
+	if !scopedLocal && ((!opts.BackfillCollections && !opts.BackfillScoped) || opts.Apply) && (cfg.FakeMode || cfg.PineconeAPIKey == "" || cfg.PineconeIndexName == "") {
 		return errors.New("reconciliation requires a configured hosted vector index")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -129,6 +135,20 @@ func run() error {
 			slog.Error("close document store", "error", closeErr)
 		}
 	}()
+	if opts.BackfillScoped && !opts.Apply {
+		result, backfillErr := backfillScoped(ctx, pg, nil, opts)
+		if backfillErr != nil {
+			return backfillErr
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
+	if scopedLocal {
+		result, backfillErr := backfillScoped(ctx, pg, pgvectorVectors{pg}, opts)
+		if backfillErr != nil {
+			return backfillErr
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
 	var collectionDocuments []collectionDocument
 	if opts.BackfillCollections {
 		collectionDocuments, err = listCollectionDocuments(ctx, pg, opts.After, opts.Limit)
@@ -162,6 +182,13 @@ func run() error {
 			slog.Error("close index connection", "error", closeErr)
 		}
 	}()
+	if opts.BackfillScoped {
+		result, backfillErr := backfillScoped(ctx, pg, hostedVectors{conn}, opts)
+		if backfillErr != nil {
+			return backfillErr
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
 	if opts.BackfillCollections {
 		result, backfillErr := backfillCollections(ctx, conn, collectionDocuments, opts)
 		if backfillErr != nil {
