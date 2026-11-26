@@ -30,9 +30,6 @@ func (g citationScopeGenerator) Generate(ctx context.Context, req llm.Request) (
 }
 
 func TestCitationScopeRejectsStaleAndReusedEvidence(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	ctx := t.Context()
 	db, err := pgstore.NewClient(ctx, pgtest.StartVector(t))
 	require.NoError(t, err)

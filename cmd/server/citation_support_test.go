@@ -27,9 +27,7 @@ func TestOfflineServerMakesNoCitationVerifierRequests(t *testing.T) {
 		require.NoError(t, run())
 		return
 	}
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
+	databaseURL := pgtest.Start(t)
 	const model = "fixture@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	const token = "fixture-service-token"
 	profile := citationsupport.PairEvaluation{
@@ -76,7 +74,7 @@ func TestOfflineServerMakesNoCitationVerifierRequests(t *testing.T) {
 	require.NoError(t, l.Close())
 
 	t.Setenv("GO_RAG_FAKE_MODE", "true")
-	t.Setenv("DATABASE_URL", pgtest.Start(t))
+	t.Setenv("DATABASE_URL", databaseURL)
 	t.Setenv("SERVER_PORT", port)
 	t.Setenv("METRICS_ADDR", "")
 	t.Setenv("SERVICE_TOKENS", "")

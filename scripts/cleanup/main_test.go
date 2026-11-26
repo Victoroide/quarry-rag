@@ -174,9 +174,6 @@ func FuzzParseCommand(f *testing.F) {
 }
 
 func TestCleanupCLIQuarantineListAndReleaseAcrossActivation(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db := pgtest.StartVector(t)
 	t.Setenv("DATABASE_URL", db)
 	t.Setenv("VECTOR_STORE", "postgres")

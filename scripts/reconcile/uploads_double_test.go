@@ -300,9 +300,6 @@ type rig struct {
 
 func newDatabase(t *testing.T) *pgstore.Client {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(context.WithoutCancel(t.Context()))) })

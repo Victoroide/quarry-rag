@@ -25,9 +25,6 @@ func TestGrantCatalogRejectsIncompatibleFlagsBeforeConnecting(t *testing.T) {
 }
 
 func TestGrantCatalogActivateGrantsCommand(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	databaseURL := pgtest.Start(t)
 	c, err := postgres.NewClient(t.Context(), databaseURL)
 	require.NoError(t, err)
@@ -62,9 +59,6 @@ func TestGrantCatalogRejectsDuplicateInputBeforeConnecting(t *testing.T) {
 }
 
 func TestGrantCatalogInvalidDimensionsLeaveSchemaUntouched(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	databaseURL := pgtest.Start(t)
 	c, err := postgres.NewClient(t.Context(), databaseURL)
 	require.NoError(t, err)

@@ -20,9 +20,6 @@ import (
 )
 
 func TestDocumentLookupPreservesRetryJobs(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(t.Context())) })
@@ -39,9 +36,6 @@ func TestDocumentLookupPreservesRetryJobs(t *testing.T) {
 }
 
 func TestCollectionBackfillSelectsLabeledDocuments(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(t.Context())) })
@@ -60,9 +54,6 @@ func TestCollectionBackfillSelectsLabeledDocuments(t *testing.T) {
 }
 
 func TestDocumentKeyListingFollowsUUIDOrder(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(t.Context())) })
@@ -91,9 +82,6 @@ func TestDocumentKeyListingFollowsUUIDOrder(t *testing.T) {
 }
 
 func TestMakeCollectionBackfillDryRun(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(t.Context())) })
@@ -129,9 +117,6 @@ func (b *blockingScopedVectors) Verify(ctx context.Context, _ pgstore.BackfillDo
 }
 
 func TestScopedBackfillApplyAcquiresWriterAndRefusesGenerationMismatch(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	ctx := t.Context()
 	pg, err := pgstore.NewClient(ctx, pgtest.StartVector(t))
 	require.NoError(t, err)
@@ -222,9 +207,6 @@ func TestScopedBackfillApplyAcquiresWriterAndRefusesGenerationMismatch(t *testin
 }
 
 func TestLookupDocumentsIncludesManifestedRevisions(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(t.Context())) })
@@ -305,9 +287,6 @@ func (*blockingSweepVectors) ListPrefixVectorIDs(context.Context, string, string
 }
 
 func TestRevisionSweepApplyPinsGenerationAndHoldsWriterBarrier(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	ctx := t.Context()
 	pg, err := pgstore.NewClient(ctx, pgtest.Start(t))
 	require.NoError(t, err)
