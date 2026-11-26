@@ -11,15 +11,18 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/credential"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -391,6 +394,285 @@ func requireTrustEvent(t *testing.T, events <-chan TrustEvent, outcome, reason s
 	require.Equal(t, TrustEvent{Action: "trust_key_load", Outcome: outcome, Reason: reason}, awaitTrustResult(t, events))
 }
 
+// gateTrustRead pauses after taking a real file sample, before the loader can
+// use it. The read count includes any checks that unexpectedly enter the reader.
+func gateTrustRead(t *testing.T, verifier *Verifier, readErr error) (*atomic.Int32, func(int32), <-chan struct{}, func()) {
+	t.Helper()
+	count := new(atomic.Int32)
+	var blockedRead atomic.Int32
+	entered, released := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(released) }) }
+	t.Cleanup(release)
+	verifier.trust.readFile = func(path string, limit int64, denied fs.FileMode) ([]byte, error) {
+		attempt := count.Add(1)
+		data, err := credential.ReadFile(path, limit, denied)
+		if attempt == blockedRead.Load() {
+			close(entered)
+			<-released
+			if readErr != nil {
+				return nil, readErr
+			}
+		}
+		return data, err
+	}
+	return count, func(offset int32) { blockedRead.Store(count.Load() + offset) }, entered, release
+}
+
+func TestTrustUnchangedReadsDoNotBlockEachOther(t *testing.T) {
+	verifier, key, _ := newFixtureVerifier(t)
+	events, _, _ := observeTrustFixture(t, verifier)
+	reads, blockRead, entered, release := gateTrustRead(t, verifier, nil)
+	token := fixtureToken(t, key, fixtureHeader, fixtureClaims(t, nil))
+	identity, err := verifier.Verify(token)
+	require.NoError(t, err)
+	requireTrustEvent(t, events, "allow", "trust_loaded")
+	initialReads := reads.Load()
+	blockRead(1)
+
+	stalled := startTrustCall(verifier.ValidateTrust)
+	awaitTrustResult(t, entered)
+	for _, check := range []func() error{
+		func() error { _, err := verifier.Verify(token); return err },
+		func() error { return verifier.CheckTrust(identity) },
+		verifier.ValidateTrust,
+	} {
+		require.NoError(t, awaitTrustResult(t, startTrustCall(check)))
+	}
+	require.Equal(t, initialReads+4, reads.Load())
+	require.Empty(t, events)
+
+	release()
+	require.NoError(t, awaitTrustResult(t, stalled))
+	require.Equal(t, initialReads+4, reads.Load())
+	require.Empty(t, events)
+}
+
+func TestTrustPendingReadDoesNotHoldStateMutex(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read int32
+	}{
+		{"pre-audit", 2},
+		{"post-audit", 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verifier, key, path := newFixtureVerifier(t)
+			sibling, _, _ := newFixtureVerifier(t)
+			events, _, _ := observeTrustFixture(t, verifier)
+			reads, blockRead, entered, release := gateTrustRead(t, verifier, nil)
+			claims := fixtureClaims(t, nil)
+			oldToken := fixtureToken(t, key, fixtureHeader, claims)
+			identity, err := verifier.Verify(oldToken)
+			require.NoError(t, err)
+			requireTrustEvent(t, events, "allow", "trust_loaded")
+			initialReads := reads.Load()
+			blockRead(tc.read)
+
+			replacement, err := rsa.GenerateKey(rand.Reader, 2048)
+			require.NoError(t, err)
+			newToken := fixtureToken(t, replacement, fixtureHeader, claims)
+			replaceTrust(t, path, trustFixture(t, fixtureTime.Add(time.Hour), jose.JSONWebKey{Key: replacement.Public(), KeyID: "first"}))
+			rotation := startTrustCall(verifier.ValidateTrust)
+			awaitTrustResult(t, entered)
+			if tc.name == "post-audit" {
+				requireTrustEvent(t, events, "allow", "trust_rotated")
+			}
+
+			for _, check := range []func() error{
+				func() error { _, err := verifier.Verify(oldToken); return err },
+				func() error { _, err := verifier.Verify(newToken); return err },
+				func() error { return verifier.CheckTrust(identity) },
+				verifier.ValidateTrust,
+			} {
+				require.ErrorIs(t, awaitTrustResult(t, startTrustCall(check)), ErrAuthorityUnavailable)
+			}
+			require.NoError(t, awaitTrustResult(t, startTrustCall(sibling.ValidateTrust)))
+			require.Equal(t, initialReads+tc.read, reads.Load())
+			require.Empty(t, events)
+			require.True(t, verifier.trust.last.keys["first"].Equal(key.Public()))
+
+			release()
+			require.NoError(t, awaitTrustResult(t, rotation))
+			if tc.name == "pre-audit" {
+				requireTrustEvent(t, events, "allow", "trust_rotated")
+			}
+			require.Equal(t, initialReads+3, reads.Load())
+			_, err = verifier.Verify(newToken)
+			require.NoError(t, err)
+			require.ErrorIs(t, verifier.CheckTrust(identity), ErrInvalidCredential)
+			require.Empty(t, events)
+		})
+	}
+}
+
+func TestTrustRejectsDelayedReadAcrossTransition(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		failAudit      bool
+		staleReadError error
+	}{
+		{name: "published same-kid replacement"},
+		{name: "failed audit leaves original published", failAudit: true},
+		{name: "stale read error cannot start an episode", failAudit: true, staleReadError: fs.ErrPermission},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verifier, key, path := newFixtureVerifier(t)
+			events, blockNext, finishAudit := observeTrustFixture(t, verifier)
+			// Open a failure episode before holding a successful old sample in
+			// the failed-audit case. A stale success must leave it open.
+			_, blockRead, entered, release := gateTrustRead(t, verifier, tc.staleReadError)
+			claims := fixtureClaims(t, nil)
+			oldToken := fixtureToken(t, key, fixtureHeader, claims)
+			identity, err := verifier.Verify(oldToken)
+			require.NoError(t, err)
+			requireTrustEvent(t, events, "allow", "trust_loaded")
+			oldBytes, err := os.ReadFile(path)
+			require.NoError(t, err)
+			episodeOpen := tc.failAudit && tc.staleReadError == nil
+			if episodeOpen {
+				require.NoError(t, os.Remove(path))
+				require.ErrorIs(t, verifier.ValidateTrust(), ErrAuthorityUnavailable)
+				requireTrustEvent(t, events, "error", "trust_unavailable")
+				replaceTrust(t, path, oldBytes)
+			}
+
+			blockRead(1)
+			stale := startTrustCall(func() error { return verifier.CheckTrust(identity) })
+			awaitTrustResult(t, entered)
+			replacement, err := rsa.GenerateKey(rand.Reader, 2048)
+			require.NoError(t, err)
+			newToken := fixtureToken(t, replacement, fixtureHeader, claims)
+			newBytes := trustFixture(t, fixtureTime.Add(time.Hour), jose.JSONWebKey{Key: replacement.Public(), KeyID: "first"})
+			require.Len(t, newBytes, len(oldBytes))
+			replaceTrust(t, path, newBytes)
+			if tc.failAudit {
+				blockNext()
+				rotation := startTrustCall(verifier.ValidateTrust)
+				requireTrustEvent(t, events, "allow", "trust_rotated")
+				finishAudit <- context.Canceled
+				require.ErrorIs(t, awaitTrustResult(t, rotation), ErrAuthorityUnavailable)
+				replaceTrust(t, path, oldBytes)
+			} else {
+				require.NoError(t, awaitTrustResult(t, startTrustCall(verifier.ValidateTrust)))
+				requireTrustEvent(t, events, "allow", "trust_rotated")
+			}
+
+			release()
+			require.ErrorIs(t, awaitTrustResult(t, stale), ErrAuthorityUnavailable)
+			require.Equal(t, episodeOpen, verifier.trust.unavailable)
+			require.Empty(t, events)
+			if tc.failAudit {
+				require.NoError(t, verifier.CheckTrust(identity))
+			} else {
+				require.ErrorIs(t, verifier.CheckTrust(identity), ErrInvalidCredential)
+				_, err = verifier.Verify(newToken)
+				require.NoError(t, err)
+			}
+			require.Empty(t, events)
+		})
+	}
+}
+
+func TestTrustRereadRestoresPublishedSnapshot(t *testing.T) {
+	verifier, key, path := newFixtureVerifier(t)
+	events, _, _ := observeTrustFixture(t, verifier)
+	original, err := os.ReadFile(path)
+	require.NoError(t, err)
+	restore := false
+	verifier.trust.readFile = func(path string, limit int64, denied fs.FileMode) ([]byte, error) {
+		data, err := credential.ReadFile(path, limit, denied)
+		if restore {
+			restore = false
+			replaceTrust(t, path, original)
+		}
+		return data, err
+	}
+	token := fixtureToken(t, key, fixtureHeader, fixtureClaims(t, nil))
+	identity, err := verifier.Verify(token)
+	require.NoError(t, err)
+	requireTrustEvent(t, events, "allow", "trust_loaded")
+	require.NoError(t, os.Remove(path))
+	require.ErrorIs(t, verifier.ValidateTrust(), ErrAuthorityUnavailable)
+	requireTrustEvent(t, events, "error", "trust_unavailable")
+
+	empty := make([]jose.JSONWebKey, 0)
+	replaceTrust(t, path, trustFixture(t, fixtureTime.Add(time.Hour), empty...))
+	restore = true
+	require.NoError(t, verifier.CheckTrust(identity))
+	require.Empty(t, events)
+
+	require.NoError(t, os.Remove(path))
+	require.ErrorIs(t, verifier.ValidateTrust(), ErrAuthorityUnavailable)
+	requireTrustEvent(t, events, "error", "trust_unavailable")
+}
+
+func TestTrustReadLimitsAndRecovery(t *testing.T) {
+	verifier, key, path := newFixtureVerifier(t)
+	var denyRead bool
+	verifier.trust.readFile = func(path string, limit int64, denied fs.FileMode) ([]byte, error) {
+		if denyRead {
+			return nil, fs.ErrPermission
+		}
+		return credential.ReadFile(path, limit, denied)
+	}
+	events, _, _ := observeTrustFixture(t, verifier)
+	token := fixtureToken(t, key, fixtureHeader, fixtureClaims(t, nil))
+	identity, err := verifier.Verify(token)
+	require.NoError(t, err)
+	requireTrustEvent(t, events, "allow", "trust_loaded")
+
+	keys := make([]jose.JSONWebKey, maxTrustKeys+1)
+	for i := range keys {
+		keys[i] = jose.JSONWebKey{Key: key.Public(), KeyID: fmt.Sprintf("key-%02d", i)}
+	}
+	expiry := fixtureTime.Add(time.Hour)
+	valid := trustFixture(t, expiry, keys[:maxTrustKeys]...)
+	atLimit := append(valid, strings.Repeat(" ", maxTrustBytes-len(valid))...)
+	for _, tc := range []struct {
+		name      string
+		data      []byte
+		deny      bool
+		want      error
+		newOutage bool
+	}{
+		{name: "empty key set", data: trustFixture(t, expiry, keys[:0]...)},
+		{name: "empty file", want: ErrAuthorityUnavailable, newOutage: true},
+		{name: "byte and key limits", data: atLimit},
+		{name: "byte limit exceeded", data: append(atLimit, ' '), want: ErrAuthorityUnavailable, newOutage: true},
+		{name: "key limit exceeded", data: trustFixture(t, expiry, keys...), want: ErrAuthorityUnavailable},
+		{name: "unreadable", data: valid, deny: true, want: ErrAuthorityUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replaceTrust(t, path, tc.data)
+			denyRead = tc.deny
+			defer func() { denyRead = false }()
+			err := verifier.ValidateTrust()
+			if tc.want == nil {
+				require.NoError(t, err)
+				requireTrustEvent(t, events, "allow", "trust_rotated")
+				require.ErrorIs(t, verifier.CheckTrust(identity), ErrInvalidCredential)
+			} else {
+				require.ErrorIs(t, err, tc.want)
+				require.ErrorIs(t, verifier.CheckTrust(identity), ErrAuthorityUnavailable)
+				if tc.newOutage {
+					requireTrustEvent(t, events, "error", "trust_unavailable")
+				}
+			}
+			require.Empty(t, events)
+		})
+	}
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.Mkdir(path, 0o700))
+	require.ErrorIs(t, verifier.ValidateTrust(), ErrAuthorityUnavailable)
+	require.Empty(t, events)
+	require.NoError(t, os.Remove(path))
+	replaceTrust(t, path, trustFixture(t, expiry, jose.JSONWebKey{Key: key.Public(), KeyID: "first"}))
+	require.NoError(t, verifier.CheckTrust(identity))
+	requireTrustEvent(t, events, "allow", "trust_rotated")
+	require.Empty(t, events)
+}
+
 func TestPendingTrustAuditCannotAuthenticate(t *testing.T) {
 	replacement, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -660,7 +942,13 @@ func TestTrustTransitionRecoversAfterObserverPanic(t *testing.T) {
 func FuzzSubjectTrustAndClaims(f *testing.F) {
 	verifier, key, _ := newFixtureVerifier(f)
 	trust := trustFixture(f, fixtureTime.Add(time.Hour), jose.JSONWebKey{Key: key.Public(), KeyID: "first"})
-	for _, seed := range [][]byte{[]byte(fixtureClaims(f, nil)), trust, []byte(fixtureHeader), []byte(`{"aud":["quarry-documents"],"exp":1e999999}`), []byte(`{"exp":1,"exp":2}`)} {
+	for _, seed := range [][]byte{
+		[]byte(fixtureClaims(f, nil)), trust, []byte(fixtureHeader),
+		[]byte(`{"aud":["quarry-documents"],"exp":1e999999}`), []byte(`{"exp":1,"exp":2}`),
+		[]byte(`{"keys":[`),
+		[]byte(`{"keys":[],"keys":[],"expires_at":"2026-11-25T17:00:00Z"}`),
+		[]byte(`{"keys":{},"expires_at":"2026-11-25T17:00:00Z"}`),
+	} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, raw []byte) {
