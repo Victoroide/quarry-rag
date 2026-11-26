@@ -34,8 +34,14 @@ type DocumentRevision struct {
 	// revision-qualified physical keys that a copy by logical key cannot reproduce.
 	ScopedVectors bool
 	// ActiveRevisionID holds the active revision UUID when the document uses
-	// hosted vector manifests, or empty otherwise.
+	// hosted vector manifests, or empty otherwise. A document with an active
+	// revision keeps its vectors under manifest keys, whether or not it is also
+	// marked ScopedVectors.
 	ActiveRevisionID string
+	// VectorAttempt is the published vector attempt of a tagged document.
+	VectorAttempt string
+	// MutationPending marks a document whose vector write has not settled.
+	MutationPending bool
 }
 
 // DocumentSnapshot is one completed document read from a single snapshot.
@@ -52,8 +58,10 @@ const eligibleDocument = `d.status = 'completed'
 const documentTenantSQL = `CASE WHEN d.grant_catalog_assigned THEN COALESCE(grant_catalog_document_tenant(d.id, COALESCE(d.incarnation, d.id))::text, '') ELSE '' END`
 
 const revisionSQL = `SELECT d.id::text, COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, d.chunk_count, c.n, c.bytes,
- encode(sha256(convert_to(jsonb_build_array('v4', COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, COALESCE(r.active_revision_id::text, ''), c.n, c.fingerprint)::text, 'UTF8')), 'hex'),
- d.scoped_vectors, COALESCE(r.active_revision_id::text, '')
+ encode(sha256(convert_to((CASE WHEN d.scoped_vectors AND r.active_revision_id IS NULL
+  THEN jsonb_build_array('v4', COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, '', c.n, c.fingerprint, 'tagged', COALESCE(d.vector_attempt::text, ''))
+  ELSE jsonb_build_array('v4', COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, COALESCE(r.active_revision_id::text, ''), c.n, c.fingerprint) END)::text, 'UTF8')), 'hex'),
+ d.scoped_vectors, COALESCE(r.active_revision_id::text, ''), COALESCE(d.vector_attempt::text, ''), d.vector_mutation_pending
  FROM eligible d
  LEFT JOIN hosted_vector_revisions r ON r.document_id = d.id
  CROSS JOIN LATERAL (
@@ -64,7 +72,7 @@ const revisionSQL = `SELECT d.id::text, COALESCE(d.incarnation, d.id)::text, d.d
  ) c`
 
 func scanRevision(rows pgx.Row, r *DocumentRevision) error {
-	return rows.Scan(&r.ID, &r.Incarnation, &r.DocType, &r.Collection, &r.TenantID, &r.DeclaredChunks, &r.Chunks, &r.TextBytes, &r.Revision, &r.ScopedVectors, &r.ActiveRevisionID)
+	return rows.Scan(&r.ID, &r.Incarnation, &r.DocType, &r.Collection, &r.TenantID, &r.DeclaredChunks, &r.Chunks, &r.TextBytes, &r.Revision, &r.ScopedVectors, &r.ActiveRevisionID, &r.VectorAttempt, &r.MutationPending)
 }
 
 // DocumentRevisions lists completed documents after a document ID in ascending order.
@@ -246,4 +254,86 @@ func parseManifestVectorID(key string) (docID, revID string, index int32, ok boo
 		return "", "", 0, false
 	}
 	return docUUID.String(), revUUID.String(), int32(idx), true
+}
+
+// TaggedVectorDocuments counts eligible completed documents stored in the tagged
+// vector format and how many lack a determinable published vector attempt. A
+// document with an active hosted revision keeps manifest keys and is not counted.
+func (c *Client) TaggedVectorDocuments(ctx context.Context) (total, unresolved int, err error) {
+	err = c.Pool.QueryRow(ctx, `SELECT count(*)::int, count(*) FILTER (WHERE d.vector_attempt IS NULL OR d.vector_mutation_pending)::int
+ FROM documents d LEFT JOIN hosted_vector_revisions r ON r.document_id = d.id
+ WHERE `+eligibleDocument+` AND d.scoped_vectors AND r.active_revision_id IS NULL`).Scan(&total, &unresolved)
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: count tagged vector documents: %w", err)
+	}
+	return total, unresolved, nil
+}
+
+// TaggedVectorKey identifies one physical tagged vector key and its parsed parts.
+type TaggedVectorKey struct {
+	Key        string
+	DocumentID string
+	Revision   string
+	Attempt    string
+	ChunkID    string
+}
+
+// UnexpectedTaggedKeys returns only tagged keys absent from the eligible tagged
+// corpus or whose revision, attempt or chunk no longer matches PostgreSQL. A
+// document with an active hosted revision has no current tagged key.
+func (c *Client) UnexpectedTaggedKeys(ctx context.Context, keys []TaggedVectorKey) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	rawKeys := make([]string, 0, len(keys))
+	docIDs := make([]string, 0, len(keys))
+	revisions := make([]string, 0, len(keys))
+	attempts := make([]string, 0, len(keys))
+	chunkIDs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		docUUID, docErr := uuid.Parse(k.DocumentID)
+		revUUID, revErr := uuid.Parse(k.Revision)
+		attUUID, attErr := uuid.Parse(k.Attempt)
+		chunkUUID, chunkErr := uuid.Parse(k.ChunkID)
+		if docErr != nil || revErr != nil || attErr != nil || chunkErr != nil ||
+			k.DocumentID != docUUID.String() || k.Revision != revUUID.String() || k.Attempt != attUUID.String() ||
+			k.ChunkID != fmt.Sprintf("%x", chunkUUID[:]) {
+			continue
+		}
+		rawKeys = append(rawKeys, k.Key)
+		docIDs = append(docIDs, docUUID.String())
+		revisions = append(revisions, revUUID.String())
+		attempts = append(attempts, attUUID.String())
+		chunkIDs = append(chunkIDs, chunkUUID.String())
+	}
+	present := make(map[string]bool, len(rawKeys))
+	if len(rawKeys) > 0 {
+		rows, err := c.Pool.Query(ctx, `SELECT k.key
+ FROM unnest($1::text[], $2::uuid[], $3::text[], $4::text[], $5::uuid[]) AS k(key, doc_id, revision, attempt, chunk_id)
+ JOIN documents d ON d.id = k.doc_id
+ LEFT JOIN hosted_vector_revisions r ON r.document_id = d.id
+ JOIN chunks c ON c.id = k.chunk_id AND c.document_id = d.id
+ WHERE `+eligibleDocument+`
+  AND d.scoped_vectors AND r.active_revision_id IS NULL
+  AND COALESCE(d.incarnation, d.id)::text = k.revision
+  AND d.vector_attempt IS NOT NULL
+  AND d.vector_attempt::text = k.attempt`, rawKeys, docIDs, revisions, attempts, chunkIDs)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: check tagged vector keys: %w", err)
+		}
+		matched, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, fmt.Errorf("postgres: collect tagged vector keys: %w", err)
+		}
+		for _, key := range matched {
+			present[key] = true
+		}
+	}
+	extra := make([]string, 0, len(keys)-len(present))
+	for _, k := range keys {
+		if !present[k.Key] {
+			extra = append(extra, k.Key)
+		}
+	}
+	return extra, nil
 }
