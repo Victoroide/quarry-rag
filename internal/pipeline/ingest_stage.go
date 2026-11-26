@@ -155,6 +155,9 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 		if ic.Collection != "" {
 			ic.Chunks[i].Metadata["collection"] = ic.Collection
 		}
+		if ic.Tenant != "" {
+			ic.Chunks[i].Metadata[domain.VectorTenantKey] = ic.Tenant
+		}
 	}
 
 	if _, transactional := s.vectorStore.(domain.TransactionalVectorStore); transactional {

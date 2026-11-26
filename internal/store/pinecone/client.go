@@ -223,7 +223,7 @@ func (p *Client) UpsertWithVisibility(ctx context.Context, namespace string, chu
 		if c.VectorIncarnation != "" {
 			mdMap[domain.VectorIncarnationKey] = c.VectorIncarnation
 		}
-		for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorRevisionKey, domain.VectorAttemptKey} {
+		for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey} {
 			if value, ok := c.Metadata[key]; ok {
 				mdMap[key] = value
 			}
@@ -494,6 +494,25 @@ func vectorIDPrefix(docID, revision string) string { return docID + "/" + revisi
 
 func validVectorIDPart(part string) bool { return part != "" && !strings.Contains(part, "/") }
 
+// TaggedVectorID formats a revision- and attempt-qualified hosted vector ID.
+func TaggedVectorID(docID, revision, attempt, chunkID string) (string, error) {
+	if !validVectorIDPart(docID) || !validVectorIDPart(revision) || !validVectorIDPart(chunkID) {
+		return "", errors.New("pinecone: invalid tagged vector identity")
+	}
+	target := vectorTarget{document: docID, revision: revision}
+	if attempt != "" {
+		if !validVectorIDPart(attempt) {
+			return "", errors.New("pinecone: invalid vector attempt")
+		}
+		target.attempt = attempt
+	}
+	id := target.prefix() + chunkID
+	if len(id) > 512 {
+		return "", errors.New("pinecone: tagged vector ID exceeds 512 bytes")
+	}
+	return id, nil
+}
+
 func physicalVectorID(chunk domain.Chunk) (string, error) {
 	id := string(chunk.ID)
 	value, tagged := chunk.Metadata[domain.VectorRevisionKey]
@@ -505,22 +524,15 @@ func physicalVectorID(chunk domain.Chunk) (string, error) {
 		return id, nil
 	}
 	revision, _ := value.(string)
-	docID := string(chunk.DocumentID)
-	if !validVectorIDPart(docID) || !validVectorIDPart(revision) || !validVectorIDPart(id) {
-		return "", errors.New("pinecone: invalid tagged vector identity")
-	}
-	target := vectorTarget{document: docID, revision: revision}
+	var attempt string
 	if hasAttempt {
-		target.attempt, _ = attemptValue.(string)
-		if !validVectorIDPart(target.attempt) {
+		var ok bool
+		attempt, ok = attemptValue.(string)
+		if !ok || attempt == "" {
 			return "", errors.New("pinecone: invalid vector attempt")
 		}
 	}
-	id = target.prefix() + id
-	if len(id) > 512 {
-		return "", errors.New("pinecone: tagged vector ID exceeds 512 bytes")
-	}
-	return id, nil
+	return TaggedVectorID(string(chunk.DocumentID), revision, attempt, id)
 }
 
 func (t vectorTarget) logicalID(physicalID string) (string, bool) {
@@ -724,7 +736,7 @@ func matchesToScoredChunks(matches []*pinecone.ScoredVector, namespace string) [
 				}
 			}
 			chunk.Metadata = make(map[string]any)
-			for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorRevisionKey, domain.VectorAttemptKey} {
+			for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey} {
 				if v, ok := fields[key]; ok {
 					chunk.Metadata[key] = v.GetStringValue()
 				}

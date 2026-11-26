@@ -136,7 +136,7 @@ func validateMetadata(c domain.Chunk) error {
 	if c.VectorIncarnation != "" {
 		metadata[domain.VectorIncarnationKey] = c.VectorIncarnation
 	}
-	for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorRevisionKey, domain.VectorAttemptKey} {
+	for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey} {
 		if value, ok := c.Metadata[key]; ok {
 			metadata[key] = value
 		}

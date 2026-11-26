@@ -219,6 +219,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 	ic.S3Key = job.Document.S3Key
 	ic.DocType = job.DocType
 	ic.Collection = job.Collection
+	ic.Tenant = job.Tenant
 	ic.Stopping = w.stop
 	if job.ScopedVectors {
 		ic.VectorRevision = job.Incarnation

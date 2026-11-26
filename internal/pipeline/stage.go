@@ -65,6 +65,9 @@ type IngestContext struct {
 
 	// Collection is written to chunk metadata when non-empty.
 	Collection string
+	// Tenant is the owning tenant of an owned document. It is written to every
+	// chunk so tenant-scoped searches can match it.
+	Tenant string
 }
 
 // NewIngestContext creates an initialized IngestContext.

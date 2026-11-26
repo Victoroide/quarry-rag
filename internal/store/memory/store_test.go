@@ -191,3 +191,12 @@ func TestOfflineStoreOwnsMetadataLists(t *testing.T) {
 		})
 	}
 }
+
+func TestTenantLabelIsStoredAndReturned(t *testing.T) {
+	s := NewFakeVectorStore()
+	require.NoError(t, s.Upsert(t.Context(), "", []domain.Chunk{{ID: "owned", Embedding: []float32{1}, Metadata: map[string]any{domain.VectorTenantKey: "tenant-a"}}}))
+	result, err := s.QueryAllNamespaces(t.Context(), []float32{1}, 1, "")
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	require.Equal(t, "tenant-a", result[0].Chunk.Metadata[domain.VectorTenantKey])
+}

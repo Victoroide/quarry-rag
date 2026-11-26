@@ -51,3 +51,29 @@ func TestEmbedStageRunsConcurrently(t *testing.T) {
 		require.Equal(t, []float32{1}, ch.Embedding)
 	}
 }
+
+type tenantRecordingStore struct {
+	domain.VectorStore
+	chunks []domain.Chunk
+}
+
+func (s *tenantRecordingStore) Upsert(_ context.Context, _ string, chunks []domain.Chunk) error {
+	s.chunks = append(s.chunks, chunks...)
+	return nil
+}
+
+func TestPersistLabelsOwnedChunksWithTheirTenant(t *testing.T) {
+	for _, tenant := range []string{"tenant-a", ""} {
+		ic := NewIngestContext("doc", "text", nil)
+		ic.Tenant = tenant
+		ic.Chunks = []domain.Chunk{{ID: "chunk", Embedding: []float32{1}}}
+		store := &tenantRecordingStore{}
+		require.NoError(t, NewPersistStage(store).Run(t.Context(), ic))
+		require.Len(t, store.chunks, 1)
+		label, labeled := store.chunks[0].Metadata[domain.VectorTenantKey]
+		require.Equal(t, tenant != "", labeled)
+		if labeled {
+			require.Equal(t, tenant, label)
+		}
+	}
+}
