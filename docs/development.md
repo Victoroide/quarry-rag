@@ -80,10 +80,12 @@ The offline query test ingests through HTTP, polls document status until complet
 
 The router tests use real PostgreSQL roles, grant imports, token verification,
 ingestion workers, and two independent connection pools. pgvector stores the
-local embeddings. Models and the S3 endpoint use deterministic local fixtures.
+local embeddings. The Pinecone driver uses a local data plane that applies
+metadata filters before ranking. Models and the S3 endpoint use deterministic
+local fixtures.
 
 ```sh
-go test -race -count=1 ./internal/api -run "^TestGrantsPostgres"
+go test -race -count=1 ./internal/api -run "^TestGrants(Postgres|Pinecone)"
 ```
 
 ### 3. Smoke Tests
