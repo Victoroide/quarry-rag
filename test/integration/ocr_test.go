@@ -279,17 +279,43 @@ func TestMixedPDFAnonymousRetryUsesLegacyOCROriginal(t *testing.T) {
 				send(t, mixed, tc.data, "another-collection"),
 				send(t, privateMixed, tc.data, "archive"),
 			} {
-				require.Equal(t, http.StatusUnprocessableEntity, response.Code, response.Body.String())
+				if tc.name == "blank PDF" {
+					require.Equal(t, http.StatusUnprocessableEntity, response.Code, response.Body.String())
+					continue
+				}
+				acceptedOther := privateResponse(t, response, http.StatusAccepted)
+				summary, err := store.GetDocumentSummary(ctx, domain.DocumentID(acceptedOther.DocumentID))
+				require.NoError(t, err)
+				require.NotNil(t, summary)
+				require.Equal(t, domain.PDFPending, summary.PDFCoverage)
+				// Drain mixed-PDF work so subsequent legacy ClaimJob calls are not blocked by pdf_required jobs.
+				mixedJob, err := store.ClaimPDFJob(ctx, "mixed", time.Minute, 5)
+				require.NoError(t, err)
+				require.NotNil(t, mixedJob)
+				require.Equal(t, acceptedOther.DocumentID, string(mixedJob.Document.ID))
+				_, err = store.BeginPDFOCR(ctx, *mixedJob)
+				require.NoError(t, err)
+				require.NoError(t, store.StorePDFOCR(ctx, *mixedJob, domain.PDFResult{
+					Text:     "Recovered archive text",
+					Coverage: domain.PDFComplete,
+					Pages:    []domain.PDFPageResult{{Number: 1, Source: "ocr", State: "text"}},
+				}))
+				done, err := store.CompleteJob(ctx, *mixedJob, nil, domain.IndexObservation{})
+				require.NoError(t, err)
+				require.True(t, done)
 			}
 		})
 	}
 	response := send(t, mixed, newScan, "archive")
-	require.Equal(t, http.StatusUnprocessableEntity, response.Code, response.Body.String())
-	require.Contains(t, response.Body.String(), `"code":"unparseable"`)
-	require.Len(t, objects.saved, 2)
+	acceptedNew := privateResponse(t, response, http.StatusAccepted)
+	summary, err := store.GetDocumentSummary(t.Context(), domain.DocumentID(acceptedNew.DocumentID))
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Equal(t, domain.PDFPending, summary.PDFCoverage)
+	require.Len(t, objects.saved, 5)
 	var docs int
 	require.NoError(t, store.Pool.QueryRow(t.Context(), `SELECT count(*) FROM documents`).Scan(&docs))
-	require.Equal(t, 2, docs)
+	require.Equal(t, 5, docs)
 }
 
 func TestMixedPDFInconclusiveLegacyIdentityKeepsOriginalDocument(t *testing.T) {
