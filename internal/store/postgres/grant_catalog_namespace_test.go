@@ -159,7 +159,7 @@ func testGrantCatalogTruncate(t *testing.T, databaseURL string) {
 }
 
 func testGrantCatalogPreviewSnapshot(t *testing.T, databaseURL string) {
-	c := migrationTestClient(t, databaseURL)
+	c := migrationTestClient(t, withFixtureOptions(t, databaseURL, "application_name=quarry-grant-preview-test"))
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	require.NoError(t, c.RunMigrations(ctx))
@@ -188,7 +188,8 @@ func testGrantCatalogPreviewSnapshot(t *testing.T, databaseURL string) {
 	}()
 	require.Eventually(t, func() bool {
 		var waiting int
-		readErr := c.Pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, writerPID).Scan(&waiting)
+		readErr := c.Pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database()
+			AND application_name=current_setting('application_name') AND $1 = ANY(pg_blocking_pids(pid))`, writerPID).Scan(&waiting)
 		return readErr == nil && waiting == 2
 	}, 10*time.Second, 20*time.Millisecond)
 	mutation := testGrantBatch(0)
