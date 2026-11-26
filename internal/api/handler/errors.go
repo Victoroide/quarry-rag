@@ -10,6 +10,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/aws/smithy-go"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -42,7 +43,7 @@ func acquireQuerySlot(ctx context.Context, slots chan struct{}, timeout time.Dur
 }
 
 func writeQueryError(w http.ResponseWriter, r *http.Request, err error) {
-	slog.ErrorContext(r.Context(), "query processing failed", "error", err)
+	slog.ErrorContext(r.Context(), "query processing failed", "error", tracing.ErrorForTelemetry(r.Context(), err))
 	code, retry, body := queryErrorResponse(err)
 	if code == 0 {
 		return
@@ -50,7 +51,7 @@ func writeQueryError(w http.ResponseWriter, r *http.Request, err error) {
 	if retry != "" {
 		w.Header().Set("Retry-After", retry)
 	}
-	writeJSONError(w, code, body.Error, body.Message)
+	writeJSONError(r.Context(), w, code, body.Error, body.Message)
 }
 
 func queryErrorResponse(err error) (code int, retry string, body APIError) {

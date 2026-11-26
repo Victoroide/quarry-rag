@@ -704,3 +704,17 @@ raw `sub`, credentials, presigned URLs, or text excerpts:
 - `subject_auth`, `query`, `document_list`, and `document_status` fail closed if
   required allow audit records fail, and record denials/errors.
 - Grant `SELECT` on `grant_catalog_security_audit` to `quarry_auditor` only; keep mutations restricted to the schema owner and `grant_catalog_record_security_audit(...)` for `quarry_service`.
+
+### Operational telemetry
+
+In grants mode, operational error fields in logs and trace exceptions and status
+descriptions use three categories: `operation failed`, `operation canceled`, and
+`operation timed out`. SQL traces omit statement text and record only a recognized
+SQL verb or `OTHER`. Panic and extraction child diagnostics use fixed log messages.
+Grants-mode telemetry omits document, object, and upload identifiers and disables
+content capture. API responses, restricted audit records, and durable ingestion
+and cleanup diagnostics keep their existing formats.
+
+Upgrade every grants-mode replica and worker to apply this behavior across the
+deployment. A binary rollback restores that binary's previous diagnostic rendering.
+Telemetry already exported stays subject to the destination's retention policy.

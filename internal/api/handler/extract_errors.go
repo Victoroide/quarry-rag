@@ -9,10 +9,11 @@ import (
 	"strings"
 
 	"github.com/Victoroide/quarry-rag/internal/extractor"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 )
 
 func writeExtractionError(w http.ResponseWriter, r *http.Request, err error) {
-	slog.ErrorContext(r.Context(), "extract uploaded text", "error", err)
+	slog.ErrorContext(r.Context(), "extract uploaded text", "error", tracing.ErrorForTelemetry(r.Context(), err))
 	status, code, message := http.StatusUnprocessableEntity, "unparseable", "document could not be parsed"
 	switch {
 	case extractionErrorIs(err, extractor.ErrTypeMismatch):
@@ -39,7 +40,7 @@ func writeExtractionError(w http.ResponseWriter, r *http.Request, err error) {
 		Message string `json:"message"`
 		Code    string `json:"code"`
 	}{"extraction", message, code}); err != nil {
-		slog.ErrorContext(r.Context(), "encode extraction error", "error", err)
+		slog.ErrorContext(r.Context(), "encode extraction error", "error", tracing.ErrorForTelemetry(r.Context(), err))
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 )
 
 // Deletion modes reported by GET /deletion-mode.
@@ -32,15 +33,15 @@ func DeletionModeHandler(cs domain.ChunkStore) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-store")
 		deleter, ok := cs.(domain.DocumentDeleter)
 		if !ok {
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document deletion mode is unavailable")
+			writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document deletion mode is unavailable")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), deletionModeTimeout)
 		defer cancel()
 		active, err := deleter.DeletionActive(ctx)
 		if err != nil {
-			slog.ErrorContext(r.Context(), "read deletion mode", "error", err)
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document deletion mode is unavailable")
+			slog.ErrorContext(r.Context(), "read deletion mode", "error", tracing.ErrorForTelemetry(r.Context(), err))
+			writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document deletion mode is unavailable")
 			return
 		}
 		mode := DeletionModeInactive
@@ -49,7 +50,7 @@ func DeletionModeHandler(cs domain.ChunkStore) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err = json.NewEncoder(w).Encode(DeletionModeResponse{DeletionMode: mode}); err != nil {
-			slog.ErrorContext(r.Context(), "encode deletion mode response", "error", err)
+			slog.ErrorContext(r.Context(), "encode deletion mode response", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		}
 	}
 }

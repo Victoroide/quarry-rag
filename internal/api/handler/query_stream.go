@@ -13,6 +13,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 )
 
 // QueryStreamContext describes the evidence selected for the query.
@@ -135,7 +136,7 @@ func (s *queryStream) finish(ctx context.Context, err error) {
 			writeQueryError(s.w, s.r, err)
 			return
 		}
-		slog.ErrorContext(ctx, "query processing failed", "error", err)
+		slog.ErrorContext(ctx, "query processing failed", "error", tracing.ErrorForTelemetry(ctx, err))
 		if s.writeErr != nil || s.requestEnded() != nil {
 			return
 		}
@@ -144,7 +145,7 @@ func (s *queryStream) finish(ctx context.Context, err error) {
 			return
 		}
 		if writeErr := s.event(context.WithoutCancel(ctx), "error", body); writeErr != nil {
-			slog.DebugContext(ctx, "write query stream error", "error", writeErr)
+			slog.DebugContext(ctx, "write query stream error", "error", tracing.ErrorForTelemetry(ctx, writeErr))
 		}
 	}
 }

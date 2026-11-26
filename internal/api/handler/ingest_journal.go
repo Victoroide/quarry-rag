@@ -10,6 +10,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 )
 
@@ -100,6 +101,10 @@ func (w sourceWriter) recordResult(ctx context.Context, id string, result domain
 	resultCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := w.journal.RecordSourceUploadResult(resultCtx, id, result); err != nil {
-		slog.WarnContext(ctx, "record source upload result", "upload_id", id, "error", err)
+		if tracing.RedactIdentifiers(ctx) {
+			slog.WarnContext(ctx, "record source upload result", "error", tracing.ErrorForTelemetry(ctx, err))
+		} else {
+			slog.WarnContext(ctx, "record source upload result", "upload_id", id, "error", err)
+		}
 	}
 }

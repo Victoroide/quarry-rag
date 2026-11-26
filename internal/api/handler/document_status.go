@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 )
 
@@ -22,7 +23,7 @@ func DocumentStatusHandler(cs domain.ChunkStore, opts ...DocumentStatusOption) h
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := uuid.Parse(r.PathValue("doc_id"))
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
 			return
 		}
 		query, err := url.ParseQuery(r.URL.RawQuery)
@@ -32,22 +33,22 @@ func DocumentStatusHandler(cs domain.ChunkStore, opts ...DocumentStatusOption) h
 		}
 		lister, ok := selectDocumentLister(cs, projection.incarnation)
 		if !ok {
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document status is unavailable")
+			writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document status is unavailable")
 			return
 		}
 		doc, err := lister.GetDocumentSummary(r.Context(), domain.DocumentID(id.String()))
 		if err != nil {
-			slog.ErrorContext(r.Context(), "look up document summary", "document_id", id, "error", err)
-			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to look up document")
+			slog.ErrorContext(r.Context(), "look up document summary", "document_id", id, "error", tracing.ErrorForTelemetry(r.Context(), err))
+			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to look up document")
 			return
 		}
 		if doc == nil {
-			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
+			writeJSONError(r.Context(), w, http.StatusNotFound, "not_found", "document not found")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(projection.body(*doc)); err != nil {
-			slog.ErrorContext(r.Context(), "encode document summary", "error", err)
+			slog.ErrorContext(r.Context(), "encode document summary", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		}
 	}
 }
@@ -107,7 +108,7 @@ func scopedDocumentStatusHandler(cs domain.ChunkStore, opts documentStatusOption
 		}
 		id, err := uuid.Parse(r.PathValue("doc_id"))
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
 			return
 		}
 		query, err := url.ParseQuery(r.URL.RawQuery)
@@ -118,22 +119,22 @@ func scopedDocumentStatusHandler(cs domain.ChunkStore, opts documentStatusOption
 		lister, capable := cs.(domain.ScopedDocumentLister)
 		if !capable {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "document_status", "error", "status_unavailable", id.String(), "")
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document status is unavailable")
+			writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document status is unavailable")
 			return
 		}
 		summary, fetchErr := fetchVerifiedScopedSummary(r.Context(), lister, subject, now, domain.DocumentID(id.String()), projection.incarnation)
 		if fetchErr != nil {
 			if fetchErr.cause != nil {
-				slog.ErrorContext(r.Context(), "look up scoped document summary", "error", fetchErr.cause)
+				slog.ErrorContext(r.Context(), "look up scoped document summary", "error", tracing.ErrorForTelemetry(r.Context(), fetchErr.cause))
 			}
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "document_status", statusAuditOutcome(fetchErr.status), fetchErr.errCode, id.String(), "")
-			writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
+			writeJSONError(r.Context(), w, fetchErr.status, fetchErr.errCode, fetchErr.message)
 			return
 		}
 		rev := summary.CatalogRevision
 		if summary.Document == nil {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, &rev, "document_status", "deny", "not_found", id.String(), "")
-			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
+			writeJSONError(r.Context(), w, http.StatusNotFound, "not_found", "document not found")
 			return
 		}
 		docIncarnation := summary.Document.Incarnation
@@ -142,7 +143,7 @@ func scopedDocumentStatusHandler(cs domain.ChunkStore, opts documentStatusOption
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(projection.body(redactScopedSummary(*summary.Document))); err != nil {
-			slog.ErrorContext(r.Context(), "encode scoped document summary", "error", err)
+			slog.ErrorContext(r.Context(), "encode scoped document summary", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		}
 	}
 }

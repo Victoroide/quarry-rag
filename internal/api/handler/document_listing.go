@@ -12,13 +12,14 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/api/middleware"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 )
 
 func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain.DocumentLister, query url.Values, collection string, projection documentSummaryProjection) {
 	scoped, ok := lister.(domain.CollectionDocumentLister)
 	if collection != "" && !ok {
-		writeJSONError(w, http.StatusInternalServerError, "internal", "collection filtering is unavailable")
+		writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "collection filtering is unavailable")
 		return
 	}
 
@@ -28,14 +29,14 @@ func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain
 	}
 	limit, err := strconv.Atoi(query.Get("limit"))
 	if err != nil || limit < 1 || limit > 1000 || len(query["limit"]) != 1 {
-		writeJSONError(w, http.StatusBadRequest, "validation", "limit must be between 1 and 1000")
+		writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "limit must be between 1 and 1000")
 		return
 	}
 	after := ""
 	if query.Has("after") {
 		id, parseErr := uuid.Parse(query.Get("after"))
 		if parseErr != nil || len(query["after"]) != 1 {
-			writeJSONError(w, http.StatusBadRequest, "validation", "after must be a valid UUID")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "after must be a valid UUID")
 			return
 		}
 		after = id.String()
@@ -47,8 +48,8 @@ func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain
 		docs, err = lister.ListDocumentsPage(r.Context(), after, limit)
 	}
 	if err != nil {
-		slog.ErrorContext(r.Context(), "list documents page", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to list documents")
+		slog.ErrorContext(r.Context(), "list documents page", "error", tracing.ErrorForTelemetry(r.Context(), err))
+		writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to list documents")
 		return
 	}
 	var next *string
@@ -65,7 +66,7 @@ func listDocumentSummaries(w http.ResponseWriter, r *http.Request, lister domain
 		Count     int     `json:"count"`
 		NextAfter *string `json:"next_after"`
 	}{documents, len(docs), next}); err != nil {
-		slog.ErrorContext(r.Context(), "encode document list", "error", err)
+		slog.ErrorContext(r.Context(), "encode document list", "error", tracing.ErrorForTelemetry(r.Context(), err))
 	}
 }
 
@@ -99,21 +100,21 @@ func streamDocumentSummaries(w http.ResponseWriter, r *http.Request, lister doma
 		err = lister.StreamDocuments(r.Context(), visit)
 	}
 	if err != nil {
-		slog.ErrorContext(r.Context(), "stream documents", "error", err)
+		slog.ErrorContext(r.Context(), "stream documents", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		if !started {
-			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to list documents")
+			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to list documents")
 		}
 		return
 	}
 	if !started {
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := io.WriteString(w, `{"documents":[`); err != nil {
-			slog.ErrorContext(r.Context(), "encode document list", "error", err)
+			slog.ErrorContext(r.Context(), "encode document list", "error", tracing.ErrorForTelemetry(r.Context(), err))
 			return
 		}
 	}
 	if _, err := fmt.Fprintf(w, `],"count":%d}`+"\n", count); err != nil {
-		slog.ErrorContext(r.Context(), "encode document list", "error", err)
+		slog.ErrorContext(r.Context(), "encode document list", "error", tracing.ErrorForTelemetry(r.Context(), err))
 	}
 }
 
@@ -137,19 +138,19 @@ func scopedListDocumentsHandler(cs domain.ChunkStore, opts documentListOptions) 
 		}
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "invalid query parameters")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "invalid query parameters")
 			return
 		}
 		collection, apiErr := listingCollection(query)
 		if apiErr != nil {
-			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			writeJSONError(r.Context(), w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
 		projection := documentSummaryOptions(query)
 		lister, capable := cs.(domain.ScopedDocumentLister)
 		if !capable {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "document_list", "error", "inventory_unavailable", "", "")
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document inventory is unavailable")
+			writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document inventory is unavailable")
 			return
 		}
 		if !query.Has("limit") && !query.Has("after") {
@@ -158,14 +159,14 @@ func scopedListDocumentsHandler(cs domain.ChunkStore, opts documentListOptions) 
 		}
 		limit, err := strconv.Atoi(query.Get("limit"))
 		if err != nil || limit < 1 || limit > 1000 || len(query["limit"]) != 1 {
-			writeJSONError(w, http.StatusBadRequest, "validation", "limit must be between 1 and 1000")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "limit must be between 1 and 1000")
 			return
 		}
 		after := ""
 		if query.Has("after") {
 			id, parseErr := uuid.Parse(query.Get("after"))
 			if parseErr != nil || len(query["after"]) != 1 {
-				writeJSONError(w, http.StatusBadRequest, "validation", "after must be a valid UUID")
+				writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "after must be a valid UUID")
 				return
 			}
 			after = id.String()
@@ -173,10 +174,10 @@ func scopedListDocumentsHandler(cs domain.ChunkStore, opts documentListOptions) 
 		page, fetchErr := fetchVerifiedScopedPage(r.Context(), lister, subject, now, after, limit, collection, projection.incarnation)
 		if fetchErr != nil {
 			if fetchErr.cause != nil {
-				slog.ErrorContext(r.Context(), "list scoped documents page", "error", fetchErr.cause)
+				slog.ErrorContext(r.Context(), "list scoped documents page", "error", tracing.ErrorForTelemetry(r.Context(), fetchErr.cause))
 			}
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "document_list", statusAuditOutcome(fetchErr.status), fetchErr.errCode, "", "")
-			writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
+			writeJSONError(r.Context(), w, fetchErr.status, fetchErr.errCode, fetchErr.message)
 			return
 		}
 		rev := page.CatalogRevision
@@ -197,7 +198,7 @@ func scopedListDocumentsHandler(cs domain.ChunkStore, opts documentListOptions) 
 			Count     int     `json:"count"`
 			NextAfter *string `json:"next_after"`
 		}{documents, len(page.Documents), next}); err != nil {
-			slog.ErrorContext(r.Context(), "encode scoped document list", "error", err)
+			slog.ErrorContext(r.Context(), "encode scoped document list", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		}
 	}
 }
@@ -221,11 +222,11 @@ func streamScopedDocumentSummaries(
 		page, fetchErr := fetchVerifiedScopedPage(r.Context(), lister, subject, now, after, batchSize, collection, projection.incarnation)
 		if fetchErr != nil {
 			if fetchErr.cause != nil {
-				slog.ErrorContext(r.Context(), "stream scoped documents", "error", fetchErr.cause)
+				slog.ErrorContext(r.Context(), "stream scoped documents", "error", tracing.ErrorForTelemetry(r.Context(), fetchErr.cause))
 			}
 			recordSecurityAuditBestEffort(r.Context(), audit, &subject, nil, "document_list", statusAuditOutcome(fetchErr.status), fetchErr.errCode, "", "")
 			if !started {
-				writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
+				writeJSONError(r.Context(), w, fetchErr.status, fetchErr.errCode, fetchErr.message)
 			}
 			return
 		}
@@ -251,15 +252,15 @@ func streamScopedDocumentSummaries(
 			if !subject.ValidAt(now()) {
 				recordSecurityAuditBestEffort(r.Context(), audit, &subject, nil, "document_list", "deny", "credential_expired", "", "")
 				if !started {
-					writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+					writeJSONError(r.Context(), w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 				}
 				return
 			}
 			encoded, err := json.Marshal(projection.body(redactScopedSummary(doc)))
 			if err != nil {
-				slog.ErrorContext(r.Context(), "encode scoped document summary", "error", err)
+				slog.ErrorContext(r.Context(), "encode scoped document summary", "error", tracing.ErrorForTelemetry(r.Context(), err))
 				if !started {
-					writeJSONError(w, http.StatusInternalServerError, "internal", "failed to list documents")
+					writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to list documents")
 				}
 				return
 			}
@@ -288,18 +289,18 @@ func streamScopedDocumentSummaries(
 	if !subject.ValidAt(now()) {
 		recordSecurityAuditBestEffort(r.Context(), audit, &subject, nil, "document_list", "deny", "credential_expired", "", "")
 		if !started {
-			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+			writeJSONError(r.Context(), w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 		}
 		return
 	}
 	if !started {
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := io.WriteString(w, `{"documents":[`); err != nil {
-			slog.ErrorContext(r.Context(), "encode scoped document list", "error", err)
+			slog.ErrorContext(r.Context(), "encode scoped document list", "error", tracing.ErrorForTelemetry(r.Context(), err))
 			return
 		}
 	}
 	if _, err := fmt.Fprintf(w, `],"count":%d}`+"\n", count); err != nil {
-		slog.ErrorContext(r.Context(), "encode scoped document list", "error", err)
+		slog.ErrorContext(r.Context(), "encode scoped document list", "error", tracing.ErrorForTelemetry(r.Context(), err))
 	}
 }

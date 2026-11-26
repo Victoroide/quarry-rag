@@ -13,7 +13,9 @@ import (
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/logctx"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRecoveryReturnsJSON(t *testing.T) {
@@ -190,4 +192,15 @@ func TestResponseWriterKeepsFirstStatus(t *testing.T) {
 	if rw.statusCode != 201 {
 		t.Fatalf("logged status %d differs from sent status %d", rw.statusCode, rec.Code)
 	}
+}
+
+func TestRecoveryRedactedWrappedAbort(t *testing.T) {
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
+	req = req.WithContext(tracing.WithRedactIdentifiers(req.Context(), true))
+	w := httptest.NewRecorder()
+	handler := Recovery(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(fmt.Errorf("synthetic provider detail: %w", http.ErrAbortHandler))
+	}))
+	require.PanicsWithValue(t, http.ErrAbortHandler, func() { handler.ServeHTTP(w, req) })
+	require.Empty(t, w.Body.String())
 }

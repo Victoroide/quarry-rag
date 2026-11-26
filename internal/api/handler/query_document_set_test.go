@@ -7,9 +7,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/logctx"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -286,6 +289,46 @@ func TestEnabledSetsWithoutACapableBackendRefuseEverySetQuery(t *testing.T) {
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 		require.Zero(t, rig.providerCalls())
 	})
+}
+
+func TestDocumentSetErrorResponseTelemetry(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rig    func(*testing.T) *grantRig
+		body   string
+		status int
+	}{
+		{"sets disabled", func(t *testing.T) *grantRig {
+			return newGrantRig(t, domain.GrantScopeRelation, nil)
+		}, setBody(setFull, ""), http.StatusBadRequest},
+		{"invalid allowlist", func(t *testing.T) *grantRig {
+			return newSetRig(t, domain.GrantScopeRelation, nil)
+		}, setBody(setFull, `"allowed_document_ids":["invalid"]`), http.StatusBadRequest},
+		{"missing capability", func(t *testing.T) *grantRig {
+			return newSetRigWith(t, domain.GrantScopeRelation, func(rig *grantRig) { rig.store.noSets = true })
+		}, setBody(setFull, ""), http.StatusServiceUnavailable},
+		{"missing set", func(t *testing.T) *grantRig {
+			return newSetRig(t, domain.GrantScopeRelation, nil)
+		}, setBody(setAbsent, ""), http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := tc.rig(t)
+			logs := captureLeveledLogs(t)
+			ctx := tracing.WithRedactIdentifiers(logctx.WithRequestID(t.Context(), "document-set-request"), true)
+			req, cancel := rig.request(ctx, userA1, tc.body, acceptJSON, time.Time{})
+			defer cancel()
+			writer := &leveledFailWriter{*httptest.NewRecorder()}
+			rig.handler.ServeHTTP(writer, req)
+
+			require.Equal(t, tc.status, writer.Code)
+			require.Zero(t, rig.providerCalls())
+			var record map[string]any
+			require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+			require.Equal(t, "encode error response", record["msg"])
+			require.Equal(t, "document-set-request", record["request_id"])
+			require.Equal(t, "operation failed", record["error"])
+		})
+	}
 }
 
 func TestEmptyIntersectionPerformsNoProviderWork(t *testing.T) {

@@ -18,13 +18,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-func ingestDocumentID(rw http.ResponseWriter, supplied string) (string, bool) {
+func ingestDocumentID(ctx context.Context, rw http.ResponseWriter, supplied string) (string, bool) {
 	if supplied == "" {
 		return uuid.NewString(), true
 	}
 	parsed, err := uuid.Parse(supplied)
 	if err != nil {
-		writeJSONError(rw, http.StatusBadRequest, "validation", "document_id must be a UUID")
+		writeJSONError(ctx, rw, http.StatusBadRequest, "validation", "document_id must be a UUID")
 		return "", false
 	}
 	return parsed.String(), true
@@ -88,7 +88,7 @@ func acceptExistingPDFUpload(rw http.ResponseWriter, r *http.Request, wk *worker
 	text, err := opts.extract(r.Context(), extractor.FileTypePDF, file)
 	if err != nil {
 		if extractionErrorIs(err, extractor.ErrNoText) {
-			writeJSONError(rw, http.StatusConflict, "conflict", "document_id already exists with different content")
+			writeJSONError(r.Context(), rw, http.StatusConflict, "conflict", "document_id already exists with different content")
 		} else {
 			writeExtractionError(rw, r, err)
 		}
@@ -102,7 +102,7 @@ func acceptExistingPDFUpload(rw http.ResponseWriter, r *http.Request, wk *worker
 func acceptIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker, cs domain.ChunkStore, req domain.AcceptRequest) (domain.AcceptOutcome, error) {
 	acceptor, ok := cs.(domain.DocumentAcceptor)
 	if !ok {
-		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+		writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return domain.AcceptConflict, errors.New("durable acceptance is unavailable")
 	}
 	return acceptIngestWith(rw, r, wk, acceptor.AcceptDocument, req)
@@ -113,8 +113,8 @@ func acceptIngestWith(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	defer cancel()
 	result, err := accept(acceptCtx, req)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "accept document", "error", err)
-		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+		slog.ErrorContext(r.Context(), "accept document", "error", tracing.ErrorForTelemetry(r.Context(), err))
+		writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return domain.AcceptConflict, err
 	}
 	code, state := http.StatusAccepted, "processing"
@@ -126,41 +126,41 @@ func acceptIngestWith(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	case domain.AcceptDuplicate:
 		code, state = http.StatusOK, "already_ingested"
 	case domain.AcceptConflict:
-		writeJSONError(rw, http.StatusConflict, "conflict", "document_id already exists with different content")
+		writeJSONError(r.Context(), rw, http.StatusConflict, "conflict", "document_id already exists with different content")
 		return result.Outcome, nil
 	case domain.AcceptDeletionConflict:
-		writeJSONError(rw, http.StatusConflict, "conflict", "document_id is reserved by a deletion")
+		writeJSONError(r.Context(), rw, http.StatusConflict, "conflict", "document_id is reserved by a deletion")
 		return result.Outcome, nil
 	case domain.AcceptOCRRetryRequired:
-		writeJSONError(rw, http.StatusConflict, "conflict", "retry the mixed PDF with its document_id")
+		writeJSONError(r.Context(), rw, http.StatusConflict, "conflict", "retry the mixed PDF with its document_id")
 		return result.Outcome, nil
 	case domain.AcceptOCRRetryAfterExpiry:
-		writeJSONError(rw, http.StatusConflict, "conflict", "the mixed PDF result can be retried after it expires")
+		writeJSONError(r.Context(), rw, http.StatusConflict, "conflict", "the mixed PDF result can be retried after it expires")
 		return result.Outcome, nil
 	case domain.AcceptNotFound:
-		writeJSONError(rw, http.StatusNotFound, "not_found", "document not found")
+		writeJSONError(r.Context(), rw, http.StatusNotFound, "not_found", "document not found")
 		return result.Outcome, nil
 	case domain.AcceptForbidden:
-		writeJSONError(rw, http.StatusForbidden, "forbidden", "access denied")
+		writeJSONError(r.Context(), rw, http.StatusForbidden, "forbidden", "access denied")
 		return result.Outcome, nil
 	case domain.AcceptUnauthorized:
-		writeJSONError(rw, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+		writeJSONError(r.Context(), rw, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 		return result.Outcome, nil
 	case domain.AcceptQueueFull:
 		rw.Header().Set("Retry-After", "30")
-		writeJSONError(rw, http.StatusServiceUnavailable, "queue", "ingest queue is full")
+		writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "queue", "ingest queue is full")
 		return result.Outcome, nil
 	case domain.AcceptFrozen:
-		writeFrozen(rw)
+		writeFrozen(r.Context(), rw)
 		return result.Outcome, nil
 	case domain.AcceptNeedsSource, domain.AcceptNeedsPDFText:
 		return result.Outcome, nil
 	case domain.AcceptUploadExpired:
 		rw.Header().Set("Retry-After", "30")
-		writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file upload expired before acceptance; retry the upload")
+		writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "storage", "source file upload expired before acceptance; retry the upload")
 		return result.Outcome, nil
 	default:
-		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+		writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return result.Outcome, nil
 	}
 	if !tracing.RedactIdentifiers(r.Context()) && req.Owner == nil {
@@ -172,12 +172,12 @@ func acceptIngestWith(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	rw.Header().Set("Content-Type", "application/json")
 	rw.WriteHeader(code)
 	if err = json.NewEncoder(rw).Encode(IngestResponse{DocumentID: string(result.DocumentID), Status: state}); err != nil {
-		slog.ErrorContext(r.Context(), "encode ingestion response", "error", err)
+		slog.ErrorContext(r.Context(), "encode ingestion response", "error", tracing.ErrorForTelemetry(r.Context(), err))
 	}
 	return result.Outcome, nil
 }
 
-func writeFrozen(rw http.ResponseWriter) {
+func writeFrozen(ctx context.Context, rw http.ResponseWriter) {
 	rw.Header().Set("Retry-After", "30")
-	writeJSONError(rw, http.StatusServiceUnavailable, "frozen", "document writes are paused for a vector migration")
+	writeJSONError(ctx, rw, http.StatusServiceUnavailable, "frozen", "document writes are paused for a vector migration")
 }

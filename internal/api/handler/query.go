@@ -18,6 +18,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -168,7 +169,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			slog.Error("authorized retrieval requires a vector store that enforces read scopes")
 			return func(w http.ResponseWriter, r *http.Request) {
 				recordSecurityAuditBestEffort(r.Context(), options.audit, nil, nil, "query", "error", "authorization_unavailable", "", "")
-				refuseAuthorizedQuery(w)
+				refuseAuthorizedQuery(r.Context(), w)
 			}
 		}
 	}
@@ -185,12 +186,12 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 					auditSubject = &subject
 				}
 				recordSecurityAuditBestEffort(r.Context(), options.audit, auditSubject, nil, "query", "deny", "credential_expired", "", "")
-				writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+				writeJSONError(r.Context(), w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 				return
 			}
 		}
 		if !isJSONRequest(r) {
-			writeJSONError(w, http.StatusUnsupportedMediaType, "validation", "Content-Type must be application/json")
+			writeJSONError(r.Context(), w, http.StatusUnsupportedMediaType, "validation", "Content-Type must be application/json")
 			return
 		}
 		start := time.Now()
@@ -200,21 +201,21 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		}
 
 		if apiErr := validateQueryRequest(&req); apiErr != nil {
-			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			writeJSONError(r.Context(), w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
 		setID, hasSet, apiErr := requestedDocumentSet(&req, sets != nil)
 		if apiErr != nil {
-			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			writeJSONError(r.Context(), w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
 		if apiErr = validateQueryAllowlist(&req, cfg, hasSet); apiErr != nil {
-			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			writeJSONError(r.Context(), w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
 		answerMode, status, apiErr := resolveAnswerMode(req, cfg.QueryAnswerPolicy)
 		if apiErr != nil {
-			writeJSONError(w, status, apiErr.Error, apiErr.Message)
+			writeJSONError(r.Context(), w, status, apiErr.Error, apiErr.Message)
 			return
 		}
 		if err := acquireQuerySlot(r.Context(), slots, cfg.QueryQueueTimeout); err != nil {
@@ -234,13 +235,13 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		if authz != nil {
 			if hasSet && !sets.capable {
 				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "query", "error", "authorization_unavailable", "", "")
-				refuseAuthorizedQuery(w)
+				refuseAuthorizedQuery(r.Context(), w)
 				return
 			}
 			var staged bool
 			if routing, retrieval, evidence, staged = authz.stages(ret, subject.Principal, &req, routingCfg, setID); !staged {
 				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "query", "error", "authorization_unavailable", "", "")
-				refuseAuthorizedQuery(w)
+				refuseAuthorizedQuery(r.Context(), w)
 				return
 			}
 			var err error
@@ -396,7 +397,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		setQueryLanguageHeaders(w.Header(), qc)
 		w.WriteHeader(http.StatusOK)
 		if _, writeErr := w.Write(append(data, '\n')); writeErr != nil {
-			slog.ErrorContext(r.Context(), "write query response", "error", writeErr)
+			slog.ErrorContext(r.Context(), "write query response", "error", tracing.ErrorForTelemetry(r.Context(), writeErr))
 		}
 	}
 }
@@ -408,12 +409,12 @@ func setQueryLanguageHeaders(headers http.Header, qc *pipeline.QueryContext) {
 	}
 }
 
-func writeJSONError(w http.ResponseWriter, code int, errType, message string) {
+func writeJSONError(ctx context.Context, w http.ResponseWriter, code int, errType, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	resp := APIError{Error: errType, Message: message}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		slog.Error("encode error response", "error", err)
+		slog.ErrorContext(ctx, "encode error response", "error", tracing.ErrorForTelemetry(ctx, err))
 	}
 }
 
