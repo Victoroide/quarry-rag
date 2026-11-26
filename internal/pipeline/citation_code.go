@@ -12,13 +12,22 @@ const asciiPunctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 // Markdown code in text: fenced code blocks and single-line inline code spans
 // as defined by CommonMark. Indented code blocks, fences indented four or more
 // spaces, fences inside block quotes and HTML code elements are not recognized.
-// Lines end at a line feed, so a carriage return before it belongs to the line.
+// Fence-like openers indented four or more spaces are still tracked until a
+// matching closing line so their closing fences cannot start a stray block, and
+// list-item fences opened with two or three spaces close across four- to
+// six-space closing lines. Lines end at a line feed, so a carriage return
+// before it belongs to the line.
 func citationCodeRanges(text string) [][2]int {
 	var ranges [][2]int
 	var fence struct {
-		char          byte
-		length, start int
-		open          bool
+		char                  byte
+		indent, length, start int
+		open                  bool
+	}
+	var unrecognized struct {
+		char   byte
+		length int
+		open   bool
 	}
 	for lineStart := 0; lineStart < len(text); {
 		lineEnd := len(text)
@@ -26,15 +35,25 @@ func citationCodeRanges(text string) [][2]int {
 			lineEnd = lineStart + i
 		}
 		line := text[lineStart:lineEnd]
-		indent, char, length := fenceRun(line)
+		indent, char, length := scanFenceLine(line)
 		switch {
 		case fence.open:
-			if char == fence.char && length >= fence.length && strings.Trim(line[indent+length:], " \t\r") == "" {
+			maxCloserIndent := 3
+			if fence.indent >= 2 {
+				maxCloserIndent = fence.indent + 3
+			}
+			if indent <= maxCloserIndent && isFenceCloser(line, indent, char, length, fence.char, fence.length) {
 				ranges = append(ranges, [2]int{fence.start, lineStart + indent + length})
 				fence.open = false
 			}
-		case length >= 3 && (char != '`' || !strings.Contains(line[indent+length:], "`")):
-			fence.char, fence.length, fence.start, fence.open = char, length, lineStart+indent, true
+		case unrecognized.open:
+			if isFenceCloser(line, indent, char, length, unrecognized.char, unrecognized.length) {
+				unrecognized.open = false
+			}
+		case indent <= 3 && isFenceOpener(line, indent, char, length):
+			fence.char, fence.indent, fence.length, fence.start, fence.open = char, indent, length, lineStart+indent, true
+		case indent >= 4 && isFenceOpener(line, indent, char, length):
+			unrecognized.char, unrecognized.length, unrecognized.open = char, length, true
 		default:
 			ranges = appendInlineCode(ranges, line, lineStart)
 		}
@@ -46,14 +65,14 @@ func citationCodeRanges(text string) [][2]int {
 	return ranges
 }
 
-// fenceRun measures a possible fence delimiter: at most three leading spaces
-// followed by a run of one backtick or tilde character. A zero length means the
-// line has no such run.
-func fenceRun(line string) (indent int, char byte, length int) {
+// scanFenceLine measures leading space indentation and a run of backtick or
+// tilde characters at the first non-space byte. A zero length means the line
+// has no such delimiter run.
+func scanFenceLine(line string) (indent int, char byte, length int) {
 	for indent < len(line) && line[indent] == ' ' {
 		indent++
 	}
-	if indent > 3 || indent == len(line) || (line[indent] != '`' && line[indent] != '~') {
+	if indent == len(line) || (line[indent] != '`' && line[indent] != '~') {
 		return 0, 0, 0
 	}
 	char = line[indent]
@@ -61,6 +80,14 @@ func fenceRun(line string) (indent int, char byte, length int) {
 		length++
 	}
 	return indent, char, length
+}
+
+func isFenceCloser(line string, indent int, char byte, length int, openChar byte, openLength int) bool {
+	return char == openChar && length >= openLength && strings.Trim(line[indent+length:], " \t\r") == ""
+}
+
+func isFenceOpener(line string, indent int, char byte, length int) bool {
+	return length >= 3 && (char != '`' || !strings.Contains(line[indent+length:], "`"))
 }
 
 type backtickRun struct{ start, length int }
