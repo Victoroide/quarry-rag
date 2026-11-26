@@ -465,10 +465,16 @@ func testGrantCatalogRoleBoundary(t *testing.T, databaseURL string) {
 			BEGIN RAISE EXCEPTION 'synthetic deletion audit interruption'; END; $$;
 			CREATE TRIGGER refuse_catalog_deletion BEFORE INSERT ON grant_catalog_policy_audit
 			FOR EACH ROW EXECUTE FUNCTION refuse_catalog_deletion()`)
+		const mirroredDeletion = `SELECT count(*) FROM grant_catalog_security_audit
+			WHERE policy_revision=3 AND action='document_delete' AND outcome='allow' AND reason='ownership_deleted'
+			  AND document_id=$1 AND incarnation=$2 AND operator=$3`
 		require.Error(t, service.DeleteDocument(t.Context(), domain.DocumentID(f.document)))
 		assertGrantRevision(t, admin, 2)
 		assertGrantCount(t, admin, "document_grants", 2)
 		require.Equal(t, beforeInc, grantIncarnation(t, admin, f.document))
+		var mirrored int
+		require.NoError(t, admin.Pool.QueryRow(t.Context(), mirroredDeletion, f.document, beforeInc, roles.name("catalog_service")).Scan(&mirrored))
+		require.Zero(t, mirrored)
 		grantExec(t, admin, `DROP TRIGGER refuse_catalog_deletion ON grant_catalog_policy_audit; DROP FUNCTION refuse_catalog_deletion()`)
 		require.NoError(t, service.DeleteDocument(t.Context(), domain.DocumentID(f.document)))
 		assertGrantRevision(t, admin, 3)
@@ -478,6 +484,8 @@ func testGrantCatalogRoleBoundary(t *testing.T, databaseURL string) {
 		require.NoError(t, admin.Pool.QueryRow(t.Context(), `SELECT incarnation::text,operator FROM grant_catalog_policy_audit WHERE revision=3`).Scan(&deletedInc, &deletedBy))
 		require.Equal(t, beforeInc, deletedInc)
 		require.Equal(t, roles.name("catalog_service"), deletedBy)
+		require.NoError(t, admin.Pool.QueryRow(t.Context(), mirroredDeletion, f.document, beforeInc, deletedBy).Scan(&mirrored))
+		require.Equal(t, 1, mirrored)
 	})
 }
 

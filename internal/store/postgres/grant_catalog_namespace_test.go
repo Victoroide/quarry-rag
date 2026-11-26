@@ -221,13 +221,15 @@ func testGrantCatalogQuotedACLs(t *testing.T, databaseURL string) {
 
 func testGrantCatalogRename(t *testing.T, databaseURL string) {
 	ctx := t.Context()
-	roles := newGrantRoles(t, databaseURL, "rename_catalog_owner", "replacement_catalog_owner")
+	roles := newGrantRoles(t, databaseURL, "rename_catalog_owner", "replacement_catalog_owner", "quarry_service")
 	admin := migrationTestClient(t, databaseURL)
 	grantExec(t, admin, roles.sql(`CREATE EXTENSION IF NOT EXISTS pgcrypto;
-		CREATE ROLE {rename_catalog_owner}; CREATE ROLE {replacement_catalog_owner};
+		CREATE ROLE {rename_catalog_owner}; CREATE ROLE {replacement_catalog_owner}; CREATE ROLE {quarry_service};
 		CREATE SCHEMA rename_corpus AUTHORIZATION {rename_catalog_owner}`))
 	before := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {rename_catalog_owner}; SET search_path TO rename_corpus`))
-	require.NoError(t, before.RunMigrations(ctx))
+	applyMigrationPrefix(t, before, 34)
+	adminMigrator := grantRoleClient(t, databaseURL, `SET search_path TO rename_corpus`)
+	require.NoError(t, adminMigrator.RunMigrations(ctx))
 	f := newGrantFixture()
 	insertGrantSource(t, before, f.document)
 	insertGrantSource(t, before, f.otherDocument)
@@ -235,13 +237,37 @@ func testGrantCatalogRename(t *testing.T, databaseURL string) {
 	_, err := importTestBatch(ctx, before, initial, false)
 	require.NoError(t, err)
 	beforeSnapshot := grantSource(t, before, f.document)
+	grantExec(t, before, roles.sql(`GRANT USAGE ON SCHEMA rename_corpus TO {quarry_service};
+		GRANT EXECUTE ON FUNCTION `+runtimeAuditFunction+` TO {quarry_service}`))
 
-	grantExec(t, admin, roles.sql(`ALTER SCHEMA rename_corpus RENAME TO "Renamed Ledger";
-		CREATE SCHEMA rename_corpus AUTHORIZATION {replacement_catalog_owner}`))
+	grantExec(t, admin, `ALTER SCHEMA rename_corpus RENAME TO "Renamed Ledger"`)
+	serving := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {quarry_service}; SET search_path TO "Renamed Ledger", rename_corpus`))
+	require.NoError(t, serving.RecordSecurityAudit(ctx, domain.SecurityAuditEvent{
+		RequestID: "after rename", Action: "query", Outcome: "allow",
+	}))
+
+	grantExec(t, admin, roles.sql(`CREATE SCHEMA rename_corpus AUTHORIZATION {replacement_catalog_owner}`))
 	renamed := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {rename_catalog_owner}; SET search_path TO "Renamed Ledger", rename_corpus`))
 	replaced := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {replacement_catalog_owner}; SET search_path TO rename_corpus`))
 	require.NoError(t, renamed.RunMigrations(ctx))
 	require.NoError(t, replaced.RunMigrations(ctx))
+	grantExec(t, replaced, roles.sql(`GRANT USAGE ON SCHEMA rename_corpus TO {quarry_service};
+		GRANT EXECUTE ON FUNCTION `+runtimeAuditFunction+` TO {quarry_service}`))
+	reconnected := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {quarry_service}; SET search_path TO "Renamed Ledger", rename_corpus`))
+	require.NoError(t, reconnected.RecordSecurityAudit(ctx, domain.SecurityAuditEvent{
+		RequestID: "after reuse", Action: "query", Outcome: "allow",
+	}))
+	_, err = reconnected.Pool.Exec(ctx, runtimeAuditCall, nil, nil, nil, nil, "grant_import", "allow", "synthetic", nil, nil)
+	requireRuntimeAuditRejection(t, err, "action")
+	rows, err := renamed.Pool.Query(ctx, `SELECT request_id FROM grant_catalog_security_audit
+		WHERE operator IS NULL AND action='query' AND outcome='allow' AND policy_revision=1 ORDER BY audit_id`)
+	require.NoError(t, err)
+	runtimeRequests, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	require.Equal(t, []string{"after rename", "after reuse"}, runtimeRequests)
+	assertGrantCount(t, renamed, "security_audit", 3)
+	assertGrantCount(t, replaced, "security_audit", 0)
+
 	grantExec(t, replaced, `INSERT INTO documents (id,content) VALUES ($1,'independent corpus')`, f.document)
 	require.NotEqual(t, beforeSnapshot, grantSource(t, replaced, f.document))
 
