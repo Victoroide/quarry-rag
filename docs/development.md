@@ -76,6 +76,16 @@ The advisory-lock count probe counts a fixture-local holder and excludes a sibli
 
 The offline query test ingests through HTTP, polls document status until completion, and verifies cited evidence and document restrictions through the router.
 
+#### Grants-mode router integration
+
+The router tests use real PostgreSQL roles, grant imports, token verification,
+ingestion workers, and two independent connection pools. pgvector stores the
+local embeddings. Models and the S3 endpoint use deterministic local fixtures.
+
+```sh
+go test -race -count=1 ./internal/api -run "^TestGrantsPostgres"
+```
+
 ### 3. Smoke Tests
 
 Smoke tests run against live, deployed instances and external cloud services (AWS Bedrock, Pinecone, PostgreSQL, and S3). Smoke tests are excluded by default to avoid unexpected cloud consumption or accidental mutation of configured datasets. The checks that write documents need a target that has activated checkpointed deletion, and they clean up through the service. The [staging procedure](deployment.md#smoke-testing-a-staging-deployment) owns the prerequisites and the invocation, including the read-only checks that run before activation.

@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
-	"regexp"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -23,18 +22,7 @@ var servingRoles = []string{"quarry_service", "quarry_operator", "quarry_auditor
 // publishedSQL returns the first SQL block of a guide that contains marker.
 func publishedSQL(t *testing.T, guide, marker string) string {
 	t.Helper()
-	docs, err := os.OpenRoot("../../../docs")
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, docs.Close()) })
-	body, err := docs.ReadFile(guide)
-	require.NoError(t, err)
-	for _, block := range regexp.MustCompile("(?s)```sql\n(.*?)```").FindAllStringSubmatch(string(body), -1) {
-		if strings.Contains(block[1], marker) {
-			return block[1]
-		}
-	}
-	require.FailNow(t, "published SQL block not found", marker)
-	return ""
+	return pgtest.PublishedSQL(t, "../../../docs", guide, marker)
 }
 
 // restrictedDatabase migrates as the owner and returns a client limited to the
@@ -58,11 +46,7 @@ func publishedServingClient(t *testing.T, owner *Client) (*Client, grantRoles) {
 
 func publishedServingSQL(t *testing.T, roles grantRoles, guide, marker string) string {
 	t.Helper()
-	pairs := make([]string, 0, 2*len(servingRoles))
-	for _, purpose := range servingRoles {
-		pairs = append(pairs, purpose, pgx.Identifier{roles.name(purpose)}.Sanitize())
-	}
-	return strings.NewReplacer(pairs...).Replace(publishedSQL(t, guide, marker))
+	return pgtest.ReplaceRoles(publishedSQL(t, guide, marker), roles)
 }
 
 func roleClient(t *testing.T, owner *Client, role string) *Client {
