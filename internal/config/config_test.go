@@ -22,11 +22,15 @@ func TestLoadRejectsInvalidSynthesisBudget(t *testing.T) {
 		{"SYNTHESIS_RELATIVE_SCORE_FLOOR", "+Inf"},
 		{"SYNTHESIS_RELATIVE_SCORE_FLOOR", "-Inf"},
 		{"SYNTHESIS_RELATIVE_SCORE_FLOOR", "invalid"},
+		{"SYNTHESIS_CONTEXT_POLICY", "auto"},
+		{"SYNTHESIS_CONTEXT_POLICY", "RANKED"},
+		{"SYNTHESIS_CONTEXT_POLICY", "invalid"},
 	} {
 		t.Run(tc.key+"/"+tc.value, func(t *testing.T) {
 			awsConfigEnvironment(t)
 			t.Setenv("SYNTHESIS_CONTEXT_TOKENS", "")
 			t.Setenv("SYNTHESIS_RELATIVE_SCORE_FLOOR", "")
+			t.Setenv("SYNTHESIS_CONTEXT_POLICY", "")
 			t.Setenv(tc.key, tc.value)
 			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.key) {
 				t.Fatalf("expected %s error, got %v", tc.key, err)
@@ -37,25 +41,27 @@ func TestLoadRejectsInvalidSynthesisBudget(t *testing.T) {
 
 func TestLoadSynthesisBudgetDefaultsAndBounds(t *testing.T) {
 	for _, tc := range []struct {
-		name, tokens, floor string
-		wantTokens          int
-		wantFloor           float64
+		name, tokens, floor, policy string
+		wantTokens                  int
+		wantFloor                   float64
+		wantPolicy                  string
 	}{
-		{"defaults", "", "", 2400, .55},
-		{"lower bounds", "256", "0", 256, 0},
-		{"upper bounds", "100000", "1", 100000, 1},
-		{"overrides", "4096", "0.8", 4096, .8},
+		{"defaults", "", "", "", 2400, .55, SynthesisContextPolicyRanked},
+		{"lower bounds", "256", "0", "ranked", 256, 0, SynthesisContextPolicyRanked},
+		{"upper bounds", "100000", "1", "diverse", 100000, 1, SynthesisContextPolicyDiverse},
+		{"overrides", "4096", "0.8", "diverse", 4096, .8, SynthesisContextPolicyDiverse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			awsConfigEnvironment(t)
 			t.Setenv("SYNTHESIS_CONTEXT_TOKENS", tc.tokens)
 			t.Setenv("SYNTHESIS_RELATIVE_SCORE_FLOOR", tc.floor)
+			t.Setenv("SYNTHESIS_CONTEXT_POLICY", tc.policy)
 			cfg, err := Load()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.SynthesisContextTokens != tc.wantTokens || cfg.SynthesisRelativeScoreFloor != tc.wantFloor {
-				t.Fatalf("unexpected synthesis budget: tokens=%d floor=%g", cfg.SynthesisContextTokens, cfg.SynthesisRelativeScoreFloor)
+			if cfg.SynthesisContextTokens != tc.wantTokens || cfg.SynthesisRelativeScoreFloor != tc.wantFloor || cfg.SynthesisContextPolicy != tc.wantPolicy {
+				t.Fatalf("unexpected synthesis budget: tokens=%d floor=%g policy=%q", cfg.SynthesisContextTokens, cfg.SynthesisRelativeScoreFloor, cfg.SynthesisContextPolicy)
 			}
 		})
 	}

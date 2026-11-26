@@ -30,6 +30,12 @@ const (
 	OCRPDFMixed     = "mixed"
 )
 
+// Synthesis context policies control how retrieved chunks fill the synthesis budget.
+const (
+	SynthesisContextPolicyRanked  = "ranked"
+	SynthesisContextPolicyDiverse = "diverse"
+)
+
 // Config holds all operational parameters for the service.
 // Every field is populated from environment variables at startup.
 type Config struct {
@@ -89,6 +95,8 @@ type Config struct {
 	SynthesisContextTokens int
 	// SynthesisRelativeScoreFloor sets the minimum score relative to the best match.
 	SynthesisRelativeScoreFloor float64
+	// SynthesisContextPolicy selects ranked or diverse synthesis excerpt packing.
+	SynthesisContextPolicy string
 
 	// FakeMode (GO_RAG_FAKE_MODE) runs the service fully offline: deterministic
 	// in-memory vector store, embedder, and LLM. No AWS/Pinecone credentials
@@ -193,6 +201,7 @@ func Load() (*Config, error) {
 		SynthesisModel:            envOrDefault("SYNTHESIS_MODEL", "fallback"),
 		SynthesisInputProfile:     os.Getenv("SYNTHESIS_INPUT_PROFILE"),
 		SynthesisOpenAIDeployment: os.Getenv("SYNTHESIS_OPENAI_DEPLOYMENT"),
+		SynthesisContextPolicy:    envOrDefault("SYNTHESIS_CONTEXT_POLICY", SynthesisContextPolicyRanked),
 		QueryAnswerPolicy:         envOrDefault("QUERY_ANSWER_POLICY", QueryAnswerPolicyBoth),
 		NoEvidenceCatalogFile:     os.Getenv("NO_EVIDENCE_CATALOG_FILE"),
 		ServiceToken:              os.Getenv("SERVICE_TOKEN"),
@@ -512,6 +521,11 @@ func (c *Config) validate() error {
 	}
 	if math.IsNaN(c.SynthesisRelativeScoreFloor) || math.IsInf(c.SynthesisRelativeScoreFloor, 0) || c.SynthesisRelativeScoreFloor < 0 || c.SynthesisRelativeScoreFloor > 1 {
 		return fmt.Errorf("config: SYNTHESIS_RELATIVE_SCORE_FLOOR must be between 0 and 1 and finite")
+	}
+	switch c.SynthesisContextPolicy {
+	case "", SynthesisContextPolicyRanked, SynthesisContextPolicyDiverse:
+	default:
+		return fmt.Errorf("config: SYNTHESIS_CONTEXT_POLICY must be %s or %s", SynthesisContextPolicyRanked, SynthesisContextPolicyDiverse)
 	}
 
 	if err := c.validateServiceTokens(); err != nil {

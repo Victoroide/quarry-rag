@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -644,4 +645,513 @@ func TestSynthesisGuardrailContent(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestDiverseContextSelectionEdgeCases(t *testing.T) {
+	runDiverse := func(t *testing.T, budget int, floor float64, chunks []domain.ScoredChunk) (*QueryContext, *citationPromptRecorder) {
+		t.Helper()
+		cfg := &config.Config{
+			BedrockFallbackModel:        "fallback",
+			SynthesisContextTokens:      budget,
+			SynthesisRelativeScoreFloor: floor,
+			SynthesisContextPolicy:      config.SynthesisContextPolicyDiverse,
+		}
+		rec := &citationPromptRecorder{answer: "Grounded [1] [2]."}
+		amb := llm.NewAmbassador(cfg)
+		amb.SetClient(rec)
+		qc := &QueryContext{
+			OriginalQuery:    "Compare retention and exceptions",
+			IncludeCitations: true,
+			RetrievedChunks:  chunks,
+		}
+		require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+		return qc, rec
+	}
+
+	t.Run("exact and near duplicates yield to complementary evidence", func(t *testing.T) {
+		p1 := "Retention schedule: financial ledgers must be kept for seven years in immutable storage. " + strings.Repeat("a", 220)
+		nearDup := "Retention schedule: financial ledgers must be kept for seven years in immutable storage! " + strings.Repeat("a", 220)
+		distinct := "Access logs and security audit trails must be kept for ninety days with daily verification. " + strings.Repeat("b", 200)
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "c1", DocumentID: "doc-a", Index: 0, Text: p1}, Score: .95},
+			{Chunk: domain.Chunk{ID: "c2", DocumentID: "doc-a", Index: 1, Text: p1}, Score: .92},
+			{Chunk: domain.Chunk{ID: "c3", DocumentID: "doc-a", Index: 2, Text: nearDup}, Score: .90},
+			{Chunk: domain.Chunk{ID: "c4", DocumentID: "doc-b", Index: 0, Text: distinct}, Score: .82},
+		}
+		qc, rec := runDiverse(t, 180, .55, chunks)
+		require.Len(t, qc.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("c1"), qc.Excerpts[0].Chunk.ID)
+		require.Equal(t, domain.ChunkID("c4"), qc.Excerpts[1].Chunk.ID)
+		require.Equal(t, []bool{false, false}, qc.Truncated)
+		require.Contains(t, rec.prompt, `id="1">`+"\n"+p1+"\n")
+		require.Contains(t, rec.prompt, `id="2">`+"\n"+distinct+"\n")
+	})
+
+	t.Run("short trailing evidence follows unfitting oversized candidate", func(t *testing.T) {
+		first := strings.Repeat("First fact clause ", 26) + "." // ~117 tokens
+		oversizedNoBreak := strings.Repeat("Long clause without break ", 30)
+		shortTrail := "Trailing critical exception: contractors need badge sign-off."
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "c1", DocumentID: "doc-a", Index: 0, Text: first}, Score: .95},
+			{Chunk: domain.Chunk{ID: "c2", DocumentID: "doc-b", Index: 0, Text: oversizedNoBreak}, Score: .90},
+			{Chunk: domain.Chunk{ID: "c3", DocumentID: "doc-c", Index: 0, Text: shortTrail}, Score: .85},
+		}
+		qc, _ := runDiverse(t, 180, .55, chunks)
+		require.Len(t, qc.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("c1"), qc.Excerpts[0].Chunk.ID)
+		require.Equal(t, domain.ChunkID("c3"), qc.Excerpts[1].Chunk.ID)
+		require.Equal(t, []bool{false, false}, qc.Truncated)
+	})
+
+	t.Run("all-one-document query penalizes overlap without banning document", func(t *testing.T) {
+		c0 := "Section 1: primary database backups run at 02:00 UTC every morning. " + strings.Repeat("x", 180)
+		c1 := "Section 1: primary database backups run at 02:00 UTC every morning. " + strings.Repeat("x", 180)
+		c4 := "Section 4: cross-region failover drills run quarterly on the second Sunday. " + strings.Repeat("y", 180)
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "c0", DocumentID: "single-doc", Index: 0, Text: c0}, Score: .95},
+			{Chunk: domain.Chunk{ID: "c1", DocumentID: "single-doc", Index: 1, Text: c1}, Score: .92},
+			{Chunk: domain.Chunk{ID: "c4", DocumentID: "single-doc", Index: 4, Text: c4}, Score: .80},
+		}
+		qc, _ := runDiverse(t, 160, .55, chunks)
+		require.Len(t, qc.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("c0"), qc.Excerpts[0].Chunk.ID)
+		require.Equal(t, domain.ChunkID("c4"), qc.Excerpts[1].Chunk.ID)
+		require.Equal(t, domain.DocumentID("single-doc"), qc.Excerpts[1].Chunk.DocumentID)
+	})
+
+	t.Run("truncated first excerpt keeps leading passage and packs fitting short tail", func(t *testing.T) {
+		headSentence := strings.Repeat("Primary rule ", 28) + "." // ~91 tokens
+		first := headSentence + " " + strings.Repeat("tail detail ", 60)
+		shortSecond := "Exception: emergency overrides expire after four hours."
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "c1", DocumentID: "doc-a", Index: 0, Text: first}, Score: .95},
+			{Chunk: domain.Chunk{ID: "c2", DocumentID: "doc-b", Index: 0, Text: shortSecond}, Score: .85},
+		}
+		qc, _ := runDiverse(t, 160, .55, chunks)
+		require.Len(t, qc.Excerpts, 2)
+		require.Equal(t, headSentence, qc.Excerpts[0].Chunk.Text)
+		require.Equal(t, shortSecond, qc.Excerpts[1].Chunk.Text)
+		require.Equal(t, []bool{true, false}, qc.Truncated)
+	})
+
+	t.Run("empty and control-only bodies dropped before leading usable passage", func(t *testing.T) {
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "junk-1", DocumentID: "doc-a", Index: 0, Text: "\x00\u200b \t\n"}, Score: .99},
+			{Chunk: domain.Chunk{ID: "junk-2", DocumentID: "doc-a", Index: 1, Text: "\u202e\x07"}, Score: .98},
+			{Chunk: domain.Chunk{ID: "usable", DocumentID: "doc-b", Index: 0, Text: "Usable archive rule."}, Score: .80},
+		}
+		qc, rec := runDiverse(t, 256, .55, chunks)
+		require.Len(t, qc.Excerpts, 1)
+		require.Equal(t, domain.ChunkID("usable"), qc.Excerpts[0].Chunk.ID)
+		require.Equal(t, "Usable archive rule.", qc.Excerpts[0].Chunk.Text)
+		require.Contains(t, rec.prompt, `id="1">`+"\nUsable archive rule.\n")
+	})
+
+	t.Run("wholly empty or control-only bodies make zero synthesis calls", func(t *testing.T) {
+		cfg := &config.Config{
+			BedrockFallbackModel:   "fallback",
+			SynthesisContextPolicy: config.SynthesisContextPolicyDiverse,
+		}
+		client := &synthesisDeadlineClient{call: func(context.Context) (*bedrockruntime.ConverseOutput, error) {
+			t.Fatal("ineligible control-only input must not call synthesis")
+			return nil, nil
+		}}
+		amb := llm.NewAmbassador(cfg)
+		amb.SetClient(client)
+		qc := &QueryContext{
+			OriginalQuery: "archive?",
+			RetrievedChunks: []domain.ScoredChunk{
+				{Chunk: domain.Chunk{ID: "j1", DocumentID: "d", Text: ""}, Score: .9},
+				{Chunk: domain.Chunk{ID: "j2", DocumentID: "d", Text: "\x00\u200b \n\t"}, Score: .8},
+			},
+		}
+		require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+		require.Zero(t, client.calls)
+		require.True(t, qc.EarlyExit)
+		require.Equal(t, "no_evidence", qc.FinishReason)
+		require.Empty(t, qc.RetrievedChunks)
+	})
+
+	t.Run("nominally free fragments obey chunk count and byte caps", func(t *testing.T) {
+		chunks := make([]domain.ScoredChunk, 150)
+		for i := range chunks {
+			// Distinct 3-rune fragments (EstimateTokens == 0) across chunks.
+			text := fmt.Sprintf("%03d", i)
+			chunks[i] = domain.ScoredChunk{
+				Chunk: domain.Chunk{ID: domain.ChunkID(fmt.Sprintf("f-%03d", i)), DocumentID: "doc", Index: i, Text: text},
+				Score: .9,
+			}
+		}
+		out, trunc, err := trimChunksForSynthesis(t.Context(), chunks, 256, .55, config.SynthesisContextPolicyDiverse)
+		require.NoError(t, err)
+		require.Len(t, out, maxSynthesisExcerpts)
+		require.Len(t, trunc, maxSynthesisExcerpts)
+
+		// Also verify tiny-budget excerpt count cap stops selection even when token estimates are zero.
+		tinyBudgetChunks := make([]domain.ScoredChunk, 20)
+		for i := range tinyBudgetChunks {
+			tinyBudgetChunks[i] = domain.ScoredChunk{
+				Chunk: domain.Chunk{ID: domain.ChunkID(fmt.Sprintf("b-%02d", i)), DocumentID: "doc", Index: i, Text: fmt.Sprintf("%02d!", i)},
+				Score: .9,
+			}
+		}
+		outTiny, _, err := trimChunksForSynthesis(t.Context(), tinyBudgetChunks, 2, .55, config.SynthesisContextPolicyDiverse)
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(outTiny), 2)
+	})
+
+	t.Run("repeated boilerplate across documents acts as corroboration over same-doc duplicate", func(t *testing.T) {
+		boilerplate := "Standard warranty: hardware defects are covered for twelve months from delivery. " + strings.Repeat("w", 120)
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "c1", DocumentID: "doc-a", Index: 0, Text: boilerplate}, Score: .95},
+			{Chunk: domain.Chunk{ID: "c2", DocumentID: "doc-a", Index: 1, Text: boilerplate}, Score: .92},
+			{Chunk: domain.Chunk{ID: "c3", DocumentID: "doc-b", Index: 0, Text: boilerplate}, Score: .90},
+		}
+		qc, _ := runDiverse(t, 120, .55, chunks)
+		require.Len(t, qc.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("c1"), qc.Excerpts[0].Chunk.ID)
+		require.Equal(t, domain.ChunkID("c3"), qc.Excerpts[1].Chunk.ID)
+	})
+
+	t.Run("unique qualifications, negations, and differing numbers are retained", func(t *testing.T) {
+		unrelated := "Visitor parking permits validate for level three north garage only during weekday business hours." +
+			strings.Repeat(" Garage rules are posted at each entrance and enforced by security staff.", 12)
+		for _, tc := range []struct{ name, lead, variant, want string }{
+			{"negation", "Remote work is approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+				"Remote work is not approved for engineering staff with written manager sign-off and a signed equipment agreement on file.", "is not approved"},
+			{"deleted negation", "Remote work is not approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+				"Remote work is approved for engineering staff with written manager sign-off and a signed equipment agreement on file.", "is approved"},
+			{"number", "Domestic travel is reimbursed up to 500 dollars per trip for staff with a receipt submitted within thirty days.",
+				"Domestic travel is reimbursed up to 1500 dollars per trip for staff with a receipt submitted within thirty days.", "1500 dollars"},
+			{"fullwidth number", "請求書は５００円まで承認されます。経理部門の事前確認と領収書の添付が必要です。",
+				"請求書は１５００円まで承認されます。経理部門の事前確認と領収書の添付が必要です。", "１５００円"},
+			{"qualifier", "Badge replacement is free for employees who report the loss to the security office within one business day.",
+				"Badge replacement is free only for employees who report the loss to the security office within one business day.", "free only for"},
+			{"spanish negation", "El acceso remoto está aprobado para el personal de ingeniería con autorización escrita de la gerencia.",
+				"El acceso remoto no está aprobado para el personal de ingeniería con autorización escrita de la gerencia.", "no está aprobado"},
+			{"portuguese negation", "O acesso remoto está aprovado para a equipe de engenharia com autorização por escrito da gerência.",
+				"O acesso remoto não está aprovado para a equipe de engenharia com autorização por escrito da gerência.", "não está aprovado"},
+			{"french qualifier", "Le remplacement du badge est gratuit pour les employés qui déclarent la perte au bureau de sécurité.",
+				"Le remplacement du badge est gratuit uniquement pour les employés qui déclarent la perte au bureau de sécurité.", "gratuit uniquement"},
+			{"german negation", "Die Fernarbeit ist für Ingenieure mit schriftlicher Genehmigung der Abteilungsleitung ausdrücklich gestattet.",
+				"Die Fernarbeit ist für Ingenieure mit schriftlicher Genehmigung der Abteilungsleitung nicht gestattet.", "nicht gestattet"},
+			{"italian exception", "Il rimborso delle spese di viaggio è consentito per le trasferte autorizzate dalla direzione generale.",
+				"Il rimborso delle spese di viaggio è consentito eccetto per le trasferte non autorizzate dalla direzione generale.", "eccetto per"},
+			{"chinese negation", "经主管书面批准且已提交设备协议的工程人员获准进行远程办公安排。",
+				"经主管书面批准且已提交设备协议的工程人员不获准进行远程办公安排。", "不获准"},
+			{"japanese negation", "上長の書面承認および機器管理同意書を提出した開発担当者の在宅勤務は承認されます。",
+				"上長の書面承認および機器管理同意書を提出した開発担当者の在宅勤務は承認されません。", "承認されません"},
+			{"korean negation", "부서장의 서면 승인과 장비 관리 서약서를 제출한 엔지니어의 원격 근무는 승인됩니다.",
+				"부서장의 서면 승인과 장비 관리 서약서를 제출한 엔지니어의 원격 근무는 승인되지 않습니다.", "않습니다"},
+			{"thai negation", "พนักงานวิศวกรรมที่ได้รับอนุมัติเป็นลายลักษณ์อักษรจากผู้จัดการได้รับอนุญาตให้ทำงานทางไกลได้",
+				"พนักงานวิศวกรรมที่ได้รับอนุมัติเป็นลายลักษณ์อักษรจากผู้จัดการไม่ได้รับอนุญาตให้ทำงานทางไกลได้", "ไม่ได้รับอนุญาต"},
+		} {
+			for _, loc := range []struct {
+				label string
+				doc   domain.DocumentID
+				idx   int
+			}{
+				{"same-doc-adjacent", "doc-a", 1},
+				{"same-doc-nonadjacent", "doc-a", 7},
+				{"cross-doc", "doc-c", 0},
+			} {
+				in := []domain.ScoredChunk{
+					{Chunk: domain.Chunk{ID: "lead", DocumentID: "doc-a", Index: 0, Text: tc.lead}, Score: .90},
+					{Chunk: domain.Chunk{ID: "variant", DocumentID: loc.doc, Index: loc.idx, Text: tc.variant}, Score: .88},
+					{Chunk: domain.Chunk{ID: "unrelated", DocumentID: "doc-b", Index: 0, Text: unrelated}, Score: .60},
+				}
+				rankedOut, _, err := trimChunksForSynthesis(t.Context(), in, 256, .55, config.SynthesisContextPolicyRanked)
+				require.NoError(t, err)
+				diverseOut, _, err := trimChunksForSynthesis(t.Context(), in, 256, .55, config.SynthesisContextPolicyDiverse)
+				require.NoError(t, err)
+				require.True(t, strings.Contains(rankedOut[1].Chunk.Text, tc.want), "%s (%s): ranked should keep variant", tc.name, loc.label)
+				require.GreaterOrEqual(t, len(diverseOut), 2, "%s (%s)", tc.name, loc.label)
+				require.Equal(t, domain.ChunkID("variant"), diverseOut[1].Chunk.ID, "%s (%s): diverse dropped meaning-bearing variant", tc.name, loc.label)
+				require.Contains(t, diverseOut[1].Chunk.Text, tc.want, "%s (%s)", tc.name, loc.label)
+			}
+		}
+
+		// Cut variant with a new number in its kept prefix is still retained over a lower-scored distractor;
+		// a cut paraphrase without a new signal is not falsely promoted.
+		leadCutBase := "Domestic travel is reimbursed up to 500 dollars per trip for staff with a receipt submitted within thirty days. " + strings.Repeat("Standard policy details apply. ", 6)
+		cutVariant := "Domestic travel is reimbursed up to 1500 dollars per trip for staff with a receipt submitted within thirty days. " + strings.Repeat("Additional appendix detail. ", 25)
+		cutParaphrase := "Domestic travel is reimbursed up to 500 dollars per trip for staff with a receipt submitted within thirty days. " + strings.Repeat("Standard policy details apply! ", 6)
+		outCutVar, truncCutVar, err := trimChunksForSynthesis(t.Context(), []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "lead", DocumentID: "doc-a", Index: 0, Text: leadCutBase}, Score: .90},
+			{Chunk: domain.Chunk{ID: "variant", DocumentID: "doc-a", Index: 1, Text: cutVariant}, Score: .88},
+			{Chunk: domain.Chunk{ID: "unrelated", DocumentID: "doc-b", Index: 0, Text: unrelated}, Score: .60},
+		}, 256, .55, config.SynthesisContextPolicyDiverse)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(outCutVar), 2)
+		require.Equal(t, domain.ChunkID("variant"), outCutVar[1].Chunk.ID)
+		require.True(t, truncCutVar[1])
+		require.Contains(t, outCutVar[1].Chunk.Text, "1500 dollars")
+
+		require.False(t, meaningBearingDifference(
+			"Remote work is approved for engineering staff.",
+			"Remote work is not approved for engineering staff.",
+			true,
+		))
+		require.True(t, meaningBearingDifference(
+			"Remote work is approved for engineering staff.",
+			"Remote work is not approved for engineering staff.",
+			false,
+		))
+		require.False(t, meaningBearingDifference(cutParaphrase[:200], leadCutBase, true))
+		require.True(t, meaningBearingDifference(
+			"Contract expires on 2026-03-15 with 15% retention fee.",
+			"Contract expires on 2026-04-15 with 15% retention fee.",
+			false,
+		))
+		require.True(t, meaningBearingDifference(
+			"Contract expires on 2026-03-15 with 20% retention fee.",
+			"Contract expires on 2026-03-15 with 15% retention fee.",
+			false,
+		))
+		require.False(t, meaningBearingDifference(
+			"This node accepts another request from engineering.",
+			"This node accepts other requests from engineering.",
+			false,
+		))
+	})
+
+	t.Run("adjacent continuations are retained with overlap, without overlap, and under reranking", func(t *testing.T) {
+		sent := []string{
+			"The contractor onboarding policy requires a signed agreement before any access is granted.",
+			"Managers review each request and confirm the cost center within two business days.",
+			"Badge issuance follows the review and is recorded by the security office in the register.",
+			"Equipment checkout is handled by the service desk after the badge has been issued.",
+			"Remote access tokens are provisioned only after equipment checkout is complete.",
+			"Contractors working more than ninety days must complete annual security training before renewal.",
+			"Training completion is tracked in the learning portal and reported monthly to managers.",
+			"Expired training blocks contract renewal until the course is completed again.",
+		}
+		unrelated := "Visitor parking permits validate for level three north garage only during weekday business hours. Garage gates close at midnight and reopen at six in the morning. Lost permits are replaced at the security office for a small fee." +
+			strings.Repeat(" Garage rules are posted at each entrance.", 7)
+		for _, unrelatedScore := range []float64{.60, .70} {
+			for _, tc := range []struct {
+				name   string
+				a1Text string
+				rerank bool
+			}{
+				{"with-overlap", strings.Join(sent[4:8], " "), false},
+				{"no-overlap", strings.Join(sent[5:8], " "), false},
+				{"reranked-with-overlap", strings.Join(sent[4:8], " "), true},
+			} {
+				in := []domain.ScoredChunk{
+					{Chunk: domain.Chunk{ID: "a0", DocumentID: "doc-a", Index: 0, Text: strings.Join(sent[0:5], " ")}, Score: .91},
+					{Chunk: domain.Chunk{ID: "a1", DocumentID: "doc-a", Index: 1, Text: tc.a1Text}, Score: .89},
+					{Chunk: domain.Chunk{ID: "b0", DocumentID: "doc-b", Index: 0, Text: unrelated}, Score: unrelatedScore},
+				}
+				if tc.rerank {
+					r0, r1, r2 := 0.99, 0.95, 0.90
+					in[0].RerankScore, in[1].RerankScore, in[2].RerankScore = &r0, &r1, &r2
+				}
+				out, _, err := trimChunksForSynthesis(t.Context(), in, 256, .55, config.SynthesisContextPolicyDiverse)
+				require.NoError(t, err)
+				require.GreaterOrEqual(t, len(out), 2, "%s unrelated=%.2f", tc.name, unrelatedScore)
+				require.Equal(t, domain.ChunkID("a1"), out[1].Chunk.ID, "%s unrelated=%.2f", tc.name, unrelatedScore)
+				require.Contains(t, out[1].Chunk.Text, sent[5], "%s unrelated=%.2f", tc.name, unrelatedScore)
+			}
+		}
+	})
+
+	t.Run("non-space-delimited CJK and Thai scripts detect overlap and keep distinct facts", func(t *testing.T) {
+		jp1 := "東京支社の営業時間は午前9時から午後6時までです。" + strings.Repeat("あ", 160)
+		jpDup := "東京支社の営業時間は午前9時から午後6時までです。" + strings.Repeat("あ", 160)
+		thDistinct := "สำนักงานกรุงเทพเปิดให้บริการตั้งแต่เวลาแปดโมงเช้าถึงห้าโมงเย็นทุกวันจันทร์ถึงศุกร์" + strings.Repeat("ก", 160)
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "jp1", DocumentID: "doc-jp", Index: 0, Text: jp1}, Score: .95},
+			{Chunk: domain.Chunk{ID: "jp2", DocumentID: "doc-jp", Index: 1, Text: jpDup}, Score: .92},
+			{Chunk: domain.Chunk{ID: "th1", DocumentID: "doc-th", Index: 0, Text: thDistinct}, Score: .85},
+		}
+		qc, _ := runDiverse(t, 450, .55, chunks)
+		require.Len(t, qc.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("jp1"), qc.Excerpts[0].Chunk.ID)
+		require.Equal(t, domain.ChunkID("th1"), qc.Excerpts[1].Chunk.ID)
+	})
+
+	t.Run("zero, negative, and tied cosine scores have defined deterministic treatment", func(t *testing.T) {
+		// Zero cosine scores: all pass floor (0 >= 0), diverse prefers distinct body.
+		zeroChunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "z2", DocumentID: "doc-a", Index: 0, Text: "Zero score fact alpha. " + strings.Repeat("a", 160)}, Score: 0},
+			{Chunk: domain.Chunk{ID: "z1", DocumentID: "doc-a", Index: 1, Text: "Zero score fact alpha. " + strings.Repeat("a", 160)}, Score: 0},
+			{Chunk: domain.Chunk{ID: "z3", DocumentID: "doc-b", Index: 0, Text: "Zero score fact beta. " + strings.Repeat("b", 160)}, Score: 0},
+		}
+		qcZero, _ := runDiverse(t, 120, .55, zeroChunks)
+		require.Len(t, qcZero.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("z2"), qcZero.Excerpts[0].Chunk.ID)
+		require.Equal(t, domain.ChunkID("z3"), qcZero.Excerpts[1].Chunk.ID)
+
+		// Negative cosine scores: first-candidate exception retains leading passage;
+		// weaker negative scores below top*floor are excluded just like ranked mode.
+		negChunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "n1", DocumentID: "doc-a", Index: 0, Text: "Negative best fact."}, Score: -0.5},
+			{Chunk: domain.Chunk{ID: "n2", DocumentID: "doc-b", Index: 0, Text: "Weaker negative fact."}, Score: -0.6},
+		}
+		qcNeg, _ := runDiverse(t, 256, .55, negChunks)
+		require.Len(t, qcNeg.Excerpts, 1)
+		require.Equal(t, domain.ChunkID("n1"), qcNeg.Excerpts[0].Chunk.ID)
+
+		// Tied cosine scores: deterministic across repeated runs and breaks ties by rank/ID.
+		tiedChunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "t-first", DocumentID: "doc-a", Index: 0, Text: "Lead anchor fact."}, Score: .8},
+			{Chunk: domain.Chunk{ID: "t-b", DocumentID: "doc-b", Index: 0, Text: "Unique tied clause."}, Score: .8},
+			{Chunk: domain.Chunk{ID: "t-c", DocumentID: "doc-c", Index: 0, Text: "Unique tied clause."}, Score: .8},
+		}
+		qcTied1, _ := runDiverse(t, 256, .55, tiedChunks)
+		qcTied2, _ := runDiverse(t, 256, .55, tiedChunks)
+		require.Equal(t, qcTied1.Excerpts, qcTied2.Excerpts)
+		require.Equal(t, domain.ChunkID("t-b"), qcTied1.Excerpts[1].Chunk.ID)
+	})
+
+	t.Run("first-candidate exception after reranking retains top reranked passage and filters below-floor", func(t *testing.T) {
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "rerank-top", DocumentID: "doc-a", Index: 0, Text: "Top reranked passage."}, Score: .30},
+			{Chunk: domain.Chunk{ID: "weak-mid", DocumentID: "doc-b", Index: 0, Text: "Below floor passage."}, Score: .40},
+			{Chunk: domain.Chunk{ID: "strong-vec", DocumentID: "doc-c", Index: 0, Text: "Strong vector passage."}, Score: .99},
+		}
+		r := rerankerFunc(func(_ context.Context, _ string, in []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+			out := []domain.ScoredChunk{in[0], in[1], in[2]}
+			for i, rs := range []float64{.98, .80, .60} {
+				score := rs
+				out[i].RerankScore = &score
+			}
+			return out, nil
+		})
+		cfg := &config.Config{
+			BedrockFallbackModel:        "fallback",
+			SynthesisContextTokens:      256,
+			SynthesisRelativeScoreFloor: .55,
+			SynthesisContextPolicy:      config.SynthesisContextPolicyDiverse,
+		}
+		amb := llm.NewAmbassador(cfg)
+		amb.SetClient(&citationPromptRecorder{answer: "Grounded [1] [2]."})
+		qc := &QueryContext{OriginalQuery: "question", RetrievedChunks: chunks, TopScore: .99}
+		_, err := RunRetrievalPipeline(t.Context(), qc, []QueryStage{NewRerankStage(r, time.Second), NewSynthesisStage(amb, cfg)})
+		require.NoError(t, err)
+		require.Len(t, qc.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("rerank-top"), qc.Excerpts[0].Chunk.ID)
+		require.Equal(t, domain.ChunkID("strong-vec"), qc.Excerpts[1].Chunk.ID)
+	})
+
+	t.Run("reranker failure falls back while parent cancellation stops selection", func(t *testing.T) {
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "c1", DocumentID: "doc-a", Index: 0, Text: "Alpha rule. " + strings.Repeat("a", 160)}, Score: .95},
+			{Chunk: domain.Chunk{ID: "c2", DocumentID: "doc-a", Index: 1, Text: "Alpha rule. " + strings.Repeat("a", 160)}, Score: .90},
+			{Chunk: domain.Chunk{ID: "c3", DocumentID: "doc-b", Index: 0, Text: "Beta exception. " + strings.Repeat("b", 160)}, Score: .85},
+		}
+		failingReranker := rerankerFunc(func(context.Context, string, []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+			return nil, errors.New("reranker down")
+		})
+		cfg := &config.Config{
+			BedrockFallbackModel:        "fallback",
+			SynthesisContextTokens:      120,
+			SynthesisRelativeScoreFloor: .55,
+			SynthesisContextPolicy:      config.SynthesisContextPolicyDiverse,
+		}
+		amb := llm.NewAmbassador(cfg)
+		amb.SetClient(&citationPromptRecorder{answer: "Alpha [1] Beta [2]."})
+		qc := &QueryContext{OriginalQuery: "rules", RetrievedChunks: chunks, TopScore: .95}
+		_, err := RunRetrievalPipeline(t.Context(), qc, []QueryStage{NewRerankStage(failingReranker, time.Second), NewSynthesisStage(amb, cfg)})
+		require.NoError(t, err)
+		require.Len(t, qc.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("c1"), qc.Excerpts[0].Chunk.ID)
+		require.Equal(t, domain.ChunkID("c3"), qc.Excerpts[1].Chunk.ID)
+
+		// Parent cancellation stops selection with zero synthesis calls.
+		canceledCtx, cancel := context.WithCancel(t.Context())
+		cancel()
+		client := &synthesisDeadlineClient{call: func(context.Context) (*bedrockruntime.ConverseOutput, error) {
+			t.Fatal("canceled context must not call synthesis")
+			return nil, nil
+		}}
+		ambCanceled := llm.NewAmbassador(cfg)
+		ambCanceled.SetClient(client)
+		qcCanceled := &QueryContext{OriginalQuery: "rules", RetrievedChunks: chunks}
+		err = NewSynthesisStage(ambCanceled, cfg).Run(canceledCtx, qcCanceled)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Zero(t, client.calls)
+	})
+
+	t.Run("renumbered excerpts map citations to exact selected bodies and match evidence mode", func(t *testing.T) {
+		lead := "Lead policy states badges expire yearly. " + strings.Repeat("p", 160)
+		dup := "Lead policy states badges expire yearly. " + strings.Repeat("p", 160)
+		trail := "Visitor passes expire after twenty four hours."
+		chunks := []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "c1", DocumentID: "doc-a", Index: 0, Text: lead}, Score: .95},
+			{Chunk: domain.Chunk{ID: "c2", DocumentID: "doc-a", Index: 1, Text: dup}, Score: .92},
+			{Chunk: domain.Chunk{ID: "c3", DocumentID: "doc-b", Index: 7, Text: trail}, Score: .85},
+		}
+		qcGen, _ := runDiverse(t, 120, .55, chunks)
+		require.Len(t, qcGen.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("c3"), qcGen.Excerpts[1].Chunk.ID)
+		require.Len(t, qcGen.Citations, 2)
+		require.Equal(t, 2, qcGen.Citations[1].Excerpt)
+		require.Equal(t, domain.DocumentID("doc-b"), qcGen.Citations[1].DocumentID)
+		require.Equal(t, 7, qcGen.Citations[1].ChunkIndex)
+
+		cfgEvid := &config.Config{
+			SynthesisContextTokens:      120,
+			SynthesisRelativeScoreFloor: .55,
+			SynthesisContextPolicy:      config.SynthesisContextPolicyDiverse,
+		}
+		ambEvid := llm.NewAmbassador(cfgEvid)
+		ambEvid.SetGenerator(unexpectedEvidenceGenerator{t})
+		qcEvid := &QueryContext{
+			OriginalQuery:   "Compare retention and exceptions",
+			AnswerMode:      domain.AnswerModeEvidence,
+			RetrievedChunks: chunks,
+		}
+		require.NoError(t, NewSynthesisStage(ambEvid, cfgEvid).Run(t.Context(), qcEvid))
+		require.Equal(t, qcGen.Excerpts, qcEvid.Excerpts)
+		require.Equal(t, qcGen.Truncated, qcEvid.Truncated)
+	})
+
+	t.Run("strict profile and NaN score handling remain safe under diverse policy", func(t *testing.T) {
+		out, trunc, err := trimChunksForSynthesis(t.Context(), []domain.ScoredChunk{
+			{Chunk: domain.Chunk{ID: "nan-lead", DocumentID: "doc-a", Index: 0, Text: "Lead passage."}, Score: math.NaN()},
+			{Chunk: domain.Chunk{ID: "valid-2", DocumentID: "doc-b", Index: 0, Text: "Valid passage."}, Score: .8},
+			{Chunk: domain.Chunk{ID: "weak-3", DocumentID: "doc-c", Index: 0, Text: "Weak passage."}, Score: .2},
+		}, 256, .55, config.SynthesisContextPolicyDiverse)
+		require.NoError(t, err)
+		require.Len(t, out, 2)
+		require.Equal(t, []bool{false, false}, trunc)
+		require.Equal(t, domain.ChunkID("nan-lead"), out[0].Chunk.ID)
+		require.Equal(t, domain.ChunkID("valid-2"), out[1].Chunk.ID)
+
+		// Strict input profile preserves diverse selection order and exact token counting.
+		cfg := &config.Config{
+			LLMProvider:                 "bedrock",
+			AWSRegion:                   "us-east-1",
+			BedrockFallbackModel:        testBedrockFallback,
+			SynthesisInputProfile:       "strict",
+			SynthesisContextTokens:      120,
+			SynthesisRelativeScoreFloor: .55,
+			SynthesisContextPolicy:      config.SynthesisContextPolicyDiverse,
+			SynthesisTimeout:            5 * time.Second,
+		}
+		double := &calibratedBedrockDouble{
+			countFn: func(_ context.Context, _ string, _ string, _ []brtypes.Message, _ int) (llm.CountResult, error) {
+				return llm.CountResult{InputTokens: 512, Attempts: 1, Method: llm.CountMethodBedrockCountTokens}, nil
+			},
+		}
+		amb := llm.NewAmbassador(cfg)
+		amb.SetClient(double)
+		lead := "Strict lead retention policy. " + strings.Repeat("a", 160)
+		dup := "Strict lead retention policy. " + strings.Repeat("a", 160)
+		trail := "Strict complementary exception."
+		qc := &QueryContext{
+			OriginalQuery: "retention?",
+			RetrievedChunks: []domain.ScoredChunk{
+				{Chunk: domain.Chunk{ID: "s1", DocumentID: "doc-a", Index: 0, Text: lead}, Score: .95},
+				{Chunk: domain.Chunk{ID: "s2", DocumentID: "doc-a", Index: 1, Text: dup}, Score: .90},
+				{Chunk: domain.Chunk{ID: "s3", DocumentID: "doc-b", Index: 0, Text: trail}, Score: .85},
+			},
+		}
+		require.NoError(t, NewSynthesisStage(amb, cfg).Run(t.Context(), qc))
+		require.Len(t, qc.Excerpts, 2)
+		require.Equal(t, domain.ChunkID("s3"), qc.Excerpts[1].Chunk.ID)
+		require.Equal(t, 512, qc.ModelInputTokens)
+	})
 }

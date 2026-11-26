@@ -26,6 +26,9 @@ func (q *QueryStream) start(ctx context.Context) error {
 }
 
 func (s *SynthesisStage) finishWithoutEvidence(ctx context.Context, qc *QueryContext) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	qc.FinishReason = "no_evidence"
 	qc.FinalAnswer, qc.ContentLanguage = s.noEvidenceCatalog.answer(qc.AcceptLanguage)
 	qc.ContextTokens, qc.ContextChunks = 0, 0
