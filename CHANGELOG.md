@@ -57,6 +57,7 @@ Notable changes are grouped by release.
 
 ### Changed
 
+- Guarded ID-only deletions, enabled only with legacy deletion reservations, run on a PostgreSQL session outside the pool, so slow provider calls no longer hold pooled connections. A replica runs at most `LEGACY_DELETION_CONCURRENCY` of them (default a quarter of `pool_max_conns`, at least one), answers further requests with `503` `busy` and `Retry-After: 5` before it takes a lock or a connection, and the [connection sizing formula](docs/deployment.md#concurrency-limits) counts the extra sessions.
 - `make reindex` freeze, activation and inventory reports now include up to 20 document IDs of open deletion receipts blocking quiescence, and the [deployment guide](docs/deployment.md#changing-models-or-vector-stores) documents how to thaw, complete qualified retries and re-freeze.
 - Deployment and grant-catalog documentation specifies the PostgreSQL privileges required by a non-owner `make reindex` maintenance login, including `EXECUTE` on `grant_catalog_document_tenant`, `ingest_jobs`, `evaluation_fixtures`, `document_pdf_extractions`, and pre-created or self-created generation vector tables.
 - `DELETE /documents/{doc_id}` accepts `release_held=true` for offline hold release and rejects empty, repeated, malformed or non-literal values with `400`; see [document deletion](docs/api.md#delete-documentsdoc_id).
