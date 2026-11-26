@@ -25,6 +25,9 @@ type pagedSource struct {
 	checkpointErr error
 	probeErr      error
 	unregistered  bool
+	orphanCount   int
+	orphanErr     error
+	orphanReads   []string
 }
 
 func (s *pagedSource) DocumentRevisions(_ context.Context, after string, limit int) ([]pgstore.DocumentRevision, error) {
@@ -69,10 +72,39 @@ func (s *pagedSource) GenerationCheckpoints(_ context.Context, _ string, _ []str
 	return nil, nil
 }
 
-func (s *pagedSource) OrphanedGenerationDocuments(_ context.Context, _ string, _ int) ([]pgstore.Checkpoint, error) {
+func (s *pagedSource) CountOrphanedGenerationDocuments(_ context.Context, generation string) (int, error) {
 	s.t.Helper()
 	require.False(s.t, s.unregistered, "unregistered inventory must skip orphan reads")
-	return nil, nil
+	s.orphanReads = append(s.orphanReads, generation)
+	return s.orphanCount, s.orphanErr
+}
+
+func TestScanPlanCountsOrphans(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("orphan count failed")
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{name: "full_count"},
+		{name: "count_error", err: failure},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			src := pagedSource{t: t, ids: []string{"a"}, orphanCount: 3, orphanErr: tt.err}
+			opts := options{Page: 100, MaxDocuments: 2}
+			var report inventoryReport
+			err := scanPlan(t.Context(), &src, opts, targetPlan{generation: "g2", store: "postgres"}, true, &report)
+			require.Equal(t, []string{"g2"}, src.orphanReads)
+			if tt.err != nil {
+				require.Equal(t, tt.err, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 3, report.Ledger.Orphaned)
+			require.False(t, report.Truncated)
+		})
+	}
 }
 
 func TestScanPlanTruncation(t *testing.T) {
