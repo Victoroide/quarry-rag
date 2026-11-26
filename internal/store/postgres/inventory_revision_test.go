@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestInventoryRevisionTracksEffectivePolicy(t *testing.T) {
 	inc := grantIncarnation(t, c, f.document)
 	people := []string{f.owner, f.reader, f.creator, f.disabled, f.stranger}
 	last := make([]int64, len(people))
-	check := func(delta ...int) {
+	check := func(t *testing.T, delta ...int) {
 		t.Helper()
 		for i, person := range people {
 			tenant := f.tenant
@@ -51,9 +52,9 @@ func TestInventoryRevisionTracksEffectivePolicy(t *testing.T) {
 		}
 		assertGrantCount(t, c, "inventory_revision_pending", 0)
 	}
-	check(1, 1, 1, 1, 1)
+	check(t, 1, 1, 1, 1, 1)
 	catalog := int64(1)
-	apply := func(group string, entry grantEntry) {
+	apply := func(t *testing.T, group string, entry grantEntry) {
 		t.Helper()
 		b := testGrantBatch(catalog)
 		b[group] = []grantEntry{entry}
@@ -62,8 +63,8 @@ func TestInventoryRevisionTracksEffectivePolicy(t *testing.T) {
 		catalog++
 		require.Equal(t, catalog, res.Revision)
 	}
-	grant := func(read, download bool) grantEntry {
-		return grantEntry{"tenant_id": f.tenant, "principal_id": f.reader, "document_id": f.document,
+	grant := func(principal string, read, download bool) grantEntry {
+		return grantEntry{"tenant_id": f.tenant, "principal_id": principal, "document_id": f.document,
 			"incarnation": inc, "can_read": read, "can_download": download}
 	}
 	for _, tc := range []struct {
@@ -71,19 +72,20 @@ func TestInventoryRevisionTracksEffectivePolicy(t *testing.T) {
 		entry       grantEntry
 		delta       []int
 	}{
-		{"no_op", "grants", grant(true, false), []int{0, 0, 0, 0, 0}},
+		{"no_op", "grants", grant(f.reader, true, false), []int{0, 0, 0, 0, 0}},
 		{"reservation", "reservations", grantEntry{"tenant_id": f.tenant, "principal_id": f.owner, "collection": "", "document_id": uuid.NewString()}, []int{0, 0, 0, 0, 0}},
-		{"download", "grants", grant(true, true), []int{0, 1, 0, 0, 0}},
-		{"revoke", "grants", grant(false, false), []int{0, 1, 0, 0, 0}},
-		{"grant", "grants", grant(true, false), []int{0, 1, 0, 0, 0}},
+		{"download", "grants", grant(f.reader, true, true), []int{0, 1, 0, 0, 0}},
+		{"revoke", "grants", grant(f.reader, false, false), []int{0, 1, 0, 0, 0}},
+		{"grant", "grants", grant(f.reader, true, false), []int{0, 1, 0, 0, 0}},
+		{"disabled_download", "grants", grant(f.disabled, true, false), []int{0, 0, 0, 1, 0}},
 		{"disable", "principals", grantPrincipal(f.tenant, f.reader, "owner", false), []int{0, 1, 0, 0, 0}},
 		{"reenable", "principals", grantPrincipal(f.tenant, f.reader, "owner", true), []int{0, 1, 0, 0, 0}},
 		{"create_revocation", "create_permissions", grantEntry{"tenant_id": f.tenant, "principal_id": f.creator, "collection": "", "can_create": false}, []int{0, 0, 1, 0, 0}},
 		{"collection_only", "collections", grantEntry{"tenant_id": f.tenant, "collection": "new"}, []int{0, 0, 0, 0, 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			apply(tc.group, tc.entry)
-			check(tc.delta...)
+			apply(t, tc.group, tc.entry)
+			check(t, tc.delta...)
 		})
 	}
 
@@ -96,31 +98,102 @@ func TestInventoryRevisionTracksEffectivePolicy(t *testing.T) {
 			require.True(t, published)
 		}
 	}
-	check(1, 1, 0, 1, 0)
+	check(t, 1, 1, 0, 1, 0)
+
+	const fileKey = "documents/inventory.pdf"
+	grantExec(t, c, `UPDATE documents SET s3_key=$2 WHERE id=$1`, f.document, fileKey)
+	checkOwnerAccess := func(t *testing.T) {
+		t.Helper()
+		page, listErr := c.ListScopedDocumentsPage(t.Context(), owner, "", 10, "", true)
+		require.NoError(t, listErr)
+		require.True(t, page.Active)
+		require.Equal(t, catalog, page.CatalogRevision)
+		require.Len(t, page.Documents, 1)
+		require.Equal(t, f.document, page.Documents[0].ID)
+		require.Equal(t, inc, page.Documents[0].Incarnation)
+
+		status, statusErr := c.GetScopedDocumentSummary(t.Context(), owner, domain.DocumentID(f.document), true)
+		require.NoError(t, statusErr)
+		require.True(t, status.Active)
+		require.Equal(t, catalog, status.CatalogRevision)
+		require.NotNil(t, status.Document)
+		require.Equal(t, page.Documents[0], *status.Document)
+
+		var active bool
+		var key string
+		require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT active, s3_key FROM grant_catalog_authorize_file($1,$2,$3)`,
+			f.tenant, f.owner, f.document).Scan(&active, &key))
+		require.True(t, active)
+		require.Equal(t, fileKey, key)
+	}
+	checkOwnerAccess(t)
+	for _, tc := range []struct {
+		name           string
+		read, download bool
+	}{
+		{"owner_grant", true, false},
+		{"owner_download", true, true},
+		{"owner_revoke", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			apply(t, "grants", grant(f.owner, tc.read, tc.download))
+			checkOwnerAccess(t)
+			check(t, 0, 0, 0, 0, 0)
+		})
+	}
+
 	grantExec(t, c, `UPDATE grant_catalog_document_ownership SET source_version=repeat('a',64) WHERE document_id=$1`, f.document)
 	grantExec(t, c, `UPDATE documents SET status='processing' WHERE id=$1`, f.document)
-	check(0, 0, 0, 0, 0)
+	check(t, 0, 0, 0, 0, 0)
 	grantExec(t, c, `UPDATE documents SET collection='new' WHERE id=$1`, f.document)
-	check(1, 1, 0, 1, 0)
+	check(t, 1, 1, 0, 1, 0)
 	grantExec(t, c, `UPDATE documents SET collection='' WHERE id=$1`, f.document)
-	check(1, 1, 0, 1, 0)
+	check(t, 1, 1, 0, 1, 0)
 	grantExec(t, c, `UPDATE documents SET status='deleting' WHERE id=$1`, f.document)
-	check(1, 1, 0, 1, 0)
+	check(t, 1, 1, 0, 1, 0)
 	grantExec(t, c, `DELETE FROM documents WHERE id=$1`, f.document)
-	check(1, 1, 0, 1, 0)
+	check(t, 1, 1, 0, 1, 0)
 
 	req := ownedRequest(owner, "", "inventory accepted document")
 	req.SupportsScopedVectors = true
 	res, err := c.AcceptDocument(t.Context(), req)
 	require.NoError(t, err)
 	require.Equal(t, domain.AcceptAccepted, res.Outcome)
-	check(1, 0, 0, 0, 0)
+	check(t, 1, 0, 0, 0, 0)
 	accepted := string(req.Document.ID)
 	grantExec(t, c, `SELECT grant_catalog_publish_accepted_document($1,$2)`, accepted, grantIncarnation(t, c, accepted))
-	check(0, 0, 0, 0, 0)
+	check(t, 0, 0, 0, 0, 0)
 	_, err = c.Pool.Exec(t.Context(), `UPDATE documents SET grant_catalog_assigned=false WHERE id=$1`, accepted)
 	require.Error(t, err, "the catalog forbids clearing an assigned marker")
-	check(0, 0, 0, 0, 0)
+	check(t, 0, 0, 0, 0, 0)
+	grantExec(t, c, `UPDATE grant_catalog_document_ownership SET principal_id=$2 WHERE document_id=$1`, accepted, f.creator)
+	check(t, 1, 0, 1, 0, 0)
+	grantExec(t, c, `INSERT INTO grant_catalog_document_grants VALUES($1,$2,$3,$4,true,false)`,
+		f.tenant, accepted, grantIncarnation(t, c, accepted), f.reader)
+	check(t, 0, 1, 0, 0, 0)
+	grantExec(t, c, `UPDATE grant_catalog_document_grants SET principal_id=$2 WHERE document_id=$1`, accepted, f.disabled)
+	check(t, 0, 1, 0, 1, 0)
+	grantExec(t, c, `UPDATE grant_catalog_document_grants SET principal_id=$2 WHERE document_id=$1`, accepted, f.creator)
+	check(t, 0, 0, 0, 1, 0)
+	grantExec(t, c, `UPDATE grant_catalog_document_grants SET principal_id=$2 WHERE document_id=$1`, accepted, f.reader)
+	check(t, 0, 1, 0, 0, 0)
+
+	otherReq := ownedRequest(owner, "", "inventory second accepted document")
+	otherReq.SupportsScopedVectors = true
+	res, err = c.AcceptDocument(t.Context(), otherReq)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, res.Outcome)
+	check(t, 1, 0, 0, 0, 0)
+	other := string(otherReq.Document.ID)
+	grantExec(t, c, `INSERT INTO grant_catalog_document_grants VALUES($1,$2,$3,$4,true,false)`,
+		f.tenant, accepted, grantIncarnation(t, c, accepted), f.creator)
+	check(t, 0, 0, 0, 0, 0)
+	moveGrant := `UPDATE grant_catalog_document_grants SET document_id=$2, incarnation=$3
+		WHERE document_id=$1 AND principal_id=$4`
+	grantExec(t, c, moveGrant, accepted, other, grantIncarnation(t, c, other), f.creator)
+	check(t, 0, 0, 1, 0, 0)
+	grantExec(t, c, moveGrant, other, accepted, grantIncarnation(t, c, accepted), f.creator)
+	check(t, 0, 0, 1, 0, 0)
 }
 
 func TestInventoryRevisionCommitOrder(t *testing.T) {
@@ -146,11 +219,11 @@ func TestInventoryRevisionCommitOrder(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	begin := func(opts pgx.TxOptions) pgx.Tx {
+	begin := func(t *testing.T, opts pgx.TxOptions) pgx.Tx {
 		t.Helper()
 		tx, err := c.Pool.BeginTx(ctx, opts)
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+		t.Cleanup(func() { _ = tx.Rollback(context.WithoutCancel(ctx)) })
 		return tx
 	}
 	hide := func(tx pgx.Tx, id string) {
@@ -158,16 +231,16 @@ func TestInventoryRevisionCommitOrder(t *testing.T) {
 		_, err := tx.Exec(ctx, `UPDATE documents SET status='deleting' WHERE id=$1`, id)
 		require.NoError(t, err)
 	}
-	read := begin(pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	read := begin(t, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	old, err := readScopedPolicyState(ctx, read, owner)
 	require.NoError(t, err)
 	otherOld := revisionFor(t, c, other.TenantID, other.ID)
-	aborted := begin(pgx.TxOptions{})
+	aborted := begin(t, pgx.TxOptions{})
 	hide(aborted, order[0][0])
 	require.NoError(t, aborted.Rollback(ctx))
 	require.Equal(t, old.Revision, revisionFor(t, c, owner.TenantID, owner.ID))
 
-	first, second := begin(pgx.TxOptions{}), begin(pgx.TxOptions{})
+	first, second := begin(t, pgx.TxOptions{}), begin(t, pgx.TxOptions{})
 	hide(first, order[0][0])
 	hide(first, order[0][1])
 	hide(second, order[1][1])
@@ -176,8 +249,9 @@ func TestInventoryRevisionCommitOrder(t *testing.T) {
 	results := make(chan error, 2)
 	go func() { results <- first.Commit(ctx) }()
 	go func() { results <- second.Commit(ctx) }()
-	require.NoError(t, <-results)
-	require.NoError(t, <-results)
+	firstErr, secondErr := <-results, <-results
+	require.NoError(t, firstErr)
+	require.NoError(t, secondErr)
 	stillOld, err := readScopedPolicyState(ctx, read, owner)
 	require.NoError(t, err)
 	require.Equal(t, old, stillOld)
@@ -193,41 +267,46 @@ func TestInventoryRevisionCommitOrder(t *testing.T) {
 	assertGrantCount(t, c, "inventory_revision_pending", 0)
 
 	t.Run("publish_before_hide", func(t *testing.T) {
-		candidates, candidateErr := c.BackfillCandidates(t.Context(), "", 10)
+		candidates, candidateErr := c.BackfillCandidates(ctx, "", 10)
 		require.NoError(t, candidateErr)
-		for _, candidate := range candidates {
-			if candidate.DocumentID != f.document {
-				continue
-			}
-			writer, hider := begin(pgx.TxOptions{}), begin(pgx.TxOptions{})
-			var published bool
-			require.NoError(t, writer.QueryRow(ctx, `SELECT grant_catalog_publish_verified_document($1,$2,$3,$4)`,
-				candidate.DocumentID, candidate.Incarnation, candidate.SourceVersion, candidate.ChunkDigest).Scan(&published))
-			require.True(t, published)
-			pid := hider.Conn().PgConn().PID()
-			updated := make(chan error, 1)
-			go func() {
-				_, hideErr := hider.Exec(ctx, `UPDATE documents SET status='deleting' WHERE id=$1`, candidate.DocumentID)
-				updated <- hideErr
-			}()
-			require.EventuallyWithT(t, func(ct *assert.CollectT) {
-				var blocked bool
-				require.NoError(ct, c.Pool.QueryRow(ctx, `SELECT cardinality(pg_blocking_pids($1)) > 0`, int32(pid)).Scan(&blocked))
-				require.True(ct, blocked)
-			}, 3*time.Second, 10*time.Millisecond)
-			require.NoError(t, writer.Commit(ctx))
-			require.NoError(t, <-updated)
-			visible, readErr := c.GetScopedDocumentSummary(ctx, owner, domain.DocumentID(candidate.DocumentID), false)
-			require.NoError(t, readErr)
-			require.NotNil(t, visible.Document)
-			require.NoError(t, hider.Commit(ctx))
-			hidden, readErr := c.GetScopedDocumentSummary(ctx, owner, domain.DocumentID(candidate.DocumentID), false)
-			require.NoError(t, readErr)
-			require.Nil(t, hidden.Document)
-			require.Equal(t, visible.Revision+1, hidden.Revision)
-			return
-		}
-		t.Fatal("missing quarantined inventory document")
+		candidateIndex := slices.IndexFunc(candidates, func(candidate BackfillDocument) bool {
+			return candidate.DocumentID == f.document
+		})
+		require.NotEqual(t, -1, candidateIndex, "missing quarantined inventory document")
+		candidate := candidates[candidateIndex]
+		writer, hider := begin(t, pgx.TxOptions{}), begin(t, pgx.TxOptions{})
+		var published bool
+		require.NoError(t, writer.QueryRow(ctx, `SELECT grant_catalog_publish_verified_document($1,$2,$3,$4)`,
+			candidate.DocumentID, candidate.Incarnation, candidate.SourceVersion, candidate.ChunkDigest).Scan(&published))
+		require.True(t, published)
+		var pid int32
+		require.NoError(t, hider.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
+		updated := make(chan error, 1)
+		finished := make(chan struct{})
+		defer func() {
+			_ = writer.Rollback(context.WithoutCancel(ctx))
+			<-finished
+		}()
+		go func() {
+			defer close(finished)
+			_, hideErr := hider.Exec(ctx, `UPDATE documents SET status='deleting' WHERE id=$1`, candidate.DocumentID)
+			updated <- hideErr
+		}()
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			var blocked bool
+			require.NoError(ct, c.Pool.QueryRow(ctx, `SELECT cardinality(pg_blocking_pids($1)) > 0`, pid).Scan(&blocked))
+			require.True(ct, blocked)
+		}, 3*time.Second, 10*time.Millisecond)
+		require.NoError(t, writer.Commit(ctx))
+		require.NoError(t, <-updated)
+		visible, readErr := c.GetScopedDocumentSummary(ctx, owner, domain.DocumentID(candidate.DocumentID), false)
+		require.NoError(t, readErr)
+		require.NotNil(t, visible.Document)
+		require.NoError(t, hider.Commit(ctx))
+		hidden, readErr := c.GetScopedDocumentSummary(ctx, owner, domain.DocumentID(candidate.DocumentID), false)
+		require.NoError(t, readErr)
+		require.Nil(t, hidden.Document)
+		require.Equal(t, visible.Revision+1, hidden.Revision)
 	})
 
 	t.Run("largest_import_and_point_lookup", func(t *testing.T) {
@@ -249,13 +328,17 @@ func TestInventoryRevisionCommitOrder(t *testing.T) {
 		_, body, ok := strings.Cut(definition, "BEGIN ATOMIC")
 		require.True(t, ok)
 		statement := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(body), "END"))
-		statement = strings.NewReplacer("p_tenant", "$1", "p_principal", "$2").Replace(statement)
+		statement = strings.NewReplacer(
+			"grant_catalog_inventory_policy_state.p_tenant", "$1", "p_tenant", "$1",
+			"grant_catalog_inventory_policy_state.p_principal", "$2", "p_principal", "$2",
+		).Replace(statement)
 		tx, txErr := c.Pool.Begin(t.Context())
 		require.NoError(t, txErr)
 		defer func() { _ = tx.Rollback(context.Background()) }()
 		_, planErr := tx.Exec(t.Context(), "PREPARE inventory_lookup(uuid,uuid) AS "+statement)
 		require.NoError(t, planErr)
-		rows, planErr := tx.Query(t.Context(), fmt.Sprintf("EXPLAIN (COSTS OFF) EXECUTE inventory_lookup('%s','%s')", f.tenant, f.owner))
+		rows, planErr := tx.Query(t.Context(), `EXPLAIN (COSTS OFF) EXECUTE inventory_lookup($1,$2)`,
+			pgx.QueryExecModeSimpleProtocol, f.tenant, f.owner)
 		require.NoError(t, planErr)
 		lines, planErr := pgx.CollectRows(rows, pgx.RowTo[string])
 		require.NoError(t, planErr)
@@ -265,6 +348,23 @@ func TestInventoryRevisionCommitOrder(t *testing.T) {
 		require.NotContains(t, plan, "document_ownership")
 		_, planErr = tx.Exec(t.Context(), "DEALLOCATE inventory_lookup")
 		require.NoError(t, planErr)
+	})
+
+	t.Run("overflow_rolls_back_policy_and_audit", func(t *testing.T) {
+		const maximum = int64(1<<63 - 1)
+		grantExec(t, c, `UPDATE grant_catalog_inventory_revisions SET revision=$3 WHERE tenant_id=$1 AND principal_id=$2`,
+			owner.TenantID, owner.ID, maximum)
+		batch := testGrantBatch(2)
+		batch["principals"] = []grantEntry{grantPrincipal(f.tenant, f.owner, "Owner", false)}
+		_, importErr := importTestBatch(t.Context(), c, batch, false)
+		require.ErrorContains(t, importErr, "SQLSTATE 22003")
+		state, readErr := c.ScopedPolicyState(t.Context(), owner)
+		require.NoError(t, readErr)
+		require.True(t, state.Active)
+		require.Equal(t, maximum, state.Revision)
+		require.EqualValues(t, 2, state.CatalogRevision)
+		assertGrantCount(t, c, "inventory_revision_pending", 0)
+		assertGrantCount(t, c, "policy_audit", 2)
 	})
 }
 

@@ -17,12 +17,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newInventoryHandlerFixture() (*scopedMockStore, domain.Principal, string, string) {
-	reader := domain.Principal{ID: uuid.NewString(), TenantID: uuid.NewString()}
+func newInventoryHandlerFixture() (store *scopedMockStore, reader domain.Principal, first, second string) {
+	reader = domain.Principal{ID: uuid.NewString(), TenantID: uuid.NewString()}
 	owner := domain.Principal{ID: uuid.NewString(), TenantID: reader.TenantID}
-	store := newScopedMockStore(owner, reader)
-	first := "00000000-0000-4000-8000-000000000001"
-	second := "00000000-0000-4000-8000-000000000002"
+	store = newScopedMockStore(owner, reader)
+	first = "00000000-0000-4000-8000-000000000001"
+	second = "00000000-0000-4000-8000-000000000002"
 	for _, id := range []string{first, second} {
 		store.docs[id] = &scopedMemoryEntry{
 			owner: owner, readers: map[string]bool{reader.ID: true},
@@ -36,6 +36,11 @@ func TestScopedInventoryEndsStreamOnPolicyChange(t *testing.T) {
 	for _, change := range []string{"revoke", "grant_before_cursor", "disable", "expire", "empty_page", "continuous_churn"} {
 		t.Run(change, func(t *testing.T) {
 			store, reader, first, second := newInventoryHandlerFixture()
+			earlier := "00000000-0000-4000-8000-000000000000"
+			store.docs[earlier] = &scopedMemoryEntry{
+				owner: store.docs[first].owner, readers: map[string]bool{},
+				summary: domain.DocumentSummary{ID: earlier, Status: "completed"},
+			}
 			fixed := time.Now()
 			now := fixed
 			checks := 0
@@ -48,8 +53,7 @@ func TestScopedInventoryEndsStreamOnPolicyChange(t *testing.T) {
 				case "revoke":
 					delete(store.docs[second].readers, reader.ID)
 				case "grant_before_cursor":
-					id := "00000000-0000-4000-8000-000000000000"
-					store.docs[id] = &scopedMemoryEntry{owner: reader, summary: domain.DocumentSummary{ID: id}}
+					store.docs[earlier].readers[reader.ID] = true
 				case "disable":
 					store.active[reader.ID] = false
 				case "expire":
@@ -63,6 +67,7 @@ func TestScopedInventoryEndsStreamOnPolicyChange(t *testing.T) {
 			rec := serveScoped(h, http.MethodGet, "/documents", &reader, fixed.Add(time.Minute))
 			require.Equal(t, http.StatusOK, rec.Code)
 			require.Contains(t, rec.Body.String(), first)
+			require.NotContains(t, rec.Body.String(), earlier)
 			require.NotContains(t, rec.Body.String(), second)
 			require.NotContains(t, rec.Body.String(), `"count":`)
 			if change == "continuous_churn" {
@@ -129,6 +134,31 @@ func TestScopedInventoryPolicyReadFailure(t *testing.T) {
 			require.NotContains(t, rec.Body.String(), failure.Error())
 		}
 	}
+}
+
+func TestScopedInventoryCursorValidation(t *testing.T) {
+	store, reader, first, second := newInventoryHandlerFixture()
+	store.docs[second].summary.Collection = "archive"
+	h := ListDocumentsHandler(store, WithScopedListing())
+	expiry := time.Now().Add(time.Minute)
+	checks := 0
+	store.beforePolicy = func() { checks++ }
+	for _, query := range []string{
+		"limit=0", "limit=1001", "limit=999999999999999999999999", "limit=1&limit=2",
+		"after=" + first, "limit=1&after=bad", "limit=1&after=", "limit=1&after=" + first + "&after=" + second,
+		"limit=1&collection=%GG",
+	} {
+		rec := serveScoped(h, http.MethodGet, "/documents?"+query, &reader, expiry)
+		require.Equal(t, http.StatusBadRequest, rec.Code, query)
+	}
+	require.Zero(t, checks)
+	rec := serveScoped(h, http.MethodGet, "/documents?limit=1000&after="+first+"&collection=archive", &reader, expiry)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), second)
+	require.NotContains(t, rec.Body.String(), first)
+	rec = serveScoped(h, http.MethodGet, "/documents?limit=1000&after="+second+"&collection=archive", &reader, expiry)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"documents":[],"count":0,"next_after":null}`, rec.Body.String())
 }
 
 func TestInventoryAuditUsesCatalogRevision(t *testing.T) {
@@ -298,20 +328,29 @@ func TestScopedInventoryIgnoresUnrelatedPolicyCommits(t *testing.T) {
 	require.Equal(t, 1, checks)
 	checkList("/documents", ids, 3)
 
-	grant := func(id string, read bool) map[string]any {
-		return map[string]any{"tenant_id": tenant, "principal_id": sameTenant, "document_id": id,
+	grant := func(principal, id string, read bool) map[string]any {
+		return map[string]any{"tenant_id": tenant, "principal_id": principal, "document_id": id,
 			"incarnation": incarnations[id], "can_read": read, "can_download": false}
 	}
+	store.beforePolicy = func() {
+		checks++
+		if checks == 2 {
+			apply(map[string]any{"grants": []map[string]any{grant(owner, ids[1], true)}})
+		}
+	}
+	list = ListDocumentsHandler(store, WithScopedListing(), withScopedStreamBatchSize(2))
+	checkList("/documents", ids, 3)
+
 	reader := domain.Principal{TenantID: tenant, ID: sameTenant}
 	apply(map[string]any{
 		"principals": []map[string]any{grantPrincipal(tenant, sameTenant, "same tenant", true)},
-		"grants":     []map[string]any{grant(ids[0], true), grant(ids[1], true)},
+		"grants":     []map[string]any{grant(sameTenant, ids[0], true), grant(sameTenant, ids[1], true)},
 	})
 	checks = 0
 	store.beforePolicy = func() {
 		checks++
 		if checks == 2 {
-			apply(map[string]any{"grants": []map[string]any{grant(ids[1], false)}})
+			apply(map[string]any{"grants": []map[string]any{grant(sameTenant, ids[1], false)}})
 		}
 	}
 	stream := ListDocumentsHandler(store, WithScopedListing(), withScopedStreamBatchSize(1))
@@ -321,4 +360,16 @@ func TestScopedInventoryIgnoresUnrelatedPolicyCommits(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), ids[1])
 	require.NotContains(t, rec.Body.String(), `"count":`)
 	require.Equal(t, 3, checks)
+
+	checks = 0
+	store.beforePolicy = func() {
+		checks++
+		if checks == 1 {
+			apply(map[string]any{"grants": []map[string]any{grant(sameTenant, ids[0], false)}})
+		}
+	}
+	revokedStatus := DocumentStatusHandler(store, WithScopedStatus())
+	rec = serveScoped(revokedStatus, http.MethodGet, "/documents/"+ids[0], &reader, time.Now().Add(time.Minute))
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, 2, checks)
 }
