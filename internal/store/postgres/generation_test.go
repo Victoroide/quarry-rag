@@ -11,6 +11,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,6 +43,145 @@ func TestVectorStateDefaultsToOpenLegacy(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, VectorState{Active: LegacyGeneration}, state)
 	require.NoError(t, c.WritersOpen(t.Context()))
+}
+
+func TestFrozenActiveCleanupJournal(t *testing.T) {
+	dsn := startTestDatabase(t)
+	admin := migrationTestClient(t, dsn)
+	ctx := t.Context()
+	roles := newGrantRoles(t, dsn, "cleanup_operator")
+	role := roles.name("cleanup_operator")
+	grantExec(t, admin, roles.sql("CREATE SCHEMA vector_maintenance; CREATE ROLE {cleanup_operator} LOGIN PASSWORD 'fixture-password'"))
+	client := func(user string) *Client {
+		c, err := NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
+			cfg.ConnConfig.RuntimeParams["search_path"] = "vector_maintenance,public"
+			if user != "" {
+				cfg.ConnConfig.User = user
+				cfg.ConnConfig.Password = "fixture-password"
+			}
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, c.Close(context.WithoutCancel(ctx))) })
+		return c
+	}
+	owner, operator := client(""), client(role)
+	require.NoError(t, owner.RunMigrations(ctx))
+	grantExec(t, owner, roles.sql(`GRANT USAGE ON SCHEMA vector_maintenance TO {cleanup_operator};
+		GRANT SELECT, UPDATE ON vector_state TO {cleanup_operator};
+		GRANT SELECT ON vector_generations, ingest_jobs, document_deletions TO {cleanup_operator};
+		GRANT EXECUTE ON FUNCTION vector_writer_state() TO {cleanup_operator}`))
+	var allowed bool
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT has_function_privilege($1, 'guard_active_cleanup_state()', 'EXECUTE')`, role).Scan(&allowed))
+	require.False(t, allowed)
+
+	const target, host = "corpus", "corpus-host"
+	profile := generationProfile()
+	require.NoError(t, owner.PinVectorGeneration(ctx, LegacyGeneration, "pinecone", target, host, profile))
+	ids := []string{"00000000000040008000000000000001", "00000000000040008000000000000002"}
+	for _, generation := range []string{LegacyGeneration, "registered"} {
+		t.Run(generation, func(t *testing.T) {
+			ctx := t.Context()
+			if generation != LegacyGeneration {
+				grantExec(t, owner, `INSERT INTO vector_generations(name,store,target,host,profile,profile_hash,profile_origin,state)
+					VALUES($1,'pinecone',$2,$3,'{}',$4,'recorded','active')`, generation, target, host, profile.Hash())
+				grantExec(t, owner, `UPDATE vector_state SET active_generation=$1, active_profile_hash=$2`, generation, profile.Hash())
+			}
+			require.NoError(t, owner.FreezeWriters(ctx, "other"))
+			fence, err := operator.FenceGeneration(ctx, generation)
+			require.NoError(t, err)
+			defer fence.Close(ctx)
+			_, err = fence.ReserveActiveCleanup(ctx, time.Now(), target, host, profile, ids)
+			require.Error(t, err)
+			require.NoError(t, owner.ThawWriters(ctx))
+			require.NoError(t, owner.FreezeWriters(ctx, generation))
+			state, err := operator.VectorState(ctx)
+			require.NoError(t, err)
+			require.NotNil(t, state.FrozenAt)
+			epoch := *state.FrozenAt
+			_, err = owner.FenceGeneration(ctx, generation)
+			require.ErrorContains(t, err, "another operation owns")
+			quiet, err := operator.WriterQuiesce(ctx, domain.WriteRequestTimeout)
+			require.NoError(t, err)
+			require.False(t, quiet.Quiet())
+			_, err = fence.ReserveActiveCleanup(ctx, epoch.Add(-time.Second), target, host, profile, ids)
+			require.Error(t, err)
+			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, "wrong-host", profile, ids)
+			require.Error(t, err)
+			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, []string{})
+			require.Error(t, err)
+			for _, assignment := range []string{
+				`active_cleanup_ids=ARRAY['record']`,
+				`active_cleanup_reservation=gen_random_uuid()`,
+				`active_cleanup_reservation=gen_random_uuid(), active_cleanup_ids=ARRAY[]::TEXT[]`,
+				`active_cleanup_reservation=gen_random_uuid(), active_cleanup_ids=array_fill('record'::text,ARRAY[1001])`,
+			} {
+				_, err = operator.Pool.Exec(ctx, `UPDATE vector_state SET `+assignment)
+				requireSQLState(t, err, "23514")
+			}
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+			_, err = fence.ReserveActiveCleanup(canceled, epoch, target, host, profile, ids)
+			require.ErrorIs(t, err, context.Canceled)
+			pending, err := fence.ActiveCleanupBatch(ctx, epoch)
+			require.NoError(t, err, "a canceled reservation leaves the original fence usable")
+			require.Nil(t, pending)
+			reservation, err := fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids)
+			require.NoError(t, err)
+			require.NotEqual(t, uuid.Nil, reservation)
+			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids)
+			require.Error(t, err)
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, reservation, ids[:1]))
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch.Add(-time.Second), reservation, ids))
+			require.ErrorIs(t, fence.ClearActiveCleanup(canceled, epoch, reservation, ids), context.Canceled)
+			want := ActiveCleanupBatch{Reservation: reservation, IDs: ids}
+			pending, err = fence.ActiveCleanupBatch(ctx, epoch)
+			require.NoError(t, err)
+			require.Equal(t, &want, pending)
+
+			// Lose the session after reserving, as with a lost dispatch or checkpoint.
+			fence.Close(ctx)
+			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids)
+			require.Error(t, err)
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, reservation, ids))
+			require.ErrorContains(t, owner.ThawWriters(ctx), "pending active vector cleanup")
+			for _, query := range []string{
+				`UPDATE vector_state SET frozen=FALSE, frozen_at=NULL, freeze_generation=NULL`,
+				`UPDATE vector_state SET active_cleanup_ids=NULL, active_cleanup_reservation=NULL, frozen=FALSE`,
+				`UPDATE vector_state SET active_generation='other'`,
+				`UPDATE vector_state SET frozen_at=clock_timestamp(), active_cleanup_ids=NULL, active_cleanup_reservation=NULL`,
+				`UPDATE vector_state SET legacy_host='other-host'`,
+				`UPDATE vector_state SET active_cleanup_ids=ARRAY['different-id']`,
+				`UPDATE vector_state SET active_cleanup_reservation=gen_random_uuid()`,
+				`UPDATE vector_state SET active_cleanup_ids=NULL`,
+			} {
+				_, err = operator.Pool.Exec(ctx, query)
+				require.ErrorContains(t, err, "pending active vector cleanup")
+			}
+			_, err = operator.Pool.Exec(ctx, `UPDATE vector_state SET active_cleanup_reservation=NULL`)
+			requireSQLState(t, err, "23514")
+			if generation != LegacyGeneration {
+				_, err = owner.Pool.Exec(ctx, `UPDATE vector_generations SET host='other-host' WHERE name=$1`, generation)
+				require.ErrorContains(t, err, "pending active vector cleanup")
+			}
+			recovery, err := operator.FenceGeneration(ctx, generation)
+			require.NoError(t, err)
+			defer recovery.Close(ctx)
+			pending, err = recovery.ActiveCleanupBatch(ctx, epoch)
+			require.NoError(t, err)
+			require.Equal(t, &want, pending)
+			require.NoError(t, recovery.ClearActiveCleanup(ctx, epoch, reservation, ids))
+			newReservation, err := recovery.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids)
+			require.NoError(t, err)
+			require.NotEqual(t, reservation, newReservation)
+			require.Error(t, recovery.ClearActiveCleanup(ctx, epoch, reservation, ids))
+			require.NoError(t, recovery.ClearActiveCleanup(ctx, epoch, newReservation, ids))
+			pending, err = recovery.ActiveCleanupBatch(ctx, epoch)
+			require.NoError(t, err)
+			require.Nil(t, pending)
+			recovery.Close(ctx)
+			grantExec(t, owner, `UPDATE vector_state SET frozen=FALSE, frozen_at=NULL, freeze_generation=NULL`)
+		})
+	}
 }
 
 func TestRegisterGenerationIsIdempotentAndFailsClosed(t *testing.T) {
@@ -704,7 +844,9 @@ func TestSourceCorpusSkipsDocumentsBeingDeleted(t *testing.T) {
 
 func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
 	c := migrationTestClient(t, startTestDatabase(t))
-	applyMigrationsExcept(t, c, 16)
+	// The current admission and claim paths need later migrations. Omit the
+	// vector state and its cleanup journal to exercise only the gate fallback.
+	applyMigrationsExcept(t, c, 16, 33)
 	require.NoError(t, c.WritersOpen(t.Context()), "no record can freeze writers before migration 016")
 	accepted, err := c.AcceptDocument(t.Context(), jobsRequest("accepted before the generation records exist"))
 	require.NoError(t, err)
@@ -718,6 +860,7 @@ func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
 	c.SetVectorGeneration(LegacyGeneration)
 
 	require.NoError(t, c.RunMigrations(t.Context()))
+	requireRecordedMigrations(t, c)
 	require.NoError(t, c.FreezeWriters(t.Context(), "g2"))
 	require.ErrorIs(t, c.WritersOpen(t.Context()), domain.ErrWritersFrozen)
 }

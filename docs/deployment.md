@@ -600,6 +600,43 @@ This pattern grants schema `CREATE` to a non-owner role, which the grant catalog
 role provisioning forbids. Deployments following that provisioning must use the
 pre-created pattern.
 
+#### Superseded vector cleanup
+
+Apply migration 033 before using `make reconcile ARGS="-superseded-unrevisioned -apply"`.
+Use the metadata schema owner or the login with the
+[vector reindex database privileges](#vector-reindex-database-privileges).
+The mode reads the documents, jobs, deletion receipts, active revision
+pointers and manifests. For a restricted maintenance login, add these grants
+to the reindex grants. Serving roles require no additional privileges.
+
+```sql
+GRANT SELECT ON public.hosted_vector_manifests TO quarry_reindex;
+GRANT EXECUTE ON FUNCTION public.vector_writer_state(), public.document_deletion_reserved(uuid) TO quarry_reindex;
+```
+
+1. Stop legacy and external writers that bypass the database writer gate,
+   including any direct upsert or delete jobs attached to the index.
+2. Run `make reindex ARGS="-freeze -apply -generation <active-generation>"`
+   and wait for the freeze to settle for at least 60 seconds, with no running
+   job leases or open deletion receipts. Use the current active generation,
+   such as `legacy`, for this freeze.
+3. Preview with `make reconcile ARGS="-superseded-unrevisioned"`, then use
+   `make reconcile ARGS="-superseded-unrevisioned -apply"` to delete exact IDs.
+   The cleanup holds the generation lock and leaves the freeze as it found it.
+4. If deletion or its checkpoint fails, the next apply reports any pending
+   batch with its reservation UUID and exact IDs. Keep writers stopped and
+   confirm with Pinecone that the request for that reservation can no longer
+   take effect. A timeout or a fetch that omits the IDs does not establish
+   settlement. After confirmation, run
+   `make reconcile ARGS="-superseded-unrevisioned -apply -confirm-target-drained=<reservation-uuid>"`
+   using the UUID of the confirmed reservation. This clears that batch and
+   starts a fresh scan. A stale UUID stops the command before it scans. If a
+   new batch is pending, confirm it separately, even if it lists the same IDs.
+5. After the final pass and provider convergence, run
+   `make reindex ARGS="-thaw -apply"` and resume external writers. Thaw and
+   activation are blocked while a batch is pending. Keep migration 033
+   installed during binary rollback until any pending batch is resolved.
+
 ### AWS Credentials
 
 For any selected AWS service, set `AWS_REGION` and give the service access to

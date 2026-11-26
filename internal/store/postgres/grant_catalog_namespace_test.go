@@ -25,7 +25,10 @@ func testGrantCatalogQuotedACLs(t *testing.T, databaseURL string) {
 		CREATE ROLE {regional_corpus_owner};
 		CREATE SCHEMA "SalesLedger" AUTHORIZATION {sales_corpus_owner};
 		CREATE SCHEMA "RegionalLedger" AUTHORIZATION {regional_corpus_owner};
-		CREATE SCHEMA regionalledger`))
+		CREATE SCHEMA regionalledger;
+		CREATE FUNCTION regionalledger.guard_active_cleanup_state() RETURNS boolean LANGUAGE sql RETURN true;
+		GRANT USAGE ON SCHEMA regionalledger TO {quoted_catalog_reader};
+		GRANT EXECUTE ON FUNCTION regionalledger.guard_active_cleanup_state() TO {quoted_catalog_reader}`))
 	for _, fixture := range []struct{ schema, owner string }{
 		{"SalesLedger", roles.name("sales_corpus_owner")},
 		{"RegionalLedger", roles.name("regional_corpus_owner")},
@@ -49,15 +52,19 @@ func testGrantCatalogQuotedACLs(t *testing.T, databaseURL string) {
 			requireRecordedMigrations(t, corpus)
 			require.Len(t, grantSource(t, corpus, id), 64)
 			var importAccess, parserAccess, auditAccess, metricsAccess, overloadAccess bool
+			var cleanupStateAccess, cleanupBindingAccess bool
 			require.NoError(t, admin.Pool.QueryRow(ctx, roles.sql(`SELECT
 				has_function_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_import_batch(text,boolean)',$1::text),'EXECUTE'),
 				has_function_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_parse_import(jsonb)',$1::text),'EXECUTE'),
 				has_table_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_policy_audit',$1::text),'SELECT'),
 				has_table_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_metrics',$1::text),'SELECT'),
-				has_function_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_parse_import(text)',$1::text),'EXECUTE')`), fixture.schema).
-				Scan(&importAccess, &parserAccess, &auditAccess, &metricsAccess, &overloadAccess))
+				has_function_privilege('{quoted_catalog_reader}', format('%I.grant_catalog_parse_import(text)',$1::text),'EXECUTE'),
+				has_function_privilege('{quoted_catalog_reader}', format('%I.guard_active_cleanup_state()',$1::text),'EXECUTE'),
+				has_function_privilege('{quoted_catalog_reader}', format('%I.guard_active_cleanup_binding()',$1::text),'EXECUTE')`), fixture.schema).
+				Scan(&importAccess, &parserAccess, &auditAccess, &metricsAccess, &overloadAccess, &cleanupStateAccess, &cleanupBindingAccess))
 			require.False(t, importAccess || parserAccess || auditAccess)
 			require.True(t, metricsAccess && overloadAccess)
+			require.False(t, cleanupStateAccess || cleanupBindingAccess)
 
 			grantExec(t, corpus, roles.sql(`GRANT EXECUTE ON FUNCTION grant_catalog_import_batch(text,boolean) TO {quoted_catalog_reader}`))
 			reader := grantRoleClient(t, databaseURL, roles.sql("SET SESSION AUTHORIZATION {quoted_catalog_reader}; SET search_path TO "+schema))
@@ -81,6 +88,10 @@ func testGrantCatalogQuotedACLs(t *testing.T, databaseURL string) {
 			require.NoError(t, err)
 		})
 	}
+	var unrelatedAccess bool
+	require.NoError(t, admin.Pool.QueryRow(t.Context(), roles.sql(`SELECT has_function_privilege(
+		'{quoted_catalog_reader}', 'regionalledger.guard_active_cleanup_state()', 'EXECUTE')`)).Scan(&unrelatedAccess))
+	require.True(t, unrelatedAccess)
 }
 
 func testGrantCatalogRename(t *testing.T, databaseURL string) {
