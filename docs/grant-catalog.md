@@ -189,27 +189,31 @@ names as needed.
   `023_deletion_predicates.sql` add owner-defined predicates and the deletion
   receipts. Ordinary admission, job leasing, removal and the deletion-mode check
   use them even when evaluation fixtures are disabled and checkpointed deletion
-  is inactive. The login reads the activation marker only through
-  `document_deletion_active` and `document_deletion_active_shared` and needs no privilege on its table.
+  is inactive. Guarded ID-only deletion can also insert and update receipts.
+  The serving login reads the activation marker through owner-defined functions
+  and needs no privilege on the marker table.
 - Migration `025_hosted_vector_manifest.sql` adds the predicate that readers use
   to match a hit with the document's active hosted revision. Every query uses
   it, even when `HOSTED_VECTOR_MANIFEST` is disabled. Only replicas that enable
   the flag also need the table grants shown above.
 
 ```sql
+-- Serving role upgrade for migrations 019, 023 and 025
 GRANT SELECT, INSERT, UPDATE ON public.document_deletions TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
   public.evaluation_fixture_reserved(uuid), public.document_deletion_active(),
   public.document_deletion_reserved(uuid), public.hosted_vector_revision_visible(uuid, uuid) TO quarry_service;
 ```
 
-After applying `030_deletion_mode_lock.sql`, grant execution of
-`document_deletion_active_shared` before enabling
-[owned ingestion](#owned-ingestion) with a hosted or offline vector store.
-Admission that may select the tagged vector format holds the activation marker
-through it.
+After applying `030_deletion_mode_lock.sql` and before starting this release
+with a hosted or offline vector store in any authorization mode, grant execution
+of `document_deletion_active_shared`. Admission to a backend that supports
+incarnation-tagged vectors reads the marker through this function when
+`HOSTED_VECTOR_MANIFEST` is off, even while checkpointed deletion is inactive.
+Admission with PostgreSQL vectors does not call this function.
 
 ```sql
+-- Serving role upgrade for migration 030
 GRANT EXECUTE ON FUNCTION public.document_deletion_active_shared() TO quarry_service;
 ```
 

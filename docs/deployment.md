@@ -198,11 +198,15 @@ When replicas share an account quota expressed in concurrent requests, the large
 
 Apply this formula to `QUERY_CONCURRENCY` and `EMBED_CONCURRENCY` with the quotas of the models they call, and to `EXTRACT_CONCURRENCY` when the deployment sets its own cluster-wide upload limit. Each result must stay within the variable's [bounds](configuration.md#environment-variables); a result below 1 means the quota cannot support that many replicas. Retries run inside these limits, so they add requests but not concurrency.
 
-PostgreSQL connections also add up across processes. Each process opens one pool of at most `pool_max_conns` connections, set in [`DATABASE_URL`](configuration.md#environment-variables); startup migrations use this pool. Some operations also hold a dedicated session outside the pool, so that a lock never waits for a pooled connection. Each admitted document deletion holds one until its request finishes, and a replica admits at most `pool_max_conns` deletions at a time. Where [legacy deletion reservations](#legacy-deletion-reservations) are enabled, each guarded ID-only deletion also holds a session of its own for its whole cleanup, and a replica runs at most `LEGACY_DELETION_CONCURRENCY` of them (`guarded deletions` below, otherwise 0). `make cleanup`, an applied `make reconcile`, and a `make reindex` command while it holds its generation lock each add one session to their own pool, and `make cleanup` adds a second where reservations are enabled (`maintenance sessions` below). Administrative sessions count as well. The total must fit within `max_connections` less the reserved slots (`superuser_reserved_connections` and `reserved_connections`), and within any per-role or per-database connection limit:
+PostgreSQL connections also add up across processes. Each process opens one pool of at most `pool_max_conns` connections, set in [`DATABASE_URL`](configuration.md#environment-variables); startup migrations use this pool. Some operations also hold a dedicated session outside the pool, so that a lock never waits for a pooled connection. Each admitted document deletion holds one until its request finishes, and a replica admits at most `pool_max_conns` deletions at a time. Each guarded ID-only deletion ([legacy deletion reservations](#legacy-deletion-reservations)) also holds a session of its own for its whole cleanup, and a replica runs at most `LEGACY_DELETION_CONCURRENCY` of them (`guarded deletions` below). `make cleanup`, an applied `make reconcile`, and a `make reindex` command while it holds its generation lock each add one session to their own pool, and `make cleanup` adds a second (`maintenance sessions` below). Administrative sessions count as well. The total must fit within `max_connections` less the reserved slots (`superuser_reserved_connections` and `reserved_connections`), and within any per-role or per-database connection limit:
 
 `replicas × (2 × pool_max_conns + guarded deletions) + Σ (maintenance pool_max_conns + maintenance sessions) + administrative sessions ≤ max_connections − reserved slots`
 
-For example, three replicas with `pool_max_conns=16` can use 96 connections without reservations, and 108 where each also runs the default four guarded deletions. Without reservations, one `make reindex` command with `pool_max_conns=4` and one administrative session raise the total to 102, more than PostgreSQL's default `max_connections` of 100 less its 3 reserved superuser slots allows. Lower `pool_max_conns` or raise `max_connections`.
+For example, three replicas with `pool_max_conns=16` can use 108 connections when each runs the default four guarded deletions. One `make reindex` command with `pool_max_conns=4` and one administrative session raise the total to 114, more than PostgreSQL's default `max_connections` of 100 less its 3 reserved superuser slots allows. Lower `pool_max_conns` or raise `max_connections`.
+
+With hosted manifests disabled, admission to a hosted or offline backend that
+supports incarnation-tagged vectors holds a shared lock on the activation row
+until the admission transaction ends.
 
 ## Query and Proxy Timeouts
 
@@ -315,18 +319,9 @@ are removed when the document is deleted or fails.
 
 #### SDK Deployment Verification
 
-Before upgrading, record the UUID of a completed, searchable staging document in the default namespace. Deploy to staging first, with `GO_RAG_FAKE_MODE=false`, and expose the staging server at `localhost:8081`. Configure the test environment with the staging service token and the same external service settings as the staging server.
+Verify an SDK upgrade on staging before promoting it. The [staging procedure](#smoke-testing-a-staging-deployment) lists the prerequisites, including the preexisting document to record before upgrading, and the exact invocation. The Pinecone service determines whether the legacy empty namespace (`""`) and `__default__` refer to the same data; the SDK mapping alone does not establish their equivalence.
 
-Before promoting the upgrade, the opt-in smoke suite must pass against the deployment's own index with `RUN_SMOKE=1` and `SMOKE_EXISTING_DOCUMENT_ID` set to a document ingested before the upgrade. The Pinecone service determines whether the legacy empty namespace (`""`) and `__default__` refer to the same data; the SDK mapping alone does not establish their equivalence.
-
-Run the smoke suite with that preexisting document UUID:
-
-```sh
-RUN_SMOKE=1 SMOKE_EXISTING_DOCUMENT_ID="<pre-upgrade-document-uuid>" \
-  go test ./test/smoke/... -count=1 -v -timeout 600s
-```
-
-Confirm that `TestSmoke_PreexistingDocumentRemainsRetrievable` passes without skipping: the direct index check must find the preexisting document's vectors, and a service query restricted to that document must return at least one chunk from it. If the direct check succeeds but the service reports `no_evidence`, check `MIN_RELEVANCE_SCORE` and the query before retrying. This check reads the document without reingesting or deleting it. The other smoke checks create and delete their own documents. Promote only after the staging suite passes. To roll back, revert the SDK upgrade and redeploy; stored documents and vectors are unaffected.
+Confirm that `TestSmoke_PreexistingDocumentRemainsRetrievable` passes without skipping: the direct index check must find the preexisting document's vectors, and a service query restricted to that document must return at least one chunk from it. If the direct check succeeds but the service reports `no_evidence`, check `MIN_RELEVANCE_SCORE` and the query before retrying. This check reads the document without reingesting or deleting it. The other smoke checks create and delete their own documents. Promote only after the staging suite passes. To roll back, revert the SDK upgrade inside a deletion-aware build and redeploy, as [rollback after activation](#rollback-after-activation) requires; stored documents and vectors are unaffected.
 
 ### PostgreSQL Vectors
 
@@ -861,11 +856,70 @@ If documents already have collection labels, complete the
 [collection metadata backfill](development.md#collection-metadata-backfill) once
 after upgrading to enable collection-filtered retrieval of their existing vectors.
 
+## Activating Checkpointed Deletion
+
+This release ships with the database inactive. Deploying it changes no deletion contract: bare `DELETE` requests, `make cleanup <uuid>` and the MCP tool keep deleting the live document by UUID, and an incarnation-qualified request returns `412`. Activating [checkpointed deletion](api.md#checkpointed-deletion) is a separate, one-way, database-wide operation that an operator performs once every mutating executable can honor it and outstanding provider work is settled or quarantined.
+
+### Upgrade order
+
+1. **Apply the additive schema and prepare callers.** Apply pending migrations as the schema owner and apply the [serving-role upgrade grants](grant-catalog.md#upgrade-an-existing-serving-role) before starting upgraded processes. For hosted and offline vectors, include the migration 030 grant in every authorization mode. Prepare clients to opt in to each document's incarnation with `include_incarnation=true`. Keep using bare deletion until step 4.
+2. **Pause and retire pre-upgrade processes.** Pause ingestion, deletion and index maintenance at every entry point. Stop and drain every API, worker, `make cleanup` or `make reconcile` invocation, scheduled job and client that could reissue an operation through an endpoint that predates the marker. Such a process ignores the marker and every receipt, and it can delete by UUID after activation. Reads can stay available where that is safe. Deploy this release with the marker still unset. Keep the old writers away during preparation too, because an old process ignores the SQL hold.
+3. **Account for outstanding provider work.** For every hosted upsert and every hosted delete that a pre-upgrade process issued, including retries by processes that have exited, collect the document UUID, the original index and the namespace. On a Pinecone serverless namespace where a response recorded an `x-pinecone-request-lsn`, query the same namespace until its `x-pinecone-max-indexed-lsn` reaches that value. For a lost reply with no sequence number, obtain independent confirmation from the provider or keep the UUID fenced. An empty read, an elapsed drain interval, a later request's success and a released database lock cannot settle an earlier attempt.
+   - While writers are paused, [quarantine](#quarantine-and-hold-release) every known absent UUID with unresolved effects, even when its process left no receipt. Keep writes and deletions paused for live UUIDs with unresolved effects.
+   - Postpone activation, and any reuse of the affected UUIDs, if the affected UUIDs cannot be enumerated, the pause cannot be enforced, a live pre-upgrade executable remains, or the target index has neither a usable scoped metadata filter nor supported prefix listing.
+   - Verify that the object bucket and the vector index are the ones the receipts name, and keep both available through recovery. Inventory the operations that this release's own bare deletions issue before activation as well: they are reserved, and a held reservation needs the same settlement.
+4. **Activate, then switch callers.** Run the [activation command](#activate-checkpointed-deletion). Check the mode through every replica, including one that was running before activation and one started afterwards. Switch callers to the incarnation they saved earlier, then resume the writes you paused. Identities that stay held remain fenced until a verified release.
+5. **Keep the boundary.** Follow [rollback after activation](#rollback-after-activation). Old executables stay retired and the marker is never cleared.
+
+### Activate checkpointed deletion
+
+```sh
+make cleanup IDS="--activate-deletion"
+```
+
+The command is an exclusive action: it accepts no document, no other flag and no value. It reads the service environment, so it runs against the database of the deployment it activates. It must run as the schema owner. The restricted serving login has no privilege on the marker table and fails with a permission error, so keep it that way.
+
+It takes the activation lock exclusively. That lock is shared by every ID-only cleanup, so activation waits for each healthy cleanup to return from its last external call, and cleanups that start meanwhile run after it as activated requests. The command is bounded by two minutes. If a cleanup outlasts that, the command exits with an error and the marker stays unset, so pause deletion before activating. Under the lock the command sets the marker once from the database clock and prints it:
+
+```json
+{"activated_at":"2026-11-26T18:30:00.123456Z","already_active":false}
+```
+
+Repeating the command, from any host, changes nothing and prints the recorded instant with `"already_active":true`. After a lost reply or a crash, repeat it to learn the outcome. A cleanup whose database session was lost holds no lock, so activation can commit while its last provider call is outstanding. Its durable reservation keeps the UUID protected until that call is completed.
+
+Nothing else writes the marker. Server startup, HTTP requests, `make cleanup` deletions, the MCP tool and the smoke tests only read it, and no environment variable in a service or test shell can authorize the transition. Every compatible process reads the marker from the database for each decision, with its local settings unset or different from other replicas. If the lookup fails, it reports an error and never falls back to an ID-only deletion.
+
+From activation, documents that a replica admits store incarnation-tagged vectors in a hosted or in-process vector backend that can delete one incarnation's vectors, and ID-only requests for a live UUID receive `428`. PostgreSQL vectors need no tag, because they leave with the document in one transaction. A deployment with `HOSTED_VECTOR_MANIFEST` enabled keeps manifested revisions, which already fence vectors by exact IDs.
+
+### Smoke testing a staging deployment
+
+This procedure is the single home of the prerequisites and the invocation for the opt-in smoke suite. Run it against a staging deployment whose database is separate from production, and record the UUID of a completed, searchable document that predates the upgrade.
+
+1. Expose the staging server at `localhost:8081`. Configure the test environment with the staging service token and the same external service settings as the staging server.
+2. While the target is inactive, run only the checks that write no documents:
+
+   ```sh
+   RUN_SMOKE=1 SMOKE_EXISTING_DOCUMENT_ID="<pre-upgrade-document-uuid>" \
+     go test ./test/smoke/... -count=1 -v -timeout 600s \
+     -run 'TestSmoke_(HealthIncludesS3|UnsupportedFileType|PreexistingDocumentRemainsRetrievable)$'
+   ```
+
+3. Activate the staging database with the [activation command](#activate-checkpointed-deletion) and confirm `GET /deletion-mode` reports `active`.
+4. Run the whole suite with the same variables and without `-run`.
+
+The tests that write documents ask the target service for its mode before their first ingest. When it reports `inactive`, or cannot answer, they stop with an error before any ingest or delete, and the marker stays unset. They never activate the database, whatever the test process's environment contains. Each test gives its document a unique identifier and registers cleanup only after the service accepted that request. It reads the document's incarnation once, from the accepted document, and sends every cleanup attempt as an authenticated qualified `DELETE` to that service with the saved value. A creation whose outcome is ambiguous, or an incarnation that cannot be read, never leads to a lookup of the current document: the failure names the document so an operator can remove it deliberately. Replacements that reuse an identifier are left alone, and the preexisting document is only read.
+
+### Rollback after activation
+
+- **Before activation, holds and tagged data.** With the marker unset and no reservation, hold or tagged document in the database, the binary can be reverted. The additive migrations and their checksums stay in place.
+- **With holds.** Once reservations, quarantines or held receipts exist, keep a build that reads them at admission and the cleanup command that releases them.
+- **With tagged data.** Once tagged documents exist, keep workers and readers that understand the tagged format.
+- **After activation.** Keep the marker and deploy only a build that enforces the incarnation contract on every path above, or pause writes and repair forward. Never redeploy a pre-upgrade API, worker, cleanup command, reconcile command or client: it ignores the marker and every receipt, and a bare request deletes a live document by UUID. Keep those executables retired.
+- **SDK rollback.** Reverting the Pinecone SDK dependency is supported only inside a deletion-aware service build. The rebuilt image keeps the activated contract, so a bare `DELETE` of a live UUID still returns `428` and leaves its row, source object and vectors in place.
+
 ## Legacy Deletion Reservations
 
-ID-only deletion keeps working while the database has not activated [checkpointed deletion](api.md#checkpointed-deletion). The [reservation behavior](api.md#id-only-deletion-across-activation) closes the window in which an activation, or a lost database session, lets a replacement UUID overtake the last external call of a legacy cleanup. The server entry point and `make cleanup` of this release do not enable it, because a reservation that holds a hosted identity needs the quarantine, release and activation procedures that ship with the activation release. The activation release enables it through `RouterDeps.LegacyDeletionReservations` and `cleanup.WithLegacyReservations`. Until then deletion behaves as before and the reservation receipts are not written.
-
-Where it is enabled:
+ID-only deletion keeps working while the database has not activated [checkpointed deletion](api.md#checkpointed-deletion). The [reservation behavior](api.md#id-only-deletion-across-activation) closes the window in which an activation, or a lost database session, lets a replacement UUID overtake the last external call of a legacy cleanup. The server entry point and `make cleanup` enable it, and a hosted reservation is released with the [quarantine and release procedure](#quarantine-and-hold-release) below.
 
 - Activation takes the same lock exclusively. It waits for every healthy ID-only cleanup, then commits. A cleanup whose database session was lost does not hold the lock, so activation can commit while the last provider call is outstanding. The durable reservation then blocks admission of that UUID with `409` until the call completes, and the original request completes it on a new connection.
 - A live row with a reservation, for example after the first hosted call failed, still serves status, signed file addresses and same-content duplicates until an activated request qualifies the original incarnation. That request converts the reservation and fences the document.
