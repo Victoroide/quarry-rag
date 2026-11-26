@@ -51,13 +51,14 @@ type copyReport struct {
 }
 
 type documentCounts struct {
-	Completed       int `json:"completed"`
-	Processing      int `json:"processing"`
-	Failed          int `json:"failed"`
-	Deleting        int `json:"deleting_or_held"`
-	Inconsistent    int `json:"inconsistent"`
-	TaggedVectors   int `json:"tagged_vectors"`
-	WithoutOriginal int `json:"completed_without_original"`
+	Completed         int `json:"completed"`
+	Processing        int `json:"processing"`
+	Failed            int `json:"failed"`
+	Deleting          int `json:"deleting_or_held"`
+	Inconsistent      int `json:"inconsistent"`
+	TaggedVectors     int `json:"tagged_vectors"`
+	ManifestedVectors int `json:"manifested_vectors,omitempty"`
+	WithoutOriginal   int `json:"completed_without_original"`
 }
 
 type ledgerCounts struct {
@@ -142,6 +143,15 @@ func (d deps) blockers(ctx context.Context, p targetPlan, profile domain.Embeddi
 	}
 	if tagged > 0 {
 		out = append(out, fmt.Sprintf("%d completed documents store tagged vectors, whose revision-qualified keys a copy by chunk key cannot reproduce", tagged))
+	}
+	if p.store != "pinecone" {
+		var manifested int
+		if err := d.pg.Pool.QueryRow(ctx, `SELECT count(*) FROM documents d JOIN hosted_vector_revisions r ON r.document_id = d.id WHERE d.status='completed'`).Scan(&manifested); err != nil {
+			return nil, fmt.Errorf("count manifested vector documents: %w", err)
+		}
+		if manifested > 0 {
+			out = append(out, fmt.Sprintf("%d completed documents own hosted vector revisions, which a PostgreSQL target does not store", manifested))
+		}
 	}
 	row, err := d.pg.Generation(ctx, p.generation)
 	if err != nil {
@@ -261,6 +271,8 @@ func (d deps) scanPlan(ctx context.Context, opts options, p targetPlan, register
 				rep.Documents.Inconsistent++
 			case rev.ScopedVectors:
 				rep.Documents.TaggedVectors++
+			case p.store != "pinecone" && rev.ActiveRevisionID != "":
+				rep.Documents.ManifestedVectors++
 			case seen && cp.Complete && cp.SourceRevision == rev.Revision && cp.Incarnation == rev.Incarnation:
 				rep.Ledger.Current++
 			default:

@@ -34,7 +34,7 @@ func (d deps) stage(ctx context.Context, opts options, p targetPlan, profile dom
 	if err != nil {
 		return err
 	}
-	s := &stager{corpus: d.pg, ledger: fence.Ledger(), generation: p.generation, profile: profile, opts: opts, fence: fence}
+	s := &stager{corpus: d.pg, ledger: fence.Ledger(), generation: p.generation, profile: profile, opts: opts, fence: fence, taggedTarget: p.store == "pinecone"}
 	if reuse {
 		live, closeLive, _, openErr := d.openBound(ctx, targetSpec{Store: p.live.store, Target: p.live.target, Generation: p.live.generation, Dimensions: source.Dimensions}, sourceHost)
 		if hardSourceError(ctx, openErr) {

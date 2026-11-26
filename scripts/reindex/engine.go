@@ -101,10 +101,20 @@ type stager struct {
 	opts       options
 	fence      *pgstore.GenerationFence
 	retired    *pgstore.Client
+	// taggedTarget is true when the target stores revision-qualified hosted
+	// vector IDs and revision_id metadata for manifested documents.
+	taggedTarget bool
 	// copyFrom serves reusable vectors; nil forces every vector to be computed.
 	copyFrom vectorReader
 	embed    domain.EmbeddingProvider
 	calls    int
+}
+
+func targetVectorID(docID, activeRevisionID string, c domain.Chunk, tagged bool) string {
+	if tagged && activeRevisionID != "" {
+		return domain.FormatRevisionVectorID(domain.DocumentID(docID), activeRevisionID, c.Index)
+	}
+	return string(c.ID)
 }
 
 func validVector(v []float32, dimensions int) error {
@@ -146,7 +156,7 @@ func (s *stager) run(ctx context.Context) (stageReport, error) {
 			switch {
 			case rev.DeclaredChunks != rev.Chunks:
 				rep.Inconsistent = append(rep.Inconsistent, rev.ID)
-			case rev.ScopedVectors:
+			case rev.ScopedVectors || (!s.taggedTarget && rev.ActiveRevisionID != ""):
 				rep.Unsupported = append(rep.Unsupported, rev.ID)
 			case cp.Complete && cp.SourceRevision == rev.Revision && cp.Incarnation == rev.Incarnation:
 				rep.Skipped++
@@ -217,13 +227,13 @@ func (s *stager) stageDocument(ctx context.Context, rev pgstore.DocumentRevision
 		rep.Inconsistent = append(rep.Inconsistent, rev.ID)
 		return nil
 	}
-	if snap.ScopedVectors {
+	if snap.ScopedVectors || (!s.taggedTarget && snap.ActiveRevisionID != "") {
 		rep.Unsupported = append(rep.Unsupported, rev.ID)
 		return nil
 	}
 	ids := make([]string, len(snap.Chunks))
 	for i, c := range snap.Chunks {
-		ids[i] = string(c.ID)
+		ids[i] = targetVectorID(snap.ID, snap.ActiveRevisionID, c, s.taggedTarget)
 	}
 	chunks, copied, embedded, err := s.vectors(ctx, snap)
 	if err != nil {
@@ -299,7 +309,7 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 	if s.copyFrom != nil {
 		ids := make([]string, len(snap.Chunks))
 		for i, c := range snap.Chunks {
-			ids[i] = string(c.ID)
+			ids[i] = targetVectorID(snap.ID, snap.ActiveRevisionID, c, snap.ActiveRevisionID != "")
 		}
 		reusable = make(map[string]domain.Chunk, len(ids))
 		for start := 0; start < len(ids); start += 100 {
@@ -318,12 +328,17 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 		// A target record names the document incarnation it was written for, so
 		// that retrieval can discard a record that outlived its document.
 		c.VectorIncarnation = snap.Incarnation
+		if s.taggedTarget && snap.ActiveRevisionID != "" {
+			c.RevisionID = snap.ActiveRevisionID
+			c.VectorID = domain.FormatRevisionVectorID(domain.DocumentID(snap.ID), snap.ActiveRevisionID, c.Index)
+		}
 		chunks[i] = c
-		src, ok := reusable[string(c.ID)]
+		fetchID := targetVectorID(snap.ID, snap.ActiveRevisionID, c, snap.ActiveRevisionID != "")
+		src, ok := reusable[fetchID]
 		srcTenant, _ := src.Metadata[domain.VectorTenantKey].(string)
-		identityMatches := ok && src.DocumentID == c.DocumentID && src.Text == c.Text && src.Index == c.Index &&
+		identityMatches := ok && src.DocumentID == c.DocumentID && src.ID == c.ID && src.Text == c.Text && src.Index == c.Index &&
 			(src.VectorIncarnation == "" || src.VectorIncarnation == snap.Incarnation) &&
-			(srcTenant == "" || srcTenant == snap.TenantID)
+			(srcTenant == "" || srcTenant == snap.TenantID) && src.RevisionID == c.RevisionID
 		if identityMatches {
 			copyLayoutMetadata(chunks[i].Metadata, src.Metadata)
 		}

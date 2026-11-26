@@ -161,6 +161,24 @@ func deleteFixture(w http.ResponseWriter, r *http.Request, cs domain.ChunkStore,
 		if vectors == nil {
 			return errors.New("fixture vector store is unavailable")
 		}
+		if ms, hasMS := cs.(domain.VectorManifestStore); hasMS {
+			manifests, listErr := ms.ListDocumentVectorManifests(sweepCtx, domain.DocumentID(id), revisions[0])
+			if listErr != nil {
+				return listErr
+			}
+			if len(manifests) > 0 {
+				revDeleter, canRev := vectors.(domain.ManifestRevisionVectorDeleter)
+				if !canRev {
+					return errors.New("fixture revision vector deleter is unavailable")
+				}
+				for _, m := range manifests {
+					if delErr := revDeleter.DeleteByManifestRevision(sweepCtx, id, m.RevisionID, m.VectorIDs); delErr != nil && status.Code(delErr) != codes.NotFound {
+						return delErr
+					}
+				}
+				return nil
+			}
+		}
 		// Admission wrote only to the default namespace, so the receipt does not
 		// cover a namespace named after the document.
 		err := vectors.DeleteByDocID(sweepCtx, id)

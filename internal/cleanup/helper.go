@@ -48,13 +48,12 @@ func remove(ctx context.Context, cs domain.ChunkStore, vectors domain.VectorDele
 			return err
 		}
 	}
-	if vectors != nil {
-		if err := vectors.DeleteAllVectorsInNamespace(ctx, string(doc.ID)); err != nil && status.Code(err) != codes.NotFound {
-			return fmt.Errorf("delete document namespace: %w", err)
-		}
-		if err := vectors.DeleteByDocID(ctx, string(doc.ID)); err != nil && status.Code(err) != codes.NotFound {
-			return fmt.Errorf("delete global document vectors: %w", err)
-		}
+	manifests, err := activeDocumentManifests(ctx, cs, doc.ID)
+	if err != nil {
+		return fmt.Errorf("list vector manifests: %w", err)
+	}
+	if err := deleteDocumentVectors(ctx, vectors, doc.ID, manifests, true); err != nil {
+		return err
 	}
 	if objects != nil && doc.S3Key != nil {
 		if err := objects.Delete(ctx, *doc.S3Key); err != nil {
@@ -70,10 +69,53 @@ func remove(ctx context.Context, cs domain.ChunkStore, vectors domain.VectorDele
 	if removeErr != nil {
 		return fmt.Errorf("delete document metadata: %w", removeErr)
 	}
-	if vectors != nil {
-		if err := vectors.DeleteByDocID(ctx, string(doc.ID)); err != nil && status.Code(err) != codes.NotFound {
-			return fmt.Errorf("delete document vectors after metadata: %w", err)
+	return deleteDocumentVectors(ctx, vectors, doc.ID, manifests, false)
+}
+
+func activeDocumentManifests(ctx context.Context, cs domain.ChunkStore, docID domain.DocumentID) ([]domain.VectorManifest, error) {
+	ms, ok := cs.(domain.VectorManifestStore)
+	if !ok {
+		return nil, nil
+	}
+	all, err := ms.ListDocumentVectorManifests(ctx, docID, "")
+	if err != nil {
+		return nil, err
+	}
+	var active []domain.VectorManifest
+	for _, m := range all {
+		if m.State != "retired" {
+			active = append(active, m)
 		}
+	}
+	return active, nil
+}
+
+func deleteDocumentVectors(ctx context.Context, vectors domain.VectorDeleter, docID domain.DocumentID, manifests []domain.VectorManifest, includeNamespace bool) error {
+	if vectors == nil {
+		return nil
+	}
+	if includeNamespace {
+		if err := vectors.DeleteAllVectorsInNamespace(ctx, string(docID)); err != nil && status.Code(err) != codes.NotFound {
+			return fmt.Errorf("delete document namespace: %w", err)
+		}
+	}
+	if len(manifests) > 0 {
+		revDeleter, ok := vectors.(domain.ManifestRevisionVectorDeleter)
+		if !ok {
+			return errors.New("revision-targeted vector deletion is unavailable")
+		}
+		for _, m := range manifests {
+			if err := revDeleter.DeleteByManifestRevision(ctx, string(docID), m.RevisionID, m.VectorIDs); err != nil && status.Code(err) != codes.NotFound {
+				return fmt.Errorf("delete revision %s vectors: %w", m.RevisionID, err)
+			}
+		}
+		return nil
+	}
+	if err := vectors.DeleteByDocID(ctx, string(docID)); err != nil && status.Code(err) != codes.NotFound {
+		if includeNamespace {
+			return fmt.Errorf("delete global document vectors: %w", err)
+		}
+		return fmt.Errorf("delete document vectors after metadata: %w", err)
 	}
 	return nil
 }
@@ -121,6 +163,11 @@ func operations(vectors domain.VectorDeleter, objects ObjectDeleter, targets Tar
 		if revisions, ok := vectors.(domain.RevisionVectorDeleter); ok {
 			ops.RevisionVectors = func(ctx context.Context, id, incarnation string) error {
 				return ignoreMissing(revisions.DeleteByRevision(ctx, id, incarnation))
+			}
+		}
+		if manifests, ok := vectors.(domain.ManifestRevisionVectorDeleter); ok {
+			ops.ManifestVectors = func(ctx context.Context, id, revision string, ids []string) error {
+				return ignoreMissing(manifests.DeleteByManifestRevision(ctx, id, revision, ids))
 			}
 		}
 	}
@@ -230,6 +277,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Cleaner, err
 	if migrationErr != nil {
 		return nil, errors.Join(fmt.Errorf("prepare cleanup schema: %w", migrationErr), pg.Close(ctx))
 	}
+	pg.EnableHostedVectorManifests(cfg.HostedVectorManifest)
 	cleaner.metadata = pg
 	cleaner.targets = Targets{SourceBucket: cfg.S3Bucket}
 	var host string

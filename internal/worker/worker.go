@@ -16,6 +16,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/aws/smithy-go"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -26,6 +27,7 @@ import (
 // Options bounds parallel processing, retries, and lease lifetimes.
 type Options struct {
 	FixtureVectorIdentity           string
+	HostedVectorManifest            bool
 	Workers, MaxAttempts            int
 	Lease, JobTimeout, PollInterval time.Duration
 	Owner                           string
@@ -180,7 +182,55 @@ func (w *Worker) ShutdownContext(ctx context.Context) error {
 	}
 }
 
+var manifestRevisionNamespace = uuid.MustParse("c3d59c98-994f-46b0-9f5c-0c4a12437a10")
+
+func (w *Worker) hostedManifestEnabled() bool {
+	if !w.opts.HostedVectorManifest {
+		return false
+	}
+	_, transactional := w.vectors.(domain.TransactionalVectorStore)
+	return !transactional
+}
+
+func revisionIDForAttempt(job domain.Job, owner string) string {
+	if job.RevisionID != "" {
+		return job.RevisionID
+	}
+	token := owner
+	if job.LeaseToken != "" {
+		token = job.LeaseToken
+	}
+	seed := fmt.Sprintf("%s\x00%s\x00%d\x00%s", job.Document.ID, job.Incarnation, job.Attempts, token)
+	return uuid.NewSHA1(manifestRevisionNamespace, []byte(seed)).String()
+}
+
+func persistAttemptManifest(ctx context.Context, ms domain.VectorManifestStore, job domain.Job, chunks []domain.Chunk) error {
+	vectorIDs := make([]string, len(chunks))
+	chunkIDs := make([]string, len(chunks))
+	for i, ch := range chunks {
+		vectorIDs[i] = ch.VectorID
+		if vectorIDs[i] == "" {
+			vectorIDs[i] = domain.FormatRevisionVectorID(job.Document.ID, job.RevisionID, ch.Index)
+		}
+		chunkIDs[i] = string(ch.ID)
+	}
+	return ms.PersistVectorManifest(ctx, job, domain.VectorManifest{
+		RevisionID:  job.RevisionID,
+		DocumentID:  job.Document.ID,
+		Incarnation: job.Incarnation,
+		Attempt:     job.Attempts,
+		LeaseToken:  job.LeaseToken,
+		Collection:  job.Collection,
+		IDPrefix:    domain.RevisionVectorPrefix(job.Document.ID, job.RevisionID),
+		VectorIDs:   vectorIDs,
+		ChunkIDs:    chunkIDs,
+	})
+}
+
 func (w *Worker) process(parent context.Context, job domain.Job) {
+	if w.hostedManifestEnabled() {
+		job.RevisionID = revisionIDForAttempt(job, w.opts.Owner)
+	}
 	attrs := append(tracing.DocumentAttributes(string(job.Document.ID)), attribute.String(tracing.LangSmithKind, "chain"), attribute.Int("quarry.job.attempt", job.Attempts))
 	parent, span := otel.Tracer("github.com/Victoroide/quarry-rag/internal/worker").Start(parent, "ingest.job", trace.WithNewRoot(), trace.WithAttributes(attrs...))
 	defer span.End()
@@ -223,13 +273,22 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 	ic.Collection = job.Collection
 	ic.Tenant = job.Tenant
 	ic.Stopping = w.stop
-	if job.ScopedVectors {
-		ic.VectorRevision = job.Incarnation
-		ic.VectorAttempt = job.LeaseToken
-	}
-	if guard, ok := w.store.(domain.JobVectorGuard); ok {
-		ic.MutateVectors = func(ctx context.Context, mutate func(context.Context) error) error {
-			return guard.MutateJobVectors(ctx, job, mutate)
+	if w.hostedManifestEnabled() {
+		ic.RevisionID = job.RevisionID
+		if ms, ok := w.store.(domain.VectorManifestStore); ok {
+			ic.PersistManifest = func(mCtx context.Context, chunks []domain.Chunk) error {
+				return persistAttemptManifest(mCtx, ms, job, chunks)
+			}
+		}
+	} else {
+		if job.ScopedVectors {
+			ic.VectorRevision = job.Incarnation
+			ic.VectorAttempt = job.LeaseToken
+		}
+		if guard, ok := w.store.(domain.JobVectorGuard); ok {
+			ic.MutateVectors = func(ctx context.Context, mutate func(context.Context) error) error {
+				return guard.MutateJobVectors(ctx, job, mutate)
+			}
 		}
 	}
 	err := w.run(ctx, job, ic)
@@ -238,8 +297,17 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		w.release(parent, job)
 		return
 	}
-	if err == nil || errors.Is(err, domain.ErrJobNotOwned) || errors.Is(context.Cause(leaseCtx), errLeaseLost) {
+	if errors.Is(context.Cause(leaseCtx), errLeaseLost) {
+		if w.hostedManifestEnabled() {
+			w.compensateDeleted(parent, job, ic.Chunks)
+		}
 		return
+	}
+	if err == nil || errors.Is(err, domain.ErrJobNotOwned) {
+		return
+	}
+	if w.hostedManifestEnabled() {
+		w.compensateDeleted(parent, job, ic.Chunks)
 	}
 	if permanent(err) || job.Attempts >= w.opts.MaxAttempts {
 		confirmCtx, confirmCancel := context.WithTimeout(leaseCtx, 5*time.Second)
@@ -247,14 +315,20 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		confirmCancel()
 		if confirmErr != nil || !owned {
 			w.logStateError(job, confirmErr)
+			if w.hostedManifestEnabled() {
+				w.compensateDeleted(parent, job, ic.Chunks)
+			}
 			return
 		}
-		w.deleteVectors(leaseCtx, job)
+		w.deleteVectors(leaseCtx, job, ic.Chunks)
 		if parent.Err() != nil {
 			w.release(parent, job)
 			return
 		}
 		if errors.Is(context.Cause(leaseCtx), errLeaseLost) {
+			if w.hostedManifestEnabled() {
+				w.compensateDeleted(parent, job, ic.Chunks)
+			}
 			return
 		}
 		stateCtx, stateCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
@@ -268,6 +342,9 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		}
 		failErr := w.store.FailJob(stateCtx, job, message)
 		w.recordOutcome(parent, job, "failed", failErr)
+		if w.hostedManifestEnabled() && errors.Is(failErr, domain.ErrJobNotOwned) {
+			w.compensateDeleted(parent, job, ic.Chunks)
+		}
 		return
 	}
 	stateCtx, stateCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
@@ -310,8 +387,14 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 		return contextErr
 	}
 	if w.vectors != nil {
-		if err = w.removeJobVectors(ctx, job); err != nil {
-			return fmt.Errorf("remove previous vectors: %w", err)
+		var delErr error
+		if w.hostedManifestEnabled() {
+			delErr = w.deleteAttemptVectors(ctx, job, nil)
+		} else {
+			delErr = w.removeJobVectors(ctx, job)
+		}
+		if delErr != nil {
+			return fmt.Errorf("remove previous vectors: %w", delErr)
 		}
 	}
 	if _, err = pipeline.RunIngestionPipeline(ctx, ic, w.stages); err != nil {
@@ -321,7 +404,11 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 	if err != nil {
 		return err
 	}
-	if ok {
+	if !ok {
+		if w.hostedManifestEnabled() {
+			w.compensateDeleted(ctx, job, ic.Chunks)
+		}
+	} else {
 		w.opts.Metrics.IngestJobs.WithLabelValues("completed").Inc()
 		trace.SpanFromContext(ctx).SetAttributes(attribute.String("quarry.job.result", "completed"))
 	}
@@ -365,12 +452,34 @@ func permanent(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "ValidationException"
 }
-func (w *Worker) deleteVectors(ctx context.Context, job domain.Job) {
+func (w *Worker) compensateDeleted(ctx context.Context, job domain.Job, chunks []domain.Chunk) {
+	ds, ok := w.store.(interface {
+		DocumentExists(context.Context, domain.DocumentID) (bool, error)
+	})
+	if !ok {
+		return
+	}
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	exists, err := ds.DocumentExists(checkCtx, job.Document.ID)
+	if err != nil {
+		w.logStateError(job, err)
+		return
+	}
+	if !exists {
+		w.deleteVectors(context.WithoutCancel(ctx), job, chunks)
+	}
+}
+func (w *Worker) deleteVectors(ctx context.Context, job domain.Job, chunks []domain.Chunk) {
 	if w.vectors == nil {
 		return
 	}
 	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	if w.hostedManifestEnabled() {
+		w.logStateError(job, w.deleteAttemptVectors(cleanupCtx, job, chunks))
+		return
+	}
 	w.logStateError(job, w.removeJobVectors(cleanupCtx, job))
 }
 
@@ -397,6 +506,31 @@ func (w *Worker) removeJobVectors(ctx context.Context, job domain.Job) error {
 		return errors.New("job vector guard is unavailable")
 	}
 	return remove(ctx)
+}
+
+func (w *Worker) deleteAttemptVectors(ctx context.Context, job domain.Job, chunks []domain.Chunk) error {
+	if w.vectors == nil {
+		return nil
+	}
+	revDeleter, ok := w.vectors.(domain.ManifestRevisionVectorDeleter)
+	if !ok {
+		return errors.New("worker: revision-targeted vector deletion is unavailable")
+	}
+	var knownIDs []string
+	if len(chunks) > 0 {
+		knownIDs = make([]string, len(chunks))
+		for i, ch := range chunks {
+			knownIDs[i] = ch.VectorID
+			if knownIDs[i] == "" {
+				knownIDs[i] = domain.FormatRevisionVectorID(job.Document.ID, job.RevisionID, ch.Index)
+			}
+		}
+	} else if ms, hasMS := w.store.(domain.VectorManifestStore); hasMS && job.RevisionID != "" {
+		if m, err := ms.GetVectorManifest(ctx, job.RevisionID); err == nil && m != nil {
+			knownIDs = m.VectorIDs
+		}
+	}
+	return revDeleter.DeleteByManifestRevision(ctx, string(job.Document.ID), job.RevisionID, knownIDs)
 }
 
 func (w *Worker) logStateError(job domain.Job, err error) {

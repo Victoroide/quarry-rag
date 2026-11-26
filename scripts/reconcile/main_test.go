@@ -23,7 +23,7 @@ const storedID = "00000000-0000-4000-8000-000000000001"
 const missingID = "00000000-0000-4000-8000-000000000002"
 
 func TestOrphanVectorsAreSelected(t *testing.T) {
-	refs := []vectorRef{{"missing-metadata", ""}, {"invalid", "not-a-uuid"}, {"missing-row", missingID}, {"stored", storedID}}
+	refs := []vectorRef{{ID: "missing-metadata"}, {ID: "invalid", DocID: "not-a-uuid"}, {ID: "missing-row", DocID: missingID}, {ID: "stored", DocID: storedID}}
 	states := map[string]documentState{storedID: {Status: "completed"}}
 	require.Equal(t, []string{"missing-metadata", "invalid", "missing-row"}, selectOrphanVectors(refs, states, 10))
 }
@@ -35,14 +35,14 @@ func TestFailedDocumentsAreOrphans(t *testing.T) {
 		orphan bool
 	}{{"failed", false, true}, {"failed", true, false}, {"processing", false, false}, {"processing", true, false}, {"completed", false, false}} {
 		t.Run(fmt.Sprintf("%s/job=%t", tc.status, tc.job), func(t *testing.T) {
-			got := selectOrphanVectors([]vectorRef{{"v", storedID}}, map[string]documentState{storedID: {Status: tc.status, HasJob: tc.job}}, 10)
+			got := selectOrphanVectors([]vectorRef{{ID: "v", DocID: storedID}}, map[string]documentState{storedID: {Status: tc.status, HasJob: tc.job}}, 10)
 			require.Equal(t, tc.orphan, len(got) == 1)
 		})
 	}
 }
 
 func TestLimitIsRespected(t *testing.T) {
-	refs := []vectorRef{{"a", ""}, {"b", ""}, {"c", ""}}
+	refs := []vectorRef{{ID: "a"}, {ID: "b"}, {ID: "c"}}
 	require.Equal(t, []string{"a", "b"}, selectOrphanVectors(refs, nil, 2))
 	require.Empty(t, selectOrphanVectors(refs, nil, 0))
 	counts := map[string]uint32{storedID: 3, missingID: 2}
@@ -131,7 +131,7 @@ func noDocuments(context.Context, []string) (map[string]documentState, error) { 
 func TestReconcileDryRunAndApply(t *testing.T) {
 	for _, apply := range []bool{false, true} {
 		t.Run(fmt.Sprint(apply), func(t *testing.T) {
-			idx := &reconcileFakeIndex{refs: []vectorRef{{"a", ""}, {"b", missingID}, {"c", storedID}}, counts: map[string]uint32{missingID: 2}}
+			idx := &reconcileFakeIndex{refs: []vectorRef{{ID: "a"}, {ID: "b", DocID: missingID}, {ID: "c", DocID: storedID}}, counts: map[string]uint32{missingID: 2}}
 			lookup := func(context.Context, []string) (map[string]documentState, error) {
 				return map[string]documentState{storedID: {Status: "completed"}}, nil
 			}
@@ -188,7 +188,7 @@ func TestReconcileReadErrorsPreventDeletion(t *testing.T) {
 	failure := errors.New("read failed")
 	for _, stage := range []string{"fetch", "lookup", "stats"} {
 		t.Run(stage, func(t *testing.T) {
-			idx := &reconcileFakeIndex{refs: []vectorRef{{"a", missingID}}}
+			idx := &reconcileFakeIndex{refs: []vectorRef{{ID: "a", DocID: missingID}}}
 			lookup := noDocuments
 			switch stage {
 			case "fetch":
@@ -240,7 +240,7 @@ func TestReconcileDeleteErrorsAreReported(t *testing.T) {
 		if namespace {
 			idx.counts = map[string]uint32{missingID: 1}
 		} else {
-			idx.refs = []vectorRef{{"a", ""}}
+			idx.refs = []vectorRef{{ID: "a"}}
 		}
 		_, err := reconcile(t.Context(), idx, idx.deleteNamespace, noDocuments, options{Apply: true, Limit: 10, Page: 1}, &bytes.Buffer{})
 		require.ErrorIs(t, err, failure)
@@ -256,12 +256,12 @@ func TestAliasedOrphansStayWithTheOrphanReconciler(t *testing.T) {
 	const aliasedStored = "b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22"
 	const aliasedFailed = "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a33"
 	refs := []vectorRef{
-		{"missing-upper", strings.ToUpper(aliasedMissing)},
-		{"missing-braced", "{" + strings.ToUpper(aliasedMissing) + "}"},
-		{"missing-urn", "urn:uuid:" + aliasedMissing},
-		{"missing-compact", strings.ReplaceAll(aliasedMissing, "-", "")},
-		{"failed-upper", strings.ToUpper(aliasedFailed)},
-		{"live-upper", strings.ToUpper(aliasedStored)},
+		{ID: "missing-upper", DocID: strings.ToUpper(aliasedMissing)},
+		{ID: "missing-braced", DocID: "{" + strings.ToUpper(aliasedMissing) + "}"},
+		{ID: "missing-urn", DocID: "urn:uuid:" + aliasedMissing},
+		{ID: "missing-compact", DocID: strings.ReplaceAll(aliasedMissing, "-", "")},
+		{ID: "failed-upper", DocID: strings.ToUpper(aliasedFailed)},
+		{ID: "live-upper", DocID: strings.ToUpper(aliasedStored)},
 	}
 	states := map[string]documentState{
 		aliasedStored: {Status: "completed"},
@@ -346,4 +346,34 @@ func TestDryRunMaintenanceTakesNoWriterSession(t *testing.T) {
 	require.NoError(t, runMaintenance(t.Context(), gate, options{Apply: true}, work))
 	require.Equal(t, 2, worked)
 	require.Equal(t, 1, gate.calls)
+}
+
+func TestSelectOrphanVectorsProtectsManifestedRevisions(t *testing.T) {
+	refs := []vectorRef{
+		{ID: storedID + "#rev-active#0", DocID: storedID, RevisionID: "rev-active"},
+		{ID: storedID + "#rev-pending#0", DocID: storedID, RevisionID: "rev-pending"},
+		{ID: storedID + "#rev-tracked#0", DocID: storedID, RevisionID: "rev-tracked"},
+		{ID: storedID + "#rev-untracked#0", DocID: storedID, RevisionID: "rev-untracked"},
+		{ID: missingID + "#rev-deleted-tracked#0", DocID: missingID, RevisionID: "rev-deleted-tracked"},
+		{ID: missingID + "#rev-deleted-untracked#0", DocID: missingID, RevisionID: "rev-deleted-untracked"},
+		{ID: "legacy-ok", DocID: storedID},
+		{ID: "legacy-missing", DocID: missingID},
+	}
+	states := map[string]documentState{
+		storedID: {
+			Status:           "completed",
+			ActiveRevision:   "rev-active",
+			PendingRevisions: map[string]bool{"rev-pending": true},
+			TrackedRevisions: map[string]bool{"rev-tracked": true},
+		},
+		missingID: {
+			TrackedRevisions: map[string]bool{"rev-deleted-tracked": true},
+		},
+	}
+	got := selectOrphanVectors(refs, states, 100)
+	require.Equal(t, []string{
+		storedID + "#rev-untracked#0",
+		missingID + "#rev-deleted-untracked#0",
+		"legacy-missing",
+	}, got)
 }

@@ -609,7 +609,8 @@ func (qc *QueryContext) checkSynthesisEvidence(ctx context.Context, excerpts []d
 	for i, original := range originals {
 		row := current[i].Chunk
 		if row.ID != original.Chunk.ID || row.DocumentID != original.Chunk.DocumentID ||
-			row.Index != original.Chunk.Index || row.Text != original.Chunk.Text {
+			row.Index != original.Chunk.Index || row.Text != original.Chunk.Text ||
+			row.RevisionID != original.Chunk.RevisionID {
 			return ErrEvidenceScopeChanged
 		}
 	}
@@ -713,6 +714,9 @@ func (qc *QueryContext) checkCandidateEvidence(ctx context.Context) error {
 func visibleChunks(ctx context.Context, chunks []domain.ScoredChunk, visibility domain.DocumentVisibility) ([]domain.ScoredChunk, error) {
 	if visibility == nil || len(chunks) == 0 {
 		return chunks, nil
+	}
+	if revVis, ok := visibility.(domain.RevisionVisibility); ok {
+		return revVis.VisibleRevisionChunks(ctx, chunks)
 	}
 	visible, err := visibility.VisibleDocumentIDs(ctx, candidateDocumentIDs(chunks))
 	if err != nil {

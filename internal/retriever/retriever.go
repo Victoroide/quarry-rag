@@ -317,21 +317,27 @@ func SelectRoutedChunks(verified []domain.ScoredChunk, target string, limit int)
 	return primary[:min(len(primary), limit)]
 }
 
+type chunkMergeKey struct {
+	id         domain.ChunkID
+	revisionID string
+}
+
 func mergeChunks(batches ...[]domain.ScoredChunk) []domain.ScoredChunk {
 	size := 0
 	for _, batch := range batches {
 		size += len(batch)
 	}
 	merged := make([]domain.ScoredChunk, 0, size)
-	byID := make(map[domain.ChunkID]int, size)
+	byID := make(map[chunkMergeKey]int, size)
 	for _, batch := range batches {
 		for _, sc := range batch {
-			if i, ok := byID[sc.Chunk.ID]; ok {
+			key := chunkMergeKey{id: sc.Chunk.ID, revisionID: sc.Chunk.RevisionID}
+			if i, ok := byID[key]; ok {
 				if sc.Score > merged[i].Score {
 					merged[i] = sc
 				}
 			} else {
-				byID[sc.Chunk.ID] = len(merged)
+				byID[key] = len(merged)
 				merged = append(merged, sc)
 			}
 		}

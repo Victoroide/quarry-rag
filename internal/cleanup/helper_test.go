@@ -147,6 +147,13 @@ func (v *revisionRecordingVectors) DeleteByRevision(_ context.Context, id, revis
 	return v.err
 }
 
+type manifestRecordingVectors struct{ recordingVectors }
+
+func (v *manifestRecordingVectors) DeleteByManifestRevision(_ context.Context, id, revision string, ids []string) error {
+	v.calls = append(v.calls, "manifest:"+id+"/"+revision+"/"+strings.Join(ids, ","))
+	return v.err
+}
+
 type transactionalRecordingVectors struct{ recordingVectors }
 
 func (*transactionalRecordingVectors) TransactionalVectors() {}
@@ -201,12 +208,13 @@ func TestOperationsMatchTheConfiguredStores(t *testing.T) {
 		vectors          domain.VectorDeleter
 		objects          ObjectDeleter
 		legacy, revision bool
-		source           bool
+		manifest, source bool
 	}{
 		{name: "no stores"},
 		{name: "objects only", objects: &recordingObjects{}, source: true},
 		{name: "legacy hosted vectors", vectors: &recordingVectors{}, legacy: true},
 		{name: "revision hosted vectors", vectors: &revisionRecordingVectors{}, legacy: true, revision: true, source: true, objects: &recordingObjects{}},
+		{name: "manifested hosted vectors", vectors: &manifestRecordingVectors{}, legacy: true, manifest: true},
 		{name: "transactional vectors", vectors: &transactionalRecordingVectors{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -214,6 +222,7 @@ func TestOperationsMatchTheConfiguredStores(t *testing.T) {
 			require.Equal(t, tc.legacy, ops.LegacyNamespace != nil)
 			require.Equal(t, tc.legacy, ops.LegacyVectors != nil)
 			require.Equal(t, tc.revision, ops.RevisionVectors != nil)
+			require.Equal(t, tc.manifest, ops.ManifestVectors != nil)
 			require.Equal(t, tc.source, ops.Source != nil)
 		})
 	}
@@ -228,6 +237,17 @@ func TestOperationsTreatMissingVectorsAsDeleted(t *testing.T) {
 	vectors.err = status.Error(codes.Unavailable, "provider unavailable")
 	require.Error(t, ops.LegacyVectors(t.Context(), "document"))
 	require.Error(t, ops.RevisionVectors(t.Context(), "document", "incarnation"))
+}
+
+func TestManifestOperationDeletesExactIDsAndTreatsMissingVectorsAsDeleted(t *testing.T) {
+	vectors := &manifestRecordingVectors{}
+	ops := operations(vectors, nil, Targets{})
+	require.NoError(t, ops.ManifestVectors(t.Context(), "document", "revision", []string{"document#revision#0", "document#revision#1"}))
+	require.Equal(t, []string{"manifest:document/revision/document#revision#0,document#revision#1"}, vectors.calls)
+	vectors.err = status.Error(codes.NotFound, "namespace not found")
+	require.NoError(t, ops.ManifestVectors(t.Context(), "document", "revision", nil))
+	vectors.err = status.Error(codes.Unavailable, "provider unavailable")
+	require.Error(t, ops.ManifestVectors(t.Context(), "document", "revision", nil))
 }
 
 func TestPostgresCleanupOnAnActiveDatabaseUsesTheCoordinator(t *testing.T) {
@@ -515,4 +535,106 @@ func TestLegacyReservationCleanerAcquiresWriterBeforeGuard(t *testing.T) {
 	close(objects.finish)
 	require.NoError(t, <-result)
 	require.NoError(t, metadata.FreezeWriters(t.Context(), "g2"))
+}
+
+type manifestedCleanupStore struct {
+	domain.ChunkStore
+	manifests []domain.VectorManifest
+	deleted   int
+}
+
+func (s *manifestedCleanupStore) DeleteDocument(context.Context, domain.DocumentID) error {
+	s.deleted++
+	return nil
+}
+func (*manifestedCleanupStore) PersistVectorManifest(context.Context, domain.Job, domain.VectorManifest) error {
+	return nil
+}
+func (*manifestedCleanupStore) GetVectorManifest(context.Context, string) (*domain.VectorManifest, error) {
+	return nil, nil
+}
+func (s *manifestedCleanupStore) ListDocumentVectorManifests(context.Context, domain.DocumentID, string) ([]domain.VectorManifest, error) {
+	return s.manifests, nil
+}
+func (*manifestedCleanupStore) ClaimVectorCleanup(context.Context, string, time.Duration, time.Duration) (*domain.VectorCleanupTask, error) {
+	return nil, nil
+}
+func (*manifestedCleanupStore) RenewVectorCleanup(context.Context, domain.VectorCleanupTask, time.Duration) (bool, error) {
+	return true, nil
+}
+func (*manifestedCleanupStore) AdvanceVectorCleanup(context.Context, domain.VectorCleanupTask, int) (bool, error) {
+	return true, nil
+}
+func (*manifestedCleanupStore) DeferVectorCleanup(context.Context, domain.VectorCleanupTask, string, time.Duration, int, string) (bool, error) {
+	return true, nil
+}
+func (*manifestedCleanupStore) CompleteVectorCleanup(context.Context, domain.VectorCleanupTask) (bool, error) {
+	return true, nil
+}
+func (*manifestedCleanupStore) ReleaseVectorCleanup(context.Context, domain.VectorCleanupTask) error {
+	return nil
+}
+
+type revisionCleanupVectors struct {
+	fileCleanupVectors
+	revDeletes []string
+}
+
+func (v *revisionCleanupVectors) DeleteByManifestRevision(_ context.Context, _, revisionID string, _ []string) error {
+	v.revDeletes = append(v.revDeletes, revisionID)
+	return nil
+}
+
+func TestRemoveTargetsManifestedRevisionWithoutDocWideDelete(t *testing.T) {
+	store := &manifestedCleanupStore{
+		manifests: []domain.VectorManifest{
+			{RevisionID: "rev-retired", DocumentID: "doc-1", State: "retired"},
+			{RevisionID: "rev-active", DocumentID: "doc-1", State: "active", VectorIDs: []string{"doc-1#rev-active#0"}},
+		},
+	}
+	vecs := &revisionCleanupVectors{}
+	require.NoError(t, Remove(t.Context(), store, vecs, nil, &domain.Document{ID: "doc-1"}))
+	require.Equal(t, 1, store.deleted)
+	require.Equal(t, 1, vecs.deletions, "only legacy namespace delete may run; DeleteByDocID must not run")
+	require.Equal(t, []string{"rev-active", "rev-active"}, vecs.revDeletes)
+}
+
+func TestRemoveOfAManifestedDocumentHonorsTheDrainWindowAtClaim(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	metadata, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
+	require.NoError(t, metadata.RunMigrations(t.Context()))
+	metadata.EnableHostedVectorManifests(true)
+
+	id, revision := uuid.NewString(), uuid.NewString()
+	vectorID := domain.FormatRevisionVectorID(domain.DocumentID(id), revision, 0)
+	_, err = metadata.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,status) VALUES ($1,'manifested','completed')`, id)
+	require.NoError(t, err)
+	_, err = metadata.Pool.Exec(t.Context(), `INSERT INTO hosted_vector_manifests(revision_id,document_id,incarnation,attempt,id_prefix,vector_ids,chunk_ids,state)
+		SELECT $1,id,COALESCE(incarnation,id),1,$3,ARRAY[$4],ARRAY[]::uuid[],'active' FROM documents WHERE id=$2`,
+		revision, id, domain.RevisionVectorPrefix(domain.DocumentID(id), revision), vectorID)
+	require.NoError(t, err)
+	_, err = metadata.Pool.Exec(t.Context(), `INSERT INTO hosted_vector_revisions(document_id,incarnation,active_revision_id)
+		SELECT id,COALESCE(incarnation,id),$2 FROM documents WHERE id=$1`, id, revision)
+	require.NoError(t, err)
+
+	vectors := &revisionCleanupVectors{}
+	doc, err := metadata.GetDocument(t.Context(), domain.DocumentID(id))
+	require.NoError(t, err)
+	require.NoError(t, Remove(t.Context(), metadata, vectors, nil, doc))
+	require.Equal(t, []string{revision, revision}, vectors.revDeletes, "exact deletes run before and after the metadata removal")
+	require.Equal(t, 1, vectors.deletions, "only the namespace delete runs; the document-wide delete is skipped")
+
+	held, err := metadata.ClaimVectorCleanup(t.Context(), "sweeper", time.Minute, time.Hour)
+	require.NoError(t, err)
+	require.Nil(t, held, "a writer that was mid-batch at removal may still land inside the drain window")
+	_, err = metadata.Pool.Exec(t.Context(), `UPDATE hosted_vector_cleanups SET retired_at=retired_at-interval '2 hours' WHERE revision_id=$1`, revision)
+	require.NoError(t, err)
+	claimed, err := metadata.ClaimVectorCleanup(t.Context(), "sweeper", time.Minute, time.Hour)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	require.Equal(t, revision, claimed.RevisionID)
 }
