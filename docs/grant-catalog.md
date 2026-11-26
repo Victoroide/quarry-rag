@@ -30,8 +30,14 @@ Export the public RSA `kty`, `n`, `e` and `kid` fields. When present,
 `use`, `alg` and `key_ops` must identify RS256 signature verification. Rotate by
 atomically replacing the file on each replica. Include both keys during overlap,
 then remove the retired key. A missing, unreadable, invalid or expired file
-makes the authority unavailable. After resolving the principal, the gate
-checks that the current key set is still valid and contains the signing key.
+makes the authority unavailable. Each replica requires a successful
+`trust_key_load` allow audit before using a new key set, and rechecks the file
+and its expiry after the write. Subject admissions and readiness checks that
+encounter a pending or failed audit return `503`. A subsequent check can retry the
+audit, and liveness continues to report process availability. Upgrade every
+grants replica before relying on audit ordering. Rolling back to an earlier
+build can reintroduce the race. After resolving the principal, the gate checks
+that the current key set is still valid and contains the signing key.
 
 Use TLS between clients and trusted ingress, with protected transport from
 ingress to Quarry. The verified, case-sensitive issuer and subject select the
@@ -603,6 +609,6 @@ raw `sub`, credentials, presigned URLs, or text excerpts:
 
 - `corpus_cutover`, grant imports (`mirror_policy_audit`), `ingest` acceptance, `file_sign` URL signing,
   and `document_delete` intents record allow events inside their PostgreSQL transactions.
-- `trust_key_load`, `subject_auth`, `query`, `document_list`, and `document_status` fail closed if
-  required key-trust transitions or allow audit records fail, and record denials/errors.
+- `subject_auth`, `query`, `document_list`, and `document_status` fail closed if
+  required allow audit records fail, and record denials/errors.
 - Grant `SELECT` on `grant_catalog_security_audit` to `quarry_auditor` only; keep mutations restricted to the schema owner and `grant_catalog_record_security_audit(...)` for `quarry_service`.

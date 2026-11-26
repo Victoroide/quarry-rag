@@ -80,6 +80,7 @@ Notable changes are grouped by release.
 
 ### Fixed
 
+- Grants replicas wait for a successful trust-file audit before accepting newly loaded or rotated keys.
 - Mixed PDF JPEG inspection skips bounded runs of extraneous non-marker bytes between segments (up to 64 bytes per gap and 256 bytes per image) instead of rejecting valid scans as `unparseable`.
 - `preserve_code` citation cleanup tracks fence-like openers indented four or more spaces until their matching closing line and closes two- or three-space list-item fences across four- to six-space closing lines, preventing nested fence straddles from hiding later citations.
 - Admission that may select the tagged vector format reads the deletion activation marker through an owner-defined function, so a restricted serving login following the published grants can use owned ingestion with a hosted vector store (migration 030).
