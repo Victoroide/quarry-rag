@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-Security fixes target the latest release and main; older releases and forks
-are not supported. Review deployment changes before updating.
+Security fixes target the latest release (0.2.x) and main in the upstream
+repository. Review deployment changes before updating.
 
 ## Reporting a vulnerability
 
