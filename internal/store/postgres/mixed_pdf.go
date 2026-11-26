@@ -78,7 +78,7 @@ func findSharedPDF(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest) (id
 	err = tx.QueryRow(ctx, `SELECT d.id::text,d.status FROM document_fingerprints f
 		JOIN documents d ON d.id=f.document_id
 		LEFT JOIN document_pdf_extractions p ON p.document_id=d.id
-		WHERE d.collection=$2 AND d.content_dedup='collection' AND (
+		WHERE d.collection=$2 AND d.content_dedup='collection' AND d.status<>'deleting' AND (
 			(f.fingerprint=$1 AND p.profile=$5 AND d.text_source IN ('parser','pdf_mixed')) OR
 			(p.document_id IS NULL AND
 			((f.fingerprint=$3 AND d.text_source='parser') OR

@@ -253,12 +253,19 @@ func TestLegacyDocumentsSurviveTheUploadMigration(t *testing.T) {
 	key := "documents/document/legacy/scan.pdf"
 	req := jobsRequest("legacy original")
 	req.Document.S3Key = &key
-	result, err := c.AcceptDocument(t.Context(), req)
+	// The database holds only the schema before the upload journal, so the
+	// legacy rows are written in the shape of an executable of that time.
+	// Current admission needs later migrations and cannot run here.
+	id := string(req.Document.ID)
+	_, err := c.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,s3_key,status,fingerprint) VALUES($1,$2,$3,'processing',$4)`,
+		id, req.Document.Content, key, req.Fingerprint)
 	require.NoError(t, err)
-	require.Equal(t, domain.AcceptAccepted, result.Outcome)
+	require.NoError(t, c.StoreFingerprint(t.Context(), req.Fingerprint, id))
+	_, err = c.Pool.Exec(t.Context(), `INSERT INTO ingest_jobs(document_id) VALUES($1)`, id)
+	require.NoError(t, err)
 
 	require.NoError(t, c.RunMigrations(t.Context()))
-	stored, err := c.GetDocumentS3Key(t.Context(), result.DocumentID)
+	stored, err := c.GetDocumentS3Key(t.Context(), req.Document.ID)
 	require.NoError(t, err)
 	require.Equal(t, key, *stored)
 	var rows int

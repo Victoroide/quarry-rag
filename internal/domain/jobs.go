@@ -23,6 +23,8 @@ const (
 	AcceptNeedsPDFText
 	AcceptOCRRetryAfterExpiry
 	AcceptUploadExpired
+	// AcceptDeletionConflict reports a document identity reserved by an unfinished or held deletion.
+	AcceptDeletionConflict
 )
 
 // ContentDedup controls whether uploads participate in collection-wide content matching.

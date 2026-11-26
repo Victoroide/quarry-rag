@@ -59,10 +59,10 @@ func (c documentLister) StreamDocuments(ctx context.Context, visit func(domain.D
 }
 
 func (c documentLister) StreamDocumentsInCollection(ctx context.Context, collection string, visit func(domain.DocumentSummary) error) error {
-	query := `SELECT ` + c.columns() + ` FROM documents`
+	query := `SELECT ` + c.columns() + ` FROM documents WHERE status <> 'deleting'`
 	args := []any{}
 	if collection != "" {
-		query += ` WHERE collection = $1`
+		query += ` AND collection = $1`
 		args = append(args, collection)
 	}
 	rows, err := c.pool.Query(ctx, query+` ORDER BY documents.id`, args...)
@@ -100,7 +100,7 @@ func (c documentLister) ListDocumentsPage(ctx context.Context, after string, lim
 }
 
 func (c documentLister) ListDocumentsPageInCollection(ctx context.Context, after string, limit int, collection string) ([]domain.DocumentSummary, error) {
-	query := `SELECT ` + c.columns() + ` FROM documents WHERE ($1::text = '' OR id > NULLIF($1::text, '')::uuid)`
+	query := `SELECT ` + c.columns() + ` FROM documents WHERE status <> 'deleting' AND ($1::text = '' OR id > NULLIF($1::text, '')::uuid)`
 	args := []any{after, limit}
 	if collection != "" {
 		query += ` AND collection = $3`
@@ -131,7 +131,7 @@ func (c *Client) GetDocumentSummary(ctx context.Context, id domain.DocumentID) (
 }
 
 func (c documentLister) GetDocumentSummary(ctx context.Context, id domain.DocumentID) (*domain.DocumentSummary, error) {
-	doc, err := c.scanDocumentSummary(c.pool.QueryRow(ctx, `SELECT `+c.columns()+` FROM documents WHERE id = $1`, string(id)))
+	doc, err := c.scanDocumentSummary(c.pool.QueryRow(ctx, `SELECT `+c.columns()+` FROM documents WHERE id = $1 AND status <> 'deleting'`, string(id)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

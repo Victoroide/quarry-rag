@@ -331,15 +331,16 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `017_evaluation_fixtures.sql` | Adds durable receipts and UUID reservations for the [opt-in evaluation fixtures](development.md#evidence-evaluation). |
 | `018_evaluation_vector_identity.sql` | Binds new fixture receipts to their vector store and permits reservations for durably retired submissions. |
 | `019_evaluation_fixture_guards.sql` | Moves the reservation checks used by ordinary admission, leasing and removal into owner-defined predicates, so a restricted serving login needs no access to the receipt table. |
+| `023_deletion_predicates.sql` | Adds owner-defined predicates that report whether checkpointed deletion is active and whether an unfinished or held deletion reserves a document UUID. Admission and deletion call them, so a restricted serving login needs no access to the marker table. |
 
 The service can roll back to the previous binary with migration 010 and its
-checksum still recorded. After applying migration 019, follow the
+checksum still recorded. After applying migrations 019 and 023, follow the
 [serving-role upgrade procedure](grant-catalog.md#upgrade-an-existing-serving-role)
 for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).
 See [document deletion](api.md#delete-documentsdoc_id) for fixture reservations.
 
-This release keeps production admissions on the untagged format and leaves the activation marker null. Drain in-progress worker mutations before rolling back the binary. While production data uses only the untagged format, the additive migrations and their checksums can stay in place.
+This release keeps production admissions on the untagged format and leaves the activation marker null. [Document deletion](api.md#checkpointed-deletion) keeps its existing contract until an operator sets the marker; the service never sets it. Drain in-progress worker mutations before rolling back the binary. While production data uses only the untagged format, the additive migrations and their checksums can stay in place.
 
 The optional vector schema is initialized separately after base migrations, under the same advisory lock; see the [vector data model](architecture.md#postgresql-vector-schema).
 
