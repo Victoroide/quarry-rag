@@ -27,6 +27,8 @@ type DeleteOption func(*deleteOptions)
 type deleteOptions struct {
 	targets            cleanup.Targets
 	legacyReservations bool
+	scoped             bool
+	now                func() time.Time
 }
 
 // WithLegacyReservations makes an ID-only request commit a durable reservation
@@ -53,6 +55,9 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 	var options deleteOptions
 	for _, opt := range opts {
 		opt(&options)
+	}
+	if options.scoped {
+		return scopedDeleteHandler(cs, pcDriver, objects, options)
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		docIDStr := r.PathValue("doc_id")
@@ -159,6 +164,10 @@ func writeDeleteResult(ctx context.Context, w http.ResponseWriter, docID string,
 		}
 	case errors.Is(err, domain.ErrDocumentNotFound):
 		writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
+	case errors.Is(err, domain.ErrUnauthorized):
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+	case errors.Is(err, domain.ErrForbidden):
+		writeJSONError(w, http.StatusForbidden, "forbidden", "access denied")
 	case errors.Is(err, domain.ErrDeletionPreconditionRequired):
 		writeJSONError(w, http.StatusPreconditionRequired, "precondition", incarnationHeaderName+" is required to delete a live document")
 	case errors.Is(err, domain.ErrDeletionPreconditionFailed):
@@ -180,8 +189,61 @@ func writeDeleteResult(ctx context.Context, w http.ResponseWriter, docID string,
 	}
 }
 
+func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects cleanup.ObjectDeleter, options deleteOptions) http.HandlerFunc {
+	now := clockOrDefault(options.now)
+	return func(w http.ResponseWriter, r *http.Request) {
+		subject, ok := requireScopedSubject(w, r, now)
+		if !ok {
+			return
+		}
+		docIDStr := r.PathValue("doc_id")
+		parsedID, err := uuid.Parse(docIDStr)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
+			return
+		}
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "validation", "invalid query parameters")
+			return
+		}
+		if query.Has("release_held") {
+			writeJSONError(w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
+			return
+		}
+		incarnation, _, valid := deletionIncarnation(r.Header)
+		if !valid {
+			writeJSONError(w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
+			return
+		}
+		deleter, capable := cs.(domain.ScopedDocumentDeleter)
+		if !capable {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document deletion is unavailable")
+			return
+		}
+		canonical := parsedID.String()
+		err = cleanup.RemoveScoped(r.Context(), deleter, pcDriver, objects, options.targets, subject.Principal, subject.ExpiresAt, domain.DocumentID(canonical), incarnation)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if !subject.ValidAt(now()) {
+				err = domain.ErrUnauthorized
+			} else if errors.Is(err, cleanup.ErrScopedDeletionCanceled) {
+				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document deletion canceled")
+				return
+			}
+		}
+		writeDeleteResult(r.Context(), w, canonical, err)
+	}
+}
+
 // ListDocumentsHandler returns document summaries or legacy references.
-func ListDocumentsHandler(cs domain.ChunkStore) http.HandlerFunc {
+func ListDocumentsHandler(cs domain.ChunkStore, opts ...DocumentListOption) http.HandlerFunc {
+	options := documentListOptions{streamBatchSize: defaultScopedStreamBatchSize}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	if options.scoped {
+		return scopedListDocumentsHandler(cs, options)
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		if err != nil {

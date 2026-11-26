@@ -3,8 +3,10 @@ package cleanup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -274,4 +276,83 @@ func TestLegacyPostgresCleanupWithSingleConnection(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorIs(t, cleaner.Delete(t.Context(), string(live)), domain.ErrDeletionPreconditionRequired, "the guard yields to the activated contract")
 	require.NoError(t, cleaner.DeleteIncarnation(t.Context(), string(live), incarnation))
+}
+
+type scopedRecordingDeleter struct {
+	incarnation  string
+	complete     bool
+	beginErr     error
+	resumeErr    error
+	beginCalls   int
+	resumeCalls  int
+	beginCtxErr  error
+	resumeCtxErr error
+	resumeTrace  any
+	resumedInc   string
+}
+
+type scopedCtxKey struct{}
+
+func (d *scopedRecordingDeleter) BeginScopedDeletion(ctx context.Context, _ domain.Principal, _ time.Time, _ domain.DocumentID, _ domain.DeleteOperations) (incarnation string, complete bool, err error) {
+	d.beginCalls++
+	d.beginCtxErr = ctx.Err()
+	if d.beginCtxErr != nil && d.beginErr == nil {
+		return "", false, d.beginCtxErr
+	}
+	return d.incarnation, d.complete, d.beginErr
+}
+
+func (d *scopedRecordingDeleter) ResumeScopedDeletion(ctx context.Context, _ domain.DocumentID, incarnation string, _ domain.DeleteOperations) error {
+	d.resumeCalls++
+	d.resumeCtxErr = ctx.Err()
+	d.resumeTrace = ctx.Value(scopedCtxKey{})
+	d.resumedInc = incarnation
+	return d.resumeErr
+}
+
+func TestRemoveScopedDetachesOnlyAfterIntentCommits(t *testing.T) {
+	principal := domain.Principal{ID: uuid.NewString(), TenantID: uuid.NewString()}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	deleter := &scopedRecordingDeleter{incarnation: "inc-1"}
+	err := RemoveScoped(canceled, deleter, nil, nil, Targets{}, principal, time.Now().Add(time.Minute), "doc-1", "")
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, ErrScopedDeletionCanceled)
+	require.Equal(t, 1, deleter.beginCalls)
+	require.Zero(t, deleter.resumeCalls, "pre-commit cancellation must never start detached cleanup")
+
+	// Pre-commit deadline expiration also returns ErrScopedDeletionCanceled.
+	deleter = &scopedRecordingDeleter{incarnation: "inc-1b", beginErr: fmt.Errorf("begin tx: %w", context.DeadlineExceeded)}
+	err = RemoveScoped(t.Context(), deleter, nil, nil, Targets{}, principal, time.Now().Add(time.Minute), "doc-1b", "")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, ErrScopedDeletionCanceled)
+	require.Zero(t, deleter.resumeCalls)
+
+	// Post-commit cleanup timeout does NOT match ErrScopedDeletionCanceled.
+	deleter = &scopedRecordingDeleter{incarnation: "inc-1c", resumeErr: fmt.Errorf("delete vectors: %w", context.DeadlineExceeded)}
+	err = RemoveScoped(t.Context(), deleter, nil, nil, Targets{}, principal, time.Now().Add(time.Minute), "doc-1c", "")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotErrorIs(t, err, ErrScopedDeletionCanceled)
+	require.Equal(t, 1, deleter.resumeCalls)
+
+	// When the intent succeeds, detached cleanup ignores caller cancellation.
+	liveCtx, liveCancel := context.WithCancel(context.WithValue(t.Context(), scopedCtxKey{}, "trace"))
+	deleter = &scopedRecordingDeleter{incarnation: "inc-2"}
+	err = RemoveScoped(liveCtx, &cancelAfterBegin{scopedRecordingDeleter: deleter, cancel: liveCancel}, nil, nil, Targets{}, principal, time.Now().Add(time.Minute), "doc-2", "")
+	require.NoError(t, err)
+	require.Equal(t, 1, deleter.resumeCalls)
+	require.Equal(t, "inc-2", deleter.resumedInc)
+	require.NoError(t, deleter.resumeCtxErr)
+	require.Equal(t, "trace", deleter.resumeTrace)
+}
+
+type cancelAfterBegin struct {
+	*scopedRecordingDeleter
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterBegin) BeginScopedDeletion(ctx context.Context, p domain.Principal, until time.Time, id domain.DocumentID, ops domain.DeleteOperations) (incarnation string, complete bool, err error) {
+	incarnation, complete, err = c.scopedRecordingDeleter.BeginScopedDeletion(ctx, p, until, id, ops)
+	c.cancel()
+	return incarnation, complete, err
 }
