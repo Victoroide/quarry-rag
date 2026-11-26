@@ -42,6 +42,7 @@ Notable changes are grouped by release.
   incarnation and an active checkpointed-deletion marker. Inaccessible or
   absent documents retain private `404` responses unless an active owner
   retries with a matching finalized receipt.
+- Scoped original-file signing uses advisory locks after checkpointed deletion activation and retains the mandatory allow audit. Apply migration 034 and the serving-role grants before deploying.
 
 ## [0.2.0] - 2026-11-26
 

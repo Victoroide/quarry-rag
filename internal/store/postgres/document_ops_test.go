@@ -2,7 +2,9 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,25 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+func noopFileSign(context.Context, string) error { return nil }
+
+func unexpectedScopedFileSignature(context.Context, string) error {
+	return errors.New("unauthorized source reached signer")
+}
+
+func fileImportBody(t *testing.T, f *ownedFixture, changes map[string]any) string {
+	t.Helper()
+	var revision int64
+	require.NoError(t, f.c.Pool.QueryRow(t.Context(), `SELECT revision FROM grant_catalog_policy_revision`).Scan(&revision))
+	batch := testGrantBatch(revision)
+	for group, entries := range changes {
+		batch[group] = entries
+	}
+	raw, err := json.Marshal(batch)
+	require.NoError(t, err)
+	return string(raw)
+}
 
 func (f *ownedFixture) grant(t *testing.T, recipient domain.Principal, docID, incarnation string, read, download bool) {
 	t.Helper()
@@ -25,7 +46,7 @@ func (f *ownedFixture) grant(t *testing.T, recipient domain.Principal, docID, in
 	})
 }
 
-func (f *ownedFixture) acceptOwned(t *testing.T, owner domain.Principal, collection, key string) string {
+func (f *ownedFixture) acceptOwned(t testing.TB, owner domain.Principal, collection, key string) string {
 	t.Helper()
 	reservedID, incarnation := f.reserve(t, owner, collection)
 	req := suppliedOwnedRequest(owner, collection, "content "+reservedID, reservedID, incarnation)
@@ -36,6 +57,73 @@ func (f *ownedFixture) acceptOwned(t *testing.T, owner domain.Principal, collect
 	res := f.accept(t, req)
 	require.Equal(t, domain.AcceptAccepted, res.Outcome)
 	return reservedID
+}
+
+func TestScopedFileAdvisoryAuthorization(t *testing.T) {
+	f := newOwnedFixture(t)
+	const source = "documents/original.pdf"
+	doc := f.acceptOwned(t, f.owner, "", source)
+	noSource := f.acceptOwned(t, f.owner, "", "")
+	deleting := f.acceptOwned(t, f.owner, "", source)
+	stale := f.acceptOwned(t, f.owner, "", source)
+	pending := jobsRequest("historical file awaiting verification")
+	pending.Document.S3Key = new(source)
+	require.Equal(t, domain.AcceptAccepted, f.accept(t, pending).Outcome)
+	f.importBatch(t, func(b map[string]any) {
+		b["assignments"] = []grantEntry{grantAssignment(t, f.c, f.tenant, f.owner.ID, string(pending.Document.ID))}
+	})
+	grantExec(t, f.c, `UPDATE documents SET status='deleting' WHERE id=$1`, deleting)
+	// Model stale ownership from a previous incarnation without changing the
+	// live document's immutable identity.
+	older := uuid.NewString()
+	grantExec(t, f.c, `INSERT INTO grant_catalog_assigned_incarnations VALUES ($1,$2)`, stale, older)
+	grantExec(t, f.c, `UPDATE grant_catalog_document_ownership SET incarnation=$2 WHERE document_id=$1`, stale, older)
+
+	inc := storedIncarnation(t, f.c, domain.DocumentID(doc))
+	f.grant(t, f.peer, doc, inc, true, true)
+	readOnly := f.acceptOwned(t, f.owner, "", source)
+	f.grant(t, f.peer, readOnly, storedIncarnation(t, f.c, domain.DocumentID(readOnly)), true, false)
+	for _, mode := range []string{"legacy", "checkpointed"} {
+		t.Run(mode, func(t *testing.T) {
+			if mode == "checkpointed" {
+				grantExec(t, f.c, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+			}
+			for _, tc := range []struct {
+				name, id      string
+				principal     domain.Principal
+				active, found bool
+			}{
+				{"owner", doc, f.owner, true, true},
+				{"reader with download", doc, f.peer, true, true},
+				{"canonical UUIDs", strings.ToUpper(doc), domain.Principal{TenantID: strings.ToUpper(f.tenant), ID: strings.ToUpper(f.peer.ID)}, true, true},
+				{"read alone", readOnly, f.peer, true, false},
+				{"missing principal", doc, domain.Principal{TenantID: f.tenant, ID: uuid.NewString()}, false, false},
+				{"disabled", doc, f.disabled, false, false},
+				{"foreign tenant", doc, f.outsider, true, false},
+				{"wrong tenant for principal", doc, domain.Principal{TenantID: f.otherTenant, ID: f.owner.ID}, false, false},
+				{"missing document", uuid.NewString(), f.owner, true, false},
+				{"missing source", noSource, f.owner, true, false},
+				{"pending assignment", string(pending.Document.ID), f.owner, true, false},
+				{"mismatched incarnation", stale, f.owner, true, false},
+				{"deleting", deleting, f.owner, true, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					var keys []string
+					res, err := f.c.WithScopedDocumentFile(t.Context(), tc.principal, domain.DocumentID(tc.id), func(_ context.Context, key string) error {
+						keys = append(keys, key)
+						return nil
+					})
+					require.NoError(t, err)
+					require.Equal(t, domain.ScopedFileResult{Active: tc.active, Found: tc.found}, res)
+					if tc.found {
+						require.Equal(t, []string{source}, keys)
+					} else {
+						require.Empty(t, keys)
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestScopedListingAndStatusEnforceTenantGrantsAndState(t *testing.T) {
@@ -291,7 +379,7 @@ func TestScopedDeleteRequiresObservedIncarnation(t *testing.T) {
 
 	// Test reuse by the same owner and a different tenant's owner in turn.
 	for _, replacementOwner := range []domain.Principal{f.owner, f.outsider} {
-		newInc := replaceScopedDocument(t, f, id, replacementOwner)
+		newInc := replaceScopedDocument(t, f, id, replacementOwner, new("documents/doc/replacement/original.pdf"))
 		require.NotEqual(t, incarnation, newInc)
 		unqualified := ops
 		unqualified.ExpectedIncarnation = ""
@@ -315,17 +403,23 @@ func TestScopedDeleteRequiresObservedIncarnation(t *testing.T) {
 		require.NoError(t, repErr)
 		require.NotNil(t, repStatus.Document)
 		require.Equal(t, newInc, repStatus.Document.Incarnation)
+		ownerFile, err := f.c.WithScopedDocumentFile(t.Context(), replacementOwner, id, noopFileSign)
+		require.NoError(t, err)
+		require.Equal(t, domain.ScopedFileResult{Active: true, Found: true}, ownerFile)
+		peerFile, err := f.c.WithScopedDocumentFile(t.Context(), f.peer, id, unexpectedScopedFileSignature)
+		require.NoError(t, err)
+		require.Equal(t, domain.ScopedFileResult{Active: true}, peerFile, "a prior grant cannot follow a reused UUID")
 		require.Equal(t, 1, receiptCount(t.Context(), t, f.c, id))
 		if replacementOwner == f.owner {
 			require.NoError(t, f.c.DeleteDocument(t.Context(), id))
 		}
 	}
-
 }
 
-func replaceScopedDocument(t *testing.T, f *ownedFixture, id domain.DocumentID, owner domain.Principal) string {
+func replaceScopedDocument(t *testing.T, f *ownedFixture, id domain.DocumentID, owner domain.Principal, source *string) string {
 	t.Helper()
 	req := jobsRequest("replacement " + uuid.NewString())
+	req.Document.S3Key = source
 	req.Document.ID, req.CallerSupplied, req.SupportsScopedVectors = id, true, true
 	require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)
 	f.importBatch(t, func(b map[string]any) {
@@ -519,7 +613,7 @@ func TestScopedDeleteQualifierSurvivesRetryAndReuse(t *testing.T) {
 	require.NoError(t, lockDocumentIntent(ctx, tx, id))
 	result := attemptAsync(ctx, time.Now().Add(time.Minute))
 	waitForAdvisoryWaiter(t, f.c, "ExclusiveLock")
-	newInc := replaceScopedDocument(t, f, id, f.owner)
+	newInc := replaceScopedDocument(t, f, id, f.owner, nil)
 	require.NoError(t, tx.Commit(ctx))
 	require.ErrorIs(t, <-result, domain.ErrDeletionPreconditionFailed)
 	require.Equal(t, newInc, storedIncarnation(t, f.c, id))

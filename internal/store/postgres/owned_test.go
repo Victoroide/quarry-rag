@@ -31,7 +31,7 @@ func newOwnedFixture(t *testing.T) *ownedFixture {
 	return provisionOwnedFixture(t, jobsDatabase(t))
 }
 
-func provisionOwnedFixture(t *testing.T, c *Client) *ownedFixture {
+func provisionOwnedFixture(t testing.TB, c *Client) *ownedFixture {
 	t.Helper()
 	f := &ownedFixture{c: c, tenant: uuid.NewString(), otherTenant: uuid.NewString()}
 	f.owner = domain.Principal{ID: uuid.NewString(), TenantID: f.tenant}
@@ -59,7 +59,7 @@ func provisionOwnedFixture(t *testing.T, c *Client) *ownedFixture {
 	return f
 }
 
-func (f *ownedFixture) importBatch(t *testing.T, fill func(map[string]any)) {
+func (f *ownedFixture) importBatch(t testing.TB, fill func(map[string]any)) {
 	t.Helper()
 	require.NoError(t, f.c.Pool.QueryRow(t.Context(), `SELECT revision FROM grant_catalog_policy_revision`).Scan(&f.revision))
 	batch := testGrantBatch(f.revision)
@@ -83,7 +83,7 @@ func (f *ownedFixture) setEnabled(t *testing.T, p domain.Principal, subject stri
 	})
 }
 
-func (f *ownedFixture) reserve(t *testing.T, p domain.Principal, collection string) (id, incarnation string) {
+func (f *ownedFixture) reserve(t testing.TB, p domain.Principal, collection string) (id, incarnation string) {
 	t.Helper()
 	id = uuid.NewString()
 	f.importBatch(t, func(b map[string]any) {
@@ -123,7 +123,7 @@ func (f *ownedFixture) counts(t *testing.T) storeCounts {
 	return n
 }
 
-func (f *ownedFixture) accept(t *testing.T, req domain.AcceptRequest) domain.AcceptResult {
+func (f *ownedFixture) accept(t testing.TB, req domain.AcceptRequest) domain.AcceptResult {
 	t.Helper()
 	result, err := f.c.AcceptDocument(t.Context(), req)
 	require.NoError(t, err)

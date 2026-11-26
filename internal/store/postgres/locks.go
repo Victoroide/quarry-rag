@@ -21,3 +21,7 @@ const DeletionActivationLockID int64 = 0x7175617272790004
 // own seed, independent of the fixture reservation key (seed 487011). A hash
 // collision between two documents only delays one of them.
 const documentIntentLockKey = "hashtextextended($1::uuid::text, 487012)"
+
+// scopedFilePrincipalLockClass separates signing and grant import locks from
+// the bigint document intent key. Both SQL callers use this class in migration 034.
+const scopedFilePrincipalLockClass int32 = 0x71726673

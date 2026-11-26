@@ -347,7 +347,7 @@ func (c *migrationCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, dat
 
 func (*migrationCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
-func migrationTestClient(t *testing.T, url string) *Client {
+func migrationTestClient(t testing.TB, url string) *Client {
 	t.Helper()
 	client, err := NewClient(t.Context(), url)
 	require.NoError(t, err)
