@@ -28,11 +28,7 @@ disclosure after a fix or mitigation is available.
 
 ## Scope and deployment boundaries
 
-- Service token authentication: every route except the health probe requires the
-  shared token in deployed mode. Keep it secret, rotate it after exposure and
-  restrict direct access to the service.
-- Document isolation: callers must send the correct document allowlist for
-  restricted queries. A shared service token is not per-user authorization.
+- Service token vs grants authentication: every data route requires `X-Service-Token` in deployed modes; in `AUTHZ_MODE=service`, callers must send accurate `allowed_document_ids` for restricted queries, whereas in `AUTHZ_MODE=grants`, every data route also requires a verified short-lived JWT bearer token, enforces tenant/grant isolation server-side, redacts document/object/subject identifiers from telemetry, and records a restricted security audit trail (`grant_catalog_security_audit`). Keep service and subject credentials secret, rotate keys with overlap, and restrict direct network access to operator listeners (`METRICS_ADDR`).
 - S3 presigned downloads: a signed link grants temporary file access to anyone
   holding it. Avoid logging or sharing links and restrict storage permissions.
 - Uploaded file parsing: malformed documents, parser resource exhaustion and

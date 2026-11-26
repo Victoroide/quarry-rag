@@ -59,6 +59,8 @@ paths:
       description: 'See [document identity](api.md#document-identity), [queue admission and retries](api.md#queue-admission-and-retries), and optional [image-only](api.md#image-only-pdf-ocr), [mixed](api.md#mixed-pdf-ocr), or [layout](api.md#pdf-layout-analysis) PDF processing.'
       security:
         - ServiceToken: []
+        - ServiceToken: []
+          SubjectToken: []
       requestBody:
         required: true
         content:
@@ -76,6 +78,8 @@ paths:
         '400':
           $ref: '#/components/responses/Error'
         '401':
+          $ref: '#/components/responses/Error'
+        '403':
           $ref: '#/components/responses/Error'
         '409':
           $ref: '#/components/responses/Error'
@@ -98,6 +102,8 @@ paths:
       description: 'See [POST /query](api.md#post-query) for query scope, current-evidence checks and partial hosted results.'
       security:
         - ServiceToken: []
+        - ServiceToken: []
+          SubjectToken: []
       parameters:
         - name: Accept-Language
           in: header
@@ -187,6 +193,8 @@ paths:
           $ref: '#/components/responses/Error'
         '415':
           $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
         '500':
           $ref: '#/components/responses/Error'
         '502':
@@ -212,6 +220,8 @@ paths:
       description: 'See [GET /documents](api.md#get-documents).'
       security:
         - ServiceToken: []
+        - ServiceToken: []
+          SubjectToken: []
       parameters:
         - name: limit
           in: query
@@ -246,6 +256,8 @@ paths:
           $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
         '500':
           $ref: '#/components/responses/Error'
         '503':
@@ -260,6 +272,8 @@ paths:
       description: 'See [GET /documents/{doc_id}](api.md#get-documentsdoc_id).'
       security:
         - ServiceToken: []
+        - ServiceToken: []
+          SubjectToken: []
       parameters:
         - $ref: '#/components/parameters/IncludeIncarnation'
         - $ref: '#/components/parameters/IncludeIndexVisibility'
@@ -278,6 +292,8 @@ paths:
           $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
         '404':
           $ref: '#/components/responses/Error'
         '500':
@@ -290,6 +306,8 @@ paths:
       description: 'See [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
       security:
         - ServiceToken: []
+        - ServiceToken: []
+          SubjectToken: []
       parameters:
         - name: X-Document-Incarnation
           in: header
@@ -315,6 +333,8 @@ paths:
         '400':
           $ref: '#/components/responses/Error'
         '401':
+          $ref: '#/components/responses/Error'
+        '403':
           $ref: '#/components/responses/Error'
         '404':
           $ref: '#/components/responses/Error'
@@ -484,6 +504,8 @@ paths:
       description: 'See [GET /documents/{doc_id}/file](api.md#get-documentsdoc_idfile).'
       security:
         - ServiceToken: []
+        - ServiceToken: []
+          SubjectToken: []
       responses:
         '200':
           description: Original-file download
@@ -498,9 +520,13 @@ paths:
           $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
         '404':
           $ref: '#/components/responses/Error'
         '500':
+          $ref: '#/components/responses/Error'
+        '503':
           $ref: '#/components/responses/Error'
 components:
   securitySchemes:
@@ -508,6 +534,10 @@ components:
       type: apiKey
       in: header
       name: X-Service-Token
+    SubjectToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
   parameters:
     RequestID:
       name: X-Request-ID
