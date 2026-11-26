@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -162,10 +163,66 @@ func TestQuiesceCannotBeShorterThanTheDeleteDeadline(t *testing.T) {
 	require.Equal(t, 5*time.Minute, opts.Quiesce)
 }
 
+func TestConfirmTargetDrainedOptions(t *testing.T) {
+	const writeID = "8a3e792c-5df6-4b6e-a612-4f7db4959db2"
+	const flag = "-confirm-target-drained"
+	base := []string{"-generation", "g2", "-profile", "p.json"}
+	stage := append([]string{"-apply"}, base...)
+	opts, err := parse(t, append(stage, flag+"="+writeID, "-after", writeID, "-prune-after", "page-2")...)
+	require.NoError(t, err)
+	require.Equal(t, writeID, opts.ConfirmTargetDrained.String())
+	require.Equal(t, writeID, opts.After)
+	require.Equal(t, "page-2", opts.PruneAfter)
+	opts, err = parse(t, stage...)
+	require.NoError(t, err)
+	require.Zero(t, opts.ConfirmTargetDrained)
+
+	for name, args := range map[string][]string{
+		"bare":          {flag},
+		"true":          {flag + "=true"},
+		"false":         {flag + "=false"},
+		"empty":         {flag + "="},
+		"zero":          {flag + "=00000000-0000-0000-0000-000000000000"},
+		"uppercase":     {flag + "=" + strings.ToUpper(writeID)},
+		"unhyphenated":  {flag + "=" + strings.ReplaceAll(writeID, "-", "")},
+		"braced":        {flag + "={" + writeID + "}"},
+		"urn":           {flag + "=urn:uuid:" + writeID},
+		"huge":          {flag + "=" + strings.Repeat("a", 4096)},
+		"invalid UTF-8": {flag + "=\xff"},
+		"duplicate":     {flag + "=" + writeID, flag + "=" + writeID},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := parse(t, append(append([]string{}, stage...), args...)...)
+			require.ErrorContains(t, err, flag)
+		})
+	}
+
+	for _, mode := range []string{"", "-verify", "-freeze", "-thaw", "-activate", "-attest-source"} {
+		args := []string{"-profile", "p.json", flag + "=" + writeID}
+		if mode != "-attest-source" {
+			args = append(args, "-generation", "g2")
+		}
+		if mode == "-verify" {
+			args = append(args, "-sample-size=1", "-min-recall=0.5", "-max-p95=1s")
+		}
+		if mode != "" {
+			args = append(args, mode)
+			_, err := parse(t, append(args, "-apply")...)
+			require.ErrorContains(t, err, "staging with -apply", mode)
+		}
+		_, err := parse(t, args...)
+		require.ErrorContains(t, err, "staging with -apply", mode)
+	}
+}
+
 func FuzzParseOptions(f *testing.F) {
 	for _, seed := range []string{
 		"-generation g2 -profile p.json",
 		"-generation g2 -profile p.json -apply -max-embed-calls 10",
+		"-generation g2 -profile p.json -apply -confirm-target-drained=8a3e792c-5df6-4b6e-a612-4f7db4959db2",
+		"-generation g2 -profile p.json -apply -confirm-target-drained=true",
+		"-generation g2 -profile p.json -apply -confirm-target-drained=\xff",
+		"-generation g2 -profile p.json -apply -confirm-target-drained=00000000-0000-0000-0000-000000000000",
 		"-verify -generation g2 -sample-size 5 -min-recall 0.9 -max-p95 1s",
 		"-freeze -generation g2 -quiesce 2m",
 		"-thaw",
@@ -179,7 +236,8 @@ func FuzzParseOptions(f *testing.F) {
 		if len(line) > 512 {
 			t.Skip()
 		}
-		opts, err := parseOptions(strings.Fields(line), io.Discard)
+		args := strings.Fields(line)
+		opts, err := parseOptions(args, io.Discard)
 		if err != nil {
 			return
 		}
@@ -191,6 +249,12 @@ func FuzzParseOptions(f *testing.F) {
 		require.LessOrEqual(t, opts.Batch, 1000)
 		if opts.Generation != "" {
 			require.True(t, domain.ValidGenerationName(opts.Generation))
+		}
+		if opts.ConfirmTargetDrained != uuid.Nil {
+			require.Equal(t, actionStage, opts.action())
+			require.True(t, opts.Apply)
+			token := opts.ConfirmTargetDrained.String()
+			require.True(t, strings.Contains(line, token))
 		}
 		if !opts.Apply {
 			require.NotEqual(t, actionStage, opts.action(), "staging needs -apply")

@@ -31,7 +31,7 @@ type options struct {
 	TargetStore          string
 	TargetIndex          string
 	Apply                bool
-	ConfirmTargetDrained bool
+	ConfirmTargetDrained uuid.UUID
 
 	Verify, Freeze, Thaw, Activate, Attest bool
 
@@ -83,7 +83,17 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.StringVar(&opts.TargetStore, "target-store", "", "store of the target: postgres or pinecone (default: the configured VECTOR_STORE)")
 	flags.StringVar(&opts.TargetIndex, "target-index", "", "name of the target Pinecone index")
 	flags.BoolVar(&opts.Apply, "apply", false, "permit writes; without it every mode only reads and reports")
-	flags.BoolVar(&opts.ConfirmTargetDrained, "confirm-target-drained", false, "resume staging after independently confirming that an unacknowledged target write can no longer land")
+	flags.Func("confirm-target-drained", "pending target write UUID confirmed settled for applied staging", func(value string) error {
+		if opts.ConfirmTargetDrained != uuid.Nil {
+			return errors.New("may be supplied only once")
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value {
+			return errors.New("must be a canonical lowercase nonzero UUID")
+		}
+		opts.ConfirmTargetDrained = id
+		return nil
+	})
 	flags.BoolVar(&opts.Verify, "verify", false, "compare the target with PostgreSQL and run the matched-query sample")
 	flags.BoolVar(&opts.Freeze, "freeze", false, "pause admission, job claims, deletions and maintenance")
 	flags.BoolVar(&opts.Thaw, "thaw", false, "resume writers")
@@ -133,7 +143,7 @@ func (o options) validate(positional int, declared map[string]bool) error {
 	if o.QueryFixtures != "" && act != actionVerify {
 		return errors.New("-query-fixtures applies only to -verify")
 	}
-	if (o.ConfirmTargetDrained || o.PruneAfter != "") && act != actionStage {
+	if (o.ConfirmTargetDrained != uuid.Nil || o.PruneAfter != "") && act != actionStage {
 		return errors.New("-confirm-target-drained and -prune-after apply only to staging with -apply")
 	}
 	if o.Generation != "" && !domain.ValidGenerationName(o.Generation) {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -53,18 +54,19 @@ func VectorTable(generation string) string { return domain.VectorTable(generatio
 
 // Generation is one vector target and the embedding profile it stores.
 type Generation struct {
-	Name         string
-	Store        string
-	Target       string
-	Host         string
-	Profile      domain.EmbeddingProfile
-	Origin       string
-	State        string
-	CorpusDigest string
-	VerifiedAt   *time.Time
-	Verification json.RawMessage
-	EverActive   bool
-	PendingWrite bool
+	Name           string
+	Store          string
+	Target         string
+	Host           string
+	Profile        domain.EmbeddingProfile
+	Origin         string
+	State          string
+	CorpusDigest   string
+	VerifiedAt     *time.Time
+	Verification   json.RawMessage
+	EverActive     bool
+	PendingWrite   bool
+	PendingWriteID uuid.NullUUID
 }
 
 // VectorState is the singleton coordinating generations and the writer freeze.
@@ -274,8 +276,8 @@ func readGeneration(ctx context.Context, q queryRower, name, lock string) (*Gene
 	var g Generation
 	var profile []byte
 	var digest *string
-	err := q.QueryRow(ctx, `SELECT name, store, target, host, profile, profile_origin, state, corpus_digest, verified_at, COALESCE(verification, 'null'::jsonb), ever_active, pending_write
- FROM vector_generations WHERE name=$1 `+lock, name).Scan(&g.Name, &g.Store, &g.Target, &g.Host, &profile, &g.Origin, &g.State, &digest, &g.VerifiedAt, &g.Verification, &g.EverActive, &g.PendingWrite)
+	err := q.QueryRow(ctx, `SELECT name, store, target, host, profile, profile_origin, state, corpus_digest, verified_at, COALESCE(verification, 'null'::jsonb), ever_active, pending_write, pending_write_id
+ FROM vector_generations WHERE name=$1 `+lock, name).Scan(&g.Name, &g.Store, &g.Target, &g.Host, &profile, &g.Origin, &g.State, &digest, &g.VerifiedAt, &g.Verification, &g.EverActive, &g.PendingWrite, &g.PendingWriteID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

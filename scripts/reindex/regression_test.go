@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -133,46 +134,219 @@ func TestPausedStagerExcludesCatchUpVerificationAndActivation(t *testing.T) {
 	require.Equal(t, "newscope", got[string(updated[0].ID)].Metadata["collection"])
 }
 
-type lostUpsertResponse struct{ vectorTarget }
+type lostTargetResponse struct {
+	vectorTarget
+	upsert func([]domain.Chunk)
+	delete func([]string)
+}
 
-func (p lostUpsertResponse) Upsert(ctx context.Context, namespace string, chunks []domain.Chunk) error {
-	if err := p.vectorTarget.Upsert(ctx, namespace, chunks); err != nil {
+var errTargetResponseLost = errors.New("target acknowledgement lost")
+
+func (p lostTargetResponse) Upsert(ctx context.Context, namespace string, chunks []domain.Chunk) error {
+	if err := p.vectorTarget.Upsert(ctx, namespace, chunks); err != nil || p.upsert == nil {
 		return err
 	}
-	return errors.New("target acknowledgement lost")
+	p.upsert(chunks)
+	return errTargetResponseLost
+}
+
+func (p lostTargetResponse) DeleteIDs(ctx context.Context, ids []string) error {
+	if err := p.vectorTarget.DeleteIDs(ctx, ids); err != nil || p.delete == nil {
+		return err
+	}
+	p.delete(ids)
+	return errTargetResponseLost
+}
+
+func trapTargetResponse(d deps, generation string, loss lostTargetResponse) deps {
+	open := d.open
+	d.open = func(ctx context.Context, spec targetSpec) (vectorTarget, func(), string, error) {
+		target, closeTarget, host, err := open(ctx, spec)
+		if err == nil && spec.Generation == generation {
+			target = lostTargetResponse{target, loss.upsert, loss.delete}
+		}
+		return target, closeTarget, host, err
+	}
+	return d
+}
+
+func pendingTargetWrite(t *testing.T, f *fixture, generation string) uuid.UUID {
+	t.Helper()
+	row, err := f.pg.Generation(t.Context(), generation)
+	require.NoError(t, err)
+	require.NotNil(t, row)
+	require.True(t, row.PendingWrite)
+	require.True(t, row.PendingWriteID.Valid)
+	require.NotEqual(t, uuid.Nil, row.PendingWriteID.UUID)
+	return row.PendingWriteID.UUID
 }
 
 func TestUnacknowledgedTargetWriteSurvivesRestart(t *testing.T) {
 	f := newFixture(t)
 	h := newHarness(t, f, "postgres")
 	h.attestSource()
-	open := h.deps.open
-	h.deps.open = func(ctx context.Context, spec targetSpec) (vectorTarget, func(), string, error) {
-		target, closeTarget, host, err := open(ctx, spec)
-		if err == nil && spec.Generation == "g2" {
-			target = lostUpsertResponse{target}
-		}
-		return target, closeTarget, host, err
-	}
+	normal := h.deps
+	h.deps = trapTargetResponse(normal, "g2", lostTargetResponse{upsert: func([]domain.Chunk) {}})
 	stage := options{Generation: "g2", TargetStore: "pinecone", TargetIndex: "quarry-g2", Apply: true,
 		Profile: h.profileFile("g2.json", testProfile(sourceModel))}
 	_, err := h.run(stage)
-	require.ErrorContains(t, err, "acknowledgement lost")
-	h.deps.open = open
+	require.ErrorIs(t, err, errTargetResponseLost)
+	id := pendingTargetWrite(t, f, stage.Generation)
+	require.ErrorContains(t, err, id.String())
+	h.deps = normal
+	opened := h.stores.opened
 	_, err = h.run(stage)
 	require.ErrorContains(t, err, "unconfirmed target write")
+	require.ErrorContains(t, err, "-confirm-target-drained="+id.String())
+	require.Equal(t, opened, h.stores.opened)
 	require.NoError(t, f.pg.FreezeWriters(t.Context(), "g2"))
 	apply := verifyOptions("g2")
 	apply.Apply = true
 	_, err = h.run(apply)
 	require.ErrorContains(t, err, "unconfirmed target write")
+	require.ErrorContains(t, err, id.String())
 	_, err = h.run(options{Generation: "g2", Activate: true, Apply: true})
 	require.Error(t, err)
-	stage.ConfirmTargetDrained = true
+
+	// Settlement is durable even if an unrelated provider preflight fails.
+	stage.ConfirmTargetDrained = id
+	preflightErr := errors.New("target preflight failed")
+	h.deps.open = func(ctx context.Context, spec targetSpec) (vectorTarget, func(), string, error) {
+		if spec.Generation == "g2" {
+			return nil, nil, "", preflightErr
+		}
+		return normal.open(ctx, spec)
+	}
+	_, err = h.run(stage)
+	require.ErrorIs(t, err, preflightErr)
+	h.deps = normal
+	opened = h.stores.opened
+	_, err = h.run(stage)
+	require.ErrorContains(t, err, "stale")
+	require.Equal(t, opened, h.stores.opened)
+	stage.ConfirmTargetDrained = uuid.Nil
 	report, err := h.run(stage)
 	require.NoError(t, err)
 	require.Equal(t, true, report["complete"])
 	_, err = h.run(apply)
+	require.NoError(t, err)
+}
+
+func TestStaleTargetWriteConfirmationCannotAdvance(t *testing.T) {
+	for _, store := range []string{"pinecone", "postgres"} {
+		for _, mutation := range []string{"identical upsert", "different exact delete"} {
+			t.Run(store+"/"+mutation, func(t *testing.T) {
+				testStaleTargetWriteConfirmation(t, store, mutation == "different exact delete")
+			})
+		}
+	}
+}
+
+func testStaleTargetWriteConfirmation(t *testing.T, store string, deleteSecond bool) {
+	t.Helper()
+	f := newFixture(t)
+	h := newHarness(t, f, "postgres")
+	h.attestSource()
+	normal := h.deps
+	stage := options{Generation: "g2", TargetStore: store, Apply: true,
+		Profile: h.profileFile("g2.json", testProfile(sourceModel))}
+	if store == "pinecone" {
+		stage.TargetIndex = "quarry-g2"
+	}
+	var orphan string
+	var second lostTargetResponse
+	if deleteSecond {
+		spec := normal.resolve(stage)
+		registerGeneration(t, f.pg, spec.generation, store, spec.target, sourceModel)
+		orphan = uuid.NewString()
+		key := strings.ReplaceAll(orphan, "-", "")
+		_, err := f.pg.BeginGenerationDocument(t.Context(), stage.Generation, orphan, []string{key})
+		require.NoError(t, err)
+		second.delete = func(ids []string) { require.Equal(t, []string{key}, ids) }
+	}
+	var first []domain.Chunk
+	h.deps = trapTargetResponse(normal, stage.Generation, lostTargetResponse{
+		upsert: func(chunks []domain.Chunk) { first = chunks },
+	})
+	report, err := h.run(stage)
+	require.ErrorIs(t, err, errTargetResponseLost)
+	require.NotContains(t, report, "next_after")
+	require.NotEmpty(t, first)
+	a := pendingTargetWrite(t, f, stage.Generation)
+
+	// A different generation must reject the token before creating a target.
+	h.deps = normal
+	other := stage
+	other.Generation = "g3"
+	if store == "pinecone" {
+		other.TargetIndex = "quarry-g3"
+	}
+	other.ConfirmTargetDrained = a
+	opened := h.stores.opened
+	_, err = h.run(other)
+	require.ErrorContains(t, err, "stale")
+	require.Equal(t, opened, h.stores.opened)
+	row, err := f.pg.Generation(t.Context(), other.Generation)
+	require.NoError(t, err)
+	require.Nil(t, row)
+	require.Equal(t, a, pendingTargetWrite(t, f, stage.Generation))
+
+	if !deleteSecond {
+		second.upsert = func(chunks []domain.Chunk) { require.Equal(t, first, chunks) }
+	}
+	stage.ConfirmTargetDrained = a
+	h.deps = trapTargetResponse(normal, stage.Generation, second)
+	report, err = h.run(stage)
+	require.ErrorIs(t, err, errTargetResponseLost)
+	b := pendingTargetWrite(t, f, stage.Generation)
+	require.NotEqual(t, a, b)
+	require.ErrorContains(t, err, b.String())
+	if after, ok := report["next_after"].(string); ok {
+		stage.After = after
+	}
+
+	// Another invocation can replay A after losing the clear response. It
+	// must leave B and the stage checkpoint untouched.
+	h.deps = normal
+	documentIDs := []string{string(first[0].DocumentID)}
+	if deleteSecond {
+		documentIDs = append(documentIDs, orphan)
+	}
+	before, err := f.pg.GenerationCheckpoints(t.Context(), stage.Generation, documentIDs)
+	require.NoError(t, err)
+	opened = h.stores.opened
+	stage.MaxEmbedCalls = 1
+	rejected, err := h.run(stage)
+	require.ErrorContains(t, err, "stale")
+	require.ErrorContains(t, err, b.String())
+	require.Nil(t, rejected)
+	require.Equal(t, opened, h.stores.opened)
+	require.Nil(t, h.embed)
+	require.Equal(t, b, pendingTargetWrite(t, f, stage.Generation))
+	after, err := f.pg.GenerationCheckpoints(t.Context(), stage.Generation, documentIDs)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+
+	require.NoError(t, f.pg.FreezeWriters(t.Context(), stage.Generation))
+	verify := verifyOptions(stage.Generation)
+	verify.Apply = true
+	_, err = h.run(verify)
+	require.ErrorContains(t, err, b.String())
+	cutover := options{Generation: stage.Generation, Activate: true, Apply: true}
+	_, err = h.run(cutover)
+	require.ErrorContains(t, err, "must be verified")
+
+	stage.ConfirmTargetDrained = b
+	report, err = h.run(stage)
+	require.NoError(t, err)
+	require.Equal(t, true, report["complete"])
+	_, err = h.run(verify)
+	require.NoError(t, err)
+	opened = h.stores.opened
+	_, err = h.run(stage)
+	require.ErrorContains(t, err, "stale")
+	require.Equal(t, opened, h.stores.opened)
+	_, err = h.run(cutover)
 	require.NoError(t, err)
 }
 

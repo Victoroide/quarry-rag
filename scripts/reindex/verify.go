@@ -539,7 +539,7 @@ func (d deps) verify(ctx context.Context, opts options, p targetPlan, out io.Wri
 		return fmt.Errorf("generation %q is not registered", p.generation)
 	}
 	if row.PendingWrite {
-		return fmt.Errorf("generation %q has an unconfirmed target write", row.Name)
+		return fmt.Errorf("generation %q has an unconfirmed target write %s", row.Name, row.PendingWriteID.UUID)
 	}
 	state, err := d.pg.VectorState(ctx)
 	if err != nil {

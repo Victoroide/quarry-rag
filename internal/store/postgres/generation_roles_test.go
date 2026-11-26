@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -261,6 +262,15 @@ func TestReindexMaintenanceRoleWithDocumentedGrants(t *testing.T) {
 
 	fence, err := reindex.FenceGeneration(ctx, "g2")
 	require.NoError(t, err)
+	providerErr := errors.New("target write response lost")
+	require.ErrorIs(t, fence.Write(ctx, func() error { return providerErr }), providerErr)
+	pending, err := reindex.Generation(ctx, "g2")
+	require.NoError(t, err)
+	require.True(t, pending.PendingWriteID.Valid)
+	require.NoError(t, fence.RequireAcknowledged(ctx, pending.PendingWriteID.UUID))
+	_, err = reindex.Pool.Exec(ctx, `ALTER TABLE public.vector_generations ADD COLUMN forbidden BOOLEAN`)
+	requireSQLState(t, err, "42501")
+
 	ledger := fence.Ledger()
 	for _, rev := range revs {
 		snap, loadErr := reindex.LoadDocumentSnapshotBounded(ctx, rev.ID, 10, 4096)

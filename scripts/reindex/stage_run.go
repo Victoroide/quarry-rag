@@ -26,6 +26,9 @@ func (d deps) stage(ctx context.Context, opts options, p targetPlan, profile dom
 	if len(blockers) > 0 {
 		return fmt.Errorf("staging is blocked: %s", strings.Join(blockers, "; "))
 	}
+	if pendingErr := fence.RequireAcknowledged(ctx, opts.ConfirmTargetDrained); pendingErr != nil {
+		return pendingErr
+	}
 	source, _, sourceHost, err := d.sourceProfile(ctx, p.live)
 	if err != nil {
 		return err
@@ -71,9 +74,6 @@ func (d deps) stage(ctx context.Context, opts options, p targetPlan, profile dom
 		if _, err = d.pg.RegisterGeneration(ctx, pgstore.Generation{Name: p.generation, Store: p.store, Target: p.target, Host: host, Profile: profile, Origin: pgstore.OriginRecorded}); err != nil {
 			return err
 		}
-	}
-	if pendingErr := fence.RequireAcknowledged(ctx, opts.ConfirmTargetDrained); pendingErr != nil {
-		return pendingErr
 	}
 	row, err := d.pg.Generation(ctx, p.generation)
 	if err != nil {
