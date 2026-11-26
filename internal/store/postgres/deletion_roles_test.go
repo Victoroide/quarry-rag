@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
@@ -387,4 +388,36 @@ func TestTaggedAdmissionWithoutGrantFailsClosed(t *testing.T) {
 	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM documents), (SELECT count(*) FROM ingest_jobs)`).Scan(&docs, &jobs))
 	require.Zero(t, docs)
 	require.Zero(t, jobs)
+}
+
+func TestRestrictedServingLoginReleasesOfflineHeldReceipt(t *testing.T) {
+	owner, serving, _ := restrictedDatabase(t)
+	ctx := t.Context()
+	doc := acceptDocument(t, owner, "restricted offline release", false, false)
+	memoryOwner := uuid.NewString()
+	_, err := owner.Pool.Exec(ctx, `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode,memory_owner,step,held,finalized)
+		VALUES($1,$2,'legacy_reservation','memory',$3,0,FALSE,FALSE)`, string(doc.id), doc.incarnation, memoryOwner)
+	require.NoError(t, err)
+	_, err = owner.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, string(doc.id))
+	require.NoError(t, err)
+
+	var namespaceCalls, vectorCalls int
+	ops := domain.DeleteOperations{
+		InMemory:    true,
+		MemoryOwner: memoryOwner,
+		LegacyNamespace: func(context.Context, string) error {
+			namespaceCalls++
+			return nil
+		},
+		LegacyVectors: func(context.Context, string) error {
+			vectorCalls++
+			return nil
+		},
+	}
+	require.NoError(t, serving.ReleaseHeldDeletion(ctx, doc.id, doc.incarnation, ops))
+	require.Equal(t, 1, namespaceCalls)
+	require.Equal(t, 1, vectorCalls)
+	receipt := readReceipt(t, owner, doc.id)
+	require.True(t, receipt.finalized)
+	require.False(t, receipt.held)
 }

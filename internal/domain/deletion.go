@@ -54,6 +54,51 @@ type DeleteOperations struct {
 	ManifestVectors func(ctx context.Context, documentID, revisionID string, vectorIDs []string) error
 	// Source removes the exact original object.
 	Source func(ctx context.Context, key string) error
+	// ConfirmedOfflineOwnerTerminated marks operator verification that the
+	// recorded process-local index owner exited and its local vectors are gone.
+	ConfirmedOfflineOwnerTerminated bool
+}
+
+// HeldDeletion describes an unfinished or held deletion receipt that keeps a
+// public UUID from being admitted again.
+type HeldDeletion struct {
+	DocumentID      DocumentID `json:"document_id"`
+	Incarnation     string     `json:"incarnation"`
+	Kind            string     `json:"kind"`
+	VectorMode      string     `json:"vector_mode"`
+	VectorIndex     string     `json:"vector_index,omitempty"`
+	VectorNamespace string     `json:"vector_namespace,omitempty"`
+	MemoryOwner     string     `json:"memory_owner,omitempty"`
+	SourceKey       string     `json:"source_key,omitempty"`
+	SourceBucket    string     `json:"source_bucket,omitempty"`
+	Step            int        `json:"step"`
+	Phase           string     `json:"phase"`
+	Held            bool       `json:"held"`
+	Finalized       bool       `json:"finalized"`
+	DocumentPresent bool       `json:"document_present"`
+	Claimed         bool       `json:"claimed"`
+	Claim           string     `json:"claim,omitempty"`
+	ClaimUntil      *time.Time `json:"claim_until,omitempty"`
+}
+
+// QuarantineTarget names the default backend recorded when quarantining an
+// absent document UUID that has no existing receipt.
+type QuarantineTarget struct {
+	VectorMode  string
+	VectorIndex string
+}
+
+// HeldDeletionReleaser releases a held or unfinished deletion receipt after
+// verified cleanup.
+type HeldDeletionReleaser interface {
+	ReleaseHeldDeletion(ctx context.Context, id DocumentID, incarnation string, ops DeleteOperations) error
+}
+
+// HeldDeletionStore inspects, quarantines and releases held identities.
+type HeldDeletionStore interface {
+	HeldDeletionReleaser
+	ListHeldDeletions(ctx context.Context) ([]HeldDeletion, error)
+	QuarantineDeletion(ctx context.Context, id DocumentID, target QuarantineTarget) (HeldDeletion, error)
 }
 
 // DocumentDeleter durably checkpoints the cleanup of one document incarnation.

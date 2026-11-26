@@ -194,7 +194,7 @@ func TestScopedFileAuthorizationAndDeletionLocking(t *testing.T) {
 	// Non-owner grantee (even with read+download) cannot delete.
 	rec := newDeletionRecorder()
 	ops := rec.ops("")
-	ops.InMemory = true
+	ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
 	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.peer, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
 	require.ErrorIs(t, err, domain.ErrDocumentNotFound)
 	require.Empty(t, rec.all())
@@ -282,7 +282,7 @@ func TestScopedDeletionCancellationBeforeCommitLeavesDocumentIntact(t *testing.T
 	docID := f.acceptOwned(t, f.owner, "", "documents/doc/cancel/orig.pdf")
 	rec := newDeletionRecorder()
 	ops := rec.ops("")
-	ops.InMemory = true
+	ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
 
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -337,7 +337,7 @@ func TestScopedDeletionIntentWaitsForServiceSigning(t *testing.T) {
 
 	rec := newDeletionRecorder()
 	ops := rec.ops("")
-	ops.InMemory = true
+	ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
 	type beginResult struct {
 		complete bool
 		err      error
