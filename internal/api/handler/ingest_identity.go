@@ -163,7 +163,9 @@ func acceptIngestWith(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return result.Outcome, nil
 	}
-	trace.SpanFromContext(r.Context()).SetAttributes(tracing.DocumentAttributes(string(result.DocumentID))...)
+	if !tracing.RedactIdentifiers(r.Context()) && req.Owner == nil {
+		trace.SpanFromContext(r.Context()).SetAttributes(tracing.DocumentAttributes(string(result.DocumentID))...)
+	}
 	if req.EvaluationReceipt != "" && result.Outcome == domain.AcceptAccepted && result.Incarnation != "" {
 		fixtureHeaders(rw, domain.FixtureOwned, result.Incarnation)
 	}

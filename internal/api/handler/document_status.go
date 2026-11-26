@@ -101,7 +101,7 @@ func (p documentSummaryProjection) body(doc domain.DocumentSummary) any {
 func scopedDocumentStatusHandler(cs domain.ChunkStore, opts documentStatusOptions) http.HandlerFunc {
 	now := clockOrDefault(opts.now)
 	return func(w http.ResponseWriter, r *http.Request) {
-		subject, ok := requireScopedSubject(w, r, now)
+		subject, ok := requireAuditedScopedSubject(w, r, now, opts.audit, "document_status")
 		if !ok {
 			return
 		}
@@ -117,19 +117,27 @@ func scopedDocumentStatusHandler(cs domain.ChunkStore, opts documentStatusOption
 		}
 		lister, capable := cs.(domain.ScopedDocumentLister)
 		if !capable {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "document_status", "error", "status_unavailable", id.String(), "")
 			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document status is unavailable")
 			return
 		}
 		summary, fetchErr := fetchVerifiedScopedSummary(r.Context(), lister, subject, now, domain.DocumentID(id.String()), projection.incarnation)
 		if fetchErr != nil {
 			if fetchErr.cause != nil {
-				slog.ErrorContext(r.Context(), "look up scoped document summary", "document_id", id, "error", fetchErr.cause)
+				slog.ErrorContext(r.Context(), "look up scoped document summary", "error", fetchErr.cause)
 			}
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "document_status", statusAuditOutcome(fetchErr.status), fetchErr.errCode, id.String(), "")
 			writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
 			return
 		}
+		rev := summary.Revision
 		if summary.Document == nil {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, &rev, "document_status", "deny", "not_found", id.String(), "")
 			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
+			return
+		}
+		docIncarnation := summary.Document.Incarnation
+		if !requireAuditedAllow(r.Context(), w, opts.audit, &subject, &rev, "document_status", "authorized", id.String(), docIncarnation) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

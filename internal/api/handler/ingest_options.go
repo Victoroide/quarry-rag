@@ -19,6 +19,7 @@ type ingestOptions struct {
 	fixtureVectorIdentity string
 	journal               domain.SourceUploadJournal
 	owned                 bool
+	audit                 domain.SecurityAuditRecorder
 }
 
 // WithOwnedIngestion binds every upload to the verified principal in the
@@ -27,6 +28,11 @@ type ingestOptions struct {
 // switch yet; it is reachable only through this internal option.
 func WithOwnedIngestion() IngestOption {
 	return func(opts *ingestOptions) { opts.owned = true }
+}
+
+// WithIngestAudit records bounded security audit events for owned ingestion denials and failures.
+func WithIngestAudit(recorder domain.SecurityAuditRecorder) IngestOption {
+	return func(opts *ingestOptions) { opts.audit = recorder }
 }
 
 // WithEvaluationFixtures enables receipt-qualified admission for one staging prefix.

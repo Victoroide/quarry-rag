@@ -27,12 +27,18 @@ type documentListOptions struct {
 	scoped          bool
 	streamBatchSize int
 	now             func() time.Time
+	audit           domain.SecurityAuditRecorder
 }
 
 // WithScopedListing enforces tenant and read-grant checks inside inventory
 // queries without exposing a partially protected public mode.
 func WithScopedListing() DocumentListOption {
 	return func(opts *documentListOptions) { opts.scoped = true }
+}
+
+// WithListingAudit records bounded security audit events for scoped document listing.
+func WithListingAudit(recorder domain.SecurityAuditRecorder) DocumentListOption {
+	return func(opts *documentListOptions) { opts.audit = recorder }
 }
 
 func withScopedStreamBatchSize(size int) DocumentListOption {
@@ -53,11 +59,17 @@ type DocumentStatusOption func(*documentStatusOptions)
 type documentStatusOptions struct {
 	scoped bool
 	now    func() time.Time
+	audit  domain.SecurityAuditRecorder
 }
 
 // WithScopedStatus enforces tenant and read-grant checks on status lookups.
 func WithScopedStatus() DocumentStatusOption {
 	return func(opts *documentStatusOptions) { opts.scoped = true }
+}
+
+// WithStatusAudit records bounded security audit events for scoped document status lookups.
+func WithStatusAudit(recorder domain.SecurityAuditRecorder) DocumentStatusOption {
+	return func(opts *documentStatusOptions) { opts.audit = recorder }
 }
 
 func withStatusClock(now func() time.Time) DocumentStatusOption {
@@ -70,12 +82,18 @@ type FileOption func(*fileOptions)
 type fileOptions struct {
 	scoped bool
 	now    func() time.Time
+	audit  domain.SecurityAuditRecorder
 }
 
 // WithScopedFile enforces owner or read-plus-download grants and assertion-bounded
 // presigned lifetimes on original-file downloads.
 func WithScopedFile() FileOption {
 	return func(opts *fileOptions) { opts.scoped = true }
+}
+
+// WithFileAudit records bounded security audit events for scoped file signing denials and failures.
+func WithFileAudit(recorder domain.SecurityAuditRecorder) FileOption {
+	return func(opts *fileOptions) { opts.audit = recorder }
 }
 
 func withFileClock(now func() time.Time) FileOption {
@@ -86,6 +104,11 @@ func withFileClock(now func() time.Time) FileOption {
 // checkpointed deletion intent.
 func WithScopedDeletion() DeleteOption {
 	return func(opts *deleteOptions) { opts.scoped = true }
+}
+
+// WithDeleteAudit records bounded security audit events for scoped deletion denials and failures.
+func WithDeleteAudit(recorder domain.SecurityAuditRecorder) DeleteOption {
+	return func(opts *deleteOptions) { opts.audit = recorder }
 }
 
 func withDeleteClock(now func() time.Time) DeleteOption {

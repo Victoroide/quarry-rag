@@ -131,7 +131,7 @@ func scopedListDocumentsHandler(cs domain.ChunkStore, opts documentListOptions) 
 		batchSize = defaultScopedStreamBatchSize
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		subject, ok := requireScopedSubject(w, r, now)
+		subject, ok := requireAuditedScopedSubject(w, r, now, opts.audit, "document_list")
 		if !ok {
 			return
 		}
@@ -148,11 +148,12 @@ func scopedListDocumentsHandler(cs domain.ChunkStore, opts documentListOptions) 
 		projection := documentSummaryOptions(query)
 		lister, capable := cs.(domain.ScopedDocumentLister)
 		if !capable {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "document_list", "error", "inventory_unavailable", "", "")
 			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document inventory is unavailable")
 			return
 		}
 		if !query.Has("limit") && !query.Has("after") {
-			streamScopedDocumentSummaries(w, r, lister, subject, now, batchSize, collection, projection)
+			streamScopedDocumentSummaries(w, r, lister, subject, now, batchSize, collection, projection, opts.audit)
 			return
 		}
 		limit, err := strconv.Atoi(query.Get("limit"))
@@ -174,7 +175,12 @@ func scopedListDocumentsHandler(cs domain.ChunkStore, opts documentListOptions) 
 			if fetchErr.cause != nil {
 				slog.ErrorContext(r.Context(), "list scoped documents page", "error", fetchErr.cause)
 			}
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "document_list", statusAuditOutcome(fetchErr.status), fetchErr.errCode, "", "")
 			writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
+			return
+		}
+		rev := page.Revision
+		if !requireAuditedAllow(r.Context(), w, opts.audit, &subject, &rev, "document_list", "authorized", "", "") {
 			return
 		}
 		var next *string
@@ -205,26 +211,37 @@ func streamScopedDocumentSummaries(
 	batchSize int,
 	collection string,
 	projection documentSummaryProjection,
+	audit domain.SecurityAuditRecorder,
 ) {
 	after := ""
 	count := 0
 	started := false
+	allowAudited := false
 	for {
 		page, fetchErr := fetchVerifiedScopedPage(r.Context(), lister, subject, now, after, batchSize, collection, projection.incarnation)
 		if fetchErr != nil {
 			if fetchErr.cause != nil {
 				slog.ErrorContext(r.Context(), "stream scoped documents", "error", fetchErr.cause)
 			}
+			recordSecurityAuditBestEffort(r.Context(), audit, &subject, nil, "document_list", statusAuditOutcome(fetchErr.status), fetchErr.errCode, "", "")
 			if !started {
 				writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
 			}
 			return
+		}
+		if !allowAudited {
+			rev := page.Revision
+			if !requireAuditedAllow(r.Context(), w, audit, &subject, &rev, "document_list", "authorized", "", "") {
+				return
+			}
+			allowAudited = true
 		}
 		if len(page.Documents) == 0 {
 			break
 		}
 		for _, doc := range page.Documents {
 			if !subject.ValidAt(now()) {
+				recordSecurityAuditBestEffort(r.Context(), audit, &subject, nil, "document_list", "deny", "credential_expired", "", "")
 				if !started {
 					writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 				}
@@ -258,6 +275,7 @@ func streamScopedDocumentSummaries(
 		after = page.Documents[len(page.Documents)-1].ID
 	}
 	if !subject.ValidAt(now()) {
+		recordSecurityAuditBestEffort(r.Context(), audit, &subject, nil, "document_list", "deny", "credential_expired", "", "")
 		if !started {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 		}

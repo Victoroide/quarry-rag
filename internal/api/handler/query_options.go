@@ -49,10 +49,16 @@ type queryOptions struct {
 	reranker          retriever.Reranker
 	noEvidenceCatalog *pipeline.NoEvidenceCatalog
 	citationVerifier  pipeline.CitationVerifier
+	audit             domain.SecurityAuditRecorder
 }
 
 // QueryOption configures optional query dependencies.
 type QueryOption func(*queryOptions)
+
+// WithQueryAudit records bounded security audit events for authorized query decisions.
+func WithQueryAudit(recorder domain.SecurityAuditRecorder) QueryOption {
+	return func(opts *queryOptions) { opts.audit = recorder }
+}
 
 // WithReranker selects the reranker used before synthesis context selection.
 func WithReranker(r retriever.Reranker) QueryOption {

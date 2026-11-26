@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/api/middleware"
 	"github.com/Victoroide/quarry-rag/internal/cleanup"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 )
 
@@ -29,6 +31,7 @@ type deleteOptions struct {
 	legacyReservations bool
 	scoped             bool
 	now                func() time.Time
+	audit              domain.SecurityAuditRecorder
 }
 
 // WithLegacyReservations makes an ID-only request commit a durable reservation
@@ -192,7 +195,11 @@ func writeDeleteResult(ctx context.Context, w http.ResponseWriter, docID string,
 	case errors.Is(err, domain.ErrDeletionInactive):
 		writeJSONError(w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
 	default:
-		slog.ErrorContext(ctx, "delete document", "document_id", docID, "error", err)
+		if tracing.RedactIdentifiers(ctx) {
+			slog.ErrorContext(ctx, "delete document", "error", err)
+		} else {
+			slog.ErrorContext(ctx, "delete document", "document_id", docID, "error", err)
+		}
 		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to delete document")
 	}
 }
@@ -216,7 +223,11 @@ func writeDeleteGateError(ctx context.Context, w http.ResponseWriter, docIDStr s
 		w.Header().Set("Retry-After", "30")
 		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
 	default:
-		slog.ErrorContext(ctx, "check document writers", "document_id", docIDStr, "error", gateErr)
+		if tracing.RedactIdentifiers(ctx) {
+			slog.ErrorContext(ctx, "check document writers", "error", gateErr)
+		} else {
+			slog.ErrorContext(ctx, "check document writers", "document_id", docIDStr, "error", gateErr)
+		}
 		w.Header().Set("Retry-After", "30")
 		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 	}
@@ -225,7 +236,9 @@ func writeDeleteGateError(ctx context.Context, w http.ResponseWriter, docIDStr s
 func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects cleanup.ObjectDeleter, options deleteOptions) http.HandlerFunc {
 	now := clockOrDefault(options.now)
 	return func(w http.ResponseWriter, r *http.Request) {
-		subject, ok := requireScopedSubject(w, r, now)
+		ctx := tracing.WithRedactIdentifiers(r.Context(), true)
+		r = r.WithContext(ctx)
+		subject, ok := requireAuditedScopedSubject(w, r, now, options.audit, "document_delete")
 		if !ok {
 			return
 		}
@@ -241,6 +254,7 @@ func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, ob
 			return
 		}
 		if query.Has("release_held") {
+			recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "deny", "release_held_unsupported", parsedID.String(), "")
 			writeJSONError(w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
 			return
 		}
@@ -249,35 +263,63 @@ func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, ob
 			writeJSONError(w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
 			return
 		}
+		canonical := parsedID.String()
 		deleter, capable := cs.(domain.ScopedDocumentDeleter)
 		if !capable {
+			recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "error", "deletion_unavailable", canonical, incarnation)
 			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document deletion is unavailable")
 			return
 		}
-		canonical := parsedID.String()
-		release, gateErr := acquireDeleteWriter(r.Context(), cs)
+		release, gateErr := acquireDeleteWriter(ctx, cs)
 		if gateErr != nil {
 			if (errors.Is(gateErr, context.Canceled) || errors.Is(gateErr, context.DeadlineExceeded)) && !subject.ValidAt(now()) {
-				writeDeleteResult(r.Context(), w, canonical, domain.ErrUnauthorized)
+				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "deny", "credential_expired", canonical, incarnation)
+				writeDeleteResult(ctx, w, canonical, domain.ErrUnauthorized)
 				return
 			}
-			writeDeleteGateError(r.Context(), w, docIDStr, gateErr)
+			recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "error", "writer_gate_unavailable", canonical, incarnation)
+			writeDeleteGateError(ctx, w, docIDStr, gateErr)
 			return
 		}
 		if release != nil {
 			defer release()
 		}
-		err = cleanup.RemoveScoped(r.Context(), deleter, pcDriver, objects, options.targets, subject.Principal, subject.ExpiresAt, domain.DocumentID(canonical), incarnation)
+		err = cleanup.RemoveScoped(ctx, deleter, pcDriver, objects, options.targets, subject.Principal, subject.ExpiresAt, domain.DocumentID(canonical), incarnation)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			if !subject.ValidAt(now()) {
 				err = domain.ErrUnauthorized
 			} else if errors.Is(err, cleanup.ErrScopedDeletionCanceled) {
+				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "error", "deletion_canceled", canonical, incarnation)
 				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document deletion canceled")
 				return
 			}
 		}
-		writeDeleteResult(r.Context(), w, canonical, err)
+		if err != nil {
+			auditDeleteFailure(ctx, options.audit, &subject, canonical, incarnation, err)
+		}
+		writeDeleteResult(ctx, w, canonical, err)
 	}
+}
+
+func auditDeleteFailure(ctx context.Context, recorder domain.SecurityAuditRecorder, subject *middleware.VerifiedSubject, docID, incarnation string, err error) {
+	outcome, reason := "error", "delete_failed"
+	switch {
+	case errors.Is(err, domain.ErrUnauthorized):
+		outcome, reason = "deny", "credential_expired"
+	case errors.Is(err, domain.ErrForbidden):
+		outcome, reason = "deny", "access_denied"
+	case errors.Is(err, domain.ErrDocumentNotFound):
+		outcome, reason = "deny", "not_found"
+	case errors.Is(err, domain.ErrDeletionPreconditionRequired),
+		errors.Is(err, domain.ErrDeletionPreconditionFailed),
+		errors.Is(err, domain.ErrFixtureDeletionRequired):
+		outcome, reason = "deny", "precondition_failed"
+	case errors.Is(err, domain.ErrAuthzModeMismatch):
+		reason = "authz_mode_mismatch"
+	case errors.Is(err, domain.ErrDeletionBusy):
+		reason = "deletion_busy"
+	}
+	recordSecurityAuditBestEffort(ctx, recorder, subject, nil, "document_delete", outcome, reason, docID, incarnation)
 }
 
 // ListDocumentsHandler returns document summaries or legacy references.

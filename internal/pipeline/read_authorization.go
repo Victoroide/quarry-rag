@@ -58,6 +58,13 @@ func (a *ReadAuthorization) now() time.Time {
 // Expired reports whether the credential has reached its exact expiry.
 func (a *ReadAuthorization) Expired() bool { return a.expired() }
 
+// PolicyRevision returns the policy revision recorded when the read scope was derived.
+func (a *ReadAuthorization) PolicyRevision() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.revision
+}
+
 func (a *ReadAuthorization) expired() bool {
 	return a.ExpiresAt.IsZero() || !a.now().Before(a.ExpiresAt)
 }

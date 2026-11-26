@@ -11,6 +11,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -38,6 +39,7 @@ func (s *ChunkStage) ID() StageID { return StageChunk }
 
 // Run splits the raw text or ordered layout sections into chunks.
 func (s *ChunkStage) Run(ctx context.Context, ic *IngestContext) error {
+	redact := tracing.RedactIdentifiers(ctx) || ic.Tenant != ""
 	var err error
 	if len(ic.LayoutSections) > 0 {
 		ic.Chunks, err = s.chunker.ChunkLayout(ctx, ic.DocumentID, ic.LayoutSections, s.profile)
@@ -45,12 +47,22 @@ func (s *ChunkStage) Run(ctx context.Context, ic *IngestContext) error {
 		ic.Chunks, err = s.chunker.ChunkForEmbedding(ctx, ic.DocumentID, ic.RawText, s.profile)
 	}
 	if err != nil {
+		if redact {
+			return fmt.Errorf("chunk_stage: %w", err)
+		}
 		return fmt.Errorf("chunk_stage: document %s: %w", ic.DocumentID, err)
 	}
 	if len(ic.Chunks) == 0 {
+		if redact {
+			return fmt.Errorf("chunk_stage: %w", ErrNoChunks)
+		}
 		return fmt.Errorf("chunk_stage: document %s: %w", ic.DocumentID, ErrNoChunks)
 	}
-	slog.DebugContext(ctx, "document chunked", "document_id", ic.DocumentID, "chunks", len(ic.Chunks))
+	if redact {
+		slog.DebugContext(ctx, "document chunked", "chunks", len(ic.Chunks))
+	} else {
+		slog.DebugContext(ctx, "document chunked", "document_id", ic.DocumentID, "chunks", len(ic.Chunks))
+	}
 	return nil
 }
 
@@ -73,6 +85,7 @@ func (s *EmbedStage) ID() StageID { return StageEmbed }
 
 // Run generates embeddings for all chunks.
 func (s *EmbedStage) Run(ctx context.Context, ic *IngestContext) error {
+	redact := tracing.RedactIdentifiers(ctx) || ic.Tenant != ""
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(s.concurrency)
 	for i := range ic.Chunks {
@@ -85,6 +98,9 @@ func (s *EmbedStage) Run(ctx context.Context, ic *IngestContext) error {
 			}
 			emb, err := s.embedder.Embed(groupCtx, ic.Chunks[i].Text)
 			if err != nil {
+				if redact {
+					return fmt.Errorf("embed_stage: %w", err)
+				}
 				return fmt.Errorf("embed_stage: chunk %s: %w", ic.Chunks[i].ID, err)
 			}
 			ic.Chunks[i].Embedding = emb
@@ -97,7 +113,11 @@ func (s *EmbedStage) Run(ctx context.Context, ic *IngestContext) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	slog.DebugContext(ctx, "document chunks embedded", "document_id", ic.DocumentID, "chunks", len(ic.Chunks))
+	if redact {
+		slog.DebugContext(ctx, "document chunks embedded", "chunks", len(ic.Chunks))
+	} else {
+		slog.DebugContext(ctx, "document chunks embedded", "document_id", ic.DocumentID, "chunks", len(ic.Chunks))
+	}
 	return nil
 }
 
@@ -218,7 +238,11 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 		return err
 	}
 
-	slog.DebugContext(ctx, "document vectors persisted", "document_id", ic.DocumentID, "doc_type", docType, "chunks", len(ic.Chunks))
+	if tracing.RedactIdentifiers(ctx) || ic.Tenant != "" {
+		slog.DebugContext(ctx, "document vectors persisted", "doc_type", docType, "chunks", len(ic.Chunks))
+	} else {
+		slog.DebugContext(ctx, "document vectors persisted", "document_id", ic.DocumentID, "doc_type", docType, "chunks", len(ic.Chunks))
+	}
 	if s.visibilityTimeout <= 0 {
 		ic.observeIndex(domain.VisibilityDisabled)
 		return nil
@@ -327,7 +351,11 @@ func (s *PersistStage) waitForVisibility(ctx context.Context, ic *IngestContext,
 	}
 	ic.observeIndex(domain.VisibilityTimeout)
 	metrics.FromContext(ctx).IndexVisibility.WithLabelValues("timeout").Inc()
-	attrs := []any{"document_id", ic.DocumentID, "waited_ms", time.Since(start).Milliseconds()}
+	var attrs []any
+	if !tracing.RedactIdentifiers(ctx) && ic.Tenant == "" {
+		attrs = append(attrs, "document_id", ic.DocumentID)
+	}
+	attrs = append(attrs, "waited_ms", time.Since(start).Milliseconds())
 	if probeErr != nil {
 		attrs = append(attrs, "error", probeErr)
 	}

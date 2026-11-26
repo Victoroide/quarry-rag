@@ -40,10 +40,16 @@ func ownedIngestHandler(wk *worker.Worker, cs domain.ChunkStore, s3Client Object
 		rw.Header().Set("Cache-Control", "private, no-store")
 		subject, ok := middleware.SubjectFromContext(r.Context())
 		if !ok || !subject.ValidAt(time.Now()) {
+			var auditSubject *middleware.VerifiedSubject
+			if ok {
+				auditSubject = &subject
+			}
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, auditSubject, nil, "ingest", "deny", "credential_expired", "", "")
 			writeJSONError(rw, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 			return
 		}
 		if len(r.Header.Values(evaluation.ReceiptHeader)) != 0 {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "ingest", "deny", "evaluation_fixtures_disabled", "", "")
 			fixtureUnavailable(rw)
 			return
 		}
@@ -71,19 +77,64 @@ type ownedIngest struct {
 // authorize decides, before any extraction or external write, whether the
 // principal may use the supplied identity. An identity the principal cannot use
 // receives one answer whatever the reason.
+func (o ownedIngest) auditSubject() *middleware.VerifiedSubject {
+	return &middleware.VerifiedSubject{Principal: o.principal, ExpiresAt: o.validUntil}
+}
+
+// acceptAudit maps a durable acceptance decision to the audit pair of the
+// ingest event. record is false when the acceptance transaction already
+// recorded the allow event. Every declared outcome has an explicit pair, and
+// known is false only for an outcome this mapping has never seen.
+func acceptAudit(outcome domain.AcceptOutcome) (auditOutcome, reason string, record, known bool) {
+	switch outcome {
+	case domain.AcceptAccepted, domain.AcceptDuplicate, domain.AcceptInProgress, domain.AcceptRequeued:
+		return "", "", false, true
+	case domain.AcceptConflict, domain.AcceptDeletionConflict:
+		return "deny", "conflict", true, true
+	case domain.AcceptNotFound:
+		return "deny", "not_found", true, true
+	case domain.AcceptForbidden:
+		return "deny", "access_denied", true, true
+	case domain.AcceptUnauthorized:
+		return "deny", "credential_expired", true, true
+	case domain.AcceptNeedsSource, domain.AcceptOCRRetryRequired, domain.AcceptNeedsPDFText,
+		domain.AcceptOCRRetryAfterExpiry, domain.AcceptUploadExpired:
+		return "deny", "precondition_failed", true, true
+	case domain.AcceptQueueFull:
+		return "error", "queue_full", true, true
+	case domain.AcceptFrozen:
+		return "error", "writers_frozen", true, true
+	}
+	return "error", "accept_failed", true, false
+}
+
+func (o ownedIngest) recordAcceptFailure(ctx context.Context, outcome domain.AcceptOutcome, err error, docID string) {
+	auditOutcome, reason := "error", "accept_failed"
+	if err == nil {
+		var record bool
+		if auditOutcome, reason, record, _ = acceptAudit(outcome); !record {
+			return
+		}
+	}
+	recordSecurityAuditBestEffort(ctx, o.opts.audit, o.auditSubject(), nil, "ingest", auditOutcome, reason, docID, "")
+}
+
 func (o ownedIngest) authorize(rw http.ResponseWriter, r *http.Request, collection, supplied string) (domain.OwnedTarget, *domain.OwnerBinding, bool) {
 	target, err := o.store.AuthorizeOwnedIngest(r.Context(), o.principal, collection, domain.DocumentID(supplied))
 	if err != nil {
 		slog.ErrorContext(r.Context(), "authorize owned ingest", "error", err)
+		recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "error", "authorize_failed", supplied, "")
 		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return target, nil, false
 	}
 	switch {
 	case target.Decision == domain.OwnedForbidden:
+		recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "deny", "access_denied", supplied, "")
 		writeJSONError(rw, http.StatusForbidden, "forbidden", "access denied")
 		return target, nil, false
 	case target.Decision == domain.OwnedNotFound, target.Decision == domain.OwnedNew && supplied != "",
 		target.Decision != domain.OwnedNew && (supplied == "" || target.Incarnation == ""):
+		recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "deny", "not_found", supplied, "")
 		writeJSONError(rw, http.StatusNotFound, "not_found", "document not found")
 		return target, nil, false
 	}
@@ -138,7 +189,8 @@ func (o ownedIngest) json(rw http.ResponseWriter, r *http.Request) {
 	acceptReq.Document.Content = req.Content
 	acceptReq.Document.Metadata = req.Metadata
 	acceptReq.Fingerprint = chunker.ScopedFingerprint(req.Collection, req.Content)
-	_, _ = acceptIngest(rw, r, o.wk, o.cs, acceptReq)
+	outcome, acceptErr := acceptIngest(rw, r, o.wk, o.cs, acceptReq)
+	o.recordAcceptFailure(r.Context(), outcome, acceptErr, docID)
 }
 
 // formField returns the only value of a multipart field. Query parameters never
@@ -300,10 +352,12 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 	}
 	if target.Decision == domain.OwnedExisting {
 		// The caller's own document already stores its original, so a retry writes no object.
-		_, _ = acceptIngest(rw, r, o.wk, o.cs, acceptReq)
+		outcome, acceptErr := acceptIngest(rw, r, o.wk, o.cs, acceptReq)
+		o.recordAcceptFailure(r.Context(), outcome, acceptErr, docID)
 		return
 	}
 	if (upload.ocrPending || upload.pdf != nil) && o.s3 == nil {
+		recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "error", "storage_unavailable", docID, owner.Incarnation)
 		rw.Header().Set("Retry-After", "30")
 		writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 		return
@@ -318,6 +372,7 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 		key, uploadErr := o.s3.Upload(r.Context(), docID+"/"+owner.Incarnation+"/"+uuid.NewString(), docType, fileName, ft, bytes.NewReader(fileData))
 		if uploadErr != nil {
 			slog.ErrorContext(r.Context(), "upload source file", "error", uploadErr)
+			recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "error", "storage_unavailable", docID, owner.Incarnation)
 			rw.Header().Set("Retry-After", "30")
 			writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 			return
@@ -326,6 +381,7 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 		acceptReq.Document.S3Key = s3Key
 	}
 	outcome, acceptErr := acceptIngest(rw, r, o.wk, o.cs, acceptReq)
+	o.recordAcceptFailure(r.Context(), outcome, acceptErr, docID)
 	if s3Key != nil && outcome != domain.AcceptAccepted {
 		releaseAttemptObject(r.Context(), o.cs, o.s3, docID, *s3Key, acceptErr)
 	}

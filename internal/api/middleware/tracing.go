@@ -15,6 +15,15 @@ import (
 
 // Tracing continues incoming traces and records requests by matched route.
 func Tracing(next http.Handler, captureContent bool) http.Handler {
+	return TracingWithRedaction(next, captureContent, false)
+}
+
+// TracingWithRedaction continues incoming traces while optionally forcing
+// content capture off and marking contexts to omit document/object identifiers.
+func TracingWithRedaction(next http.Handler, captureContent, redactIdentifiers bool) http.Handler {
+	if redactIdentifiers {
+		captureContent = false
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/livez", "/readyz", "/health":
@@ -23,6 +32,9 @@ func Tracing(next http.Handler, captureContent bool) http.Handler {
 		}
 		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 		ctx = tracing.WithContentCapture(ctx, captureContent)
+		if redactIdentifiers {
+			ctx = tracing.WithRedactIdentifiers(ctx, true)
+		}
 		requestID := logctx.RequestID(ctx)
 		method := spanMethod(r.Method)
 		ctx, span := otel.Tracer("github.com/Victoroide/quarry-rag/internal/api/middleware").Start(ctx, method+" unmatched", trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(

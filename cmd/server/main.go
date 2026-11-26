@@ -19,6 +19,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/api"
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
+	"github.com/Victoroide/quarry-rag/internal/api/middleware"
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/citationsupport"
 	"github.com/Victoroide/quarry-rag/internal/config"
@@ -34,6 +35,7 @@ import (
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
+	"github.com/Victoroide/quarry-rag/internal/subjectauth"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
@@ -74,7 +76,11 @@ func run() error {
 		defer shutdownCancel()
 		_ = shutdownTracing(shutdownCtx)
 	}()
-	ctx = tracing.WithContentCapture(ctx, cfg.Tracing.CaptureContent)
+	captureContent := cfg.Tracing.CaptureContent && cfg.AuthzMode != config.AuthzModeGrants
+	ctx = tracing.WithContentCapture(ctx, captureContent)
+	if cfg.AuthzMode == config.AuthzModeGrants {
+		ctx = tracing.WithRedactIdentifiers(ctx, true)
+	}
 	for _, warning := range cfg.Warnings {
 		slog.Warn(warning)
 	}
@@ -94,7 +100,36 @@ func run() error {
 	if migrationErr := pgClient.RunMigrations(startupCtx); migrationErr != nil {
 		return fmt.Errorf("startup: migrations: %w", migrationErr)
 	}
+	pgClient.SetAuthzMode(cfg.AuthzMode)
 	logger.Info("postgres connected")
+
+	var (
+		subjectVerifier *subjectauth.Verifier
+		subjectResolver middleware.SubjectResolver
+		readAuthority   domain.ReadAuthority
+		auditRecorder   domain.SecurityAuditRecorder
+	)
+	if cfg.AuthzMode == config.AuthzModeGrants {
+		observer := func(event subjectauth.TrustEvent) error {
+			auditCtx, auditCancel := context.WithTimeout(ctx, 2*time.Second)
+			defer auditCancel()
+			return pgClient.RecordSecurityAudit(auditCtx, domain.SecurityAuditEvent{
+				Action:  event.Action,
+				Outcome: event.Outcome,
+				Reason:  event.Reason,
+			})
+		}
+		subjectVerifier, err = subjectauth.NewVerifierWithObserver(cfg.SubjectAuthority.Issuer, cfg.SubjectAuthority.Audience, cfg.SubjectAuthority.JWKSFile, observer)
+		if err != nil {
+			return fmt.Errorf("startup: subject verifier: %w", err)
+		}
+		if trustErr := subjectVerifier.ValidateTrust(); trustErr != nil {
+			return fmt.Errorf("startup: subject trust validation: %w", trustErr)
+		}
+		subjectResolver = pgClient
+		readAuthority = pgstore.GrantReader{Pool: pgClient.Pool}
+		auditRecorder = pgClient
+	}
 
 	// Select vector store, embedder, and LLM. FAKE MODE (GO_RAG_FAKE_MODE) wires
 	// deterministic offline implementations so the full HTTP API can be exercised
@@ -232,7 +267,7 @@ func run() error {
 		textDetector = detector
 	}
 	owner := hostname + "-" + uuid.NewString()
-	w := worker.New(pgClient, ingestStages, vecDeleter, worker.Options{FixtureVectorIdentity: fixtureVectorIdentity, HostedVectorManifest: cfg.HostedVectorManifest, Metrics: serviceMetrics, Workers: cfg.IngestWorkers, MaxAttempts: cfg.IngestMaxAttempts, Lease: cfg.IngestLease, JobTimeout: cfg.IngestJobTimeout, PollInterval: cfg.IngestPollInterval, Owner: owner, OCR: textDetector})
+	w := worker.New(pgClient, ingestStages, vecDeleter, worker.Options{FixtureVectorIdentity: fixtureVectorIdentity, HostedVectorManifest: cfg.HostedVectorManifest, Metrics: serviceMetrics, Workers: cfg.IngestWorkers, MaxAttempts: cfg.IngestMaxAttempts, Lease: cfg.IngestLease, JobTimeout: cfg.IngestJobTimeout, PollInterval: cfg.IngestPollInterval, Owner: owner, OCR: textDetector, RedactTelemetry: cfg.AuthzMode == config.AuthzModeGrants})
 	w.Start(ctx)
 	defer func() {
 		shutdownCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
@@ -283,6 +318,10 @@ func run() error {
 		Reranker:              reranker,
 		NoEvidenceCatalog:     noEvidenceCatalog,
 		CitationVerifier:      citationVerifier,
+		SubjectVerifier:       subjectVerifier,
+		SubjectResolver:       subjectResolver,
+		ReadAuthority:         readAuthority,
+		AuditRecorder:         auditRecorder,
 	})
 
 	srv := &http.Server{
