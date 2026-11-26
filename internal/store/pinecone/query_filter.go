@@ -21,7 +21,22 @@ const (
 )
 
 func buildFilter(docType string, ids []string, collection string) *structpb.Struct {
+	return buildScopedFilter(docType, ids, collection, "", nil)
+}
+
+// buildScopedFilter adds the owning tenant and the incarnations a subject may
+// read to the document predicate. Both lists describe the same documents, so
+// neither exceeds the document list's size.
+func buildScopedFilter(docType string, ids []string, collection, tenant string, incarnations []string) *structpb.Struct {
 	fields := make(map[string]*structpb.Value)
+	if tenant != "" {
+		fields[domain.VectorTenantKey] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$eq": structpb.NewStringValue(tenant)}})
+		values := make([]*structpb.Value, len(incarnations))
+		for i, incarnation := range incarnations {
+			values[i] = structpb.NewStringValue(incarnation)
+		}
+		fields[domain.VectorRevisionKey] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$in": structpb.NewListValue(&structpb.ListValue{Values: values})}})
+	}
 	if collection != "" {
 		fields["collection"] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$eq": structpb.NewStringValue(collection)}})
 	}
@@ -94,6 +109,11 @@ func (p *Client) queryPartitions(ctx context.Context, embedding []float32, topK 
 	if topK < 1 || uint64(topK) > math.MaxUint32 {
 		return fmt.Errorf("pinecone: topK must be between 1 and %d", uint64(math.MaxUint32))
 	}
+	if filter.Authorized != nil && (filter.DocumentIDs == nil || filter.Authorized.TenantID == "") {
+		// A hosted search has no relation to join, so an authorized scope must
+		// name its tenant and its members. Anything else would search globally.
+		return domain.ErrGrantScopeUnsupported
+	}
 	partitions := 1 + max(0, len(filter.DocumentIDs)-1)/maxInValues
 	if budget != nil && *budget < partitions {
 		return domain.ErrVectorQueryBudget
@@ -101,7 +121,17 @@ func (p *Client) queryPartitions(ctx context.Context, embedding []float32, topK 
 	for part := range partitions {
 		start := part * maxInValues
 		ids := filter.DocumentIDs[start:min(start+maxInValues, len(filter.DocumentIDs))]
-		req := &pinecone.QueryByVectorValuesRequest{Vector: embedding, TopK: uint32(topK), IncludeMetadata: true, MetadataFilter: buildFilter(filter.DocType, ids, filter.Collection)}
+		metadataFilter := buildFilter(filter.DocType, ids, filter.Collection)
+		var members map[string]string
+		if filter.Authorized != nil {
+			var incarnations []string
+			ids, incarnations, members = authorizedMembers(filter.Authorized, ids)
+			if len(ids) == 0 {
+				continue
+			}
+			metadataFilter = buildScopedFilter(filter.DocType, ids, filter.Collection, filter.Authorized.TenantID, incarnations)
+		}
+		req := &pinecone.QueryByVectorValuesRequest{Vector: embedding, TopK: uint32(topK), IncludeMetadata: true, MetadataFilter: metadataFilter}
 		var partitionBudget *int
 		limited := false
 		remainingPartitions := partitions - part - 1
@@ -121,7 +151,49 @@ func (p *Client) queryPartitions(ctx context.Context, embedding []float32, topK 
 		if err != nil {
 			return err
 		}
+		if filter.Authorized != nil {
+			chunks = withinMembers(filter.Authorized, members, chunks)
+		}
 		accept(chunks)
 	}
 	return nil
+}
+
+// authorizedMembers keeps the documents of a partition that the scope lists
+// and pairs each with the incarnation it may read. A document the scope does
+// not list is dropped, so it never reaches a hosted predicate. The members map
+// is keyed by the exact spelling sent to the provider.
+func authorizedMembers(scope *domain.AuthorizedScope, ids []string) (documents, incarnations []string, members map[string]string) {
+	members = make(map[string]string, len(ids))
+	documents = make([]string, 0, len(ids))
+	incarnations = make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		incarnation, ok := scope.IncarnationOf(id)
+		if _, repeated := members[id]; !ok || repeated {
+			continue
+		}
+		if _, duplicate := seen[incarnation]; !duplicate {
+			seen[incarnation] = struct{}{}
+			incarnations = append(incarnations, incarnation)
+		}
+		members[id] = incarnation
+		documents = append(documents, id)
+	}
+	return documents, incarnations, members
+}
+
+// withinMembers rejects any hit whose own metadata contradicts the request.
+// Hosted metadata is untrusted, so identity, tenant and incarnation must match
+// what the request asked for before a hit can rank or reach a preview.
+func withinMembers(scope *domain.AuthorizedScope, members map[string]string, chunks []domain.ScoredChunk) []domain.ScoredChunk {
+	kept := chunks[:0:0]
+	for _, sc := range chunks {
+		incarnation, listed := members[string(sc.Chunk.DocumentID)]
+		revision, _ := sc.Chunk.Metadata[domain.VectorRevisionKey].(string)
+		if listed && scope.SameTenant(sc.Chunk.Metadata) && revision == incarnation {
+			kept = append(kept, sc)
+		}
+	}
+	return kept
 }

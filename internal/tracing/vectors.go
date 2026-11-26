@@ -192,6 +192,15 @@ func (s *vectorStore) ObservesVectorIncarnation() bool {
 	return ok && reader.ObservesVectorIncarnation()
 }
 
+// GrantScope reports how the wrapped store enforces an authorized read
+// scope. A store without that enforcement reports the empty kind.
+func (s *vectorStore) GrantScope() domain.GrantScopeKind {
+	if scoped, ok := s.VectorStore.(domain.GrantScopedVectorStore); ok {
+		return scoped.GrantScope()
+	}
+	return ""
+}
+
 func (s *vectorStore) QueryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
 	return s.query(ctx, topK, func(ctx context.Context) ([]domain.ScoredChunk, error) {
 		return s.filtered.QueryFiltered(ctx, embedding, topK, filter)
