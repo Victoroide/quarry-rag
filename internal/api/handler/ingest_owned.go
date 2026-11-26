@@ -190,6 +190,7 @@ func (o ownedIngest) json(rw http.ResponseWriter, r *http.Request) {
 	acceptReq.Document.Metadata = req.Metadata
 	acceptReq.Fingerprint = chunker.ScopedFingerprint(req.Collection, req.Content)
 	outcome, acceptErr := acceptIngest(rw, r, o.wk, o.cs, acceptReq)
+	ownedOutcomeUnresolved(rw, r, outcome)
 	o.recordAcceptFailure(r.Context(), outcome, acceptErr, docID)
 }
 
@@ -351,9 +352,7 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 		acceptReq.Fingerprint = chunker.ScopedFingerprint(fields.collection, upload.text)
 	}
 	if target.Decision == domain.OwnedExisting {
-		// The caller's own document already stores its original, so a retry writes no object.
-		outcome, acceptErr := acceptIngest(rw, r, o.wk, o.cs, acceptReq)
-		o.recordAcceptFailure(r.Context(), outcome, acceptErr, docID)
+		o.acceptExisting(rw, r, fileData, acceptReq)
 		return
 	}
 	if (upload.ocrPending || upload.pdf != nil) && o.s3 == nil {
@@ -381,8 +380,39 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 		acceptReq.Document.S3Key = s3Key
 	}
 	outcome, acceptErr := acceptIngest(rw, r, o.wk, o.cs, acceptReq)
+	ownedOutcomeUnresolved(rw, r, outcome)
 	o.recordAcceptFailure(r.Context(), outcome, acceptErr, docID)
 	if s3Key != nil && outcome != domain.AcceptAccepted {
 		releaseAttemptObject(r.Context(), o.cs, o.s3, docID, *s3Key, acceptErr)
+	}
+}
+
+// acceptExisting retries the caller's document without writing an object. The
+// store can request the legacy parser fingerprint after confirming ownership
+// and create permission. The second acceptance checks both again.
+func (o ownedIngest) acceptExisting(rw http.ResponseWriter, r *http.Request, file []byte, req domain.AcceptRequest) {
+	outcome, acceptErr := acceptIngest(rw, r, o.wk, o.cs, req)
+	if outcome == domain.AcceptNeedsPDFText && req.PDF != nil {
+		text, err := o.opts.extract(r.Context(), extractor.FileTypePDF, file)
+		switch {
+		case err != nil && extractionErrorIs(err, extractor.ErrNoText):
+			o.recordAcceptFailure(r.Context(), domain.AcceptConflict, nil, string(req.Document.ID))
+			writeJSONError(rw, http.StatusConflict, "conflict", "document_id already exists with different content")
+			return
+		case err != nil:
+			writeExtractionError(rw, r, err)
+			return
+		}
+		req.LegacyParserFingerprint = chunker.ScopedFingerprint(req.Collection, strings.ReplaceAll(text, "\x00", ""))
+		outcome, acceptErr = acceptIngest(rw, r, o.wk, o.cs, req)
+	}
+	ownedOutcomeUnresolved(rw, r, outcome)
+	o.recordAcceptFailure(r.Context(), outcome, acceptErr, string(req.Document.ID))
+}
+
+func ownedOutcomeUnresolved(rw http.ResponseWriter, r *http.Request, outcome domain.AcceptOutcome) {
+	if outcome == domain.AcceptNeedsSource || outcome == domain.AcceptNeedsPDFText {
+		slog.ErrorContext(r.Context(), "owned acceptance left an unresolved outcome", "outcome", outcome)
+		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 	}
 }

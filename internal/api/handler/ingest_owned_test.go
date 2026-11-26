@@ -31,6 +31,8 @@ type ownedStore struct {
 	authorized   []string
 	accepted     []domain.AcceptRequest
 	result       domain.AcceptOutcome
+	results      []domain.AcceptOutcome
+	onAccept     func(int)
 	acceptErr    error
 	storedKey    *string
 	sharedReads  int
@@ -53,7 +55,14 @@ func (s *ownedStore) AuthorizeOwnedIngest(_ context.Context, _ domain.Principal,
 
 func (s *ownedStore) AcceptDocument(_ context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
 	s.accepted = append(s.accepted, req)
-	return domain.AcceptResult{DocumentID: req.Document.ID, Outcome: s.result, Incarnation: req.Owner.Incarnation}, s.acceptErr
+	outcome := s.result
+	if len(s.results) > 0 {
+		outcome, s.results = s.results[0], s.results[1:]
+	}
+	if s.onAccept != nil {
+		s.onAccept(len(s.accepted))
+	}
+	return domain.AcceptResult{DocumentID: req.Document.ID, Outcome: outcome, Incarnation: req.Owner.Incarnation}, s.acceptErr
 }
 
 func (s *ownedStore) CheckFingerprint(context.Context, string) (domain.DocumentID, bool, error) {
@@ -133,10 +142,15 @@ type uploadPart struct{ name, value string }
 // ownedUpload builds a multipart body whose fields and file appear in the given order.
 func ownedUpload(t *testing.T, fileFirst bool, data []byte, fields ...uploadPart) *http.Request {
 	t.Helper()
+	return ownedUploadFile(t, fileFirst, "notes.txt", data, fields...)
+}
+
+func ownedUploadFile(t *testing.T, fileFirst bool, filename string, data []byte, fields ...uploadPart) *http.Request {
+	t.Helper()
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	writeFile := func() {
-		part, err := mw.CreateFormFile("file", "notes.txt")
+		part, err := mw.CreateFormFile("file", filename)
 		require.NoError(t, err)
 		_, err = part.Write(data)
 		require.NoError(t, err)
@@ -593,6 +607,191 @@ func TestOwnedIngestMapsExpiredAcceptanceToUnauthorized(t *testing.T) {
 			} else {
 				require.Empty(t, h.objects.deleted)
 			}
+		})
+	}
+}
+
+func inspectOwnedTestPDF(ctx context.Context, data []byte) (domain.PDFPages, error) {
+	return extractor.ExtractPDFPages(ctx, bytes.NewReader(data))
+}
+
+func TestOwnedHistoricalParserPDFRetry(t *testing.T) {
+	pdf := testutil.PDFWithPageAnnotation("", "BT /F1 14 Tf 20 150 Td (Operations register) Tj ET", "")
+	const legacyText = "Historical\x00 parser text"
+	for _, tc := range []struct {
+		name       string
+		second     domain.AcceptOutcome
+		extractErr error
+		status     int
+		response   string
+	}{
+		{name: "requeued", second: domain.AcceptRequeued, status: http.StatusAccepted, response: "processing"},
+		{name: "completed", second: domain.AcceptDuplicate, status: http.StatusOK, response: "already_ingested"},
+		{name: "processing", second: domain.AcceptInProgress, status: http.StatusAccepted, response: "processing"},
+		{name: "conflict", second: domain.AcceptConflict, status: http.StatusConflict, response: "conflict"},
+		{name: "no_text", extractErr: extractor.ErrNoText, status: http.StatusConflict, response: "conflict"},
+		{name: "extraction_timeout", extractErr: extractor.ErrExtractionTimeout, status: http.StatusUnprocessableEntity, response: "timeout"},
+		{name: "extraction_unavailable", extractErr: extractor.ErrExtractionUnavailable, status: http.StatusServiceUnavailable, response: "unavailable"},
+		{name: "canceled", extractErr: context.Canceled, status: http.StatusUnprocessableEntity, response: "unparseable"},
+		{name: "revoked_during_extraction", second: domain.AcceptForbidden, status: http.StatusForbidden, response: "forbidden"},
+		{name: "ownership_changed", second: domain.AcceptNotFound, status: http.StatusNotFound, response: "not_found"},
+		{name: "expired", second: domain.AcceptUnauthorized, status: http.StatusUnauthorized, response: "unauthorized"},
+		{name: "repeated_signal", second: domain.AcceptNeedsPDFText, status: http.StatusServiceUnavailable, response: "unavailable"},
+		{name: "unexpected_source", second: domain.AcceptNeedsSource, status: http.StatusServiceUnavailable, response: "unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := uuid.NewString()
+			r := ownedUploadFile(t, false, "register.pdf", pdf, uploadPart{"document_id", id}, uploadPart{"collection", "team"})
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			r = r.WithContext(ctx)
+			body := &ownedCountedBody{ReadCloser: r.Body}
+			r.Body = body
+
+			h := newOwnedHarness(t)
+			h.store.targets[id] = domain.OwnedTarget{Decision: domain.OwnedExisting, Incarnation: uuid.NewString()}
+			h.store.results = []domain.AcceptOutcome{domain.AcceptNeedsPDFText}
+			var compatibilityCalls, readsAtAcceptance int
+			h.store.onAccept = func(count int) {
+				if count == 1 {
+					readsAtAcceptance = body.reads
+					if errors.Is(tc.extractErr, context.Canceled) {
+						cancel()
+					}
+				}
+			}
+			h.rebuild(1<<20, WithMixedPDFOCR(inspectOwnedTestPDF), WithExtractor(func(ctx context.Context, kind extractor.FileType, data []byte) (string, error) {
+				compatibilityCalls++
+				require.Equal(t, extractor.FileTypePDF, kind)
+				require.Equal(t, pdf, data)
+				require.Len(t, h.store.accepted, 1, "acceptance must signal before compatibility extraction")
+				require.Equal(t, readsAtAcceptance, body.reads)
+				if errors.Is(tc.extractErr, context.Canceled) {
+					require.ErrorIs(t, ctx.Err(), context.Canceled)
+				}
+				h.store.result = tc.second
+				return legacyText, tc.extractErr
+			}))
+			rec := h.serve(r)
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), `"`+tc.response+`"`)
+			require.Equal(t, 1, compatibilityCalls)
+			require.Positive(t, readsAtAcceptance)
+			require.Equal(t, readsAtAcceptance, body.reads)
+			require.Empty(t, h.objects.uploads)
+			require.Empty(t, h.objects.deleted)
+			require.Zero(t, h.store.sharedReads)
+			first := h.store.accepted[0]
+			require.NotNil(t, first.PDF)
+			require.Empty(t, first.LegacyParserFingerprint)
+			require.False(t, first.TryLegacyPDFText)
+			if tc.extractErr != nil {
+				require.Len(t, h.store.accepted, 1)
+				return
+			}
+			require.Len(t, h.store.accepted, 2)
+			first.LegacyParserFingerprint = chunker.ScopedFingerprint("team", "Historical parser text")
+			require.Equal(t, first, h.store.accepted[1])
+		})
+	}
+}
+
+type ownedCountedBody struct {
+	io.ReadCloser
+	reads int
+}
+
+func (b *ownedCountedBody) Read(p []byte) (int, error) {
+	b.reads++
+	return b.ReadCloser.Read(p)
+}
+
+func TestOwnedHistoricalParserPDFRetrySkipsCompatibilityExtraction(t *testing.T) {
+	pdf := testutil.PDFWithPageAnnotation("", "BT /F1 14 Tf 20 150 Td (Operations register) Tj ET", "")
+	t.Run("new_and_reserved_skip", func(t *testing.T) {
+		h := newOwnedHarness(t, WithMixedPDFOCR(inspectOwnedTestPDF))
+		id := uuid.NewString()
+		h.store.targets[id] = domain.OwnedTarget{Decision: domain.OwnedReserved, Incarnation: uuid.NewString()}
+		for _, fields := range [][]uploadPart{nil, {{"document_id", id}}} {
+			rec := h.serve(ownedUploadFile(t, false, "register.pdf", pdf, fields...))
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		}
+		require.Len(t, h.store.accepted, 2)
+		require.Len(t, h.objects.uploads, 2)
+		require.Zero(t, h.extracted)
+		require.Zero(t, h.store.sharedReads)
+	})
+	t.Run("non_pdf_skip", func(t *testing.T) {
+		h := newOwnedHarness(t, WithMixedPDFOCR(inspectOwnedTestPDF))
+		id := uuid.NewString()
+		h.store.targets[id] = domain.OwnedTarget{Decision: domain.OwnedExisting, Incarnation: uuid.NewString()}
+		h.store.result = domain.AcceptRequeued
+		rec := h.serve(ownedUpload(t, false, []byte(ownedBody), uploadPart{"document_id", id}))
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		require.Len(t, h.store.accepted, 1)
+		require.Equal(t, ownedBody, h.store.accepted[0].Document.Content)
+		require.Nil(t, h.store.accepted[0].PDF)
+		require.Zero(t, h.extracted)
+		require.Empty(t, h.objects.uploads)
+	})
+	t.Run("parser_mode_unchanged", func(t *testing.T) {
+		var calls int
+		h := newOwnedHarness(t, WithExtractor(func(_ context.Context, ft extractor.FileType, data []byte) (string, error) {
+			calls++
+			require.Equal(t, extractor.FileTypePDF, ft)
+			require.Equal(t, pdf, data)
+			return ownedBody, nil
+		}))
+		id := uuid.NewString()
+		h.store.targets[id] = domain.OwnedTarget{Decision: domain.OwnedExisting, Incarnation: uuid.NewString()}
+		h.store.result = domain.AcceptRequeued
+		rec := h.serve(ownedUploadFile(t, false, "register.pdf", pdf, uploadPart{"document_id", id}))
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		require.Len(t, h.store.accepted, 1)
+		require.Equal(t, chunker.ScopedFingerprint("", ownedBody), h.store.accepted[0].Fingerprint)
+		require.Equal(t, 1, calls)
+		require.Empty(t, h.objects.uploads)
+	})
+}
+
+func TestOwnedUnresolvedOutcomeIsUnavailable(t *testing.T) {
+	pdf := testutil.PDFWithPageAnnotation("", "BT /F1 14 Tf 20 150 Td (Operations register) Tj ET", "")
+	for _, tc := range []struct {
+		name     string
+		existing bool
+		json     bool
+		outcome  domain.AcceptOutcome
+	}{
+		{name: "existing_source", existing: true, outcome: domain.AcceptNeedsSource},
+		{name: "new_source", outcome: domain.AcceptNeedsSource},
+		{name: "new_parser_text", outcome: domain.AcceptNeedsPDFText},
+		{name: "json_parser_text", json: true, outcome: domain.AcceptNeedsPDFText},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newOwnedHarness(t, WithMixedPDFOCR(inspectOwnedTestPDF))
+			h.store.result = tc.outcome
+			var r *http.Request
+			switch {
+			case tc.existing:
+				id := uuid.NewString()
+				h.store.targets[id] = domain.OwnedTarget{Decision: domain.OwnedExisting, Incarnation: uuid.NewString()}
+				r = ownedUploadFile(t, false, "register.pdf", pdf, uploadPart{"document_id", id})
+			case tc.json:
+				r = ownedJSON(t, `{"content":"a longer synthetic document body"}`)
+			default:
+				r = ownedUploadFile(t, false, "register.pdf", pdf)
+			}
+			rec := h.serve(r)
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), `"unavailable"`)
+			require.Zero(t, h.extracted)
+			require.Len(t, h.store.accepted, 1)
+			if tc.existing || tc.json {
+				require.Empty(t, h.objects.uploads)
+			} else {
+				require.Len(t, h.objects.uploads, 1)
+			}
+			require.Equal(t, h.objects.uploads, h.objects.deleted)
 		})
 	}
 }

@@ -282,8 +282,12 @@ commit returns `403`, and a document replaced since authorization returns
 returns `401`, and the attempt's object is removed. An owner's retry meets the usual rules: a completed document is a
 duplicate, a processing one is in progress, a failed one is requeued only with
 current create permission and queue capacity, and different content or
-collection is a conflict. An owner's retry of a historical PDF whose stored
-identity is its parser text receives `409`. Only the owner sees these outcomes.
+collection is a conflict. In mixed PDF OCR mode, an owner's retry of a
+historical PDF whose stored identity is its parser text uses the bounded legacy
+parser once more after acceptance confirms current ownership and create
+permission. The second acceptance checks both again. Matching text follows the
+usual retry rules, and different or missing text is a conflict. Only the owner
+sees these outcomes.
 No step reads or registers a shared content fingerprint, including retries of
 historical documents and job completion.
 
