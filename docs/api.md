@@ -783,7 +783,7 @@ Use `include_incarnation=true`, `include_index_visibility=true` and `include_pdf
 |---|---|---|
 | `400 Bad Request` | `validation` | `doc_id` is not a UUID |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
-| `404 Not Found` | `not_found` | The document does not exist |
+| `404 Not Found` | `not_found` | The document does not exist or its [deletion](#checkpointed-deletion) has begun |
 | `500 Internal Server Error` | `internal` | Database lookup failure |
 | `503 Service Unavailable` | `unavailable` | The requested summary projection is unavailable |
 
@@ -823,7 +823,7 @@ Error Status Codes:
 |---|---|---|
 | `400 Bad Request` | `validation` | Invalid path or `doc_id` is not a valid UUID |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
-| `404 Not Found` | `not_found` | S3 storage is disabled or the requested document has no stored object key |
+| `404 Not Found` | `not_found` | S3 storage is disabled, the requested document has no stored object key, or its [deletion](#checkpointed-deletion) has begun |
 | `500 Internal Server Error` | `internal` | Database lookup failure or error generating presigned URL |
 
 Example:
@@ -847,7 +847,7 @@ Deletion continues after the caller disconnects, with a separate 60-second deadl
 - **Parameters**: `doc_id` (path parameter, must be a valid UUID)
 - **Request Body**: None
 
-`X-Document-Incarnation` and `release_held` are reserved. An upgraded endpoint returns `412 Precondition Failed` when either is present in a well-formed request, including empty values and `release_held=false`. During a mixed rollout, older endpoints may ignore these selectors. Keep the originally observed incarnation on every attempt of an incarnation-qualified operation and send it only to an endpoint that enforces the qualifier. An ID-only DELETE addresses the document currently stored under `doc_id`.
+`release_held` is reserved: an upgraded endpoint returns `412 Precondition Failed` when it is present in a well-formed request, including an empty value and `release_held=false`. `X-Document-Incarnation` is reserved in the same way, including empty values, until the database activates [checkpointed deletion](#checkpointed-deletion). During a mixed rollout, older endpoints may ignore these selectors. Keep the originally observed incarnation on every attempt of an incarnation-qualified operation and send it only to an endpoint that enforces the qualifier. An ID-only DELETE addresses the document currently stored under `doc_id`.
 
 An active [evaluation fixture](development.md#evidence-evaluation) returns
 `412 Precondition Failed` before removing any data. Use the receipt-qualified
@@ -863,7 +863,7 @@ Deletion proceeds in this order.
 
 If an untagged worker mutation is pending when PostgreSQL checks the live document, removal returns an error and retains the row for retry.
 
-A vector or object-store failure before PostgreSQL removal returns `500 Internal Server Error` with the document record still present. A failure in the final vector sweep also returns `500`, after the record has been removed. While the UUID is absent, a subsequent ID-only DELETE returns `404` without retrying the sweep. If the UUID has been reused, the request targets the replacement.
+A vector or object-store failure before PostgreSQL removal returns `500 Internal Server Error` with the document record still present. A failure in the final vector sweep also returns `500`, after the record has been removed. While the UUID is absent, a subsequent ID-only DELETE returns `404` without retrying the sweep. If the UUID has been reused, the request targets the replacement. [Checkpointed deletion](#checkpointed-deletion) removes this window.
 
 After deletion returns successfully, subsequent queries exclude the document from answers and scored chunks immediately, even while vector deletion is still propagating through the index.
 
@@ -878,12 +878,15 @@ Error Status Codes:
 
 | Status | Error Category | Condition |
 |---|---|---|
-| `400 Bad Request` | `validation` | Invalid `doc_id` or malformed query string |
+| `400 Bad Request` | `validation` | Invalid `doc_id`, malformed query string, or an empty, repeated or non-canonical `X-Document-Incarnation` on an activated database |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
-| `404 Not Found` | `not_found` | Document does not exist in PostgreSQL |
-| `412 Precondition Failed` | `precondition` | Incarnation-qualified deletion or hold release was requested |
-| `500 Internal Server Error` | `internal` | Database query failure or external deletion error in Pinecone or S3 |
-| `503 Service Unavailable` | `storage` | A stored file exists but file storage is not configured; no data is deleted |
+| `404 Not Found` | `not_found` | Document does not exist in PostgreSQL, or no matching deletion receipt covers the qualified request |
+| `412 Precondition Failed` | `precondition` | Incarnation-qualified deletion or hold release was requested before activation, the supplied incarnation is not the stored one, or the document is an evaluation fixture |
+| `428 Precondition Required` | `precondition` | A live document was addressed without `X-Document-Incarnation` on an activated database |
+| `500 Internal Server Error` | `internal` | Database query failure or external deletion error in Pinecone or S3. Repeat the same request |
+| `503 Service Unavailable` | `storage` | A stored file or the document's vectors need a store that is not configured; no data is deleted |
+| `503 Service Unavailable` | `busy` | Another request holds the cleanup claim; repeat the same request after `Retry-After` |
+| `503 Service Unavailable` | `unavailable` | The deletion mode could not be read; nothing was changed |
 
 Example:
 
@@ -891,3 +894,15 @@ Example:
 curl -X DELETE localhost:8081/documents/8a3e792c-5df6-4b6e-a612-4f7db4959db2 \
   -H "X-Service-Token: dev-token"
 ```
+
+#### Checkpointed deletion
+
+A database that has set its deletion activation marker uses checkpointed deletion. No release sets the marker, and the service never sets it while deleting. A request names the lifetime it observed in `X-Document-Incarnation`: read the value once with `include_incarnation=true`, then send the same canonical UUID on every attempt, including after a lost response. A missing value for a live document returns `428`, a different value returns `412`, and an empty, repeated or non-canonical value returns `400`. An absent UUID without a matching completed receipt returns `404`.
+
+1. **Intent.** One short transaction locks the live row, checks the incarnation and the required storage, records the exact source key and vector target, marks the document `deleting` and cancels its ingestion job. From this commit status and listings omit the document and file requests sign no new address. Queries over JSON and SSE exclude it, and its worker can no longer complete or write vectors. An upload that supplies its `document_id` returns `409 Conflict`. Shared content no longer matches it, so a multipart duplicate stages its own source before it is accepted. A signature issued earlier keeps its normal storage semantics.
+2. **Steps.** One request at a time holds a bounded claim. It removes the historical per-document namespace where one exists, then the vectors of that incarnation, then the recorded source object, and records each acknowledged step. A step that fails or whose outcome is unknown stays pending. A step whose reply was lost is repeated, and a step whose acknowledgment was recorded is never repeated. A claim that has elapsed lets another request resume. It does not prove that a provider has settled an earlier request. Cleanup also waits for a worker vector write that is still in flight.
+3. **Completion.** The document and its receipt are completed in one transaction. A later request with the same incarnation returns `200` while the UUID is absent, so it acknowledges a response that never arrived.
+
+A deletion keeps its UUID reserved after it returns when it removed vectors written without an incarnation or when a worker write was never confirmed. Admission of that UUID returns `409` until the reservation is cleared. Vectors in the PostgreSQL vector store go with the document in the final transaction and never reserve the UUID.
+
+A retry through a configured object bucket or vector index that differs from the ones recorded at the intent fails with `500` before it touches either store.

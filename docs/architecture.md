@@ -28,7 +28,7 @@ Quarry organizes core functionality into distinct packages under `internal/`, wi
 - **`internal/store/postgres`**: Manages PostgreSQL connection pooling via `pgxpool`, applies embedded SQL migrations, and performs transactional CRUD queries on documents, chunks, and fingerprints, with optional pgvector storage described in the [vector data model](#postgresql-vector-schema).
 - **`internal/store/pinecone`**: Implements vector storage drivers for Pinecone, sharing one connection across all namespaces (legacy document namespaces use handles derived from it, which are never closed individually; the connection closes when the client shuts down), with batched writes, retries, and metadata filtering.
 - **`internal/store/s3`**: Uploads source binaries, deletes stored objects, and generates presigned GET download URLs.
-- **`internal/cleanup`**: Provides multi-store deletion ensuring external vector and object records are purged before metadata records are removed.
+- **`internal/cleanup`**: Provides multi-store deletion ensuring external vector and object records are purged before metadata records are removed. HTTP and administrative deletion share one checkpointing coordinator once the database activates [checkpointed deletion](api.md#checkpointed-deletion).
 - **`internal/domain`**: Defines shared interfaces, domain data models, and the default document label constant (`DefaultDocType = "document"`).
 
 ---
@@ -289,7 +289,7 @@ Embedded SQL migrations define the relational schema and apply in numeric order 
 
 ### Table Definitions
 
-- **`documents`**: Stores primary document records, full content, status lifecycle (`processing`, `completed`, `failed`), extracted prefix preview, file metadata, object storage references, document labels, and a non-null `collection TEXT` defaulting to `''` with an index on `(collection, id)`. For private uploads, `fingerprint` incorporates the document UUID so equal content has different digests across identities.
+- **`documents`**: Stores primary document records, full content, status lifecycle (`processing`, `completed`, `failed`, and `deleting` while a checkpointed deletion runs), extracted prefix preview, file metadata, object storage references, document labels, and a non-null `collection TEXT` defaulting to `''` with an index on `(collection, id)`. For private uploads, `fingerprint` incorporates the document UUID so equal content has different digests across identities.
 - **`chunks`**: Stores segmented text blocks and approximate token counts linked to parent documents via cascading foreign keys.
 - **`ingest_jobs`**: Stores pending or running work, attempt counts, lease ownership and expiry, retry scheduling, and the latest error. Each claim assigns a new lease token, including when shutdown or a failed-job requeue allows reuse of an attempt number. Deleting a document cascades to its job.
 - **`document_fingerprints`**: Maps collection-scoped SHA-256 content fingerprints to document UUIDs accepted under the `collection` policy.
@@ -394,6 +394,8 @@ size and declarations, and stream nesting. It honors the caller's deadline and
 otherwise applies a 30-second default. Extraction-limit failures use HTTP 422.
 
 Failure-status updates use a separate five-second context after task cancellation. Deletion treats missing vector namespaces as completed operations, allowing partial deletions to be retried before metadata is removed.
+
+Checkpointed deletion commits its intent before any external call. The `document_deletions` receipt records the incarnation, source key, vector target and the last acknowledged step, and a claim with a database-clock expiry serializes the steps. The `deleting` status hides the document from reads, signing, retrieval and job completion, and removing its fingerprints stops shared content from matching it. The final transaction deletes the document and completes the receipt together. Workers and readers already compare the stored incarnation, so a replacement under the same UUID keeps its own source and vectors.
 
 ### Metrics Collection
 
