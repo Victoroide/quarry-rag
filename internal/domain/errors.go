@@ -20,3 +20,7 @@ var ErrWritersFrozen = errors.New("document writes are frozen for a vector migra
 // ErrGenerationMismatch indicates that this replica serves a vector generation
 // other than the active one.
 var ErrGenerationMismatch = errors.New("replica vector generation is not the active generation")
+
+// ErrAuthzModeMismatch indicates that this replica's configured authorization
+// mode does not match the mode recorded on the corpus.
+var ErrAuthzModeMismatch = errors.New("authorization mode does not match the corpus")

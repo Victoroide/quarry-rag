@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -9,6 +11,45 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGrantCatalogRejectsIncompatibleFlagsBeforeConnecting(t *testing.T) {
+	for _, args := range [][]string{
+		{"-migrate", "-activate-grants"},
+		{"-migrate", "-dry-run"},
+		{"-activate-grants", "-vector-dimensions", "256"},
+		{"extra-arg"},
+	} {
+		err := run(t.Context(), args, "postgres://example", strings.NewReader(""), io.Discard)
+		require.ErrorContains(t, err, "-activate-grants")
+	}
+}
+
+func TestGrantCatalogActivateGrantsCommand(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	databaseURL := pgtest.Start(t)
+	c, err := postgres.NewClient(t.Context(), databaseURL)
+	require.NoError(t, err)
+	t.Cleanup(c.Pool.Close)
+	require.NoError(t, c.RunMigrations(t.Context()))
+
+	var dryOut bytes.Buffer
+	require.NoError(t, run(t.Context(), []string{"-activate-grants", "-dry-run"}, databaseURL, strings.NewReader(""), &dryOut))
+	var dryRes postgres.GrantsActivationResult
+	require.NoError(t, json.Unmarshal(dryOut.Bytes(), &dryRes))
+	require.True(t, dryRes.DryRun)
+	require.False(t, dryRes.AlreadyActive)
+
+	var out bytes.Buffer
+	require.NoError(t, run(t.Context(), []string{"-activate-grants"}, databaseURL, strings.NewReader(""), &out))
+	var res postgres.GrantsActivationResult
+	require.NoError(t, json.Unmarshal(out.Bytes(), &res))
+	require.Equal(t, "grants", res.AuthzMode)
+	require.False(t, res.DryRun)
+	require.False(t, res.AlreadyActive)
+	require.EqualValues(t, 1, res.Revision)
+}
 
 func TestGrantCatalogRejectsDuplicateInputBeforeConnecting(t *testing.T) {
 	for _, raw := range []string{

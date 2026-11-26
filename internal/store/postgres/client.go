@@ -23,6 +23,7 @@ type Client struct {
 	vectorTable      atomic.Pointer[string]
 	vectorPin        atomic.Pointer[vectorPin]
 	vectorStateReady atomic.Bool
+	authzMode        atomic.Pointer[string]
 	writerSlots      chan struct{}
 	hostedManifests  atomic.Bool
 }
