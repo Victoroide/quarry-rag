@@ -341,6 +341,49 @@ interruption or an error, pass `-after` with the last printed `document_id` or
 the value named in the error; without it, a run starts at the first identifier.
 Reapplying the same label is idempotent.
 
+### Document Key Canonicalization
+
+Vectors written into a hosted index by external tools can store `doc_id` in a
+UUID format other than the canonical lower-case form. Until those keys are
+rewritten, allowlisted queries, `DeleteByDocID`, `-backfill-collections` and
+`-backfill-scoped` do not match them, while collection-only queries still see
+them. Run this mode before `-backfill-collections` and `-backfill-scoped`,
+which match `doc_id` exactly:
+
+```sh
+make reconcile ARGS="-canonical-document-ids"
+make reconcile ARGS="-canonical-document-ids -apply"
+```
+
+This mode skips orphan cleanup and requires a configured Pinecone index in both
+dry run and apply. An index that does not index `doc_id` for filtering rejects
+the first request and stops the run. Without `-apply`, each request sends a
+provider dry-run request (`DryRun: true`) that counts matching vectors without
+changing them. With `-apply`, the command pins the active vector generation,
+holds the writer barrier, and sets only `doc_id` to the canonical lower-case
+UUID, leaving `collection`, `doc_type`, text and ownership fields unchanged.
+
+For each document in PostgreSQL in ascending UUID order, regardless of status,
+the command matches the nine uniform-case non-canonical spellings that UUID
+parsers accept: upper-case hyphenated, braced lower and upper case,
+`urn:uuid:` and `URN:UUID:` prefixes with lower- and upper-case digits, and
+32-digit lower and upper case without hyphens. Mixed-case hex digits are not
+enumerated and stay unchanged, though the orphan reconciler still maps them to
+their document.
+
+The command prints JSON with `mode` (`inventory` or `apply`),
+`examined_documents`, `matched_vectors`, `updated_documents`, `documents` (the
+first 100 matching documents with `document_id`, `matched_vectors`, and
+`capped` when a document reaches the provider's 100,000-record per-request
+limit), and `resume_after`. `-limit` bounds examined documents (100000 by
+default); `-page` is rejected. Each run stops after 30 minutes. Pass `-after`
+with `resume_after` or the cursor named in an error to continue. Any provider
+error stops further updates with a nonzero exit status; earlier updates remain
+applied. Metadata updates are eventually consistent, so rerun the dry run until
+`matched_vectors` is zero. To verify against a serverless staging index in an
+isolated namespace, run
+`QUARRY_PINECONE_STAGING_INDEX=<index> PINECONE_API_KEY=<key> go test -v -run TestStagingCanonicalDocumentKeys ./scripts/reconcile`.
+
 ### Scoped Metadata Backfill
 
 Documents assigned through the [grant catalog](grant-catalog.md#assign-historical-documents)

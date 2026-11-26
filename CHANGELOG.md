@@ -6,6 +6,7 @@ Notable changes are grouped by release.
 
 ### Added
 
+- `make reconcile ARGS=-canonical-document-ids` rewrites hosted vector document IDs written in another UUID spelling, such as upper case, so allowlisted queries, deletions and backfills match them.
 - Qualified document deletion for callers: `Client.DeleteDocumentIncarnation`, `UUID@incarnation` arguments for `make cleanup` and an optional `incarnation` for `quarry_delete_document`. An empty or malformed incarnation is rejected and never becomes an ID-only request.
 - Opt-in legacy deletion reservations commit a durable receipt before ID-only cleanup mutates a vector store, so activating checkpointed deletion or losing a database session cannot let a replacement overtake the last call. Document and administrative deletion enable them only in the activation release.
 - Queries with `include_citations` can set `preserve_code` to keep Markdown code unchanged and exclude bracketed numbers in code from citations, including through the Go client and MCP query tool.
