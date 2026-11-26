@@ -245,6 +245,34 @@ delete error stops further deletions and returns a nonzero exit status; earlier
 successful deletions remain applied. Rerun the dry run after the index has
 converged to verify the remaining selections.
 
+### Superseded Bare Vectors (`scripts/reconcile`)
+
+Run `make reconcile ARGS="-superseded-unrevisioned"` to preview bare vectors
+superseded by an active hosted manifest. The scan uses the configured active
+Pinecone serverless index and its default namespace. A candidate must have a
+bare chunk ID, valid document ownership metadata and no revision or attempt
+identity. Its document must be completed with an active manifest for the current
+incarnation and have no ingest job, pending vector mutation or deletion
+reservation. A bare vector can belong to a previous incarnation of that UUID.
+Use the [superseded vector cleanup procedure](deployment.md#superseded-vector-cleanup)
+before applying the selection.
+
+`-scan-limit` bounds listed entries, including duplicates and ineligible
+records, and defaults to 100000. It also caps listing requests if the provider
+returns empty pages with continuation tokens. `-limit` caps selections and
+`-page` bounds each list, fetch and deletion batch. Resume a bounded scan with
+`-page-token` set to the reported `next_page_token` from the same bound index
+and namespace. An empty token means there is no continuation. Pinecone listing
+and fetch are eventually consistent, and dry-run metadata can change during
+a pass. After convergence, start again without a token to find any records the
+previous scan missed or to recover from an invalidated token.
+
+The report includes `superseded_unrevisioned_vectors` selected,
+`scanned_vectors` listed, `deleted_vectors` acknowledged by Pinecone and a
+sample of up to 20 selected IDs. Failures stop the command with a nonzero exit
+status and return progress from the current pass. Existing reconciliation
+modes keep their own scopes and reports.
+
 ### Source Upload Reclamation (`scripts/reconcile`)
 
 Use `-source-uploads` to reclaim original files recorded by

@@ -6,6 +6,7 @@ Notable changes are grouped by release.
 
 ### Added
 
+- Opt-in `make reconcile ARGS=-superseded-unrevisioned` finds and removes bare Pinecone vectors superseded by an active hosted manifest, with a durable cleanup journal protecting the writer freeze during apply.
 - `make reconcile ARGS=-canonical-document-ids` rewrites hosted vector document IDs written in another UUID spelling, such as upper case, so allowlisted queries, deletions and backfills match them.
 - Public `AUTHZ_MODE=service|grants` configuration switch (default `service`) activating per-subject tenant and document grant enforcement across HTTP data routes, `cmd/server`, the worker, Go client, and stdio MCP (`QUARRY_SUBJECT_TOKEN_FILE`).
 - Existing restricted serving roles must receive EXECUTE on `grant_catalog_corpus_authz_mode()` after migration 029 and before upgraded processes start; see the serving-role upgrade procedure.
