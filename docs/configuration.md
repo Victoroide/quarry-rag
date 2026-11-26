@@ -334,7 +334,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `015_mixed_pdf_ocr.sql` | Records page manifests, versioned extraction provenance, and coverage. Adds a lease constraint for jobs that require a mixed-PDF worker. |
 | `016_vector_generations.sql` | Adds empty tables for vector generations, their per-document write ledger and a singleton recording the active generation (`legacy`) and an unset writer freeze. It leaves existing rows in place. |
 | `017_evaluation_fixtures.sql` | Adds durable receipts and UUID reservations for the [opt-in evaluation fixtures](development.md#evidence-evaluation). |
-| `018_evaluation_vector_identity.sql` | Binds new fixture receipts to their vector store and permits reservations for durably retired submissions. |
+| `018_evaluation_vector_identity.sql` | Binds fixture receipts to their vector store and permits reservations for durably retired submissions. |
 | `019_evaluation_fixture_guards.sql` | Moves the reservation checks used by ordinary admission, leasing and removal into owner-defined predicates, so a restricted serving login needs no access to the receipt table. |
 | `020_owned_ingestion.sql` | Adds the [owned ingestion](grant-catalog.md#owned-ingestion) entry points and an ownership origin to the grant catalog. |
 | `023_deletion_predicates.sql` | Adds owner-defined predicates that report whether checkpointed deletion is active and whether an unfinished or held deletion reserves a document UUID. Admission and deletion call them, so a restricted serving login needs no access to the marker table. |

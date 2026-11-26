@@ -524,8 +524,7 @@ use the vector store bound at fixture admission, including the resolved
 Pinecone index and its default namespace. Cleanup deletes only that
 namespace's entries for the fixture ID and never sweeps a namespace named after
 the document. If cleanup reports `store_mismatch`, restore the original vector
-configuration and retry. For older receipts with an unknown binding, verify the
-original index and remaining IDs operationally. Offline fake mode refuses
+configuration and retry. Offline fake mode refuses
 fixture admission, because its memory vectors cannot outlive the admitting
 process. Use PostgreSQL vectors or Pinecone.
 
