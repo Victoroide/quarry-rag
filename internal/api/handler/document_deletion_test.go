@@ -48,6 +48,26 @@ func (s *checkpointedStore) GetDocument(context.Context, domain.DocumentID) (*do
 	return nil, nil
 }
 
+type releasableStore struct {
+	*checkpointedStore
+	released     []domain.DeleteOperations
+	releasedIDs  []domain.DocumentID
+	releasedIncs []string
+	releaseErr   error
+}
+
+func (s *releasableStore) ReleaseHeldDeletion(_ context.Context, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
+	s.releasedIDs = append(s.releasedIDs, id)
+	s.releasedIncs = append(s.releasedIncs, incarnation)
+	s.released = append(s.released, ops)
+	return s.releaseErr
+}
+
+type stubMemoryIndex struct{ owner string }
+
+func (s stubMemoryIndex) MemoryOwner() string                { return s.owner }
+func (s stubMemoryIndex) LockDocument(string) (func(), bool) { return func() {}, true }
+
 func serveDeletion(t *testing.T, store domain.ChunkStore, header http.Header, opts ...DeleteOption) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/"+deletionTestDocument, http.NoBody)
@@ -148,16 +168,81 @@ func TestDeleteRejectsMalformedQualifiersOnAnActiveDatabase(t *testing.T) {
 	}
 }
 
-func TestDeleteKeepsReleaseHeldReservedOnAnActiveDatabase(t *testing.T) {
-	store := &checkpointedStore{active: true}
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/"+deletionTestDocument+"?release_held=true", http.NoBody)
-	req.SetPathValue("doc_id", deletionTestDocument)
-	req.Header.Set("X-Document-Incarnation", uuid.NewString())
-	rec := httptest.NewRecorder()
-	DeleteHandler(store, nil, nil)(rec, req)
-	require.Equal(t, http.StatusPreconditionFailed, rec.Code)
-	require.Empty(t, store.deletes)
-	require.Zero(t, store.modeReads)
+func TestDeleteReleaseHeldValidationAndRouting(t *testing.T) {
+	inc := uuid.NewString()
+	offlineOpts := WithCleanupTargets(cleanup.Targets{InMemory: true, Memory: stubMemoryIndex{owner: "owner-1"}})
+
+	for _, active := range []bool{false, true} {
+		t.Run("true_routes_only_to_release_in_either_mode", func(t *testing.T) {
+			store := &releasableStore{checkpointedStore: &checkpointedStore{active: active}}
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/"+deletionTestDocument+"?release_held=true", http.NoBody)
+			req.SetPathValue("doc_id", deletionTestDocument)
+			req.Header.Set("X-Document-Incarnation", inc)
+			rec := httptest.NewRecorder()
+			DeleteHandler(store, nil, nil, offlineOpts)(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, []domain.DocumentID{deletionTestDocument}, store.releasedIDs)
+			require.Equal(t, []string{inc}, store.releasedIncs)
+			require.Empty(t, store.deletes)
+			require.Zero(t, store.legacy)
+			require.Zero(t, store.modeReads, "hold release must work without activating or checking mode")
+		})
+	}
+
+	t.Run("false_uses_qualified_deletion_when_active", func(t *testing.T) {
+		store := &releasableStore{checkpointedStore: &checkpointedStore{active: true}}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/"+deletionTestDocument+"?release_held=false", http.NoBody)
+		req.SetPathValue("doc_id", deletionTestDocument)
+		req.Header.Set("X-Document-Incarnation", inc)
+		rec := httptest.NewRecorder()
+		DeleteHandler(store, nil, nil, offlineOpts)(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Len(t, store.deletes, 1)
+		require.Empty(t, store.released)
+	})
+
+	t.Run("hosted_target_refuses_offline_release_with_412", func(t *testing.T) {
+		store := &releasableStore{checkpointedStore: &checkpointedStore{active: true}}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/"+deletionTestDocument+"?release_held=true", http.NoBody)
+		req.SetPathValue("doc_id", deletionTestDocument)
+		req.Header.Set("X-Document-Incarnation", inc)
+		rec := httptest.NewRecorder()
+		DeleteHandler(store, nil, nil)(rec, req)
+		require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+		require.Empty(t, store.released)
+		require.Empty(t, store.deletes)
+	})
+
+	for name, tc := range map[string]struct {
+		query  string
+		header http.Header
+		status int
+	}{
+		"capitalized True":       {query: "release_held=True", header: http.Header{"X-Document-Incarnation": {inc}}, status: http.StatusBadRequest},
+		"empty value":            {query: "release_held=", header: http.Header{"X-Document-Incarnation": {inc}}, status: http.StatusBadRequest},
+		"false then true":        {query: "release_held=false&release_held=true", header: http.Header{"X-Document-Incarnation": {inc}}, status: http.StatusBadRequest},
+		"true then false":        {query: "release_held=true&release_held=false", header: http.Header{"X-Document-Incarnation": {inc}}, status: http.StatusBadRequest},
+		"duplicate true":         {query: "release_held=true&release_held=true", header: http.Header{"X-Document-Incarnation": {inc}}, status: http.StatusBadRequest},
+		"malformed encoding":     {query: "release_held=%ZZ", header: http.Header{"X-Document-Incarnation": {inc}}, status: http.StatusBadRequest},
+		"missing incarnation":    {query: "release_held=true", status: http.StatusPreconditionRequired},
+		"malformed incarnation":  {query: "release_held=true", header: http.Header{"X-Document-Incarnation": {"bad"}}, status: http.StatusBadRequest},
+		"empty incarnation":      {query: "release_held=true", header: http.Header{"X-Document-Incarnation": {""}}, status: http.StatusBadRequest},
+		"duplicate incarnations": {query: "release_held=true", header: http.Header{"X-Document-Incarnation": {inc, inc}}, status: http.StatusBadRequest},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := &releasableStore{checkpointedStore: &checkpointedStore{active: true}}
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/"+deletionTestDocument+"?"+tc.query, http.NoBody)
+			req.SetPathValue("doc_id", deletionTestDocument)
+			req.Header = tc.header
+			rec := httptest.NewRecorder()
+			DeleteHandler(store, nil, nil, offlineOpts)(rec, req)
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			require.Zero(t, store.modeReads)
+			require.Empty(t, store.deletes)
+			require.Empty(t, store.released)
+			require.Zero(t, store.legacy)
+		})
+	}
 }
 
 func TestDeleteWithoutActivationKeepsTheCompatibilityContract(t *testing.T) {

@@ -75,8 +75,9 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 			writeJSONError(w, http.StatusBadRequest, "validation", "invalid query parameters")
 			return
 		}
-		if query.Has("release_held") {
-			writeJSONError(w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
+		releaseHeld, ok := parseReleaseHeld(query)
+		if !ok {
+			writeJSONError(w, http.StatusBadRequest, "validation", "release_held must be a single true or false value")
 			return
 		}
 		incarnation, qualified, valid := deletionIncarnation(r.Header)
@@ -92,6 +93,20 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 			defer release()
 		}
 		docID := domain.DocumentID(docIDStr)
+		if releaseHeld {
+			if !valid {
+				writeJSONError(w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
+				return
+			}
+			if !qualified {
+				writeJSONError(w, http.StatusPreconditionRequired, "precondition", incarnationHeaderName+" is required to release a held deletion")
+				return
+			}
+			canonical := parsedID.String()
+			err = cleanup.ReleaseOfflineHold(ctx, cs, pcDriver, objects, options.targets, domain.DocumentID(canonical), incarnation)
+			writeDeleteResult(ctx, w, canonical, err)
+			return
+		}
 		if guard, ok := cs.(domain.LegacyDeletionGuard); ok && options.legacyReservations && !qualified {
 			// The activation lock decides the contract. A request that loses the race
 			// to an activation continues below as an activated ID-only request.
@@ -138,6 +153,27 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 		}
 		err = cleanup.Remove(ctx, cs, pcDriver, objects, doc)
 		writeDeleteResult(ctx, w, docIDStr, err)
+	}
+}
+
+// parseReleaseHeld accepts zero or one literal "true" or "false" value.
+// Empty values, other spellings and duplicates are rejected so validation
+// failures never reach ordinary deletion.
+func parseReleaseHeld(query url.Values) (release, ok bool) {
+	values, present := query["release_held"]
+	if !present {
+		return false, true
+	}
+	if len(values) != 1 {
+		return false, false
+	}
+	switch values[0] {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
 	}
 }
 

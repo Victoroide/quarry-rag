@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/client"
+	"github.com/google/uuid"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -213,12 +214,46 @@ func RemoveScoped(ctx context.Context, deleter domain.ScopedDocumentDeleter, vec
 	return deleter.ResumeScopedDeletion(cleanupCtx, id, resolvedIncarnation, ops)
 }
 
+// ReleaseOfflineHold replays and releases a held document identity on the
+// service that owns the in-memory vector index.
+func ReleaseOfflineHold(ctx context.Context, cs domain.ChunkStore, vectors domain.VectorDeleter, objects ObjectDeleter, targets Targets, id domain.DocumentID, incarnation string) error {
+	if incarnation == "" {
+		return domain.ErrDeletionPreconditionRequired
+	}
+	parsed, err := uuid.Parse(string(id))
+	if err != nil {
+		return domain.ErrDocumentNotFound
+	}
+	id = domain.DocumentID(parsed.String())
+	releaser, ok := cs.(domain.HeldDeletionReleaser)
+	if !ok || !targets.InMemory {
+		return domain.ErrDeletionPreconditionFailed
+	}
+	if targets.Memory == nil {
+		idx, idxOK := vectors.(domain.InMemoryIndex)
+		if !idxOK {
+			return domain.ErrVectorStorageUnavailable
+		}
+		targets.Memory = idx
+	}
+	unlock, locked := targets.Memory.LockDocument(string(id))
+	if !locked {
+		return domain.ErrDeletionBusy
+	}
+	defer unlock()
+	ops := operations(vectors, objects, targets)
+	return releaser.ReleaseHeldDeletion(ctx, id, incarnation, ops)
+}
+
 // Cleaner reuses store connections for a sequence of document deletions.
 type Cleaner struct {
-	metadata *pgstore.Client
-	vectors  *pcstore.Client
-	objects  ObjectDeleter
-	targets  Targets
+	metadata        *pgstore.Client
+	vectors         *pcstore.Client
+	objects         ObjectDeleter
+	targets         Targets
+	quarantineMode  string
+	directRecovery  bool
+	recoveryObjects bool
 	// offline forwards deletions to the service that holds an in-memory index.
 	offline OfflineAPI
 	// reserve routes ID-only cleanup through the activation guard and its reservation.
@@ -230,6 +265,7 @@ type Cleaner struct {
 type OfflineAPI interface {
 	DeleteDocument(ctx context.Context, id string) (*client.DeleteResponse, error)
 	DeleteDocumentIncarnation(ctx context.Context, id, incarnation string) (*client.DeleteResponse, error)
+	ReleaseHeldOfflineDeletion(ctx context.Context, id, incarnation string) (*client.DeleteResponse, error)
 }
 
 // Option configures a Cleaner.
@@ -248,14 +284,35 @@ func WithOfflineService(api OfflineAPI) Option {
 	return func(c *Cleaner) { c.offline = api }
 }
 
+// WithDirectRecovery connects Cleaner directly to PostgreSQL (and S3 when
+// includeObjects is true) without dialing Pinecone or an offline HTTP server,
+// for inspection, quarantine and terminated-owner hold release.
+func WithDirectRecovery(includeObjects bool) Option {
+	return func(c *Cleaner) {
+		c.directRecovery = true
+		c.recoveryObjects = includeObjects
+	}
+}
+
+func quarantineModeFor(cfg *config.Config) string {
+	switch {
+	case cfg.FakeMode:
+		return "memory"
+	case cfg.VectorStore == "postgres":
+		return "local"
+	default:
+		return "legacy"
+	}
+}
+
 // New connects the stores required for document deletion. With GO_RAG_FAKE_MODE
 // the vectors live in the running service, so deletions go to that service.
 func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Cleaner, error) {
-	cleaner := &Cleaner{}
+	cleaner := &Cleaner{quarantineMode: quarantineModeFor(cfg)}
 	for _, opt := range opts {
 		opt(cleaner)
 	}
-	if cfg.FakeMode {
+	if cfg.FakeMode && !cleaner.directRecovery {
 		if cleaner.offline != nil {
 			return cleaner, nil
 		}
@@ -279,26 +336,31 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Cleaner, err
 	}
 	pg.EnableHostedVectorManifests(cfg.HostedVectorManifest)
 	cleaner.metadata = pg
-	cleaner.targets = Targets{SourceBucket: cfg.S3Bucket}
-	var host string
-	if cfg.VectorStore != "postgres" {
-		cleaner.vectors, err = pcstore.NewPineconeClient(ctx, cfg)
-		if err != nil {
-			return nil, errors.Join(fmt.Errorf("pinecone connect: %w", err), pg.Close(ctx))
-		}
+	cleaner.targets = Targets{SourceBucket: cfg.S3Bucket, InMemory: cfg.FakeMode}
+	if !cfg.FakeMode && cfg.VectorStore != "postgres" {
 		cleaner.targets.VectorIndex = cfg.PineconeIndexName
-		host = cleaner.vectors.Host()
 	}
-	store, target := cfg.VectorTarget()
-	if cfg.VectorStore == "postgres" {
-		err = pg.PinCleanupVectorGeneration(ctx, cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings())
-	} else {
-		err = pg.PinExistingVectorGeneration(ctx, cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings())
+	if !cleaner.directRecovery {
+		var host string
+		if cfg.VectorStore != "postgres" {
+			cleaner.vectors, err = pcstore.NewPineconeClient(ctx, cfg)
+			if err != nil {
+				return nil, errors.Join(fmt.Errorf("pinecone connect: %w", err), pg.Close(ctx))
+			}
+			cleaner.targets.VectorIndex = cfg.PineconeIndexName
+			host = cleaner.vectors.Host()
+		}
+		store, target := cfg.VectorTarget()
+		if cfg.VectorStore == "postgres" {
+			err = pg.PinCleanupVectorGeneration(ctx, cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings())
+		} else {
+			err = pg.PinExistingVectorGeneration(ctx, cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings())
+		}
+		if err != nil {
+			return nil, errors.Join(fmt.Errorf("pin the cleanup target: %w", err), cleaner.Close(ctx))
+		}
 	}
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("pin the cleanup target: %w", err), cleaner.Close(ctx))
-	}
-	if cfg.S3Bucket != "" {
+	if (!cleaner.directRecovery || cleaner.recoveryObjects) && cfg.S3Bucket != "" {
 		cleaner.objects, err = s3store.New(ctx, cfg)
 		if err != nil {
 			return nil, errors.Join(fmt.Errorf("s3 connect: %w", err), cleaner.Close(ctx))
@@ -341,12 +403,9 @@ func (c *Cleaner) delete(ctx context.Context, docID, incarnation string, qualifi
 	if c.offline != nil {
 		return c.deleteOffline(ctx, docID, incarnation, qualified)
 	}
-	release, err := c.metadata.AcquireWriter(ctx)
+	release, err := c.acquireWriter(ctx)
 	if err != nil {
-		if errors.Is(err, domain.ErrWritersFrozen) || errors.Is(err, domain.ErrGenerationMismatch) {
-			return fmt.Errorf("deletions are paused: %w", err)
-		}
-		return fmt.Errorf("check document writers: %w", err)
+		return err
 	}
 	defer release()
 	var vectors domain.VectorDeleter
@@ -396,6 +455,91 @@ func (c *Cleaner) deleteOffline(ctx context.Context, docID, incarnation string, 
 		return fmt.Errorf("%w: %s", ErrDocumentNotFound, docID)
 	}
 	return err
+}
+
+// ListHeld returns held and unfinished deletion receipts from PostgreSQL.
+func (c *Cleaner) ListHeld(ctx context.Context) ([]domain.HeldDeletion, error) {
+	if c.metadata == nil {
+		return nil, errors.New("metadata store is not configured")
+	}
+	return c.metadata.ListHeldDeletions(ctx)
+}
+
+// Quarantine reserves an absent document UUID against reuse while preserving
+// any existing held or unfinished receipt.
+func (c *Cleaner) Quarantine(ctx context.Context, docID string) (domain.HeldDeletion, error) {
+	if c.metadata == nil {
+		return domain.HeldDeletion{}, errors.New("metadata store is not configured")
+	}
+	return c.metadata.QuarantineDeletion(ctx, domain.DocumentID(docID), domain.QuarantineTarget{
+		VectorMode:  c.quarantineMode,
+		VectorIndex: c.targets.VectorIndex,
+	})
+}
+
+// ReleaseHeld replays any permitted remaining cleanup and releases the exact
+// held document/incarnation pair.
+func (c *Cleaner) ReleaseHeld(ctx context.Context, docID, incarnation string) error {
+	if incarnation == "" {
+		return domain.ErrDeletionPreconditionRequired
+	}
+	if c.offline != nil {
+		_, err := c.offline.ReleaseHeldOfflineDeletion(ctx, docID, incarnation)
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("%w: %s", ErrDocumentNotFound, docID)
+		}
+		return err
+	}
+	if c.metadata == nil {
+		return errors.New("metadata store is not configured")
+	}
+	release, err := c.acquireWriter(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return c.metadata.ReleaseHeldDeletion(ctx, domain.DocumentID(docID), incarnation, operations(c.vectorDeleter(), c.objects, c.targets))
+}
+
+// ReleaseTerminatedOfflineHeld releases an offline hold administratively after
+// the operator verified that the recorded memory owner process exited and its
+// in-memory index vanished.
+func (c *Cleaner) ReleaseTerminatedOfflineHeld(ctx context.Context, docID, incarnation, owner string) error {
+	if incarnation == "" {
+		return domain.ErrDeletionPreconditionRequired
+	}
+	if c.metadata == nil {
+		return errors.New("metadata store is not configured")
+	}
+	release, err := c.acquireWriter(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ops := operations(nil, c.objects, Targets{SourceBucket: c.targets.SourceBucket})
+	ops.ConfirmedOfflineOwnerTerminated = true
+	ops.MemoryOwner = owner
+	return c.metadata.ReleaseHeldDeletion(ctx, domain.DocumentID(docID), incarnation, ops)
+}
+
+func (c *Cleaner) acquireWriter(ctx context.Context) (func(), error) {
+	release, err := c.metadata.AcquireWriter(ctx)
+	if err != nil {
+		if errors.Is(err, domain.ErrWritersFrozen) || errors.Is(err, domain.ErrGenerationMismatch) {
+			return nil, fmt.Errorf("deletions are paused: %w", err)
+		}
+		return nil, fmt.Errorf("check document writers: %w", err)
+	}
+	return release, nil
+}
+
+func (c *Cleaner) vectorDeleter() domain.VectorDeleter {
+	var vectors domain.VectorDeleter
+	if c.vectors != nil {
+		vectors = c.vectors
+	}
+	return vectors
 }
 
 // Close releases the shared store connections.

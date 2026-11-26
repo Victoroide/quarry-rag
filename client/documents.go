@@ -205,6 +205,22 @@ func (c *Client) DeleteDocumentIncarnation(ctx context.Context, id, incarnation 
 	return &response, nil
 }
 
+// ReleaseHeldOfflineDeletion replays and releases a held document deletion on
+// the offline service that owns the in-memory vector index.
+func (c *Client) ReleaseHeldOfflineDeletion(ctx context.Context, id, incarnation string) (*DeleteResponse, error) {
+	canonical, err := canonicalIncarnation(incarnation)
+	if err != nil {
+		return nil, err
+	}
+	var response DeleteResponse
+	setIncarnation := func(req *http.Request) { req.Header.Set(incarnationHeader, canonical) }
+	path := "/documents/" + url.PathEscape(id) + "?release_held=true"
+	if err := c.jsonRequest(ctx, http.MethodDelete, path, nil, &response, setIncarnation); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
 // incarnationHeader names the document lifetime a deletion addresses.
 const incarnationHeader = "X-Document-Incarnation"
 

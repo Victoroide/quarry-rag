@@ -14,6 +14,7 @@ import (
 type offlineService struct {
 	bare      []string
 	qualified [][2]string
+	released  [][2]string
 	err       error
 }
 
@@ -24,6 +25,11 @@ func (s *offlineService) DeleteDocument(_ context.Context, id string) (*client.D
 
 func (s *offlineService) DeleteDocumentIncarnation(_ context.Context, id, incarnation string) (*client.DeleteResponse, error) {
 	s.qualified = append(s.qualified, [2]string{id, incarnation})
+	return &client.DeleteResponse{Deleted: s.err == nil, DocID: id}, s.err
+}
+
+func (s *offlineService) ReleaseHeldOfflineDeletion(_ context.Context, id, incarnation string) (*client.DeleteResponse, error) {
+	s.released = append(s.released, [2]string{id, incarnation})
 	return &client.DeleteResponse{Deleted: s.err == nil, DocID: id}, s.err
 }
 
@@ -78,4 +84,73 @@ func TestServiceTokenPrefersTheSingleToken(t *testing.T) {
 	require.Equal(t, "single", serviceToken(&config.Config{ServiceToken: "single", ServiceTokens: []string{"other"}}))
 	require.Equal(t, "other", serviceToken(&config.Config{ServiceTokens: []string{"", "other"}}))
 	require.Empty(t, serviceToken(&config.Config{ServiceTokens: []string{""}}))
+}
+
+func TestOfflineCleanerRoutesReleaseHeldToOwningService(t *testing.T) {
+	service := &offlineService{}
+	cleaner, err := New(t.Context(), &config.Config{FakeMode: true}, WithOfflineService(service))
+	require.NoError(t, err)
+
+	const id = "00000000-0000-4000-8000-000000000001"
+	const inc = "00000000-0000-4000-8000-0000000000aa"
+	require.ErrorIs(t, cleaner.ReleaseHeld(t.Context(), id, ""), domain.ErrDeletionPreconditionRequired)
+	require.Empty(t, service.released)
+
+	require.NoError(t, cleaner.ReleaseHeld(t.Context(), id, inc))
+	require.Equal(t, [][2]string{{id, inc}}, service.released)
+	require.Empty(t, service.bare)
+	require.Empty(t, service.qualified)
+}
+
+type fakeHeldReleaser struct {
+	domain.ChunkStore
+	called int
+	err    error
+}
+
+func (f *fakeHeldReleaser) ReleaseHeldDeletion(_ context.Context, _ domain.DocumentID, _ string, _ domain.DeleteOperations) error {
+	f.called++
+	return f.err
+}
+
+type fakeMemoryIndex struct {
+	owner  string
+	locked bool
+}
+
+func (f *fakeMemoryIndex) MemoryOwner() string { return f.owner }
+func (f *fakeMemoryIndex) LockDocument(string) (func(), bool) {
+	if f.locked {
+		return nil, false
+	}
+	return func() {}, true
+}
+
+func TestReleaseOfflineHoldChecksOwnerAndActiveCallback(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000001"
+	const inc = "00000000-0000-4000-8000-0000000000aa"
+	releaser := &fakeHeldReleaser{}
+
+	// Active local deletion callback leaves the hold intact without calling PostgreSQL.
+	err := ReleaseOfflineHold(t.Context(), releaser, nil, nil, Targets{
+		InMemory: true,
+		Memory:   &fakeMemoryIndex{owner: "owner-1", locked: true},
+	}, id, inc)
+	require.ErrorIs(t, err, domain.ErrDeletionBusy)
+	require.Zero(t, releaser.called)
+
+	// Non-memory target is rejected before touching the store.
+	err = ReleaseOfflineHold(t.Context(), releaser, nil, nil, Targets{
+		InMemory: false,
+	}, id, inc)
+	require.ErrorIs(t, err, domain.ErrDeletionPreconditionFailed)
+	require.Zero(t, releaser.called)
+
+	// Unlocked owning memory target calls ReleaseHeldDeletion.
+	err = ReleaseOfflineHold(t.Context(), releaser, nil, nil, Targets{
+		InMemory: true,
+		Memory:   &fakeMemoryIndex{owner: "owner-1"},
+	}, id, inc)
+	require.NoError(t, err)
+	require.Equal(t, 1, releaser.called)
 }
