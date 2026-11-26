@@ -31,6 +31,9 @@ type DeleteOperations struct {
 	ExpectedIncarnation string
 	// InMemory marks vectors that live in the serving process.
 	InMemory bool
+	// MemoryOwner identifies the in-memory index. A qualified request converts a
+	// reservation recorded for another owner only on that owner.
+	MemoryOwner string
 	// SourceBucket and VectorIndex identify the nonsecret stores the operations act on.
 	// They are recorded with the cleanup target and compared on every resumption.
 	SourceBucket string
@@ -56,4 +59,73 @@ type DocumentDeleter interface {
 // DocumentFileReader keeps a file lookup valid while the caller signs its address.
 type DocumentFileReader interface {
 	WithDocumentFile(ctx context.Context, id DocumentID, sign func(ctx context.Context, key string) error) (bool, error)
+}
+
+// ErrDeletionActivated indicates that the database selected checkpointed
+// deletion while an ID-only cleanup was waiting to start. The caller continues
+// on the activated contract.
+var ErrDeletionActivated = errors.New("checkpointed deletion has been activated")
+
+// LegacyDeletionSpec describes the stores an ID-only cleanup acts on. The
+// reservation records them before the first external mutation.
+type LegacyDeletionSpec struct {
+	// Hosted marks a remote vector index and Memory a process-local one. Neither
+	// is set for transactional vectors, which the metadata removal cascades to.
+	Hosted bool
+	Memory bool
+	// RevisionVectors reports that vectors of one incarnation can be deleted.
+	RevisionVectors bool
+	// SourceAvailable reports that the original object can be deleted.
+	SourceAvailable bool
+	// SourceBucket and VectorIndex name the nonsecret stores of the cleanup.
+	SourceBucket string
+	VectorIndex  string
+	// MemoryOwner identifies the process-local index that holds the vectors.
+	MemoryOwner string
+}
+
+// LegacyDeletionTarget is the document lifetime observed under its row lock.
+type LegacyDeletionTarget struct {
+	Incarnation string
+	// SourceKey is the exact original object of that lifetime, if any.
+	SourceKey *string
+	// ScopedVectors reports that the lifetime wrote incarnation-tagged vectors.
+	ScopedVectors bool
+	// Claim names the committed reservation this cleanup owns, or is empty when
+	// the vectors need none.
+	Claim string
+}
+
+// LegacyDocumentStore runs one ID-only cleanup against the original row. Its
+// methods act on the connection that holds the activation lock while that
+// connection lives, and on a fresh one afterwards.
+type LegacyDocumentStore interface {
+	// PrepareLegacyDeletion locks the live row, synchronizes with worker
+	// mutations and commits the reservation before any external mutation.
+	PrepareLegacyDeletion(ctx context.Context, id DocumentID, spec LegacyDeletionSpec) (LegacyDeletionTarget, error)
+	// NoteLegacyUncertain keeps the identity held although a later attempt may succeed.
+	NoteLegacyUncertain(ctx context.Context, id DocumentID, target LegacyDeletionTarget) error
+	// RetireLegacyDocument removes the observed row without completing its reservation.
+	RetireLegacyDocument(ctx context.Context, id DocumentID, target LegacyDeletionTarget) error
+	// CompleteLegacyDeletion records that the last external effect returned.
+	CompleteLegacyDeletion(ctx context.Context, id DocumentID, target LegacyDeletionTarget, uncertain bool) error
+	// AbandonLegacyDeletion lets another request resume the reservation.
+	AbandonLegacyDeletion(ctx context.Context, id DocumentID, target LegacyDeletionTarget)
+}
+
+// LegacyDeletionGuard keeps activation from committing under an ID-only cleanup.
+type LegacyDeletionGuard interface {
+	// WithLegacyDeletion returns ErrDeletionActivated, without calling remove,
+	// when the database already selected checkpointed deletion.
+	WithLegacyDeletion(ctx context.Context, id DocumentID, remove func(LegacyDocumentStore) error) error
+}
+
+// InMemoryIndex identifies a process-local vector index and serializes its
+// deletions. Only the process that owns the index can complete a mutation of it.
+type InMemoryIndex interface {
+	// MemoryOwner identifies this index instance for as long as the process lives.
+	MemoryOwner() string
+	// LockDocument takes the single local deletion slot of one document, or
+	// reports ok as false while another caller holds it.
+	LockDocument(documentID string) (unlock func(), ok bool)
 }

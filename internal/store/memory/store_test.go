@@ -200,3 +200,33 @@ func TestTenantLabelIsStoredAndReturned(t *testing.T) {
 	require.Len(t, result, 1)
 	require.Equal(t, "tenant-a", result[0].Chunk.Metadata[domain.VectorTenantKey])
 }
+
+func TestMemoryOwnerIdentifiesOneIndex(t *testing.T) {
+	first, second := NewFakeVectorStore(), NewFakeVectorStore()
+	require.NotEmpty(t, first.MemoryOwner())
+	require.Equal(t, first.MemoryOwner(), first.MemoryOwner())
+	require.NotEqual(t, first.MemoryOwner(), second.MemoryOwner(), "a restarted or other process owns another index")
+}
+
+func TestLockDocumentAllowsOneDeletionPerDocument(t *testing.T) {
+	store := NewFakeVectorStore()
+	unlock, ok := store.LockDocument("doc")
+	require.True(t, ok)
+	_, again := store.LockDocument("doc")
+	require.False(t, again, "a duplicate must not start a second local mutation")
+	other, free := store.LockDocument("other")
+	require.True(t, free, "another document is independent")
+	other()
+	unlock()
+	unlock()
+	reacquired, ok := store.LockDocument("doc")
+	require.True(t, ok, "releasing twice frees the slot once")
+	reacquired()
+}
+
+func TestLockDocumentWorksOnAZeroValueStore(t *testing.T) {
+	var store FakeVectorStore
+	unlock, ok := store.LockDocument("doc")
+	require.True(t, ok)
+	unlock()
+}

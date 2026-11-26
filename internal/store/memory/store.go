@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/google/uuid"
 )
 
 // FakeVectorStore is a thread-safe in-memory vector store. It implements
@@ -28,7 +29,12 @@ type FakeVectorStore struct {
 	// namespace -> vector key -> stored chunk (with embedding + metadata).
 	ns         map[string]map[vectorKey]domain.Chunk
 	dimensions int
+	owner      string
+	// deleting holds the documents whose local deletion is in progress.
+	deleting map[string]struct{}
 }
+
+var _ domain.InMemoryIndex = (*FakeVectorStore)(nil)
 
 type vectorKey struct {
 	chunkID    domain.ChunkID
@@ -39,7 +45,33 @@ type vectorKey struct {
 
 // NewFakeVectorStore creates an empty in-memory store.
 func NewFakeVectorStore() *FakeVectorStore {
-	return &FakeVectorStore{ns: make(map[string]map[vectorKey]domain.Chunk)}
+	return &FakeVectorStore{ns: make(map[string]map[vectorKey]domain.Chunk), owner: uuid.NewString(), deleting: make(map[string]struct{})}
+}
+
+// MemoryOwner identifies this index instance. A restarted process, or another
+// replica, owns a different and empty index.
+func (s *FakeVectorStore) MemoryOwner() string { return s.owner }
+
+// LockDocument takes the single local deletion slot of a document. A caller
+// that does not get it must not start a second mutation of the same index.
+func (s *FakeVectorStore) LockDocument(documentID string) (func(), bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, busy := s.deleting[documentID]; busy {
+		return nil, false
+	}
+	if s.deleting == nil {
+		s.deleting = make(map[string]struct{})
+	}
+	s.deleting[documentID] = struct{}{}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.deleting, documentID)
+			s.mu.Unlock()
+		})
+	}, true
 }
 
 // Upsert inserts or replaces chunk vectors in the namespace.

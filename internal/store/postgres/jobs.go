@@ -377,9 +377,12 @@ const claimJobSuffix = `
 	FROM claimed j JOIN documents d ON d.id=j.document_id
 	LEFT JOIN document_pdf_extractions p ON p.document_id=d.id`
 
-// The reservation predicate is owner-defined, so a serving login needs no
-// privilege on the receipt table to lease ordinary work.
-const claimGuardedJob = claimJobPrefix + `evaluation_fixture_claimable(ready.document_id, NULLIF($4::text, ''))` + claimJobSuffix
+// The reservation predicates are owner-defined, so a serving login needs no
+// privilege on the receipt table to lease ordinary work. An unfinished or held
+// deletion receipt keeps a worker from leasing the document, so no new broad
+// vector work starts under a reservation.
+const claimGuardedJob = claimJobPrefix + `evaluation_fixture_claimable(ready.document_id, NULLIF($4::text, ''))
+		AND NOT document_deletion_reserved(ready.document_id)` + claimJobSuffix
 
 const claimBeforeFixtureMigration = claimJobPrefix + `to_regclass('evaluation_fixtures') IS NULL` + claimJobSuffix
 

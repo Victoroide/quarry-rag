@@ -53,9 +53,20 @@ func WrapVectorStore(inner domain.VectorStore, system string) domain.VectorStore
 		return writable
 	}
 	if canDeleteRevision {
-		return &revisionVectorStore{wrapped, revisions}
+		revision := &revisionVectorStore{wrapped, revisions}
+		if memory, ok := inner.(domain.InMemoryIndex); ok {
+			return &memoryVectorStore{revision, memory}
+		}
+		return revision
 	}
 	return wrapped
+}
+
+// memoryVectorStore keeps the owner identity and deletion slots of a
+// process-local index visible through tracing.
+type memoryVectorStore struct {
+	*revisionVectorStore
+	domain.InMemoryIndex
 }
 
 type revisionVectorStore struct {

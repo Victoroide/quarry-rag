@@ -86,7 +86,16 @@ func classifyMutationDelivery(ctx context.Context, method string, req, reply any
 
 func (p *Client) mutate(ctx context.Context, deletes bool, op func(context.Context) error) error {
 	if !domain.IsTrackedVectorMutation(ctx) {
-		return p.do(ctx, p.maxAttempts, op)
+		if !domain.ObservingVectorOutcome(ctx) {
+			return p.do(ctx, p.maxAttempts, op)
+		}
+		// An observer keeps the automatic retries but learns of every attempt
+		// that may have reached the provider, including one a later success hides.
+		return p.do(ctx, p.maxAttempts, func(attemptCtx context.Context) error {
+			err := definiteRejection(op(context.WithValue(attemptCtx, mutationDeliveryKey{}, new(atomic.Bool))))
+			domain.NoteVectorAttempt(ctx, err)
+			return err
+		})
 	}
 	rpcCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -94,14 +103,20 @@ func (p *Client) mutate(ctx context.Context, deletes bool, op func(context.Conte
 		if err := ctx.Err(); err != nil {
 			return domain.RejectedVectorMutation(err)
 		}
-		err := op(context.WithValue(ctx, mutationDeliveryKey{}, new(atomic.Bool)))
-		switch status.Code(err) {
-		case codes.InvalidArgument, codes.Unimplemented, codes.FailedPrecondition, codes.Unauthenticated, codes.PermissionDenied:
-			return domain.RejectedVectorMutation(err)
-		default:
-			return err
-		}
+		return definiteRejection(op(context.WithValue(ctx, mutationDeliveryKey{}, new(atomic.Bool))))
 	})
+}
+
+// definiteRejection marks the provider answers that prove the mutation did not
+// run. Tracked and observed mutations classify their errors the same way, so a
+// cleanup is never held for an attempt that could not have executed.
+func definiteRejection(err error) error {
+	switch status.Code(err) {
+	case codes.InvalidArgument, codes.Unimplemented, codes.FailedPrecondition, codes.Unauthenticated, codes.PermissionDenied:
+		return domain.RejectedVectorMutation(err)
+	default:
+		return err
+	}
 }
 
 func (p *Client) do(ctx context.Context, attempts int, op func(context.Context) error) error {

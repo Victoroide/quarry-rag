@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 )
 
 // VectorRevisionKey identifies vectors written for a document incarnation.
@@ -87,3 +88,32 @@ func VectorMutationUncertain(err error) bool {
 
 // ErrLiveVectorMutation indicates legacy removal could not retire the observed row.
 var ErrLiveVectorMutation = errors.New("document changed or has a pending vector mutation")
+
+// VectorOutcome records whether any attempt of an observed provider mutation
+// may have taken effect, including one that a later retry replaced with success.
+type VectorOutcome struct{ uncertain atomic.Bool }
+
+// Uncertain reports whether some attempt could have executed without an acknowledgment.
+func (o *VectorOutcome) Uncertain() bool { return o.uncertain.Load() }
+
+type vectorOutcomeKey struct{}
+
+// ObserveVectorOutcome lets an adapter that retries internally report an
+// attempt whose outcome stayed unknown.
+func ObserveVectorOutcome(ctx context.Context) (context.Context, *VectorOutcome) {
+	outcome := new(VectorOutcome)
+	return context.WithValue(ctx, vectorOutcomeKey{}, outcome), outcome
+}
+
+// ObservingVectorOutcome reports whether the caller wants attempt outcomes.
+func ObservingVectorOutcome(ctx context.Context) bool {
+	_, ok := ctx.Value(vectorOutcomeKey{}).(*VectorOutcome)
+	return ok
+}
+
+// NoteVectorAttempt records the failure of one attempt for the observer, if any.
+func NoteVectorAttempt(ctx context.Context, err error) {
+	if outcome, ok := ctx.Value(vectorOutcomeKey{}).(*VectorOutcome); ok && VectorMutationUncertain(err) {
+		outcome.uncertain.Store(true)
+	}
+}
