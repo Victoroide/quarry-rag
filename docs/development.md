@@ -174,13 +174,18 @@ The `scripts/` directory contains standalone administrative and evaluation tools
 
 ### Document Cleanup (`scripts/cleanup`)
 
-Accepts one or more document UUIDs as command-line arguments and removes their records from the configured vector backend, S3, and PostgreSQL using one shared set of clients:
+Accepts document UUIDs to remove records from the configured vector backend, S3 and PostgreSQL, or inspects, quarantines and releases held identities using one shared set of clients:
 
 ```sh
 make cleanup IDS="<document-uuid-1> <document-uuid-2>"
+make cleanup IDS="--list-held"
+make cleanup IDS="--quarantine <document-uuid>"
+make cleanup IDS="--release-held <document-uuid> <incarnation-uuid>"
 ```
 
-A bare UUID addresses the live document, which is the only form that works before the database activates [checkpointed deletion](api.md#checkpointed-deletion). `UUID@incarnation` addresses only the lifetime read earlier with `include_incarnation=true`. The incarnation must be one canonical UUID; an empty, repeated or malformed value stops the command before any deletion, and it is never treated as a bare UUID. With `GO_RAG_FAKE_MODE` the vectors live in the running service, so the command sends each deletion once to that service on `SERVER_PORT` with the configured service token.
+A bare UUID addresses the live document, which is the only form that works before the database activates [checkpointed deletion](api.md#checkpointed-deletion). `UUID@incarnation` addresses only the lifetime read earlier with `include_incarnation=true`. The incarnation must be one canonical UUID; an empty, repeated or malformed value stops the command before any deletion, and it is never treated as a bare UUID. With `GO_RAG_FAKE_MODE` the vectors live in the running service, so deletion and `--release-held` forward each request once to that service on `SERVER_PORT` with the configured service token.
+
+See [quarantine and hold release](deployment.md#quarantine-and-hold-release) for inspecting held receipts, quarantining absent UUIDs and releasing verified holds.
 
 PostgreSQL cleanup binds an existing `chunk_vectors` table on first use and refuses when it is missing; Pinecone cleanup and applied reconciliation require the binding a serving replica records.
 
