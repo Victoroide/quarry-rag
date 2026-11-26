@@ -144,7 +144,7 @@ func (c *Client) GetDocument(ctx context.Context, id domain.DocumentID) (*domain
 	var docID string
 	var metadataJSON []byte
 	err := c.Pool.QueryRow(ctx,
-		`SELECT id, content, metadata, chunk_count, s3_key, COALESCE(incarnation,id)::text FROM documents WHERE id = $1`,
+		`SELECT id, content, metadata, chunk_count, s3_key, COALESCE(incarnation,id)::text FROM documents WHERE id = $1 AND status <> 'deleting'`,
 		string(id),
 	).Scan(&docID, &doc.Content, &metadataJSON, &doc.ChunkCount, &doc.S3Key, &doc.Incarnation)
 	if err != nil {
@@ -166,7 +166,7 @@ func (c *Client) GetDocument(ctx context.Context, id domain.DocumentID) (*domain
 func (c *Client) GetDocumentS3Key(ctx context.Context, id domain.DocumentID) (*string, error) {
 	var s3Key *string
 	err := c.Pool.QueryRow(ctx,
-		`SELECT s3_key FROM documents WHERE id = $1`,
+		`SELECT s3_key FROM documents WHERE id = $1 AND status <> 'deleting'`,
 		string(id),
 	).Scan(&s3Key)
 	if err != nil {
@@ -181,7 +181,7 @@ func (c *Client) GetDocumentS3Key(ctx context.Context, id domain.DocumentID) (*s
 // ListDocuments returns a lightweight reference for every stored document, used
 // for reconciliation with caller-owned records.
 func (c *Client) ListDocuments(ctx context.Context) ([]domain.DocumentRef, error) {
-	rows, err := c.Pool.Query(ctx, `SELECT id, doc_type, s3_key FROM documents`)
+	rows, err := c.Pool.Query(ctx, `SELECT id, doc_type, s3_key FROM documents WHERE status <> 'deleting'`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list documents: %w", err)
 	}
@@ -216,7 +216,7 @@ func (c *Client) CheckLiveVectorRemoval(ctx context.Context, doc *domain.Documen
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var allowed, failed bool
 	err = tx.QueryRow(ctx, `SELECT scoped_vectors OR NOT vector_mutation_pending,status='failed'
-		FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2 FOR UPDATE`, doc.ID, doc.Incarnation).Scan(&allowed, &failed)
+		FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2 AND status<>'deleting' FOR UPDATE`, doc.ID, doc.Incarnation).Scan(&allowed, &failed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ErrLiveVectorMutation
 	}
@@ -236,9 +236,10 @@ func (c *Client) CheckLiveVectorRemoval(ctx context.Context, doc *domain.Documen
 }
 
 // RemoveLiveDocument rechecks the observed row while deleting it. It leaves its
-// job intact when an untagged worker owns a pending vector operation.
+// job intact when an untagged worker owns a pending vector operation, and it
+// never removes a document whose checkpointed deletion has begun.
 func (c *Client) RemoveLiveDocument(ctx context.Context, doc *domain.Document) error {
-	tag, err := c.execRemoval(ctx, `DELETE FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2
+	tag, err := c.execRemoval(ctx, `DELETE FROM documents WHERE id=$1 AND COALESCE(incarnation,id)=$2 AND status<>'deleting'
 		AND (scoped_vectors OR NOT vector_mutation_pending)`, doc.ID, doc.Incarnation)
 	if err == nil && tag.RowsAffected() != 1 {
 		return domain.ErrLiveVectorMutation
@@ -250,7 +251,8 @@ func (c *Client) RemoveLiveDocument(ctx context.Context, doc *domain.Document) e
 func (c *Client) CheckFingerprint(ctx context.Context, fingerprint string) (domain.DocumentID, bool, error) {
 	var docID string
 	err := c.Pool.QueryRow(ctx,
-		`SELECT document_id FROM document_fingerprints WHERE fingerprint = $1`,
+		`SELECT f.document_id FROM document_fingerprints f JOIN documents d ON d.id = f.document_id
+		 WHERE f.fingerprint = $1 AND d.status <> 'deleting'`,
 		fingerprint,
 	).Scan(&docID)
 	if err != nil {

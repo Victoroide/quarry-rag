@@ -97,6 +97,10 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 				result.Outcome = domain.AcceptConflict
 				return result, nil
 			}
+			if state == "deleting" {
+				result.Outcome = domain.AcceptDeletionConflict
+				return result, nil
+			}
 			if fingerprint == nil {
 				legacy := chunker.ScopedFingerprint(collection, content)
 				fingerprint = &legacy
@@ -124,7 +128,8 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 		if req.PDF != nil || existingPDFOnly {
 			id, state, err = findSharedPDF(ctx, tx, req)
 		} else {
-			err = tx.QueryRow(ctx, `SELECT d.id::text,d.status FROM document_fingerprints f JOIN documents d ON d.id=f.document_id WHERE f.fingerprint=$1 FOR UPDATE OF d`, req.Fingerprint).Scan(&id, &state)
+			err = tx.QueryRow(ctx, `SELECT d.id::text,d.status FROM document_fingerprints f JOIN documents d ON d.id=f.document_id
+				WHERE f.fingerprint=$1 AND d.status<>'deleting' FOR UPDATE OF d`, req.Fingerprint).Scan(&id, &state)
 		}
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -141,6 +146,9 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 	if id != "" {
 		result.DocumentID = domain.DocumentID(id)
 		switch state {
+		case "deleting":
+			result.Outcome = domain.AcceptDeletionConflict
+			return result, nil
 		case "completed":
 			result.Outcome = domain.AcceptDuplicate
 			return result, nil
@@ -175,6 +183,16 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 			return result, nil
 		}
 		rotateWindow = expired
+	}
+
+	// An unfinished or held deletion keeps its identity until it is released.
+	var reserved bool
+	if holdErr := tx.QueryRow(ctx, `SELECT document_deletion_reserved($1)`, string(req.Document.ID)).Scan(&reserved); holdErr != nil {
+		return result, holdErr
+	}
+	if reserved {
+		result.Outcome = domain.AcceptDeletionConflict
+		return result, nil
 	}
 
 	var count int

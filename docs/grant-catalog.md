@@ -83,8 +83,10 @@ GRANT SELECT ON public.schema_migrations TO quarry_service;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.documents, public.chunks,
   public.ingest_jobs, public.document_fingerprints TO quarry_service;
 GRANT SELECT, INSERT, UPDATE ON public.document_pdf_extractions TO quarry_service;
+GRANT SELECT, INSERT, UPDATE ON public.document_deletions TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
-  public.evaluation_fixture_reserved(uuid) TO quarry_service;
+  public.evaluation_fixture_reserved(uuid), public.document_deletion_active(),
+  public.document_deletion_reserved(uuid) TO quarry_service;
 GRANT SELECT (revision) ON public.grant_catalog_policy_revision TO quarry_operator;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_source_snapshot(uuid) TO quarry_operator;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_import_batch(text, boolean) TO quarry_operator;
@@ -128,15 +130,20 @@ receipt grant that applies only to a deployment that enables fixtures.
 
 ### Upgrade an existing serving role
 
-After the schema owner applies migration `019_evaluation_fixture_guards.sql`,
-grant the serving login execution on both functions before starting upgraded
-processes. Ordinary admission, job leasing and removal use these functions
-even when evaluation fixtures are disabled. Substitute the deployed schema and
-serving role names as needed.
+After the schema owner applies migrations `019_evaluation_fixture_guards.sql`
+and `023_deletion_predicates.sql`, grant the serving login execution on the
+four functions and access to the deletion receipts before starting upgraded
+processes. Ordinary admission, job leasing, removal and the deletion-mode
+check use these functions even when evaluation fixtures are disabled and
+checkpointed deletion is inactive. The login reads the activation marker only
+through `document_deletion_active` and needs no privilege on its table.
+Substitute the deployed schema and serving role names as needed.
 
 ```sql
+GRANT SELECT, INSERT, UPDATE ON public.document_deletions TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
-  public.evaluation_fixture_reserved(uuid) TO quarry_service;
+  public.evaluation_fixture_reserved(uuid), public.document_deletion_active(),
+  public.document_deletion_reserved(uuid) TO quarry_service;
 ```
 
 ## Prepare a batch
