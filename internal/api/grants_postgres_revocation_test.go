@@ -17,7 +17,7 @@ import (
 func TestGrantsPostgresReplicasObserveCommittedRevocation(t *testing.T) {
 	for _, backend := range grantse2e.Backends {
 		t.Run(backend, func(t *testing.T) {
-			f := grantse2e.New(t, backend)
+			f := grantse2e.New(t, backend, (*pgstore.Client).ActivateDeletion)
 			docs := f.Seed(t)
 			actor := f.Revocable
 			replicaB := f.Client(t, 1, actor)
@@ -152,7 +152,7 @@ func disableDuringSigning(t *testing.T, f *grantse2e.Fixture, c *client.Client, 
 	}()
 	var signPID int32
 	require.Eventually(t, func() bool {
-		err := conn.QueryRow(ctx, `SELECT pid FROM pg_locks WHERE database = (SELECT oid FROM pg_database WHERE datname=current_database())
+		err := f.Admin.Pool.QueryRow(ctx, `SELECT pid FROM pg_locks WHERE database = (SELECT oid FROM pg_database WHERE datname=current_database())
 			AND locktype='advisory' AND classid=283 AND objid=1 AND objsubid=2 AND NOT granted`).Scan(&signPID)
 		return err == nil
 	}, 3*time.Second, 15*time.Millisecond, "signing transaction did not reach the audit gate")
@@ -169,7 +169,7 @@ func disableDuringSigning(t *testing.T, f *grantse2e.Fixture, c *client.Client, 
 	}()
 	require.Eventually(t, func() bool {
 		var blocked bool
-		err := conn.QueryRow(ctx, `SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database()
+		err := f.Admin.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database()
 			AND usename=$1 AND $2=ANY(pg_blocking_pids(pid)))`, f.OperatorLogin, signPID).Scan(&blocked)
 		return err == nil && blocked
 	}, 3*time.Second, 15*time.Millisecond, "operator disable did not wait for signing")

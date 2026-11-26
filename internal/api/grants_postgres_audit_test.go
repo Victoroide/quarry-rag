@@ -13,6 +13,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/client"
 	"github.com/Victoroide/quarry-rag/internal/logctx"
+	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/grantse2e"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -25,7 +26,7 @@ func TestGrantsPostgresAuditAndRedaction(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			var logs *lockedGrantsLog
 			var spans *tracetest.SpanRecorder
-			f := grantse2e.New(t, backend, func() { logs, spans = captureGrantsTelemetry(t) })
+			f := grantse2e.New(t, backend, (*pgstore.Client).ActivateDeletion, func() { logs, spans = captureGrantsTelemetry(t) })
 			docs := f.Seed(t)
 			path := "/documents/" + docs.First.ID
 			body, err := json.Marshal(grantse2e.Query("global", client.AnswerModeGenerated))

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/client"
+	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/grantse2e"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
@@ -21,7 +22,7 @@ import (
 
 const grantsStdioHelper = "QUARRY_TEST_GRANTS_STDIO_HELPER"
 
-func TestGrantsStdioHelper(t *testing.T) {
+func TestGrantsStdioHelper(_ *testing.T) {
 	if os.Getenv(grantsStdioHelper) != "1" {
 		return
 	}
@@ -31,7 +32,7 @@ func TestGrantsStdioHelper(t *testing.T) {
 func TestMCPStdioGrantsThroughPostgres(t *testing.T) {
 	for _, backend := range grantse2e.Backends {
 		t.Run(backend, func(t *testing.T) {
-			f := grantse2e.New(t, backend)
+			f := grantse2e.New(t, backend, (*pgstore.Client).ActivateDeletion)
 			docs := f.Seed(t)
 			root := t.TempDir()
 			filePath := filepath.Join(root, "private-mcp-source.txt")
@@ -142,8 +143,12 @@ func startGrantsStdio(t *testing.T, f *grantse2e.Fixture, actor grantse2e.Actor,
 	require.NoError(t, os.WriteFile(credentialPath, []byte(actor.Credential.Token), 0o600))
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	t.Cleanup(cancel)
-	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestGrantsStdioHelper$")
-	cmd.WaitDelay = 5 * time.Second
+	// The resolved test binary is an absolute path and the child accepts only
+	// the fixed helper selector. The context watchdog also bounds pipe reads.
+	cmd := &exec.Cmd{
+		Path: executable, Args: []string{executable, "-test.run=^TestGrantsStdioHelper$"},
+		WaitDelay: 5 * time.Second,
+	}
 	cmd.Env = append(cmd.Environ(), grantsStdioHelper+"=1",
 		"QUARRY_URL="+f.Servers[replica].URL, "QUARRY_SERVICE_TOKEN="+f.ServiceToken,
 		"QUARRY_SUBJECT_TOKEN_FILE="+credentialPath, "QUARRY_MCP_FILE_ROOTS="+root,
@@ -154,10 +159,13 @@ func startGrantsStdio(t *testing.T, f *grantse2e.Fixture, actor grantse2e.Actor,
 	require.NoError(t, err)
 	stderr := &bytes.Buffer{}
 	cmd.Stderr = stderr
+	require.NoError(t, ctx.Err())
 	require.NoError(t, cmd.Start())
+	stopKill := context.AfterFunc(ctx, func() { _ = cmd.Process.Kill() })
 	proc := &grantsStdio{cmd: cmd, in: in, out: bufio.NewReader(out), stderr: stderr, cancel: cancel,
 		secrets: []string{f.ServiceToken, actor.Credential.Token, actor.Subject, credentialPath}}
 	t.Cleanup(func() {
+		defer stopKill()
 		if !proc.closed {
 			cancel()
 			_ = proc.in.Close()
@@ -172,7 +180,7 @@ func startGrantsStdio(t *testing.T, f *grantse2e.Fixture, actor grantse2e.Actor,
 	return proc
 }
 
-func (p *grantsStdio) request(t *testing.T, method string, params any, response any) {
+func (p *grantsStdio) request(t *testing.T, method string, params, response any) {
 	t.Helper()
 	p.id++
 	message := map[string]any{"jsonrpc": "2.0", "id": p.id, "method": method}

@@ -124,7 +124,6 @@ func (p *Pinecone) SetField(t *testing.T, vector *pinecone.Vector, field, value 
 
 // AppendQueryHits simulates a provider returning candidates outside its own filter.
 func (p *Pinecone) AppendQueryHits(vectors ...*pinecone.Vector) {
-	t.Helper()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.extra = slices.Clone(vectors)
@@ -316,8 +315,8 @@ func (p *Pinecone) delete(ctx context.Context, body pineconePayload) error {
 }
 
 func (p *Pinecone) read(r *http.Request) (any, error) {
-	params, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil || !slices.Equal(params["namespace"], []string{""}) {
+	params, parseErr := url.ParseQuery(r.URL.RawQuery)
+	if parseErr != nil || !slices.Equal(params["namespace"], []string{""}) {
 		return nil, errors.New("invalid namespace")
 	}
 	if r.URL.Path == "/vectors/fetch" {
@@ -390,23 +389,45 @@ func validPayload(body pineconePayload, action string) bool {
 }
 
 func filterShape(fields map[string]any) (*structpb.Struct, error) {
+	if err := validateFilter(fields); err != nil {
+		return nil, err
+	}
+	return structpb.NewStruct(fields)
+}
+
+func validateFilter(fields map[string]any) error {
 	for key, condition := range fields {
 		switch key {
-		case "doc_id", "collection", "doc_type", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey:
+		case "$and", "$or":
+			clauses, ok := condition.([]any)
+			if !ok || len(clauses) == 0 {
+				return errors.New("invalid logical filter")
+			}
+			for _, clause := range clauses {
+				nested, ok := clause.(map[string]any)
+				if !ok || len(nested) == 0 {
+					return errors.New("invalid filter clause")
+				}
+				if err := validateFilter(nested); err != nil {
+					return err
+				}
+			}
+			continue
+		case "doc_id", "collection", "doc_type", "revision_id", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey:
 		default:
-			return nil, errors.New("unknown filter field")
+			return errors.New("unknown filter field")
 		}
 		operators, ok := condition.(map[string]any)
 		if !ok || len(operators) != 1 {
-			return nil, errors.New("invalid filter condition")
+			return errors.New("invalid filter condition")
 		}
 		for op, operand := range operators {
 			if !validOperand(op, operand) {
-				return nil, errors.New("invalid filter operand")
+				return errors.New("invalid filter operand")
 			}
 		}
 	}
-	return structpb.NewStruct(fields)
+	return nil
 }
 
 func validOperand(op string, operand any) bool {

@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"google.golang.org/grpc/codes"
@@ -37,6 +36,7 @@ type httpVectorPayload struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
+// UpsertVectors stores records in the configured namespace.
 func (c *HTTPIndexConn) UpsertVectors(ctx context.Context, vectors []*pinecone.Vector) (uint32, error) {
 	payload := struct {
 		Namespace string              `json:"namespace"`
@@ -65,6 +65,7 @@ func (c *HTTPIndexConn) UpsertVectors(ctx context.Context, vectors []*pinecone.V
 	return out.UpsertedCount, nil
 }
 
+// QueryByVectorValues sends a ranked vector query and decodes its matches.
 func (c *HTTPIndexConn) QueryByVectorValues(ctx context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
 	var filterMap map[string]any
 	if req.MetadataFilter != nil {
@@ -115,6 +116,7 @@ func (c *HTTPIndexConn) QueryByVectorValues(ctx context.Context, req *pinecone.Q
 	return &pinecone.QueryVectorsResponse{Matches: matches}, nil
 }
 
+// DeleteVectorsByFilter removes records matching the supplied metadata.
 func (c *HTTPIndexConn) DeleteVectorsByFilter(ctx context.Context, filter *structpb.Struct) error {
 	var filterMap map[string]any
 	if filter != nil {
@@ -127,6 +129,7 @@ func (c *HTTPIndexConn) DeleteVectorsByFilter(ctx context.Context, filter *struc
 	return c.postJSON(ctx, "/vectors/delete", payload, nil)
 }
 
+// DeleteVectorsByID removes the supplied physical record IDs.
 func (c *HTTPIndexConn) DeleteVectorsByID(ctx context.Context, ids []string) error {
 	payload := struct {
 		Namespace string   `json:"namespace"`
@@ -135,6 +138,7 @@ func (c *HTTPIndexConn) DeleteVectorsByID(ctx context.Context, ids []string) err
 	return c.postJSON(ctx, "/vectors/delete", payload, nil)
 }
 
+// DeleteAllVectorsInNamespace requests removal of the entire namespace.
 func (c *HTTPIndexConn) DeleteAllVectorsInNamespace(ctx context.Context) error {
 	payload := struct {
 		Namespace string `json:"namespace"`
@@ -143,6 +147,7 @@ func (c *HTTPIndexConn) DeleteAllVectorsInNamespace(ctx context.Context) error {
 	return c.postJSON(ctx, "/vectors/delete", payload, nil)
 }
 
+// FetchVectors looks up records by their physical IDs.
 func (c *HTTPIndexConn) FetchVectors(ctx context.Context, ids []string) (*pinecone.FetchVectorsResponse, error) {
 	q := url.Values{}
 	q.Set("namespace", c.namespace)
@@ -166,6 +171,7 @@ func (c *HTTPIndexConn) FetchVectors(ctx context.Context, ids []string) (*pineco
 	return &pinecone.FetchVectorsResponse{Vectors: out}, nil
 }
 
+// ListVectors returns a page of physical IDs for the namespace.
 func (c *HTTPIndexConn) ListVectors(ctx context.Context, req *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error) {
 	q := url.Values{}
 	q.Set("namespace", c.namespace)
@@ -202,6 +208,7 @@ func (c *HTTPIndexConn) ListVectors(ctx context.Context, req *pinecone.ListVecto
 	return &pinecone.ListVectorsResponse{VectorIds: items, NextPaginationToken: next}, nil
 }
 
+// Close leaves the caller-owned HTTP client open.
 func (c *HTTPIndexConn) Close() error { return nil }
 
 func (c *HTTPIndexConn) postJSON(ctx context.Context, path string, in, out any) error {

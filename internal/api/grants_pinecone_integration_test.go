@@ -9,13 +9,14 @@ import (
 	"github.com/Victoroide/quarry-rag/client"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
+	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/grantse2e"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
 func TestGrantsPineconeFiltersBeforeRanking(t *testing.T) {
-	f := grantse2e.New(t, "pinecone")
+	f := grantse2e.New(t, "pinecone", (*pgstore.Client).ActivateDeletion)
 	docs := f.Seed(t)
 	index := f.Pinecone
 	reader := f.Client(t, 1, f.Reader)
@@ -64,11 +65,19 @@ func TestGrantsPineconeFiltersBeforeRanking(t *testing.T) {
 			require.Equal(t, "", call.Namespace)
 			require.Positive(t, call.TopK)
 			require.Equal(t, map[string]any{
-				"doc_id":                 map[string]any{"$in": []any{docs.First.ID}},
-				domain.VectorTenantKey:   map[string]any{"$eq": f.Owner.Tenant},
-				domain.VectorRevisionKey: map[string]any{"$in": []any{docs.First.Incarnation}},
-				"collection":             map[string]any{"$eq": grantse2e.Collection},
-				"doc_type":               map[string]any{"$eq": grantse2e.FileType},
+				"$and": []any{
+					map[string]any{domain.VectorTenantKey: map[string]any{"$eq": f.Owner.Tenant}},
+					map[string]any{"doc_id": map[string]any{"$in": []any{docs.First.ID}}},
+					map[string]any{"collection": map[string]any{"$eq": grantse2e.Collection}},
+					map[string]any{"doc_type": map[string]any{"$eq": grantse2e.FileType}},
+					map[string]any{"$or": []any{
+						map[string]any{domain.VectorRevisionKey: map[string]any{"$in": []any{docs.First.Incarnation}}},
+						map[string]any{
+							"revision_id":            map[string]any{"$exists": true},
+							domain.VectorRevisionKey: map[string]any{"$exists": false},
+						},
+					}},
+				},
 			}, call.Filter)
 			require.Equal(t, []string{current.Id}, call.Keys)
 		}
@@ -113,7 +122,7 @@ func TestGrantsPineconeFiltersBeforeRanking(t *testing.T) {
 			_, err := reader.Query(ctx, req)
 			returned <- err
 		}()
-		awaitPineconeSignal(t, ctx, started)
+		awaitPineconeSignal(ctx, t, started)
 		cancel()
 		select {
 		case err := <-returned:
@@ -123,7 +132,7 @@ func TestGrantsPineconeFiltersBeforeRanking(t *testing.T) {
 		}
 		drain, stop := context.WithTimeout(t.Context(), 5*time.Second)
 		defer stop()
-		awaitPineconeSignal(t, drain, canceled)
+		awaitPineconeSignal(drain, t, canceled)
 	})
 
 	t.Run("qualified deletion checkpoints provider failure", func(t *testing.T) {
@@ -152,7 +161,7 @@ func TestGrantsPineconeFiltersBeforeRanking(t *testing.T) {
 	})
 }
 
-func awaitPineconeSignal(t *testing.T, ctx context.Context, signal <-chan struct{}) {
+func awaitPineconeSignal(ctx context.Context, t *testing.T, signal <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-signal:

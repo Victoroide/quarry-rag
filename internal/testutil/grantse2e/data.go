@@ -46,15 +46,16 @@ func (f *Fixture) provision(t *testing.T) {
 	for _, actor := range []Actor{f.Owner, f.Reader, f.Other, f.Downloader, f.Revocable, f.Foreign} {
 		principals = append(principals, f.principal(actor, true))
 	}
-	f.Import(t, "tenants", tenants, "principals", principals, "collections", collections, "create_permissions", permissions)
+	f.importBatch(t, map[string][]map[string]any{
+		"tenants": tenants, "principals": principals, "collections": collections, "create_permissions": permissions,
+	})
 }
 
-// Import submits an operator batch and carries forward the committed revision.
-func (f *Fixture) Import(t *testing.T, group string, entries []map[string]any, more ...any) {
+func (f *Fixture) importBatch(t *testing.T, entries map[string][]map[string]any) {
 	t.Helper()
-	batch := map[string]any{"batch_id": uuid.NewString(), "expected_revision": f.Revision, group: entries}
-	for i := 0; i < len(more); i += 2 {
-		batch[more[i].(string)] = more[i+1]
+	batch := map[string]any{"batch_id": uuid.NewString(), "expected_revision": f.Revision}
+	for group, values := range entries {
+		batch[group] = values
 	}
 	body, err := json.Marshal(batch)
 	require.NoError(t, err)
@@ -73,7 +74,7 @@ func (f *Fixture) Grant(t *testing.T, actor Actor, read, download bool, docs ...
 		entries = append(entries, map[string]any{"tenant_id": actor.Tenant, "principal_id": actor.ID,
 			"document_id": doc.ID, "incarnation": doc.Incarnation, "can_read": read, "can_download": download})
 	}
-	f.Import(t, "grants", entries)
+	f.importBatch(t, map[string][]map[string]any{"grants": entries})
 }
 
 // DisableBatch creates a principal update without doing database work.

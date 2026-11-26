@@ -218,33 +218,45 @@
       "W": 320,
       "H": 26
     },
-    "internal/testutil/pgtest": {
+    "internal/testutil/grantse2e": {
       "X": 76,
       "Y": 836,
       "W": 320,
       "H": 26
     },
-    "internal/textutil": {
-      "X": 52,
+    "internal/testutil/pgtest": {
+      "X": 76,
       "Y": 862,
-      "W": 344,
+      "W": 320,
       "H": 26
     },
-    "internal/tracing": {
-      "X": 52,
+    "internal/testutil/pineconetest": {
+      "X": 76,
       "Y": 888,
-      "W": 344,
+      "W": 320,
       "H": 26
     },
-    "internal/wordprocessingml": {
+    "internal/textutil": {
       "X": 52,
       "Y": 914,
       "W": 344,
       "H": 26
     },
-    "internal/worker": {
+    "internal/tracing": {
       "X": 52,
       "Y": 940,
+      "W": 344,
+      "H": 26
+    },
+    "internal/wordprocessingml": {
+      "X": 52,
+      "Y": 966,
+      "W": 344,
+      "H": 26
+    },
+    "internal/worker": {
+      "X": 52,
+      "Y": 992,
       "W": 344,
       "H": 26
     },
@@ -376,7 +388,7 @@
         "X": 16,
         "Y": 72,
         "W": 392,
-        "H": 902
+        "H": 954
       }
     },
     {
