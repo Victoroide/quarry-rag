@@ -63,6 +63,7 @@ type reconcileFakeIndex struct {
 	fetchErr   error
 	statsErr   error
 	deleteErr  error
+	deleteHook func([]string) error
 	listCalls  int
 	deleteSize []int
 	deleted    []string
@@ -116,6 +117,9 @@ func (f *reconcileFakeIndex) DescribeIndexStats(context.Context) (*pinecone.Desc
 }
 
 func (f *reconcileFakeIndex) DeleteVectorsById(_ context.Context, ids []string) error { //nolint:revive // Match the SDK method name.
+	if f.deleteHook != nil {
+		return f.deleteHook(ids)
+	}
 	f.deleteSize = append(f.deleteSize, len(ids))
 	f.deleted = append(f.deleted, ids...)
 	return f.deleteErr
