@@ -29,6 +29,14 @@ type inventoryReport struct {
 	Writes          int                     `json:"writes"`
 }
 
+// inventorySource is the read-only part of PostgreSQL that an inventory scans.
+type inventorySource interface {
+	DocumentRevisions(ctx context.Context, after string, limit int) ([]pgstore.DocumentRevision, error)
+	HasDocumentsAfter(ctx context.Context, after string) (bool, error)
+	GenerationCheckpoints(ctx context.Context, generation string, documentIDs []string) (map[string]pgstore.Checkpoint, error)
+	OrphanedGenerationDocuments(ctx context.Context, generation string, limit int) ([]pgstore.Checkpoint, error)
+}
+
 type targetReport struct {
 	Store  string `json:"store"`
 	Target string `json:"target"`
@@ -208,7 +216,7 @@ func (d deps) inventory(ctx context.Context, opts options, p targetPlan, profile
 	}
 	rep.OpenDeletions = quiesce.OpenDeletions
 	rep.OpenDeletionIDs = quiesce.OpenDeletionIDs
-	if scanErr := d.scanPlan(ctx, opts, p, row != nil, &rep); scanErr != nil {
+	if scanErr := scanPlan(ctx, d.pg, opts, p, row != nil, &rep); scanErr != nil {
 		return rep, scanErr
 	}
 	return rep, nil
@@ -245,12 +253,14 @@ func (d deps) countDocuments(ctx context.Context, rep *inventoryReport) error {
 		Scan(&rep.Documents.Deleting, &rep.Documents.WithoutOriginal, &rep.TextBytes)
 }
 
-// scanPlan compares the eligible documents with the generation's ledger.
-func (d deps) scanPlan(ctx context.Context, opts options, p targetPlan, registered bool, rep *inventoryReport) error {
+// scanPlan compares the eligible documents with the generation's ledger. The
+// scan is truncated only when an eligible document remains after the limit.
+func scanPlan(ctx context.Context, src inventorySource, opts options, p targetPlan, registered bool, rep *inventoryReport) error {
 	after := opts.After
 	scanned := 0
-	for {
-		page, err := d.pg.DocumentRevisions(ctx, after, min(opts.Page, opts.MaxDocuments-scanned))
+	for scanned < opts.MaxDocuments {
+		limit := min(opts.Page, opts.MaxDocuments-scanned)
+		page, err := src.DocumentRevisions(ctx, after, limit)
 		if err != nil {
 			return err
 		}
@@ -260,7 +270,7 @@ func (d deps) scanPlan(ctx context.Context, opts options, p targetPlan, register
 		}
 		var prior map[string]pgstore.Checkpoint
 		if registered {
-			if prior, err = d.pg.GenerationCheckpoints(ctx, p.generation, ids); err != nil {
+			if prior, err = src.GenerationCheckpoints(ctx, p.generation, ids); err != nil {
 				return err
 			}
 		}
@@ -288,15 +298,21 @@ func (d deps) scanPlan(ctx context.Context, opts options, p targetPlan, register
 				rep.Plan.ChunksToStage += rev.Chunks
 			}
 		}
-		if len(page) == 0 || scanned >= opts.MaxDocuments {
-			rep.Truncated = len(page) > 0 && scanned >= opts.MaxDocuments
+		if len(page) < limit {
 			break
 		}
+	}
+	if scanned == opts.MaxDocuments {
+		more, err := src.HasDocumentsAfter(ctx, after)
+		if err != nil {
+			return err
+		}
+		rep.Truncated = more
 	}
 	// Reusable vectors are checked per chunk during staging, so the bound is an upper bound.
 	rep.Plan.EmbeddingCallsUpperBound = rep.Plan.ChunksToStage
 	if registered {
-		orphans, err := d.pg.OrphanedGenerationDocuments(ctx, p.generation, opts.MaxDocuments)
+		orphans, err := src.OrphanedGenerationDocuments(ctx, p.generation, opts.MaxDocuments)
 		if err != nil {
 			return err
 		}

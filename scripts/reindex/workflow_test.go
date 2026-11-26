@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -178,6 +180,106 @@ func TestDefaultInventoryWritesNothingAndCallsNoProvider(t *testing.T) {
 	_, hasOpenIDs := report["open_deletion_ids"]
 	require.False(t, hasOpenIDs)
 	require.Empty(t, report["blockers"])
+}
+
+func TestInventoryReportsTruncationOnlyWhenDocumentsRemain(t *testing.T) {
+	pg := vectorDB(t)
+	h := newHarness(t, &fixture{pg: pg}, "postgres")
+	base := defaultOptions()
+	base.Generation = "g2"
+	base.Profile = h.profileFile("target.json", testProfile("model-b"))
+	tests := []struct {
+		name                   string
+		documents, limit, page int
+		truncated              bool
+	}{
+		{name: "empty", limit: 1, page: 100},
+		{name: "one_at_limit", documents: 1, limit: 1, page: 100},
+		{name: "more_remain", documents: 2, limit: 1, page: 100, truncated: true},
+		{name: "below_limit", documents: 3, limit: 4, page: 2},
+		{name: "page_above_limit", documents: 3, limit: 3, page: 100},
+		{name: "exact_limit_over_pages", documents: 4, limit: 4, page: 2},
+	}
+	inserted := 0
+	for _, tt := range tests {
+		for inserted < tt.documents {
+			insertDoc(t, pg, newDoc("manuals", "manual", "inventory chunk"))
+			inserted++
+		}
+		t.Run(tt.name, func(t *testing.T) {
+			caseHarness := *h
+			caseHarness.t = t
+			opts := base
+			opts.MaxDocuments, opts.Page = tt.limit, tt.page
+			report, err := caseHarness.run(opts)
+			require.NoError(t, err)
+			require.Equal(t, tt.truncated, report["truncated"])
+			require.EqualValues(t, tt.documents, report["documents"].(map[string]any)["completed"])
+			require.EqualValues(t, min(tt.documents, tt.limit), report["plan"].(map[string]any)["documents_to_stage"])
+		})
+	}
+}
+
+func TestInventoryTruncationIgnoresIneligibleTail(t *testing.T) {
+	pg := vectorDB(t)
+	h := newHarness(t, &fixture{pg: pg}, "postgres")
+	for i, status := range []string{"completed", "failed", "processing", "deleting", "completed", "completed"} {
+		doc := newDoc("manuals", "manual", "inventory chunk")
+		doc.ID = fmt.Sprintf("00000000-0000-4000-8000-%012d", i+1)
+		doc.Status = status
+		insertDoc(t, pg, doc)
+		if i >= 4 {
+			held := i == 5
+			_, err := pg.Pool.Exec(t.Context(), `INSERT INTO document_deletions
+ (document_id,incarnation,kind,vector_mode,held,finalized) VALUES($1,$2,'quarantine','local',$3,$3)`, doc.ID, uuid.NewString(), held)
+			require.NoError(t, err)
+		}
+	}
+
+	opts := defaultOptions()
+	opts.Generation = "g2"
+	opts.Profile = h.profileFile("target.json", testProfile("model-b"))
+	opts.MaxDocuments = 1
+	report, err := h.run(opts)
+	require.NoError(t, err)
+	require.Equal(t, false, report["truncated"])
+	require.EqualValues(t, 3, report["documents"].(map[string]any)["completed"])
+	require.EqualValues(t, 1, report["plan"].(map[string]any)["documents_to_stage"])
+}
+
+type cancelInventoryProbe struct {
+	cancel context.CancelFunc
+}
+
+func (tr cancelInventoryProbe) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.HasPrefix(data.SQL, "SELECT EXISTS(SELECT 1 FROM documents d WHERE d.status = 'completed'") {
+		tr.cancel()
+	}
+	return ctx
+}
+
+func (cancelInventoryProbe) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestInventoryProbeErrorWritesNoReport(t *testing.T) {
+	pg := vectorDB(t)
+	h := newHarness(t, &fixture{pg: pg}, "postgres")
+	insertDoc(t, pg, newDoc("manuals", "manual", "inventory chunk"))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	traced, err := pgstore.NewClient(ctx, pg.Pool.Config().ConnString(), pgstore.WithQueryTracer(cancelInventoryProbe{cancel: cancel}))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, traced.Close(context.Background())) })
+	h.deps.pg = traced
+
+	opts := defaultOptions()
+	opts.Generation = "g2"
+	opts.Profile = h.profileFile("target.json", testProfile("model-b"))
+	opts.MaxDocuments = 1
+	var out bytes.Buffer
+	err = execute(ctx, h.deps, opts, &out, 10*time.Millisecond)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, out.String())
 }
 
 func TestInventoryReportsBlockers(t *testing.T) {
