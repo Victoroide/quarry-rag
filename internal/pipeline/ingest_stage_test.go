@@ -77,3 +77,16 @@ func TestPersistLabelsOwnedChunksWithTheirTenant(t *testing.T) {
 		}
 	}
 }
+
+func TestChunkStageUsesLayoutSectionsWhenPresent(t *testing.T) {
+	stage := NewChunkStage(chunker.NewChunker(64, 8))
+	ic := NewIngestContext("doc-layout", "fallback", nil)
+	ic.LayoutSections = []domain.LayoutSection{
+		{Page: 1, TableID: "p1-t1", RowID: "p1-t1-r1", Text: "Key: Status | Value: Ready"},
+	}
+	require.NoError(t, stage.Run(t.Context(), ic))
+	require.Len(t, ic.Chunks, 1)
+	require.Equal(t, []int{1}, ic.Chunks[0].Metadata["pages"])
+	require.Equal(t, []string{"p1-t1"}, ic.Chunks[0].Metadata["table_ids"])
+	require.Equal(t, []string{"p1-t1-r1"}, ic.Chunks[0].Metadata["row_ids"])
+}

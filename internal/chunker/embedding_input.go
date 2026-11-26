@@ -154,10 +154,10 @@ func (s profileText) preferredCut(start, end int, sentence bool) int {
 	return end
 }
 
-func (c *Chunker) chunkProfiled(ctx context.Context, docID domain.DocumentID, text string, profile *embeddinginput.Profile) ([]domain.Chunk, error) {
+func (c *Chunker) chunkProfiled(ctx context.Context, docID domain.DocumentID, text string, profile *embeddinginput.Profile, baseVersion string) ([]domain.Chunk, []chunkSpan, error) {
 	source, err := indexProfileText(ctx, text)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	bytes, chars := profile.SplitLimits()
 	if bytes == 0 {
@@ -169,24 +169,26 @@ func (c *Chunker) chunkProfiled(ctx context.Context, docID domain.DocumentID, te
 		spans, err = c.profilePartition(ctx, source, profile, bytes, chars)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	version := fmt.Sprintf("quarry.chunk.profile.v2.uax29-unicode17\x00%s\x00%d\x00%d\x00", profile.Fingerprint(), c.chunkSize, c.overlap)
+	version := fmt.Sprintf("%squarry.chunk.profile.v2.uax29-unicode17\x00%s\x00%d\x00%d\x00", baseVersion, profile.Fingerprint(), c.chunkSize, c.overlap)
 	var chunks []domain.Chunk
+	var byteSpans []chunkSpan
 	for i, span := range spans {
 		start := span.start
 		if c.overlap > 0 && i > 0 && !span.limited && !spans[i-1].limited {
 			start, err = c.profileOverlap(ctx, source, profile, spans[i-1], span, bytes, chars)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		chunks = append(chunks, makeChunk(docID, i, source.slice(start, span.end), version))
+		byteSpans = append(byteSpans, chunkSpan{start: source.points[start].offset, end: source.points[span.end].offset})
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return chunks, nil
+	return chunks, byteSpans, nil
 }
 
 func (c *Chunker) greedyProfileSpans(ctx context.Context, s profileText, profile *embeddinginput.Profile, bytes, chars int) ([]profileSpan, error) {

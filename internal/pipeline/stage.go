@@ -68,6 +68,9 @@ type IngestContext struct {
 	// Tenant is the owning tenant of an owned document. It is written to every
 	// chunk so tenant-scoped searches can match it.
 	Tenant string
+
+	// LayoutSections holds ordered PDF layout units with coordinate provenance.
+	LayoutSections []domain.LayoutSection
 }
 
 // NewIngestContext creates an initialized IngestContext.

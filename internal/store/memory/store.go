@@ -140,6 +140,8 @@ func validateMetadata(c domain.Chunk) error {
 		valid := true
 		switch v := value.(type) {
 		case string, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
+		case []int:
+			valid = v != nil
 		case []string:
 			valid = v != nil
 		case []any:
@@ -168,7 +170,7 @@ func validateMetadata(c domain.Chunk) error {
 	if c.VectorIncarnation != "" {
 		metadata[domain.VectorIncarnationKey] = c.VectorIncarnation
 	}
-	for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey} {
+	for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey, "pages", "table_ids", "row_ids"} {
 		if value, ok := c.Metadata[key]; ok {
 			metadata[key] = value
 		}
@@ -187,6 +189,8 @@ func cloneMetadata(metadata map[string]any) map[string]any {
 	cloned := maps.Clone(metadata)
 	for key, value := range cloned {
 		switch list := value.(type) {
+		case []int:
+			cloned[key] = slices.Clone(list)
 		case []string:
 			cloned[key] = slices.Clone(list)
 		case []any:

@@ -466,3 +466,117 @@ func TestDeleteRetriesAndMissingVectors(t *testing.T) {
 		}
 	})
 }
+
+func TestRoundTripsLayoutProvenanceMetadata(t *testing.T) {
+	var stored []*pinecone.Vector
+	conn := &fakeIndexConn{
+		upsert: func(_ context.Context, vectors []*pinecone.Vector) (uint32, error) {
+			stored = vectors
+			return 1, nil
+		},
+		query: func(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+			return &pinecone.QueryVectorsResponse{
+				Matches: []*pinecone.ScoredVector{{Vector: stored[0], Score: 0.9}},
+			}, nil
+		},
+		fetch: func(_ context.Context, ids []string) (*pinecone.FetchVectorsResponse, error) {
+			out := make(map[string]*pinecone.Vector, len(ids))
+			for _, id := range ids {
+				for _, v := range stored {
+					if v.Id == id {
+						out[id] = v
+					}
+				}
+			}
+			return &pinecone.FetchVectorsResponse{Vectors: out}, nil
+		},
+	}
+	client := testClient(conn)
+	err := client.Upsert(t.Context(), "", []domain.Chunk{{
+		ID:         "c1",
+		DocumentID: "doc-1",
+		Text:       "Header: Val",
+		Embedding:  []float32{1},
+		Metadata: map[string]any{
+			"doc_type":  "report",
+			"pages":     []int{2, 5},
+			"table_ids": []string{"p2-t1"},
+			"row_ids":   []string{"p2-t1-r3"},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.Len(t, stored, 1)
+	for key, field := range stored[0].Metadata.Fields {
+		lv := field.GetListValue()
+		if lv == nil {
+			continue
+		}
+		for i, elem := range lv.GetValues() {
+			_, isString := elem.GetKind().(*structpb.Value_StringValue)
+			require.Truef(t, isString, "metadata list field %q[%d] must be a StringValue, got %T", key, i, elem.GetKind())
+		}
+	}
+	var gotStoredPages []string
+	for _, elem := range stored[0].Metadata.Fields["pages"].GetListValue().GetValues() {
+		gotStoredPages = append(gotStoredPages, elem.GetStringValue())
+	}
+	require.Equal(t, []string{"2", "5"}, gotStoredPages)
+
+	assertProvenance := func(md map[string]any) {
+		t.Helper()
+		pages, ok := md["pages"].([]int)
+		if !ok || len(pages) != 2 || pages[0] != 2 || pages[1] != 5 {
+			t.Fatalf("unexpected pages metadata: %#v", md["pages"])
+		}
+		tids, ok := md["table_ids"].([]string)
+		if !ok || len(tids) != 1 || tids[0] != "p2-t1" {
+			t.Fatalf("unexpected table_ids metadata: %#v", md["table_ids"])
+		}
+		rids, ok := md["row_ids"].([]string)
+		if !ok || len(rids) != 1 || rids[0] != "p2-t1-r3" {
+			t.Fatalf("unexpected row_ids metadata: %#v", md["row_ids"])
+		}
+	}
+
+	got, err := client.Query(t.Context(), "", []float32{1}, 1, "")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("query failed: %v, len=%d", err, len(got))
+	}
+	assertProvenance(got[0].Chunk.Metadata)
+
+	fetched, err := client.Fetch(t.Context(), []string{"c1"})
+	require.NoError(t, err)
+	require.Contains(t, fetched, "c1")
+	assertProvenance(fetched["c1"].Metadata)
+
+	// Unparseable or non-string entries in pages are skipped on both Query and Fetch.
+	malformed := &pinecone.Vector{
+		Id:     "c2",
+		Values: &[]float32{1},
+		Metadata: &structpb.Struct{Fields: map[string]*structpb.Value{
+			"doc_id": structpb.NewStringValue("doc-1"),
+			"pages": structpb.NewListValue(&structpb.ListValue{Values: []*structpb.Value{
+				structpb.NewStringValue("1"),
+				structpb.NewStringValue("not-a-page"),
+				structpb.NewNumberValue(3),
+				structpb.NewStringValue("4"),
+			}}),
+			"table_ids": structpb.NewListValue(&structpb.ListValue{Values: []*structpb.Value{
+				structpb.NewStringValue(""),
+				structpb.NewStringValue("p1-t1"),
+			}}),
+		}},
+	}
+	matches := matchesToScoredChunks([]*pinecone.ScoredVector{{Vector: malformed}}, "")
+	require.Len(t, matches, 1)
+	require.Equal(t, []int{1, 4}, matches[0].Chunk.Metadata["pages"])
+	require.Equal(t, []string{"p1-t1"}, matches[0].Chunk.Metadata["table_ids"])
+
+	stored = append(stored, malformed)
+	fetchedMalformed, err := client.Fetch(t.Context(), []string{"c2"})
+	require.NoError(t, err)
+	require.Equal(t, []int{1, 4}, fetchedMalformed["c2"].Metadata["pages"])
+	require.Equal(t, []string{"p1-t1"}, fetchedMalformed["c2"].Metadata["table_ids"])
+}
