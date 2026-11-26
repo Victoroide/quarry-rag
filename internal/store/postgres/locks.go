@@ -12,3 +12,9 @@ const (
 // marker takes it exclusively, so activation commits only after a healthy
 // cleanup has returned. The durable reservation covers a session that is lost.
 const DeletionActivationLockID int64 = 0x7175617272790004
+
+// documentIntentLockKey is the per-document advisory key that orders a
+// deletion intent with download signing. It hashes the canonical UUID with its
+// own seed, independent of the fixture reservation key (seed 487011). A hash
+// collision between two documents only delays one of them.
+const documentIntentLockKey = "hashtextextended($1::uuid::text, 487012)"

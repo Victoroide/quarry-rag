@@ -157,6 +157,9 @@ func (c *Client) beginDeletion(ctx context.Context, id domain.DocumentID, ops do
 		return "", false, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if lockErr := lockDocumentIntent(ctx, tx, id); lockErr != nil {
+		return "", false, lockErr
+	}
 	var state string
 	var source *string
 	var scoped bool
@@ -220,6 +223,16 @@ func (c *Client) beginDeletion(ctx context.Context, id domain.DocumentID, ops do
 	return incarnation, false, tx.Commit(ctx)
 }
 
+// lockDocumentIntent takes the per-document intent key exclusively. Every
+// transaction that commits a deletion intent takes it before the row lock,
+// so the intent waits for signatures in flight.
+func lockDocumentIntent(ctx context.Context, tx pgx.Tx, id domain.DocumentID) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(`+documentIntentLockKey+`)`, string(id))
+	return err
+}
+
+// insertDeletionIntentTx records the deletion receipt, hides the document as
+// deleting, and cancels its ingest job. Callers hold the intent key and the row lock.
 func insertDeletionIntentTx(ctx context.Context, tx pgx.Tx, id domain.DocumentID, incarnation string, source *string, mode string, ops domain.DeleteOperations) error {
 	var bucket, index *string
 	if source != nil {
@@ -456,26 +469,49 @@ func (c *Client) finalizeDeletion(ctx context.Context, id domain.DocumentID, inc
 	return tx.Commit(ctx)
 }
 
-// WithDocumentFile keeps the live row shared-locked while the caller signs the
-// source address, so a deletion intent cannot commit between lookup and signing.
+// WithDocumentFile signs the stored source while a deletion intent for the
+// document cannot commit. The shared advisory key serializes signing with the
+// intent without writing to the row, and the read-only transaction keeps it so.
 func (c *Client) WithDocumentFile(ctx context.Context, id domain.DocumentID, sign func(context.Context, string) error) (bool, error) {
-	tx, err := c.Pool.Begin(ctx)
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	var key string
-	err = tx.QueryRow(ctx, `SELECT s3_key FROM documents WHERE id=$1 AND status<>'deleting' AND s3_key IS NOT NULL FOR SHARE`, string(id)).Scan(&key)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
+	key, found, err := readSignableSource(ctx, tx, string(id))
+	if err != nil || !found {
 		return false, err
 	}
 	if signErr := sign(ctx, key); signErr != nil {
 		return false, signErr
 	}
 	return true, tx.Commit(ctx)
+}
+
+// readSignableSource takes the shared intent key and then reads the source in
+// a separate statement, so the read observes an intent that committed while
+// the key was awaited. One statement would keep its pre-wait snapshot.
+func readSignableSource(ctx context.Context, tx pgx.Tx, id string) (key string, found bool, err error) {
+	batch := &pgx.Batch{}
+	batch.Queue(`SELECT pg_advisory_xact_lock_shared(`+documentIntentLockKey+`)`, id)
+	batch.Queue(`SELECT s3_key FROM documents WHERE id=$1 AND status<>'deleting' AND s3_key IS NOT NULL`, id)
+	results := tx.SendBatch(ctx, batch)
+	_, lockErr := results.Exec()
+	readErr := lockErr
+	if lockErr == nil {
+		readErr = results.QueryRow().Scan(&key)
+	}
+	closeErr := results.Close()
+	switch {
+	case lockErr != nil:
+		return "", false, lockErr
+	case errors.Is(readErr, pgx.ErrNoRows):
+		return "", false, closeErr
+	case readErr != nil:
+		return "", false, readErr
+	default:
+		return key, true, closeErr
+	}
 }
 
 // WithScopedDocumentFile verifies active principal status and owner or
@@ -528,6 +564,9 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 		return "", false, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if lockErr := lockDocumentIntent(ctx, tx, id); lockErr != nil {
+		return "", false, lockErr
+	}
 
 	var state string
 	var source *string
