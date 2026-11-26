@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,6 +185,24 @@ func TestSandboxExtractsPDFPages(t *testing.T) {
 	if err != nil || len(pages) != 1 || pages[0].Number != 1 || pages.Text() != "Archive operating hours." {
 		t.Fatalf("PDF pages: %+v, %v", pages, err)
 	}
+}
+
+func TestSandboxInspectsJPEGScanPages(t *testing.T) {
+	var scan bytes.Buffer
+	require.NoError(t, jpeg.Encode(&scan, image.NewGray(image.Rect(0, 0, 12, 12)), nil))
+	raster := fmt.Appendf(nil, "<< /Type /XObject /Subtype /Image /Width 12 /Height 12 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /DCTDecode /Length %d >>\nstream\n", scan.Len())
+	raster = append(raster, scan.Bytes()...)
+	raster = append(raster, "\nendstream"...)
+	data := testutil.PDFWithPageResources([]string{
+		`BT /F1 12 Tf (Archive operating hours.) Tj ET`,
+		`q 180 0 0 180 10 10 cm /Photo Do Q`,
+	}, "/Photo 5 0 R", [][]byte{raster})
+	pages, err := uploadSandbox(t, 5*time.Second).ExtractPDFPages(t.Context(), data)
+	require.NoError(t, err)
+	require.Equal(t, domain.PDFPages{
+		{Number: 1, Evidence: domain.PDFEmbedded, Text: "Archive operating hours."},
+		{Number: 2, Evidence: domain.PDFImage},
+	}, pages)
 }
 
 func TestSandboxNormalizesPDFBeforeClassifyingPage(t *testing.T) {
