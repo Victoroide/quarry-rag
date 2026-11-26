@@ -172,11 +172,41 @@ func TestFailClosedChecksTurnStorageFailuresIntoUnavailableAuthority(t *testing.
 	ok := FailClosedChecks(domain.SubjectEvidence{Visibility: scriptedChecks{}, Documents: scriptedChecks{}, Previews: scriptedChecks{}})
 	_, err = ok.Visibility.VisibleEvidence(t.Context(), nil)
 	require.NoError(t, err)
-	observer, isObserver := ok.Visibility.(domain.EvidenceIncarnationObserver)
+	observer, isObserver := ok.Visibility.(domain.EvidenceSnapshotObserver)
 	require.True(t, isObserver)
-	incarnations, err := observer.ObserveUntaggedIncarnations(t.Context(), nil)
+	snapshot, err := observer.ObserveEvidenceSnapshot(t.Context())
 	require.NoError(t, err)
-	require.Nil(t, incarnations, "a store without historical lifetimes has nothing to observe")
+	require.Empty(t, snapshot, "a store without historical lifetimes has nothing to observe")
+}
+
+func TestFailClosedSnapshotObservationPreservesCancellation(t *testing.T) {
+	dbErr := errors.New("snapshot unavailable")
+	for _, tc := range []struct {
+		name     string
+		snapshot string
+		err      error
+	}{
+		{name: "success", snapshot: "10:10:"},
+		{name: "query failure", err: dbErr},
+		{name: "cancellation", err: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := snapshotVisibility{observe: func(context.Context) (string, error) {
+				return tc.snapshot, tc.err
+			}}
+			checks := FailClosedChecks(domain.SubjectEvidence{Visibility: inner})
+			observer, ok := checks.Visibility.(domain.EvidenceSnapshotObserver)
+			require.True(t, ok)
+			got, err := observer.ObserveEvidenceSnapshot(t.Context())
+			require.Equal(t, tc.snapshot, got)
+			require.ErrorIs(t, err, tc.err)
+			if errors.Is(tc.err, dbErr) {
+				require.ErrorIs(t, err, ErrAuthorizationUnavailable)
+			} else {
+				require.NotErrorIs(t, err, ErrAuthorizationUnavailable)
+			}
+		})
+	}
 }
 
 func TestAuthorizedHitsMustAgreeWithTheScope(t *testing.T) {
@@ -224,12 +254,11 @@ func TestManifestEvidenceUsesPublicationIdentityWithoutAnUntaggedObservation(t *
 	tagged := domain.ScoredChunk{Chunk: domain.Chunk{DocumentID: doc, Metadata: map[string]any{domain.VectorRevisionKey: "inc"}}}
 	contradictory := manifest
 	contradictory.Chunk.Metadata = tagged.Chunk.Metadata
-	qc := QueryContext{untaggedIncarnations: map[string]string{}}
-	hits := []domain.ScoredChunk{manifest, historical, tagged, contradictory}
-	require.Equal(t, []domain.ScoredChunk{manifest, tagged}, qc.matchObservedEvidence(hits))
-
-	qc.untaggedIncarnations[doc] = "inc"
-	historical.ObservedIncarnation = "inc"
+	malformed := domain.ScoredChunk{Chunk: domain.Chunk{DocumentID: "invalid-uuid"}}
+	const snapshot = "10:11:10"
+	qc := QueryContext{untaggedSnapshot: snapshot}
+	hits := []domain.ScoredChunk{manifest, historical, tagged, contradictory, malformed}
+	historical.ObservedSnapshot = snapshot
 	require.Equal(t, []domain.ScoredChunk{manifest, historical, tagged}, qc.matchObservedEvidence(hits))
 }
 

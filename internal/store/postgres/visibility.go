@@ -46,44 +46,21 @@ func readableJoin(subject *domain.Principal, set string, args []any) (join strin
   AND g.set_id=$%d::uuid AND g.document_id=d.id AND g.incarnation=COALESCE(d.incarnation,d.id)`, len(args)-2, len(args)-1, len(args)), args
 }
 
-// ObserveUntaggedIncarnations reads a consistent view of the SQL identities
-// for historical untagged vectors, returning the connection before vector I/O.
-func (v Visibility) ObserveUntaggedIncarnations(ctx context.Context, allowedIDs []string) (map[string]string, error) {
-	incarnations := make(map[string]string)
-	if allowedIDs != nil {
-		allowedIDs = canonicalDocumentIDs(allowedIDs)
-		if len(allowedIDs) == 0 {
-			return incarnations, nil
-		}
+// ObserveEvidenceSnapshot records which transactions are visible before a
+// search whose historical hits carry no write-time document identity.
+func (v Visibility) ObserveEvidenceSnapshot(ctx context.Context) (string, error) {
+	var snapshot string
+	if err := v.Pool.QueryRow(ctx, `SELECT pg_current_snapshot()::text`).Scan(&snapshot); err != nil {
+		return "", fmt.Errorf("postgres: observe evidence snapshot: %w", err)
 	}
-	join, args := readableJoin(v.Subject, v.DocumentSetID, []any{v.Collection, v.DocType, allowedIDs})
-	rows, err := v.Pool.Query(ctx, `
-SELECT d.id::text, COALESCE(d.incarnation,d.id)::text
-FROM documents d`+join+`
-WHERE NOT d.scoped_vectors AND NOT d.vector_incarnation_required
-  AND ($1='' OR d.collection=$1) AND ($2='' OR d.doc_type=$2)
-  AND ($3::uuid[] IS NULL OR d.id=ANY($3::uuid[]))`, args...)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: observe untagged incarnations: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, incarnation string
-		if err := rows.Scan(&id, &incarnation); err != nil {
-			return nil, fmt.Errorf("postgres: scan untagged incarnation: %w", err)
-		}
-		incarnations[id] = incarnation
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: observe untagged incarnations: %w", err)
-	}
-	return incarnations, nil
+	return snapshot, nil
 }
 
 var (
-	_ domain.DocumentVisibility = Visibility{}
-	_ domain.RevisionVisibility = Visibility{}
-	_ domain.EvidenceVisibility = Visibility{}
+	_ domain.DocumentVisibility       = Visibility{}
+	_ domain.RevisionVisibility       = Visibility{}
+	_ domain.EvidenceVisibility       = Visibility{}
+	_ domain.EvidenceSnapshotObserver = Visibility{}
 )
 
 // VisibleEvidence checks that vector hits match current completed chunks and
@@ -117,6 +94,7 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 	attempts := make([]string, 0, len(candidates))
 	vectorIncarnations := make([]string, 0, len(candidates))
 	revIDs := make([]*string, 0, len(candidates))
+	snapshots := make([]string, 0, len(candidates))
 	input := make([]domain.ScoredChunk, 0, len(candidates))
 	for _, candidate := range candidates {
 		ch := candidate.Chunk
@@ -158,6 +136,7 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 		attempts = append(attempts, attempt)
 		vectorIncarnations = append(vectorIncarnations, ch.VectorIncarnation)
 		revIDs = append(revIDs, revPtr)
+		snapshots = append(snapshots, candidate.ObservedSnapshot)
 		input = append(input, candidate)
 	}
 	var previews map[string]string
@@ -181,12 +160,12 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 		return input, previews, nil
 	}
 
-	join, args := readableJoin(v.Subject, v.DocumentSetID, []any{chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs, revIDs})
+	join, args := readableJoin(v.Subject, v.DocumentSetID, []any{chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs, revIDs, snapshots})
 	rows, err := source.Query(ctx, `
 SELECT hit.ord, d.doc_type, COALESCE(d.incarnation,d.id)::text,
        CASE WHEN d.id=ANY($11::uuid[]) THEN d.content_preview END
-FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $12::uuid[])
-	WITH ORDINALITY AS hit(chunk_id, doc_id, idx, hash, revision, incarnation, attempt, vector_incarnation, rev_id, ord)
+FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $12::uuid[], $13::text[])
+	WITH ORDINALITY AS hit(chunk_id, doc_id, idx, hash, revision, incarnation, attempt, vector_incarnation, rev_id, snapshot, ord)
 JOIN chunks c ON c.id=hit.chunk_id AND c.document_id=hit.doc_id AND c.chunk_index=hit.idx
 JOIN documents d ON d.id=c.document_id AND d.status='completed'`+join+`
 WHERE ($9='' OR d.collection=$9) AND ($10='' OR d.doc_type=$10)
@@ -200,6 +179,11 @@ WHERE ($9='' OR d.collection=$9) AND ($10='' OR d.doc_type=$10)
      AND (CASE WHEN d.scoped_vectors THEN COALESCE(d.incarnation,d.id)::text ELSE '' END)=hit.revision
      AND COALESCE(d.vector_attempt::text,'')=hit.attempt)
   )
+  AND (hit.snapshot='' OR hit.incarnation<>'' OR hit.vector_incarnation<>'' OR hit.revision<>'' OR hit.rev_id IS NOT NULL
+       OR d.untagged_since IS NULL
+       OR pg_visible_in_snapshot(d.untagged_since, NULLIF(hit.snapshot,'')::pg_snapshot)
+       -- A visible row at or beyond the current xmax has a stamp from a logical restore.
+       OR d.untagged_since >= pg_snapshot_xmax(pg_current_snapshot()))
   AND hosted_vector_revision_visible(d.id, hit.rev_id)
   AND encode(digest(convert_to(c.text, 'UTF8'), 'sha256'), 'hex')=hit.hash
 ORDER BY hit.ord`, args...)

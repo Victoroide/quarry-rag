@@ -509,7 +509,8 @@ Executes vector similarity search and returns a grounded answer or selected exce
 Before routing or selecting evidence, PostgreSQL checks each hit against the
 current completed document, caller scope, chunk identity and text. New Pinecone
 and memory vectors carry the document incarnation at write time. Historical untagged
-hits must match the document incarnation observed in PostgreSQL before searching.
+hits are accepted only for a document version whose untagged state PostgreSQL had
+committed before searching.
 pgvector reads the incarnation with the score. The service rechecks the accepted
 incarnations before releasing evidence. Responses identify chunks by their
 logical IDs.

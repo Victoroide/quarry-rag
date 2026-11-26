@@ -36,7 +36,7 @@ func TestHostedRefillRerankDeadlineDistinguishesVisibilityAndProvider(t *testing
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			live := refillFixture("The fixture reading room closes at seven.", .95)
-			insertRefillDocument(t, db, live.Chunk, "archive", "completed")
+			insertRefillDocument(t.Context(), t, db, live.Chunk, "archive", "completed")
 			var rerankCalls, modelCalls atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, err := io.ReadAll(r.Body)

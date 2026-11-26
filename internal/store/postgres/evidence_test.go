@@ -174,3 +174,140 @@ func TestPgvectorEvidenceRejectsStalePublishedIdentity(t *testing.T) {
 	require.Len(t, qc.RetrievedChunks, 1)
 	require.Equal(t, chunk.ID, qc.RetrievedChunks[0].Chunk.ID)
 }
+
+func TestHistoricalHitsNeedAStampBeforeTheSnapshot(t *testing.T) {
+	ctx := t.Context()
+	c := migrationTestClient(t, startTestDatabase(t))
+	applyMigrationPrefix(t, c, 26)
+
+	newHit := func() domain.ScoredChunk {
+		return domain.ScoredChunk{Chunk: domain.Chunk{
+			ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(uuid.NewString()),
+			Text: "Identical chunk text.", Index: 0,
+		}}
+	}
+	old, foreign := newHit(), newHit()
+	committed, replaced, pending, flipped := newHit(), newHit(), newHit(), newHit()
+	tagged, manifested, late := newHit(), newHit(), newHit()
+	insert := func(hit domain.ScoredChunk, inc string, scoped, required bool) {
+		t.Helper()
+		_, err := c.Pool.Exec(ctx, `
+INSERT INTO documents(id, content, status, incarnation, scoped_vectors, vector_incarnation_required)
+VALUES ($1, $2, 'completed', $3, $4, $5)`, hit.Chunk.DocumentID, hit.Chunk.Text, inc, scoped, required)
+		require.NoError(t, err)
+		require.NoError(t, c.InsertChunks(ctx, []domain.Chunk{hit.Chunk}))
+	}
+	insert(old, uuid.NewString(), false, false)
+	insert(foreign, uuid.NewString(), false, false)
+	require.NoError(t, c.RunMigrations(ctx))
+	insert(replaced, uuid.NewString(), false, false)
+	insert(flipped, uuid.NewString(), false, true)
+
+	// Logical restores load document data with user triggers inactive.
+	_, err := c.Pool.Exec(ctx, `ALTER TABLE documents DISABLE TRIGGER documents_stamp_untagged`)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `
+UPDATE documents SET untagged_since=(pg_snapshot_xmax(pg_current_snapshot())::text::bigint + 1000000)::text::xid8
+WHERE id=$1`, foreign.Chunk.DocumentID)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `ALTER TABLE documents ENABLE TRIGGER documents_stamp_untagged`)
+	require.NoError(t, err)
+
+	writer, err := c.Pool.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = writer.Rollback(context.Background()) })
+	var pendingXID string
+	require.NoError(t, writer.QueryRow(ctx, `SELECT pg_current_xact_id()::text`).Scan(&pendingXID))
+	savepoint, err := writer.Begin(ctx)
+	require.NoError(t, err)
+	_, err = savepoint.Exec(ctx, `INSERT INTO documents(id,content,status) VALUES ($1,$2,'completed')`, pending.Chunk.DocumentID, pending.Chunk.Text)
+	require.NoError(t, err)
+	_, err = savepoint.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES ($1,$2,$3,$4,1)`,
+		pending.Chunk.ID, pending.Chunk.DocumentID, pending.Chunk.Index, pending.Chunk.Text)
+	require.NoError(t, err)
+	require.NoError(t, savepoint.Commit(ctx))
+
+	// Commit a later transaction so the pending writer is inside the snapshot
+	// range and appears in its list of in-progress transaction IDs.
+	insert(committed, uuid.NewString(), false, false)
+	visibility := Visibility{Pool: c.Pool}
+	snapshot, err := visibility.ObserveEvidenceSnapshot(ctx)
+	require.NoError(t, err)
+	var pendingInSnapshot bool
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT EXISTS (
+    SELECT 1 FROM pg_snapshot_xip($1::text::pg_snapshot) AS xip WHERE xip::text=$2
+)`, snapshot, pendingXID).Scan(&pendingInSnapshot))
+	require.True(t, pendingInSnapshot)
+	before, err := visibility.VisibleEvidence(ctx, []domain.ScoredChunk{replaced})
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+
+	require.NoError(t, writer.Commit(ctx))
+	require.Equal(t, &pendingXID, untaggedStamp(t, c, pending.Chunk.DocumentID))
+	_, err = c.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, replaced.Chunk.DocumentID)
+	require.NoError(t, err)
+	replacementIncarnation := uuid.NewString()
+	insert(replaced, replacementIncarnation, false, false)
+	_, err = c.Pool.Exec(ctx, `UPDATE documents SET vector_incarnation_required=false WHERE id=$1`, flipped.Chunk.DocumentID)
+	require.NoError(t, err)
+	insert(late, uuid.NewString(), false, false)
+
+	taggedIncarnation := uuid.NewString()
+	tagged.Chunk.Metadata = map[string]any{domain.VectorRevisionKey: taggedIncarnation}
+	insert(tagged, taggedIncarnation, true, false)
+
+	manifestedIncarnation := uuid.NewString()
+	insert(manifested, manifestedIncarnation, false, false)
+	manifested.Chunk.RevisionID = uuid.NewString()
+	_, err = c.Pool.Exec(ctx, `
+INSERT INTO hosted_vector_manifests(revision_id,document_id,incarnation,attempt,id_prefix,vector_ids,chunk_ids,state)
+VALUES ($1,$2,$3,1,$1::uuid::text,ARRAY[$1::uuid::text],ARRAY[$4::uuid],'active')`,
+		manifested.Chunk.RevisionID, manifested.Chunk.DocumentID, manifestedIncarnation, manifested.Chunk.ID)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO hosted_vector_revisions(document_id,incarnation,active_revision_id) VALUES ($1,$2,$3)`,
+		manifested.Chunk.DocumentID, manifestedIncarnation, manifested.Chunk.RevisionID)
+	require.NoError(t, err)
+
+	pinned := replaced
+	pinned.ObservedIncarnation = replacementIncarnation
+	writeTime := replaced
+	writeTime.Chunk.VectorIncarnation = replacementIncarnation
+	for _, tc := range []struct {
+		name string
+		hit  domain.ScoredChunk
+		want bool
+	}{
+		{"committed before search", committed, true},
+		{"replacement during search", replaced, false},
+		{"insert in flight during observation", pending, false},
+		{"became untagged during search", flipped, false},
+		{"inserted during search", late, false},
+		{"existing before migration", old, true},
+		{"restored stamp beyond current xmax", foreign, true},
+		{"already observed incarnation", pinned, true},
+		{"write-time incarnation", writeTime, true},
+		{"tagged revision", tagged, true},
+		{"active manifested revision", manifested, true},
+		{"release recheck of old incarnation", before[0], false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.hit.ObservedSnapshot = snapshot
+			visible, checkErr := visibility.VisibleEvidence(t.Context(), []domain.ScoredChunk{tc.hit})
+			require.NoError(t, checkErr)
+			if tc.want {
+				require.Len(t, visible, 1)
+				require.NotEmpty(t, visible[0].ObservedIncarnation)
+				return
+			}
+			require.Empty(t, visible)
+		})
+	}
+	visible, err := visibility.VisibleEvidence(ctx, []domain.ScoredChunk{replaced})
+	require.NoError(t, err)
+	require.Len(t, visible, 1, "an empty snapshot leaves a hit unpinned")
+	replaced.ObservedSnapshot, err = visibility.ObserveEvidenceSnapshot(ctx)
+	require.NoError(t, err)
+	visible, err = visibility.VisibleEvidence(ctx, []domain.ScoredChunk{replaced})
+	require.NoError(t, err)
+	require.Len(t, visible, 1, "a fresh query can see the replacement")
+}

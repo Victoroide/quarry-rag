@@ -29,10 +29,10 @@ type EvaluationEvidenceVisibility interface {
 	VerifyEvaluationEvidence(ctx context.Context, receipt string, allowed []string, selected []ScoredChunk) (bool, error)
 }
 
-// EvidenceIncarnationObserver reads historical untagged document lifetimes in scope
-// before a search that cannot identify its own lifetimes.
-type EvidenceIncarnationObserver interface {
-	ObserveUntaggedIncarnations(ctx context.Context, allowedIDs []string) (map[string]string, error)
+// EvidenceSnapshotObserver records the database snapshot before a search whose
+// historical untagged hits carry no document lifetime.
+type EvidenceSnapshotObserver interface {
+	ObserveEvidenceSnapshot(ctx context.Context) (string, error)
 }
 
 // VectorIncarnationReader identifies stores that attach the document

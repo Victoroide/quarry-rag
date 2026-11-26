@@ -3,11 +3,13 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -78,4 +80,90 @@ func TestNilVisibilityKeepsChunks(t *testing.T) {
 		require.Equal(t, []string{"failed", "missing", "completed"}, docIDs(qc.RetrievedChunks))
 		require.Equal(t, 1.0, qc.TopScore)
 	}
+}
+
+type snapshotVisibility struct {
+	currentChunks
+	observe func(context.Context) (string, error)
+}
+
+func (v snapshotVisibility) ObserveEvidenceSnapshot(ctx context.Context) (string, error) {
+	return v.observe(ctx)
+}
+
+type snapshotReadingIndex struct{ refillIndex }
+
+func (snapshotReadingIndex) ObservesVectorIncarnation() bool { return true }
+
+func TestQueryObservesOneSnapshot(t *testing.T) {
+	const beforeSearch = "10:11:10"
+	historical := refillHit("historical", uuid.NewString(), "historical body", .9)
+	tagged := refillHit("tagged", uuid.NewString(), "tagged body", .8)
+	tagged.Chunk.Metadata[domain.VectorRevisionKey] = uuid.NewString()
+	writeTime := refillHit("write-time", uuid.NewString(), "write-time body", .7)
+	writeTime.Chunk.VectorIncarnation = uuid.NewString()
+	manifested := refillHit("manifested", uuid.NewString(), "manifested body", .6)
+	manifested.Chunk.RevisionID = uuid.NewString()
+	observed := refillHit("observed", uuid.NewString(), "observed body", .5)
+	observed.ObservedIncarnation = uuid.NewString()
+	malformed := refillHit("malformed", "invalid-uuid", "malformed hit", .4)
+	hits := []domain.ScoredChunk{historical, tagged, writeTime, manifested, observed, malformed}
+
+	observations, checks := 0, 0
+	checksStore := snapshotVisibility{
+		observe: func(context.Context) (string, error) {
+			observations++
+			return beforeSearch, nil
+		},
+		currentChunks: currentChunks{check: func(candidates []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+			checks++
+			require.Len(t, candidates, len(hits)-1)
+			want := slices.Clone(hits[:len(hits)-1])
+			want[0].ObservedSnapshot = beforeSearch
+			require.Equal(t, want, candidates)
+			return candidates, nil
+		}},
+	}
+	searches := 0
+	index := refillIndex{search: func(hostedSearch) ([]domain.ScoredChunk, int, error) {
+		searches++
+		require.Equal(t, 1, observations, "the snapshot precedes vector I/O")
+		return hits, 1, nil
+	}}
+	ret := retriever.NewRetriever(index, &scopeCountingEmbedder{}, .7, 10)
+	qc := &QueryContext{
+		OriginalQuery: "compare the archive and reading room",
+		SubQueries:    []string{"archive", "reading room"}, EvidenceVisibility: checksStore,
+	}
+	require.NoError(t, NewRoutingStage(ret).Run(t.Context(), qc))
+	require.Equal(t, string(retriever.RetrievalModeGlobal), qc.RetrievalMode)
+	require.NoError(t, NewRetrievalStage(ret).Run(t.Context(), qc))
+	require.GreaterOrEqual(t, searches, 2)
+	require.GreaterOrEqual(t, checks, 2)
+	require.Equal(t, 1, observations)
+	require.Len(t, qc.RetrievedChunks, len(hits)-1)
+
+	readsIncarnation := retriever.NewRetriever(snapshotReadingIndex{index}, nil, .7, 10)
+	require.NoError(t, qc.observeUntaggedEvidence(t.Context(), readsIncarnation))
+	require.Equal(t, 1, observations, "a store that observes its own incarnations skips the snapshot")
+	require.Equal(t, hits, qc.matchObservedEvidence(hits), "retrieval clears its snapshot")
+}
+
+func TestQueryStopsBeforeSearchWhenSnapshotFails(t *testing.T) {
+	snapshotErr := errors.New("snapshot unavailable")
+	vis := snapshotVisibility{
+		observe: func(context.Context) (string, error) { return "", snapshotErr },
+		currentChunks: currentChunks{check: func([]domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+			t.Fatal("visibility called after observation failed")
+			return nil, nil
+		}},
+	}
+	index := refillIndex{search: func(hostedSearch) ([]domain.ScoredChunk, int, error) {
+		t.Fatal("search called after observation failed")
+		return nil, 0, nil
+	}}
+	ret := retriever.NewRetriever(index, &scopeCountingEmbedder{}, .7, 10)
+	qc := &QueryContext{OriginalQuery: "archive", EvidenceVisibility: vis}
+	require.ErrorIs(t, NewRoutingStage(ret).Run(t.Context(), qc), snapshotErr)
+	require.ErrorIs(t, NewRetrievalStage(ret).Run(t.Context(), qc), snapshotErr)
 }

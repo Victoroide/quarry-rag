@@ -135,7 +135,7 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 		policy = retriever.RoutingPolicyLegacy
 	}
 	qc.RoutingPolicy = string(policy)
-	qc.untaggedIncarnations = nil
+	qc.untaggedSnapshot = ""
 	qc.RetrievalMode = string(retriever.RetrievalModeGlobal)
 	qc.RouteReason = ""
 	defer func() {
@@ -501,24 +501,24 @@ func (qc *QueryContext) checksCurrentEvidence() bool {
 }
 
 func (qc *QueryContext) observeUntaggedEvidence(ctx context.Context, ret *retriever.Retriever) error {
-	observer, ok := qc.EvidenceVisibility.(domain.EvidenceIncarnationObserver)
-	if !ok || qc.untaggedIncarnations != nil || ret.ObservesVectorIncarnation() {
+	observer, ok := qc.EvidenceVisibility.(domain.EvidenceSnapshotObserver)
+	if !ok || qc.untaggedSnapshot != "" || ret.ObservesVectorIncarnation() {
 		return nil
 	}
-	incarnations, err := observer.ObserveUntaggedIncarnations(ctx, qc.AllowedDocumentIDs)
+	snapshot, err := observer.ObserveEvidenceSnapshot(ctx)
 	if err != nil {
 		return err
 	}
-	qc.untaggedIncarnations = incarnations
+	qc.untaggedSnapshot = snapshot
 	return nil
 }
 
 func (qc *QueryContext) matchObservedEvidence(chunks []domain.ScoredChunk) []domain.ScoredChunk {
-	if qc.untaggedIncarnations == nil || len(chunks) == 0 {
+	if qc.untaggedSnapshot == "" || len(chunks) == 0 {
 		return chunks
 	}
 	// Historical external hits lack a write-time identity and are checked
-	// against the SQL lifetime observed before searching.
+	// against the database snapshot taken before searching.
 	matched := make([]domain.ScoredChunk, 0, len(chunks))
 	for _, hit := range chunks {
 		if hit.Chunk.RevisionID != "" {
@@ -529,14 +529,10 @@ func (qc *QueryContext) matchObservedEvidence(chunks []domain.ScoredChunk) []dom
 		}
 		_, tagged := hit.Chunk.Metadata[domain.VectorRevisionKey]
 		if hit.ObservedIncarnation == "" && hit.Chunk.VectorIncarnation == "" && !tagged {
-			id, err := uuid.Parse(string(hit.Chunk.DocumentID))
-			if err != nil {
+			if _, err := uuid.Parse(string(hit.Chunk.DocumentID)); err != nil {
 				continue
 			}
-			hit.ObservedIncarnation = qc.untaggedIncarnations[id.String()]
-			if hit.ObservedIncarnation == "" {
-				continue
-			}
+			hit.ObservedSnapshot = qc.untaggedSnapshot
 		}
 		matched = append(matched, hit)
 	}
@@ -790,7 +786,7 @@ func (s *RetrievalStage) Run(ctx context.Context, qc *QueryContext) error {
 		return fmt.Errorf("retrieval_stage: %w", err)
 	}
 	result, err := s.retrieve(ctx, qc, mode, filter)
-	qc.untaggedIncarnations = nil
+	qc.untaggedSnapshot = ""
 	if err != nil {
 		return fmt.Errorf("retrieval_stage: %w", err)
 	}
