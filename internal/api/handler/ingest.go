@@ -87,6 +87,9 @@ func IngestHandler(wk *worker.Worker, cs domain.ChunkStore, s3Client ObjectStore
 	for _, opt := range opts {
 		opt(&options)
 	}
+	if options.owned {
+		return ownedIngestHandler(wk, cs, s3Client, maxUploadBytes, options)
+	}
 	return func(rw http.ResponseWriter, r *http.Request) {
 		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err == nil && mediaType == "multipart/form-data" {
@@ -246,32 +249,16 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		}
 	}
 
-	var text string
-	var extractErr error
-	var pdfExtraction *domain.PDFExtraction
-	switch {
-	case ft == extractor.FileTypePDF && opts.extractPages != nil:
-		pdfExtraction, text, extractErr = inspectPDFUpload(extractCtx, opts.extractPages, fileData)
-	case ft == extractor.FileTypeText:
-		extract := tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
-			return extractor.New(ft).Extract(ctx, bytes.NewReader(data))
-		})
-		text, extractErr = extract(extractCtx, ft, fileData)
-	default:
-		text, extractErr = opts.extract(extractCtx, ft, fileData)
-	}
-	ocrPending := extractErr != nil && opts.ocr && opts.extractPages == nil && ft == extractor.FileTypePDF && extractionErrorIs(extractErr, extractor.ErrNoText)
-	if extractErr != nil && !ocrPending {
+	upload, apiErr, extractErr := extractUploadText(extractCtx, opts, ft, fileData)
+	if extractErr != nil {
 		writeExtractionError(rw, r, extractErr)
 		return
 	}
-	text = strings.ReplaceAll(text, "\x00", "")
-	if ocrPending || pdfExtraction != nil && pdfExtraction.Coverage == domain.PDFPending {
-		text = ""
-	} else if apiErr := validateIngestContent(text); apiErr != nil {
+	if apiErr != nil {
 		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
 	}
+	text, ocrPending, pdfExtraction := upload.text, upload.ocrPending, upload.pdf
 	acceptReq.Document.Content = text
 	acceptReq.RequireSource = s3Client != nil || ocrPending || pdfExtraction != nil
 	if ocrPending {
@@ -335,18 +322,26 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	// Reconciliation owns every unadopted journaled upload. It fences acceptance
 	// and checks the full version history, including writes the SDK retried.
 	if s3Key != nil && written.link == nil && outcome != domain.AcceptAccepted {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
-		defer cancel()
-		if acceptErr != nil {
-			storedKey, lookupErr := cs.GetDocumentS3Key(cleanupCtx, domain.DocumentID(docID))
-			if lookupErr != nil || (storedKey != nil && *storedKey == *s3Key) {
-				slog.WarnContext(cleanupCtx, "retain source file after uncertain acceptance", "document_id", docID, "error", lookupErr)
-				return
-			}
+		releaseAttemptObject(r.Context(), cs, s3Client, docID, *s3Key, acceptErr)
+	}
+}
+
+// releaseAttemptObject removes the object a refused attempt wrote. Each attempt
+// owns a distinct key, so this never touches another acceptance's file. When
+// acceptance is uncertain, a stored key equal to the attempt's proves it
+// committed, and an unreadable state keeps the object for reconciliation.
+func releaseAttemptObject(ctx context.Context, cs domain.ChunkStore, s3Client ObjectStore, docID, key string, acceptErr error) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if acceptErr != nil {
+		storedKey, lookupErr := cs.GetDocumentS3Key(cleanupCtx, domain.DocumentID(docID))
+		if lookupErr != nil || (storedKey != nil && *storedKey == key) {
+			slog.WarnContext(cleanupCtx, "retain source file after uncertain acceptance", "document_id", docID, "error", lookupErr)
+			return
 		}
-		if deleteErr := s3Client.Delete(cleanupCtx, *s3Key); deleteErr != nil {
-			slog.ErrorContext(cleanupCtx, "remove unaccepted source file", "error", deleteErr)
-		}
+	}
+	if err := s3Client.Delete(cleanupCtx, key); err != nil {
+		slog.ErrorContext(cleanupCtx, "remove unaccepted source file", "error", err)
 	}
 }
 

@@ -17,6 +17,15 @@ type ingestOptions struct {
 	fixturePrefix         string
 	fixtureVectorIdentity string
 	journal               domain.SourceUploadJournal
+	owned                 bool
+}
+
+// WithOwnedIngestion binds every upload to the verified principal in the
+// request context. It requires a store that authorizes owners, private content
+// identity and a handler guarded by the subject gate. The mode has no public
+// switch yet; it is reachable only through this internal option.
+func WithOwnedIngestion() IngestOption {
+	return func(opts *ingestOptions) { opts.owned = true }
 }
 
 // WithEvaluationFixtures enables receipt-qualified admission for one staging prefix.
