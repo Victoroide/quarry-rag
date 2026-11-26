@@ -242,5 +242,50 @@ func (m *MemoryIndex) DeleteAllVectorsInNamespace(context.Context) error {
 	return nil
 }
 
+// UpdateVectorsByMetadata rewrites metadata fields on records matching the
+// filter, or counts matching records without mutating them when DryRun is true.
+func (m *MemoryIndex) UpdateVectorsByMetadata(_ context.Context, req *pinecone.UpdateVectorsByMetadataRequest) (*pinecone.UpdateVectorsByMetadataResponse, error) {
+	if req == nil || req.Filter == nil || req.Metadata == nil {
+		return nil, fmt.Errorf("filter and metadata are required")
+	}
+	if _, err := matchesFilter(nil, req.Filter); err != nil {
+		return nil, err
+	}
+	dryRun := req.DryRun != nil && *req.DryRun
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var matched int32
+	for _, id := range m.sortedIDs() {
+		v := m.records[id]
+		ok, err := matchesFilter(v.Metadata, req.Filter)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if matched == math.MaxInt32 {
+			return nil, fmt.Errorf("matched record count exceeds int32")
+		}
+		matched++
+		if dryRun {
+			continue
+		}
+		if v.Metadata == nil {
+			v.Metadata = &structpb.Struct{Fields: make(map[string]*structpb.Value)}
+		} else if v.Metadata.Fields == nil {
+			v.Metadata.Fields = make(map[string]*structpb.Value)
+		}
+		for field, value := range req.Metadata.GetFields() {
+			if value == nil {
+				v.Metadata.Fields[field] = nil
+				continue
+			}
+			v.Metadata.Fields[field] = proto.Clone(value).(*structpb.Value)
+		}
+	}
+	return &pinecone.UpdateVectorsByMetadataResponse{MatchedRecords: matched}, nil
+}
+
 // Close releases nothing.
 func (*MemoryIndex) Close() error { return nil }

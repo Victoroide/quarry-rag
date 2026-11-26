@@ -5,6 +5,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -117,4 +118,54 @@ func TestMemoryIndexFilterHonorsTheExistenceOperator(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestMemoryIndexUpdateVectorsByMetadata(t *testing.T) {
+	client, index := memoryClient(2)
+	require.NoError(t, client.Upsert(t.Context(), "", []domain.Chunk{
+		memoryChunk("a", "DOC-1", []float32{1, 0}, "report", "mine"),
+		memoryChunk("b", "doc-1", []float32{0, 1}, "report", "mine"),
+		memoryChunk("c", "DOC-2", []float32{1, 1}, "note", "other"),
+	}))
+
+	filter, err := structpb.NewStruct(map[string]any{"doc_id": map[string]any{"$in": []any{"DOC-1"}}})
+	require.NoError(t, err)
+	update, err := structpb.NewStruct(map[string]any{"doc_id": "doc-1"})
+	require.NoError(t, err)
+
+	dryRun := true
+	res, err := index.UpdateVectorsByMetadata(t.Context(), &pinecone.UpdateVectorsByMetadataRequest{
+		Filter: filter, Metadata: update, DryRun: &dryRun,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), res.MatchedRecords)
+	fetched, err := client.Fetch(t.Context(), []string{"a", "b", "c"})
+	require.NoError(t, err)
+	require.Equal(t, domain.DocumentID("DOC-1"), fetched["a"].DocumentID, "dry run leaves metadata unchanged")
+
+	apply := false
+	res, err = index.UpdateVectorsByMetadata(t.Context(), &pinecone.UpdateVectorsByMetadataRequest{
+		Filter: filter, Metadata: update, DryRun: &apply,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), res.MatchedRecords)
+	fetched, err = client.Fetch(t.Context(), []string{"a", "b", "c"})
+	require.NoError(t, err)
+	require.Equal(t, domain.DocumentID("doc-1"), fetched["a"].DocumentID)
+	require.Equal(t, "mine", fetched["a"].Metadata["collection"])
+	require.Equal(t, "report", fetched["a"].Metadata["doc_type"])
+	require.Equal(t, domain.DocumentID("DOC-2"), fetched["c"].DocumentID)
+
+	res, err = index.UpdateVectorsByMetadata(t.Context(), &pinecone.UpdateVectorsByMetadataRequest{
+		Filter: filter, Metadata: update, DryRun: &dryRun,
+	})
+	require.NoError(t, err)
+	require.Zero(t, res.MatchedRecords)
+
+	_, err = index.UpdateVectorsByMetadata(t.Context(), nil)
+	require.Error(t, err)
+	badFilter, err := structpb.NewStruct(map[string]any{"doc_id": map[string]any{"$regex": ".*"}})
+	require.NoError(t, err)
+	_, err = index.UpdateVectorsByMetadata(t.Context(), &pinecone.UpdateVectorsByMetadataRequest{Filter: badFilter, Metadata: update})
+	require.Error(t, err)
 }

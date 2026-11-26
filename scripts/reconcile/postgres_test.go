@@ -58,6 +58,37 @@ func TestCollectionBackfillSelectsLabeledDocuments(t *testing.T) {
 	require.Equal(t, []collectionDocument{{ID: "00000000-0000-4000-8000-000000000003", Collection: "private"}}, docs)
 }
 
+func TestDocumentKeyListingFollowsUUIDOrder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pg.Close(t.Context())) })
+	require.NoError(t, pg.RunMigrations(t.Context()))
+
+	id1 := "00000000-0000-4000-8000-000000000001"
+	id2 := "00000000-0000-4000-8000-000000000002"
+	id3 := "00000000-0000-4000-8000-000000000003"
+	id4 := "00000000-0000-4000-8000-000000000004"
+	_, err = pg.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,status) VALUES
+		($3,'three','failed'),($1,'one','processing'),($4,'four','deleting'),($2,'two','completed')`,
+		id1, id2, id3, id4)
+	require.NoError(t, err)
+
+	ids, err := listDocumentIDs(t.Context(), pg, "", 10)
+	require.NoError(t, err)
+	require.Equal(t, []string{id1, id2, id3, id4}, ids)
+
+	ids, err = listDocumentIDs(t.Context(), pg, "", 2)
+	require.NoError(t, err)
+	require.Equal(t, []string{id1, id2}, ids)
+
+	ids, err = listDocumentIDs(t.Context(), pg, id2, 10)
+	require.NoError(t, err)
+	require.Equal(t, []string{id3, id4}, ids)
+}
+
 func TestMakeCollectionBackfillDryRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires a Docker daemon")
