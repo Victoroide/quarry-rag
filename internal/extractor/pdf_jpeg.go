@@ -6,6 +6,11 @@ import (
 	"io"
 )
 
+const (
+	maxJPEGStrayBytesPerGap = 64
+	maxJPEGStrayBytesTotal  = 256
+)
+
 type pdfJPEGFrame struct {
 	width, height, components int64
 }
@@ -27,7 +32,8 @@ type pdfJPEGState struct {
 }
 
 // readPDFJPEGFrame validates a JPEG codestream's marker structure through EOI
-// without decoding pixel samples (ITU-T T.81 Annex B).
+// without decoding pixel samples (ITU-T T.81 Annex B), skipping bounded runs
+// of extraneous non-marker bytes between segments as common decoders do.
 func readPDFJPEGFrame(r io.Reader) (pdfJPEGFrame, error) {
 	br := bufio.NewReaderSize(r, 32<<10)
 	var soi [2]byte
@@ -41,23 +47,15 @@ func readPDFJPEGFrame(r io.Reader) (pdfJPEGFrame, error) {
 	var state pdfJPEGState
 	var code byte
 	var haveCode bool
+	strayTotal := 0
 
 	for {
 		if !haveCode {
-			b, err := readJPEGByte(br)
+			var err error
+			code, err = readJPEGMarkerCode(br, &strayTotal)
 			if err != nil {
 				return pdfJPEGFrame{}, err
 			}
-			if b != 0xFF {
-				return pdfJPEGFrame{}, errors.New("invalid marker")
-			}
-			for b == 0xFF {
-				b, err = readJPEGByte(br)
-				if err != nil {
-					return pdfJPEGFrame{}, err
-				}
-			}
-			code = b
 		}
 		haveCode = false
 
@@ -123,6 +121,32 @@ func readPDFJPEGFrame(r io.Reader) (pdfJPEGFrame, error) {
 			return pdfJPEGFrame{}, errors.New("unsupported JPEG marker")
 		}
 	}
+}
+
+func readJPEGMarkerCode(br *bufio.Reader, strayTotal *int) (byte, error) {
+	gap := 0
+	b, err := readJPEGByte(br)
+	if err != nil {
+		return 0, err
+	}
+	for b != 0xFF {
+		gap++
+		*strayTotal++
+		if gap > maxJPEGStrayBytesPerGap || *strayTotal > maxJPEGStrayBytesTotal {
+			return 0, errors.New("invalid marker")
+		}
+		b, err = readJPEGByte(br)
+		if err != nil {
+			return 0, err
+		}
+	}
+	for b == 0xFF {
+		b, err = readJPEGByte(br)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return b, nil
 }
 
 func isUnsupportedJPEGCoding(code byte) bool {
