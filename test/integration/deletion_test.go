@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -839,7 +840,7 @@ func TestDeleteDuringProcessingDoesNotResurrectOnAnActiveDatabase(t *testing.T) 
 	req.SetPathValue("doc_id", response.DocumentID)
 	req.Header.Set("X-Document-Incarnation", incarnation)
 	deleted := httptest.NewRecorder()
-	handler.DeleteHandler(c, v, nil, handler.WithCleanupTargets(cleanup.Targets{InMemory: true}))(deleted, req)
+	handler.DeleteHandler(c, v, nil, handler.WithCleanupTargets(cleanup.Targets{InMemory: true, Memory: v}))(deleted, req)
 	require.Equal(t, http.StatusOK, deleted.Code, deleted.Body.String())
 	close(e.finish)
 	w.Shutdown()
@@ -909,4 +910,157 @@ func TestConcurrentReuseNeverTouchesTheReplacement(t *testing.T) {
 	for _, call := range stores.all() {
 		require.NotContains(t, call, successor, "no operation may name the replacement's incarnation")
 	}
+}
+
+type failingRevisionMemory struct {
+	*memory.FakeVectorStore
+	mu       sync.Mutex
+	failNext bool
+}
+
+func (v *failingRevisionMemory) DeleteByRevision(ctx context.Context, id, revision string) error {
+	v.mu.Lock()
+	fail := v.failNext
+	v.failNext = false
+	v.mu.Unlock()
+	if fail {
+		return errors.New("lost offline release acknowledgment")
+	}
+	return v.FakeVectorStore.DeleteByRevision(ctx, id, revision)
+}
+
+func TestOfflineCleanerReleasesHoldOnOwningService(t *testing.T) {
+	c := durableDatabase(t)
+	activateDeletion(t, c)
+	v := &failingRevisionMemory{FakeVectorStore: memory.NewFakeVectorStore()}
+	cfg := &config.Config{FakeMode: true, ServiceToken: "offline-service"}
+	server := httptest.NewServer(api.NewRouter(&api.RouterDeps{ChunkStore: c, PineconeDriver: v, VectorStore: v, Config: cfg}))
+	t.Cleanup(server.Close)
+	addr, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	cfg.ServerPort = addr.Port()
+
+	// Wrong offline server owns a different in-memory index instance.
+	otherIndex := memory.NewFakeVectorStore()
+	otherCfg := &config.Config{FakeMode: true, ServiceToken: "offline-service"}
+	otherServer := httptest.NewServer(api.NewRouter(&api.RouterDeps{ChunkStore: c, PineconeDriver: otherIndex, VectorStore: otherIndex, Config: otherCfg}))
+	t.Cleanup(otherServer.Close)
+	otherAddr, err := url.Parse(otherServer.URL)
+	require.NoError(t, err)
+	otherCfg.ServerPort = otherAddr.Port()
+
+	id := domain.DocumentID(uuid.NewString())
+	req := domain.AcceptRequest{
+		Document: domain.Document{ID: id}, CallerSupplied: true, MaxPending: 10, SupportsScopedVectors: true,
+	}
+	result, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, result.Outcome)
+	job, err := c.ClaimJob(t.Context(), "offline", time.Minute, 5)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.ErrorIs(t, c.MutateJobVectors(t.Context(), *job, func(ctx context.Context) error {
+		return domain.DispatchVectorMutation(ctx, false, func(context.Context) error {
+			return context.DeadlineExceeded
+		})
+	}), context.DeadlineExceeded)
+
+	cleaner, err := cleanup.New(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
+	require.NoError(t, cleaner.DeleteIncarnation(t.Context(), string(id), job.Incarnation))
+
+	held, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptDeletionConflict, held.Outcome)
+
+	// Wrong token, wrong offline service, and lost release acknowledgment all keep the UUID held.
+	require.Error(t, cleaner.ReleaseHeld(t.Context(), string(id), uuid.NewString()))
+	wrongCleaner, err := cleanup.New(t.Context(), otherCfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, wrongCleaner.Close(context.Background())) })
+	require.Error(t, wrongCleaner.ReleaseHeld(t.Context(), string(id), job.Incarnation))
+
+	v.mu.Lock()
+	v.failNext = true
+	v.mu.Unlock()
+	require.Error(t, cleaner.ReleaseHeld(t.Context(), string(id), job.Incarnation))
+
+	stillHeld, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptDeletionConflict, stillHeld.Outcome)
+
+	// Owning service completes release cleanly and allows reuse.
+	require.NoError(t, cleaner.ReleaseHeld(t.Context(), string(id), job.Incarnation))
+	reused, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, reused.Outcome)
+}
+
+func TestOfflineReleaseQueryValidationAndPreservation(t *testing.T) {
+	c := durableDatabase(t)
+	ctx := t.Context()
+	activateDeletion(t, c)
+
+	v := memory.NewFakeVectorStore()
+	stores := newDeletionStores()
+	liveID := uuid.NewString()
+	liveKey := "source/" + liveID + "/live.txt"
+	liveInc := acceptDeletable(t, c, liveID, "live offline document", true, liveKey)
+	require.NoError(t, v.Upsert(ctx, "", []domain.Chunk{{
+		ID: "live-chunk", DocumentID: domain.DocumentID(liveID), Embedding: []float32{1},
+		Metadata: map[string]any{domain.VectorRevisionKey: liveInc},
+	}}))
+	spyMux := http.NewServeMux()
+	spyMux.HandleFunc("DELETE /documents/{doc_id}", handler.DeleteHandler(c, v, stores, handler.WithCleanupTargets(cleanup.Targets{
+		InMemory: true, Memory: v, SourceBucket: "originals",
+	})))
+	spyServer := httptest.NewServer(spyMux)
+	t.Cleanup(spyServer.Close)
+
+	for _, tc := range []struct {
+		query string
+		code  int
+	}{
+		{"release_held=true", http.StatusPreconditionFailed},
+		{"release_held=True", http.StatusBadRequest},
+		{"release_held=false&release_held=true", http.StatusBadRequest},
+		{"release_held=true&release_held=false", http.StatusBadRequest},
+		{"release_held=true&release_held=true", http.StatusBadRequest},
+		{"release_held=false&release_held=false", http.StatusBadRequest},
+		{"release_held=", http.StatusBadRequest},
+		{"release_held=%ZZ", http.StatusBadRequest},
+	} {
+		reply := doRequest(t, spyServer, http.MethodDelete, "/documents/"+liveID+"?"+tc.query, "",
+			map[string]string{"X-Document-Incarnation": liveInc}, "")
+		require.Equal(t, tc.code, reply.code, tc.query+": "+reply.body)
+		// Every rejected request preserves the live row, source key, vectors, and receipt absence.
+		require.Equal(t, "processing", documentState(t, c, liveID))
+		storedKey, keyErr := c.GetDocumentS3Key(ctx, domain.DocumentID(liveID))
+		require.NoError(t, keyErr)
+		require.Equal(t, &liveKey, storedKey)
+		require.Empty(t, stores.sources())
+		hits, queryErr := v.QueryAllNamespaces(ctx, []float32{1}, 10, "")
+		require.NoError(t, queryErr)
+		require.Len(t, hits, 1)
+		require.Zero(t, receiptCount(t, c))
+	}
+
+	// On a separate live offline document, release_held=false uses the qualified deletion contract.
+	otherID := uuid.NewString()
+	otherKey := "source/" + otherID + "/other.txt"
+	otherInc := acceptDeletable(t, c, otherID, "separate offline document", true, otherKey)
+	require.NoError(t, v.Upsert(ctx, "", []domain.Chunk{{
+		ID: "other-chunk", DocumentID: domain.DocumentID(otherID), Embedding: []float32{1},
+		Metadata: map[string]any{domain.VectorRevisionKey: otherInc},
+	}}))
+	require.Equal(t, http.StatusPreconditionRequired, doRequest(t, spyServer, http.MethodDelete, "/documents/"+otherID+"?release_held=false", "", nil, "").code)
+	require.Equal(t, http.StatusOK, doRequest(t, spyServer, http.MethodDelete, "/documents/"+otherID+"?release_held=false", "",
+		map[string]string{"X-Document-Incarnation": otherInc}, "").code)
+	require.Empty(t, documentState(t, c, otherID))
+	require.Equal(t, []string{"source:" + otherKey}, stores.sources())
+	hits, err := v.QueryAllNamespaces(ctx, []float32{1}, 10, "")
+	require.NoError(t, err)
+	require.Len(t, hits, 1, "only liveID's vector remains")
+	require.Equal(t, domain.DocumentID(liveID), hits[0].Chunk.DocumentID)
 }
