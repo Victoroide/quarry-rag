@@ -38,13 +38,16 @@ type queryOutput struct {
 }
 
 type queryChunk struct {
-	DocID      string  `json:"doc_id"`
-	DocType    string  `json:"doc_type"`
-	ChunkIndex int     `json:"chunk_index"`
-	Score      float64 `json:"score"`
-	Text       string  `json:"text"`
-	Excerpt    int     `json:"excerpt,omitempty"`
-	Truncated  bool    `json:"truncated,omitempty"`
+	DocID      string   `json:"doc_id"`
+	DocType    string   `json:"doc_type"`
+	ChunkIndex int      `json:"chunk_index"`
+	Score      float64  `json:"score"`
+	Text       string   `json:"text"`
+	Pages      []int    `json:"pages,omitzero"`
+	TableIDs   []string `json:"table_ids,omitzero"`
+	RowIDs     []string `json:"row_ids,omitzero"`
+	Excerpt    int      `json:"excerpt,omitempty"`
+	Truncated  bool     `json:"truncated,omitempty"`
 }
 
 func registerQueryTool(s *mcp.Server, api *client.Client, token string) error {
@@ -60,7 +63,7 @@ func registerQueryTool(s *mcp.Server, api *client.Client, token string) error {
 		}
 		chunks := make([]queryChunk, 0, len(response.ScoredChunks))
 		for _, c := range response.ScoredChunks {
-			chunks = append(chunks, queryChunk{DocID: c.DocID, DocType: c.DocType, ChunkIndex: c.ChunkIndex, Score: c.Score, Text: c.Text, Excerpt: c.Excerpt, Truncated: c.Truncated})
+			chunks = append(chunks, queryChunk{DocID: c.DocID, DocType: c.DocType, ChunkIndex: c.ChunkIndex, Score: c.Score, Text: c.Text, Pages: c.Pages, TableIDs: c.TableIDs, RowIDs: c.RowIDs, Excerpt: c.Excerpt, Truncated: c.Truncated})
 		}
 		var result *mcp.CallToolResult
 		if response.FinishReason == client.FinishReasonEvidenceOnly {

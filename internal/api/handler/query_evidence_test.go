@@ -37,7 +37,7 @@ func TestEvidenceQueryReturnsSameSelectedTextInJSONAndSSE(t *testing.T) {
 		require.Equal(t, domain.VectorFilter{Collection: "archive", DocType: "guide", DocumentIDs: []string{id}}, filter)
 		return []domain.ScoredChunk{
 			{Chunk: domain.Chunk{DocumentID: other, Index: 0, Text: "Out of scope.", Metadata: map[string]any{"collection": "archive", "doc_type": "guide"}}, Score: .99},
-			{Chunk: domain.Chunk{DocumentID: id, Index: 2, Text: prefix + "\u202e" + strings.Repeat("x", 650), Metadata: map[string]any{"collection": "archive", "doc_type": "guide"}}, Score: .9},
+			{Chunk: domain.Chunk{DocumentID: id, Index: 2, Text: prefix + "\u202e" + strings.Repeat("x", 650), Metadata: map[string]any{"collection": "archive", "doc_type": "guide", "pages": []int{2}, "table_ids": []string{"p2-t1"}, "row_ids": []string{"p2-t1-r1"}}}, Score: .9},
 			{Chunk: domain.Chunk{DocumentID: id, Index: 3, Text: "Unselected low score.", Metadata: map[string]any{"collection": "archive", "doc_type": "guide"}}, Score: .1},
 		}, nil
 	}}
@@ -61,7 +61,7 @@ func TestEvidenceQueryReturnsSameSelectedTextInJSONAndSSE(t *testing.T) {
 	require.Empty(t, response.Answer)
 	require.Zero(t, response.TokenUsage)
 	require.Nil(t, response.Citations)
-	require.Equal(t, []ScoredChunkResponse{{DocID: id, DocType: "guide", ChunkIndex: 2, Score: .9, Text: text, Excerpt: 1}}, response.ScoredChunks)
+	require.Equal(t, []ScoredChunkResponse{{DocID: id, DocType: "guide", ChunkIndex: 2, Score: .9, Text: text, Pages: []int{2}, TableIDs: []string{"p2-t1"}, RowIDs: []string{"p2-t1-r1"}, Excerpt: 1}}, response.ScoredChunks)
 
 	rec = httptest.NewRecorder()
 	qh.ServeHTTP(rec, streamQueryRequest(t.Context(), body))

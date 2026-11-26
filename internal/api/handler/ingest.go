@@ -241,8 +241,8 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		ContentDedup:   opts.contentDedup,
 		MaxPending:     opts.maxPending,
 	}
-	if ft == extractor.FileTypePDF && (acceptReq.CallerSupplied || opts.extractPages != nil) {
-		setPDFOriginalFingerprints(&acceptReq, fileData)
+	if ft == extractor.FileTypePDF && (acceptReq.CallerSupplied || opts.extractPages != nil || opts.pdfLayout) {
+		setPDFOriginalFingerprints(&acceptReq, fileData, activePDFProfile(opts))
 		if (acceptReq.CallerSupplied || acceptReq.ContentDedup == domain.ContentDedupCollection) &&
 			acceptExistingPDFUpload(rw, r, wk, cs, opts, fileData, acceptReq) {
 			return
@@ -345,13 +345,26 @@ func releaseAttemptObject(ctx context.Context, cs domain.ChunkStore, s3Client Ob
 	}
 }
 
-func inspectPDFUpload(ctx context.Context, extract func(context.Context, []byte) (domain.PDFPages, error), data []byte) (*domain.PDFExtraction, string, error) {
+func inspectPDFUpload(ctx context.Context, extract func(context.Context, []byte) (domain.PDFPages, error), data []byte, layoutMode bool) (*domain.PDFExtraction, string, error) {
 	pages, err := extract(ctx, data)
 	if err != nil {
 		return nil, "", err
 	}
 	if validationErr := pages.Validate(); validationErr != nil {
 		return nil, "", validationErr
+	}
+	if layoutMode {
+		hasContent := false
+		for _, page := range pages {
+			if page.Evidence != domain.PDFBlank {
+				hasContent = true
+				break
+			}
+		}
+		if !hasContent {
+			return nil, "", extractor.ErrNoText
+		}
+		return &domain.PDFExtraction{Profile: domain.LayoutPDFProfile, Pages: pages, Coverage: domain.PDFPending}, "", nil
 	}
 	profile := &domain.PDFExtraction{Profile: domain.MixedPDFProfile, Pages: pages, Coverage: pages.CoverageBeforeOCR()}
 	if profile.Coverage == domain.PDFPending {

@@ -290,7 +290,7 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 	acceptReq.RequireSource = o.s3 != nil || upload.ocrPending || upload.pdf != nil
 	switch {
 	case upload.pdf != nil:
-		setPDFOriginalFingerprints(&acceptReq, fileData)
+		setPDFOriginalFingerprints(&acceptReq, fileData, activePDFProfile(o.opts))
 		acceptReq.PDF = upload.pdf
 	case upload.ocrPending:
 		acceptReq.Document.TextSource = "ocr_pending"

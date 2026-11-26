@@ -556,3 +556,80 @@ func TestMixedPDFIdentityPreservesLegacyAndCollection(t *testing.T) {
 	require.Equal(t, domain.AcceptInProgress, result.Outcome)
 	require.Equal(t, oldOCR.DocumentID, result.DocumentID)
 }
+
+func TestLayoutPDFProfileAdmissionIsolationAndCheckpoint(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+
+	mixed := mixedPDFRequest()
+	mixedRes, err := c.AcceptDocument(ctx, mixed)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, mixedRes.Outcome)
+
+	key := uuid.NewString() + "/layout.pdf"
+	layoutReq := jobsRequest("")
+	layoutReq.Document.S3Key = &key
+	layoutReq.RequireSource = true
+	layoutReq.PDFProfile = domain.LayoutPDFProfile
+	layoutReq.Fingerprint = chunker.ScopedFingerprint(layoutReq.Collection, domain.LayoutPDFProfile+"\x00layout-bytes")
+	layoutReq.PDF = &domain.PDFExtraction{
+		Profile:  domain.LayoutPDFProfile,
+		Coverage: domain.PDFPending,
+		Pages:    domain.PDFPages{{Number: 1, Evidence: domain.PDFEmbedded, Text: "Digital page"}},
+	}
+
+	// Same UUID ingested under mixed profile conflicts under layout profile.
+	conflictReq := layoutReq
+	conflictReq.Document.ID = mixedRes.DocumentID
+	conflictReq.CallerSupplied = true
+	conflictRes, err := c.AcceptDocument(ctx, conflictReq)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptConflict, conflictRes.Outcome)
+
+	// Anonymous upload under layout profile does not match mixed or legacy rows.
+	layoutRes, err := c.AcceptDocument(ctx, layoutReq)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, layoutRes.Outcome)
+	require.NotEqual(t, mixedRes.DocumentID, layoutRes.DocumentID)
+
+	// Claim and checkpoint layout sections, then verify retry preserves sections.
+	for range 2 {
+		job, claimErr := c.ClaimPDFJob(ctx, "layout-worker", time.Minute, 5)
+		require.NoError(t, claimErr)
+		require.NotNil(t, job)
+		if job.Document.ID == mixedRes.DocumentID {
+			_, err = c.BeginPDFOCR(ctx, *job)
+			require.NoError(t, err)
+			require.NoError(t, c.StorePDFOCR(ctx, *job, domain.PDFResult{
+				Text:     "Recovered\n\nRepeated archive header",
+				Coverage: domain.PDFComplete,
+				Pages:    []domain.PDFPageResult{{Number: 1, Source: "ocr", State: "text"}, {Number: 2, Source: "parser", State: "text"}},
+			}))
+			ok, compErr := c.CompleteJob(ctx, *job, nil, domain.IndexObservation{})
+			require.NoError(t, compErr)
+			require.True(t, ok)
+			continue
+		}
+		require.Equal(t, domain.LayoutPDFProfile, job.PDF.Profile)
+		_, err = c.BeginPDFOCR(ctx, *job)
+		require.NoError(t, err)
+		checkpoint := domain.PDFResult{
+			Text:     "Column: Value",
+			Coverage: domain.PDFComplete,
+			Pages: []domain.PDFPageResult{{
+				Number:   1,
+				Source:   "textract",
+				State:    "text",
+				Sections: []domain.LayoutSection{{Page: 1, TableID: "p1-t1", RowID: "p1-t1-r1", Text: "Column: Value"}},
+			}},
+		}
+		require.NoError(t, c.StorePDFOCR(ctx, *job, checkpoint))
+		require.NoError(t, c.ReleaseJob(ctx, *job))
+
+		reclaimed, claimErr := c.ClaimPDFJob(ctx, "layout-worker", time.Minute, 5)
+		require.NoError(t, claimErr)
+		require.NotNil(t, reclaimed)
+		require.Len(t, reclaimed.PDF.PageResults, 1)
+		require.Equal(t, checkpoint.Pages[0].Sections, reclaimed.PDF.PageResults[0].Sections)
+	}
+}

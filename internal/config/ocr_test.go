@@ -37,6 +37,37 @@ func TestPDFOCRMode(t *testing.T) {
 	}
 }
 
+func TestPDFLayoutMode(t *testing.T) {
+	for _, tc := range []struct{ mode, provider, fake, isolate, want string }{
+		{"", "none", "true", "true", "plain"},
+		{"plain", "none", "true", "true", "plain"},
+		{"textract", "textract", "false", "true", "textract"},
+		{"textract", "none", "false", "true", "OCR_PROVIDER"},
+		{"textract", "textract", "true", "true", "GO_RAG_FAKE_MODE"},
+		{"textract", "textract", "false", "false", "EXTRACT_ISOLATION"},
+		{"unknown", "none", "true", "true", "PDF_LAYOUT_MODE"},
+	} {
+		t.Run(tc.mode+tc.provider+tc.fake+tc.isolate, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "host=localhost dbname=rag")
+			t.Setenv("AWS_REGION", "us-east-1")
+			t.Setenv("SERVICE_TOKEN", "synthetic-service-token")
+			t.Setenv("VECTOR_STORE", "postgres")
+			t.Setenv("S3_BUCKET", "synthetic-bucket")
+			t.Setenv("PDF_LAYOUT_MODE", tc.mode)
+			t.Setenv("OCR_PROVIDER", tc.provider)
+			t.Setenv("GO_RAG_FAKE_MODE", tc.fake)
+			t.Setenv("EXTRACT_ISOLATION", tc.isolate)
+			cfg, err := Load()
+			if tc.want == "plain" || tc.want == "textract" {
+				require.NoError(t, err)
+				require.Equal(t, tc.want, cfg.PDFLayoutMode)
+			} else {
+				require.ErrorContains(t, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestOCRConfiguration(t *testing.T) {
 	for _, tc := range []struct{ name, provider, bucket, timeout, jobTimeout, wantError string }{
 		{name: "default"},
