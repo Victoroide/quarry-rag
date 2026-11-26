@@ -53,7 +53,7 @@ Use the [trusted transport for subject credentials](grant-catalog.md#subject-ide
 
 | Tool | Input | Output |
 |---|---|---|
-| `quarry_query` | Question, retrieval mode, answer mode, document type, collection, chunk limit, optional citation request with optional code preservation and optional document ID allowlist | Answer, finish reason, mode, chunk counts, token usage, optional strict input count diagnostics (`count_method`, `model_input_tokens`), scored evidence in `chunks` with excerpt numbers, and [requested citations and coverage](api.md#citation-support) |
+| `quarry_query` | Question, retrieval mode, answer mode, document type, collection, chunk limit, optional citation request with optional code preservation, optional document ID allowlist and optional [document set](api.md#document-sets) reference | Answer, finish reason, mode, chunk counts, token usage, optional strict input count diagnostics (`count_method`, `model_input_tokens`), scored evidence in `chunks` with excerpt numbers, and [requested citations and coverage](api.md#citation-support) |
 | `quarry_list_documents` | Optional collection, page limit, continuation cursor and `include_index_visibility` | Document summaries including collection, and `next_after` |
 | `quarry_get_document` | Document ID and optional `include_index_visibility` | Document summary including collection and ingestion status |
 | `quarry_ingest_text` | Content, optional collection, document type, ID and metadata | Document ID and acceptance status |
@@ -104,7 +104,7 @@ Pass `client.WithAcceptLanguage` to `Query` to choose the language of the [no-ev
 
 Inspect `*client.APIError` for status, service error code, extraction code, request ID and retry guidance. The package does not log or retry requests. A `FileUpload` streams its reader, which remains owned by the caller; close a blocking source when canceling an upload.
 
-Set `IngestRequest.Collection` for JSON ingestion or `FileUpload.Collection` for multipart uploads. Both `ListDocuments` and `GetDocument` return the stored label in `DocumentSummary.Collection`. Set `QueryRequest.Collection` or `ListOptions.Collection` to restrict a query or listing to one collection. This helper accepts text and returns its initial ingestion summary:
+Set `IngestRequest.Collection` for JSON ingestion or `FileUpload.Collection` for multipart uploads. Both `ListDocuments` and `GetDocument` return the stored label in `DocumentSummary.Collection`. Set `QueryRequest.Collection` or `ListOptions.Collection` to restrict a query or listing to one collection. Set `QueryRequest.DocumentSetID` to select documents through a [document set](api.md#document-sets). This helper accepts text and returns its initial ingestion summary:
 
 ```go
 func ingestInCollection(ctx context.Context, c *client.Client, content string) (*client.DocumentSummary, error) {

@@ -7,6 +7,7 @@ Notable changes are grouped by release.
 ### Added
 
 - Vector reindex supports tagged documents in both directions between Pinecone and PostgreSQL, including retrieval and checkpointed deletion after PostgreSQL cutover.
+- Opt-in subject-bound document sets (`DOCUMENT_SETS_ENABLED`, `DOCUMENT_SET_MAX_MEMBERS`, `DOCUMENT_SET_MAX_BATCHES`, migration `031_document_sets.sql`, `scripts/document-sets`). Under `AUTHZ_MODE=grants`, `POST /query`, the Go client and the stdio query tool accept an optional `document_set_id` that narrows a query to an immutable, expiring selection of up to 100,000 documents owned by the authenticated subject. A reference grants no access, an unusable one returns one uniform `404`, and pgvector joins the set before ranking while Pinecone partitions the authorized incarnations within a total search budget. Existing serving roles need the new view and function grants; see the serving-role upgrade procedure.
 
 ### Fixed
 

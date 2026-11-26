@@ -261,6 +261,18 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_corpus_authz_mode() TO quarry_ser
 GRANT EXECUTE ON FUNCTION public.grant_catalog_record_security_audit(text, uuid, uuid, bigint, text, text, text, uuid, uuid) TO quarry_service;
 ```
 
+After applying `031_document_sets.sql`, grant the serving login read access to the
+two live set relations before enabling [document sets](#document-sets), and
+grant each operator execution of the two set functions. Neither login receives
+any privilege on the set tables.
+
+```sql
+-- Role upgrade for migration 031
+GRANT SELECT ON public.grant_catalog_document_sets_live, public.grant_catalog_document_set_readable TO quarry_service;
+GRANT EXECUTE ON FUNCTION public.grant_catalog_create_document_set(uuid, uuid, integer, text, uuid[], integer),
+  public.grant_catalog_purge_document_sets(integer) TO quarry_operator;
+```
+
 ## Owned ingestion
 
 In `AUTHZ_MODE=grants`, `POST /ingest` uses owned ingestion for a verified
@@ -454,6 +466,44 @@ corpus, backend and scope sizes of the deployment, and compare them with
 service mode. Use exact search over the authorized relation or separate indexes
 for independent search behavior. Provider-side prompt caching and anything
 already sent to a model provider are outside the service's control.
+
+## Document sets
+
+A document set is an immutable, expiring list of document incarnations that one principal can select in a query. It lets a caller name up to 100,000 documents with one UUID, where an inline `allowed_document_ids` list would compete with the 1 MiB request body and the [`MAX_ALLOWED_DOCUMENT_IDS`](configuration.md#environment-variables) limit. The [query contract](api.md#document-sets) defines the request field and its responses. A set is only a selector. It gives its holder no permission, and every use intersects it with the owner's live read grants.
+
+Sets are off by default. `DOCUMENT_SETS_ENABLED=true` requires `AUTHZ_MODE=grants` and a vector store that can confine a search to a set, which is pgvector or Pinecone. A shared application credential identifies the calling tier and never a person, so in `service` mode two end users behind one credential could not be told apart and a reference would become a transferable capability. Keep a large selection in the calling application until the deployment verifies subjects.
+
+Enable the setting only after every replica runs a build that accepts `document_set_id`. An older build rejects the field as unknown, so a request that reaches it fails with `400`.
+
+### Create a set
+
+Run the separate operator command with the operator login in `DATABASE_URL`. It reads a manifest from standard input and prints the new reference as JSON.
+
+```sh
+go run ./scripts/document-sets -tenant <tenant UUID> -owner <principal UUID> \
+  -ttl 1h -import-key nightly-report < manifest.txt
+```
+
+The manifest holds one document UUID per line, in the hyphenated form, with LF or CRLF line endings. An empty manifest creates an empty set. The command refuses a blank line, a value that is not a UUID in its 36-character hyphenated form and a nil UUID. It refuses a manifest of more than 8 MiB, and more raw entries than `DOCUMENT_SET_MAX_MEMBERS`, before it canonicalizes anything. It then deduplicates the identifiers and connects. All of this happens before any database work.
+
+The server assigns the set an opaque UUID and an immutable revision, and records the tenant, the owning principal, the operator login and the expiry. `-ttl` defaults to one hour and cannot exceed 24 hours. Creation is one transaction. Every member must be a completed document that the owner may read now, and its current incarnation is stored with composite tenant constraints and unique membership. An unknown, foreign, unfinished or unreadable document fails the whole creation with one message that does not say which member or why, so no partial set is ever published. An owner that is unknown or disabled in the tenant also fails creation.
+
+- An owner can hold at most 16 unexpired sets. Creations for one owner run one at a time, so concurrent calls cannot exceed the limit.
+- `-import-key` names one set per owner. An identical retry, meaning the same members, returns the original reference with `replayed: true` and its original expiry. Changed members under the same key fail with `import key conflict`. A key is free again once its set has expired.
+- Each creation also removes up to four of the owner's expired sets. `-purge-expired` alone removes expired sets of every owner in bounded steps and prints how many it removed.
+
+### Use a set
+
+The service resolves the reference by tenant and authenticated principal. An inactive principal receives the usual `403` before any set is resolved. A missing, foreign, deleted or expired set returns the same `404`. Deleting a document removes it from every set, and a document recreated under the same UUID has a new incarnation that no set names.
+
+The documents searched are the set's membership intersected with the principal's live read grants, each document's current incarnation, the inline list, the collection, the type and the completion rules. The same relations decide candidate checks, routing previews and every later release, so a document outside the set can neither be previewed nor released even if a store returned it.
+
+- pgvector joins the set, the live grants and the document incarnation inside the ranking statement, before ordering and `LIMIT`. Nothing lists the membership, and the exact-scope probe, exact ranking and approximate ranking use the same join. The result is exact in scope. Approximate-index recall on a selective set remains a separate property: measure it with the deployment's data, as under [residual channels](#residual-channels), and use `PGVECTOR_EXACT_SCOPE_MAX` for small sets.
+- Pinecone receives the intersection as an explicit member list, in partitions of at most 10,000 documents. Every request carries the tenant and any collection and type filter, and each predicate holds at most 10,000 values. The query embeds once. The service searches one partition at a time and buffers at most the requested number of hits per partition, then merges the verified hits by descending vector score and ascending chunk ID, deduplicates across partitions and truncates only after merging. The optional hosted refill is not used for a set query.
+- Each request spends from one budget of `DOCUMENT_SET_MAX_BATCHES` hosted attempts, counting the probe, the local pass, the global pass, the sparse top-up and every retry. Transport retries are disabled, so every retry is counted. The route is priced before anything is embedded: its first attempts never exceed the priced total, and retries may spend only what that total leaves. See the [query contract](api.md#document-sets) for the pricing and the `422` that an unaffordable explicit route returns.
+- A timeout or failed partition fails the whole request.
+
+Before each hosted batch, each reranker or model request, each JSON release and each streamed frame, the service checks the credential, key trust, principal and policy revision, and that the set is still live under the same revision. The database clock decides expiry, and a set past its recorded expiry by the service's own clock is also unusable. A set that lapses mid-request ends it with the same `404` as before the first byte, or with the terminal `error` event once streaming began. Nothing from the rejected disclosure is sent.
 
 ## Assign historical documents
 
