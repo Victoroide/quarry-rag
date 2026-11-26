@@ -18,7 +18,7 @@ func RequestID(next http.Handler) http.Handler {
 		if !requestIDPattern.MatchString(id) {
 			generated, err := uuid.NewV7()
 			if err != nil {
-				slog.ErrorContext(r.Context(), "generate request ID", "error", err)
+				slog.ErrorContext(r.Context(), "generate request ID")
 				writeJSONErr(w, http.StatusInternalServerError, "internal", "internal server error")
 				return
 			}

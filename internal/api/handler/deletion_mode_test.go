@@ -6,10 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/logctx"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,6 +71,50 @@ func TestDeletionModeFailsClosedWhenTheMarkerCannotBeRead(t *testing.T) {
 			require.Equal(t, "unavailable", body.Error)
 			require.NotContains(t, rec.Body.String(), "connection reset", "a driver error never reaches the caller")
 			require.NotContains(t, rec.Body.String(), DeletionModeInactive, "an unreadable marker never reads as a mode")
+		})
+	}
+}
+
+func TestDeletionModeErrorTelemetry(t *testing.T) {
+	lookupErr := errors.New("connection reset while reading private-marker-canary")
+	for _, tc := range []struct {
+		name   string
+		store  domain.ChunkStore
+		status int
+		logs   []string
+		causes []string
+	}{
+		{"missing capability", struct{ domain.ChunkStore }{}, http.StatusServiceUnavailable,
+			[]string{"encode error response"}, []string{"connection closed"}},
+		{"lookup failure", &modeStore{err: lookupErr}, http.StatusServiceUnavailable,
+			[]string{"read deletion mode", "encode error response"}, []string{lookupErr.Error(), "connection closed"}},
+		{"success response write failure", &modeStore{}, http.StatusOK,
+			[]string{"encode deletion mode response"}, []string{"connection closed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, redacted := range []bool{false, true} {
+				logs := captureLeveledLogs(t)
+				ctx := logctx.WithRequestID(t.Context(), "deletion-mode-request")
+				ctx = tracing.WithRedactIdentifiers(ctx, redacted)
+				req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/deletion-mode", http.NoBody)
+				writer := &leveledFailWriter{*httptest.NewRecorder()}
+				DeletionModeHandler(tc.store)(writer, req)
+				require.Equal(t, tc.status, writer.Code)
+				lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+				require.Len(t, lines, len(tc.logs))
+				for i, line := range lines {
+					var record map[string]any
+					require.NoError(t, json.Unmarshal([]byte(line), &record))
+					require.Equal(t, tc.logs[i], record["msg"])
+					require.Equal(t, "deletion-mode-request", record["request_id"])
+					if redacted {
+						require.Equal(t, "operation failed", record["error"])
+						require.NotContains(t, line, tc.causes[i])
+					} else {
+						require.Equal(t, tc.causes[i], record["error"])
+					}
+				}
+			}
 		})
 	}
 }

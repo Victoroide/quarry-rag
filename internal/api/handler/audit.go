@@ -9,6 +9,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/api/middleware"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/logctx"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 )
 
 func recordSecurityAudit(ctx context.Context, recorder domain.SecurityAuditRecorder, subject *middleware.VerifiedSubject, rev *int64, action, outcome, reason, docID, incarnation string) error {
@@ -35,14 +36,14 @@ func recordSecurityAudit(ctx context.Context, recorder domain.SecurityAuditRecor
 
 func recordSecurityAuditBestEffort(ctx context.Context, recorder domain.SecurityAuditRecorder, subject *middleware.VerifiedSubject, rev *int64, action, outcome, reason, docID, incarnation string) {
 	if err := recordSecurityAudit(ctx, recorder, subject, rev, action, outcome, reason, docID, incarnation); err != nil {
-		slog.WarnContext(ctx, "record security audit event", "action", action, "outcome", outcome, "error", err)
+		slog.WarnContext(ctx, "record security audit event", "action", action, "outcome", outcome, "error", tracing.ErrorForTelemetry(ctx, err))
 	}
 }
 
 func requireAuditedAllow(ctx context.Context, w http.ResponseWriter, recorder domain.SecurityAuditRecorder, subject *middleware.VerifiedSubject, rev *int64, action, reason, docID, incarnation string) bool {
 	if err := recordSecurityAudit(ctx, recorder, subject, rev, action, "allow", reason, docID, incarnation); err != nil {
-		slog.ErrorContext(ctx, "record allow security audit event", "action", action, "error", err)
-		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "audit logging unavailable")
+		slog.ErrorContext(ctx, "record allow security audit event", "action", action, "error", tracing.ErrorForTelemetry(ctx, err))
+		writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "audit logging unavailable")
 		return false
 	}
 	return true

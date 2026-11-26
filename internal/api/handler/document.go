@@ -67,17 +67,17 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 
 		parsedID, err := uuid.Parse(docIDStr)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
 			return
 		}
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "invalid query parameters")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "invalid query parameters")
 			return
 		}
 		releaseHeld, ok := parseReleaseHeld(query)
 		if !ok {
-			writeJSONError(w, http.StatusBadRequest, "validation", "release_held must be a single true or false value")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "release_held must be a single true or false value")
 			return
 		}
 		incarnation, qualified, valid := deletionIncarnation(r.Header)
@@ -107,11 +107,11 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 		docID := domain.DocumentID(docIDStr)
 		if releaseHeld {
 			if !valid {
-				writeJSONError(w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
+				writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
 				return
 			}
 			if !qualified {
-				writeJSONError(w, http.StatusPreconditionRequired, "precondition", incarnationHeaderName+" is required to release a held deletion")
+				writeJSONError(r.Context(), w, http.StatusPreconditionRequired, "precondition", incarnationHeaderName+" is required to release a held deletion")
 				return
 			}
 			canonical := parsedID.String()
@@ -132,13 +132,13 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 		if deleter, ok := cs.(domain.DocumentDeleter); ok {
 			active, modeErr := deleter.DeletionActive(ctx)
 			if modeErr != nil {
-				slog.ErrorContext(ctx, "read deletion mode", "document_id", docIDStr, "error", modeErr)
-				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document deletion mode is unavailable")
+				slog.ErrorContext(ctx, "read deletion mode", "document_id", docIDStr, "error", tracing.ErrorForTelemetry(ctx, modeErr))
+				writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document deletion mode is unavailable")
 				return
 			}
 			if active {
 				if !valid {
-					writeJSONError(w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
+					writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
 					return
 				}
 				// External stores and receipts key the document by its canonical form.
@@ -149,19 +149,19 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 			}
 		}
 		if qualified {
-			writeJSONError(w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
+			writeJSONError(r.Context(), w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
 			return
 		}
 
 		// 1. Check document exists and get s3_key.
 		doc, err := cs.GetDocument(ctx, docID)
 		if err != nil {
-			slog.ErrorContext(ctx, "look up document", "document_id", docIDStr, "error", err)
-			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to look up document")
+			slog.ErrorContext(ctx, "look up document", "document_id", docIDStr, "error", tracing.ErrorForTelemetry(ctx, err))
+			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to look up document")
 			return
 		}
 		if doc == nil {
-			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
+			writeJSONError(r.Context(), w, http.StatusNotFound, "not_found", "document not found")
 			return
 		}
 		err = cleanup.Remove(ctx, cs, pcDriver, objects, doc)
@@ -220,39 +220,39 @@ func writeDeleteResult(ctx context.Context, w http.ResponseWriter, docID string,
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if encodeErr := json.NewEncoder(w).Encode(DeleteResponse{Deleted: true, DocID: docID}); encodeErr != nil {
-			slog.ErrorContext(ctx, "encode delete response", "error", encodeErr)
+			slog.ErrorContext(ctx, "encode delete response", "error", tracing.ErrorForTelemetry(ctx, encodeErr))
 		}
 	case errors.Is(err, domain.ErrDocumentNotFound):
-		writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
+		writeJSONError(ctx, w, http.StatusNotFound, "not_found", "document not found")
 	case errors.Is(err, domain.ErrUnauthorized):
-		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+		writeJSONError(ctx, w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 	case errors.Is(err, domain.ErrForbidden):
-		writeJSONError(w, http.StatusForbidden, "forbidden", "access denied")
+		writeJSONError(ctx, w, http.StatusForbidden, "forbidden", "access denied")
 	case errors.Is(err, domain.ErrDeletionPreconditionRequired):
-		writeJSONError(w, http.StatusPreconditionRequired, "precondition", incarnationHeaderName+" is required to delete a live document")
+		writeJSONError(ctx, w, http.StatusPreconditionRequired, "precondition", incarnationHeaderName+" is required to delete a live document")
 	case errors.Is(err, domain.ErrDeletionPreconditionFailed):
-		writeJSONError(w, http.StatusPreconditionFailed, "precondition", "document incarnation does not match the stored document")
+		writeJSONError(ctx, w, http.StatusPreconditionFailed, "precondition", "document incarnation does not match the stored document")
 	case errors.Is(err, domain.ErrFixtureDeletionRequired):
-		writeJSONError(w, http.StatusPreconditionFailed, "precondition", "evaluation fixture requires receipt-qualified deletion")
+		writeJSONError(ctx, w, http.StatusPreconditionFailed, "precondition", "evaluation fixture requires receipt-qualified deletion")
 	case errors.Is(err, domain.ErrFileStorageUnavailable):
-		writeJSONError(w, http.StatusServiceUnavailable, "storage", "stored file cannot be deleted because file storage is not configured")
+		writeJSONError(ctx, w, http.StatusServiceUnavailable, "storage", "stored file cannot be deleted because file storage is not configured")
 	case errors.Is(err, domain.ErrVectorStorageUnavailable):
-		writeJSONError(w, http.StatusServiceUnavailable, "storage", "document vectors cannot be deleted because vector storage is not configured")
+		writeJSONError(ctx, w, http.StatusServiceUnavailable, "storage", "document vectors cannot be deleted because vector storage is not configured")
 	case errors.Is(err, domain.ErrDeletionBusy):
 		w.Header().Set("Retry-After", "5")
-		writeJSONError(w, http.StatusServiceUnavailable, "busy", "document cleanup is in progress; retry the same request")
+		writeJSONError(ctx, w, http.StatusServiceUnavailable, "busy", "document cleanup is in progress; retry the same request")
 	case errors.Is(err, domain.ErrTooManyLegacyDeletions):
 		w.Header().Set("Retry-After", "5")
-		writeJSONError(w, http.StatusServiceUnavailable, "busy", "too many concurrent deletions; retry later")
+		writeJSONError(ctx, w, http.StatusServiceUnavailable, "busy", "too many concurrent deletions; retry later")
 	case errors.Is(err, domain.ErrDeletionInactive):
-		writeJSONError(w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
+		writeJSONError(ctx, w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
 	default:
 		if tracing.RedactIdentifiers(ctx) {
-			slog.ErrorContext(ctx, "delete document", "error", err)
+			slog.ErrorContext(ctx, "delete document", "error", tracing.ErrorForTelemetry(ctx, err))
 		} else {
-			slog.ErrorContext(ctx, "delete document", "document_id", docID, "error", err)
+			slog.ErrorContext(ctx, "delete document", "document_id", docID, "error", tracing.ErrorForTelemetry(ctx, err))
 		}
-		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to delete document")
+		writeJSONError(ctx, w, http.StatusInternalServerError, "internal", "failed to delete document")
 	}
 }
 
@@ -270,18 +270,18 @@ func acquireDeleteWriter(ctx context.Context, cs domain.ChunkStore) (func(), err
 func writeDeleteGateError(ctx context.Context, w http.ResponseWriter, docIDStr string, gateErr error) {
 	switch {
 	case errors.Is(gateErr, domain.ErrWritersFrozen):
-		writeFrozen(w)
+		writeFrozen(ctx, w)
 	case errors.Is(gateErr, domain.ErrGenerationMismatch):
 		w.Header().Set("Retry-After", "30")
-		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
+		writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
 	default:
 		if tracing.RedactIdentifiers(ctx) {
-			slog.ErrorContext(ctx, "check document writers", "error", gateErr)
+			slog.ErrorContext(ctx, "check document writers", "error", tracing.ErrorForTelemetry(ctx, gateErr))
 		} else {
-			slog.ErrorContext(ctx, "check document writers", "document_id", docIDStr, "error", gateErr)
+			slog.ErrorContext(ctx, "check document writers", "document_id", docIDStr, "error", tracing.ErrorForTelemetry(ctx, gateErr))
 		}
 		w.Header().Set("Retry-After", "30")
-		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+		writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 	}
 }
 
@@ -297,29 +297,29 @@ func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, ob
 		docIDStr := r.PathValue("doc_id")
 		parsedID, err := uuid.Parse(docIDStr)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
+			writeJSONError(ctx, w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
 			return
 		}
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "invalid query parameters")
+			writeJSONError(ctx, w, http.StatusBadRequest, "validation", "invalid query parameters")
 			return
 		}
 		if query.Has("release_held") {
 			recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "deny", "release_held_unsupported", parsedID.String(), "")
-			writeJSONError(w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
+			writeJSONError(ctx, w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
 			return
 		}
 		incarnation, _, valid := deletionIncarnation(r.Header)
 		if !valid {
-			writeJSONError(w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
+			writeJSONError(ctx, w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
 			return
 		}
 		canonical := parsedID.String()
 		deleter, capable := cs.(domain.ScopedDocumentDeleter)
 		if !capable {
 			recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "error", "deletion_unavailable", canonical, incarnation)
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document deletion is unavailable")
+			writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "document deletion is unavailable")
 			return
 		}
 		release, gateErr := acquireDeleteWriter(ctx, cs)
@@ -342,7 +342,7 @@ func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, ob
 				err = domain.ErrUnauthorized
 			} else if errors.Is(err, cleanup.ErrScopedDeletionCanceled) {
 				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "error", "deletion_canceled", canonical, incarnation)
-				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document deletion canceled")
+				writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "document deletion canceled")
 				return
 			}
 		}
@@ -386,12 +386,12 @@ func ListDocumentsHandler(cs domain.ChunkStore, opts ...DocumentListOption) http
 	return func(w http.ResponseWriter, r *http.Request) {
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "invalid query parameters")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "invalid query parameters")
 			return
 		}
 		collection, apiErr := listingCollection(query)
 		if apiErr != nil {
-			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			writeJSONError(r.Context(), w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
 		projection := documentSummaryOptions(query)
@@ -400,21 +400,21 @@ func ListDocumentsHandler(cs domain.ChunkStore, opts ...DocumentListOption) http
 			return
 		}
 		if projection.incarnation {
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document incarnations are unavailable")
+			writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document incarnations are unavailable")
 			return
 		}
 		if projection.indexVisibility {
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document index visibility is unavailable")
+			writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document index visibility is unavailable")
 			return
 		}
 		if collection != "" {
-			writeJSONError(w, http.StatusInternalServerError, "internal", "collection filtering is unavailable")
+			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "collection filtering is unavailable")
 			return
 		}
 		docs, err := cs.ListDocuments(r.Context())
 		if err != nil {
-			slog.ErrorContext(r.Context(), "list documents", "error", err)
-			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to list documents")
+			slog.ErrorContext(r.Context(), "list documents", "error", tracing.ErrorForTelemetry(r.Context(), err))
+			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to list documents")
 			return
 		}
 		if docs == nil {
@@ -422,7 +422,7 @@ func ListDocumentsHandler(cs domain.ChunkStore, opts ...DocumentListOption) http
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{"documents": docs, "count": len(docs)}); err != nil {
-			slog.ErrorContext(r.Context(), "encode document list", "error", err)
+			slog.ErrorContext(r.Context(), "encode document list", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		}
 	}
 }

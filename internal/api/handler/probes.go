@@ -9,6 +9,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -81,7 +82,7 @@ func (p *Probes) check(ctx context.Context) HealthStatus {
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			if err := ping(probeCtx); err != nil {
-				slog.WarnContext(probeCtx, "health probe failed", "dependency", name, "error", err)
+				slog.WarnContext(probeCtx, "health probe failed", "dependency", name, "error", tracing.ErrorForTelemetry(probeCtx, err))
 				*value = "unreachable"
 			}
 		})

@@ -16,6 +16,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/evaluation"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
 )
@@ -30,9 +31,9 @@ func ownedIngestHandler(wk *worker.Worker, cs domain.ChunkStore, s3Client Object
 	store, capable := cs.(domain.OwnedIngestStore)
 	if !capable || opts.contentDedup != domain.ContentDedupOff {
 		slog.Error("owned ingestion requires private content identity and an owner-aware store")
-		return func(rw http.ResponseWriter, _ *http.Request) {
+		return func(rw http.ResponseWriter, r *http.Request) {
 			rw.Header().Set("Cache-Control", "private, no-store")
-			writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+			writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		}
 	}
 	return func(rw http.ResponseWriter, r *http.Request) {
@@ -44,12 +45,12 @@ func ownedIngestHandler(wk *worker.Worker, cs domain.ChunkStore, s3Client Object
 				auditSubject = &subject
 			}
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, auditSubject, nil, "ingest", "deny", "credential_expired", "", "")
-			writeJSONError(rw, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+			writeJSONError(r.Context(), rw, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 			return
 		}
 		if len(r.Header.Values(evaluation.ReceiptHeader)) != 0 {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "ingest", "deny", "evaluation_fixtures_disabled", "", "")
-			fixtureUnavailable(rw)
+			fixtureUnavailable(r.Context(), rw)
 			return
 		}
 		ingest := ownedIngest{store: store, cs: cs, wk: wk, s3: s3Client, maxUpload: maxUploadBytes, opts: opts, principal: subject.Principal, validUntil: subject.ExpiresAt}
@@ -121,20 +122,20 @@ func (o ownedIngest) recordAcceptFailure(ctx context.Context, outcome domain.Acc
 func (o ownedIngest) authorize(rw http.ResponseWriter, r *http.Request, collection, supplied string) (domain.OwnedTarget, *domain.OwnerBinding, bool) {
 	target, err := o.store.AuthorizeOwnedIngest(r.Context(), o.principal, collection, domain.DocumentID(supplied))
 	if err != nil {
-		slog.ErrorContext(r.Context(), "authorize owned ingest", "error", err)
+		slog.ErrorContext(r.Context(), "authorize owned ingest", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "error", "authorize_failed", supplied, "")
-		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+		writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 		return target, nil, false
 	}
 	switch {
 	case target.Decision == domain.OwnedForbidden:
 		recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "deny", "access_denied", supplied, "")
-		writeJSONError(rw, http.StatusForbidden, "forbidden", "access denied")
+		writeJSONError(r.Context(), rw, http.StatusForbidden, "forbidden", "access denied")
 		return target, nil, false
 	case target.Decision == domain.OwnedNotFound, target.Decision == domain.OwnedNew && supplied != "",
 		target.Decision != domain.OwnedNew && (supplied == "" || target.Incarnation == ""):
 		recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "deny", "not_found", supplied, "")
-		writeJSONError(rw, http.StatusNotFound, "not_found", "document not found")
+		writeJSONError(r.Context(), rw, http.StatusNotFound, "not_found", "document not found")
 		return target, nil, false
 	}
 	incarnation := target.Incarnation
@@ -160,7 +161,7 @@ func (o ownedIngest) request(docID string, supplied bool, collection, docType st
 
 func (o ownedIngest) json(rw http.ResponseWriter, r *http.Request) {
 	if !isJSONRequest(r) {
-		writeJSONError(rw, http.StatusUnsupportedMediaType, "validation", "Content-Type must be application/json or multipart/form-data")
+		writeJSONError(r.Context(), rw, http.StatusUnsupportedMediaType, "validation", "Content-Type must be application/json or multipart/form-data")
 		return
 	}
 	var req IngestRequest
@@ -173,10 +174,10 @@ func (o ownedIngest) json(rw http.ResponseWriter, r *http.Request) {
 		apiErr = validateOwnedMetadata(req.Metadata)
 	}
 	if apiErr != nil {
-		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
 	}
-	docID, ok := ingestDocumentID(rw, req.DocumentID)
+	docID, ok := ingestDocumentID(r.Context(), rw, req.DocumentID)
 	if !ok {
 		return
 	}
@@ -263,7 +264,7 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 		release, err := o.opts.limiter.Acquire(r.Context())
 		if err != nil {
 			rw.Header().Set("Retry-After", "5")
-			writeJSONError(rw, http.StatusServiceUnavailable, "busy", "too many concurrent uploads")
+			writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "busy", "too many concurrent uploads")
 			return
 		}
 		defer release()
@@ -272,30 +273,30 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 	defer func(ctx context.Context) {
 		if r.MultipartForm != nil {
 			if err := r.MultipartForm.RemoveAll(); err != nil {
-				slog.WarnContext(ctx, "remove multipart temporary files", "error", err)
+				slog.WarnContext(ctx, "remove multipart temporary files", "error", tracing.ErrorForTelemetry(ctx, err))
 			}
 		}
 	}(r.Context())
 	if err := r.ParseMultipartForm(multipartMemoryBytes); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeJSONError(rw, http.StatusRequestEntityTooLarge, "validation", "request body exceeds maximum upload size")
+			writeJSONError(r.Context(), rw, http.StatusRequestEntityTooLarge, "validation", "request body exceeds maximum upload size")
 			return
 		}
-		writeJSONError(rw, http.StatusBadRequest, "validation", "file field is required")
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, "validation", "file field is required")
 		return
 	}
 	files := r.MultipartForm.File["file"]
 	if len(files) != 1 {
-		writeJSONError(rw, http.StatusBadRequest, "validation", "file field is required")
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, "validation", "file field is required")
 		return
 	}
 	fields, apiErr := parseOwnedFields(r.MultipartForm)
 	if apiErr != nil {
-		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
 	}
-	docID, ok := ingestDocumentID(rw, fields.suppliedID)
+	docID, ok := ingestDocumentID(r.Context(), rw, fields.suppliedID)
 	if !ok {
 		return
 	}
@@ -306,17 +307,17 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 	header := files[0]
 	file, err := header.Open()
 	if err != nil {
-		writeJSONError(rw, http.StatusBadRequest, "validation", "failed to read file")
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, "validation", "failed to read file")
 		return
 	}
 	defer func(ctx context.Context) {
 		if closeErr := file.Close(); closeErr != nil {
-			slog.WarnContext(ctx, "close uploaded file", "error", closeErr)
+			slog.WarnContext(ctx, "close uploaded file", "error", tracing.ErrorForTelemetry(ctx, closeErr))
 		}
 	}(r.Context())
 	fileData, err := io.ReadAll(file)
 	if err != nil {
-		writeJSONError(rw, http.StatusBadRequest, "validation", "failed to read file")
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, "validation", "failed to read file")
 		return
 	}
 	ft, extractCtx, err := extractor.ResolveForExtraction(r.Context(), header.Filename, fileData)
@@ -330,7 +331,7 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if apiErr != nil {
-		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
 	}
 	ftStr, fileName := string(ft), header.Filename
@@ -357,7 +358,7 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 	if (upload.ocrPending || upload.pdf != nil) && o.s3 == nil {
 		recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "error", "storage_unavailable", docID, owner.Incarnation)
 		rw.Header().Set("Retry-After", "30")
-		writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
+		writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 		return
 	}
 	var written sourceWrite
@@ -370,10 +371,10 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 		var uploadErr error
 		written, uploadErr = writer.write(r.Context(), docID, fields.collection, docType, fileName, ft, owner.Incarnation, fileData)
 		if uploadErr != nil {
-			slog.ErrorContext(r.Context(), "upload source file", "error", uploadErr)
+			slog.ErrorContext(r.Context(), "upload source file", "error", tracing.ErrorForTelemetry(r.Context(), uploadErr))
 			recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "error", "storage_unavailable", docID, owner.Incarnation)
 			rw.Header().Set("Retry-After", "30")
-			writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
+			writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 			return
 		}
 		acceptReq.Document.S3Key = &written.key
@@ -397,7 +398,7 @@ func (o ownedIngest) acceptExisting(rw http.ResponseWriter, r *http.Request, fil
 		switch {
 		case err != nil && extractionErrorIs(err, extractor.ErrNoText):
 			o.recordAcceptFailure(r.Context(), domain.AcceptConflict, nil, string(req.Document.ID))
-			writeJSONError(rw, http.StatusConflict, "conflict", "document_id already exists with different content")
+			writeJSONError(r.Context(), rw, http.StatusConflict, "conflict", "document_id already exists with different content")
 			return
 		case err != nil:
 			writeExtractionError(rw, r, err)
@@ -413,6 +414,6 @@ func (o ownedIngest) acceptExisting(rw http.ResponseWriter, r *http.Request, fil
 func ownedOutcomeUnresolved(rw http.ResponseWriter, r *http.Request, outcome domain.AcceptOutcome) {
 	if outcome == domain.AcceptNeedsSource || outcome == domain.AcceptNeedsPDFText {
 		slog.ErrorContext(r.Context(), "owned acceptance left an unresolved outcome", "outcome", outcome)
-		writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+		writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 	}
 }

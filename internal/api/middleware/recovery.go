@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 )
 
 // Recovery wraps an http.Handler and recovers from panics,
@@ -19,9 +21,16 @@ func Recovery(next http.Handler) http.Handler {
 		defer func(ctx context.Context) {
 			if rec := recover(); rec != nil {
 				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					if tracing.RedactIdentifiers(ctx) {
+						panic(http.ErrAbortHandler)
+					}
 					panic(rec)
 				}
-				slog.ErrorContext(ctx, "panic recovered", "panic", rec, "stack", string(debug.Stack()))
+				if tracing.RedactIdentifiers(ctx) {
+					slog.ErrorContext(ctx, "panic recovered")
+				} else {
+					slog.ErrorContext(ctx, "panic recovered", "panic", rec, "stack", string(debug.Stack()))
+				}
 				if !rw.Written() {
 					writeJSONErr(rw, http.StatusInternalServerError, "internal", "internal server error")
 				}

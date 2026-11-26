@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +27,11 @@ const docReadTestExecutable = "quarry-doc-reader"
 
 func TestMain(m *testing.M) {
 	childHooks = map[FileType]func() (string, error){
+		"stderr": func() (string, error) {
+			_, _ = io.WriteString(os.Stderr, "synthetic-extraction-child-diagnostic")
+			os.Exit(1)
+			return "", nil
+		},
 		"sleep": func() (string, error) { time.Sleep(time.Minute); return "late", nil },
 		"env":   func() (string, error) { return strings.Join(os.Environ(), "\n"), nil },
 		"huge":  func() (string, error) { return strings.Repeat("x", 9<<20), nil },
@@ -384,5 +391,21 @@ func TestDOCXRenamedMainSharesUploadXMLWorkBudget(t *testing.T) {
 				require.Empty(t, child)
 			}
 		})
+	}
+}
+
+func TestSandboxRedactsFailedChildDiagnostics(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	for _, redact := range []bool{true, false} {
+		logs.Reset()
+		sb, err := NewSandbox(SandboxConfig{Timeout: 5 * time.Second, RedactTelemetry: redact})
+		require.NoError(t, err)
+		_, err = sb.Extract(t.Context(), "stderr", nil)
+		require.ErrorIs(t, err, ErrExtractionFailed)
+		require.Contains(t, logs.String(), "document extraction child failed")
+		require.Equal(t, !redact, strings.Contains(logs.String(), "synthetic-extraction-child-diagnostic"))
 	}
 }

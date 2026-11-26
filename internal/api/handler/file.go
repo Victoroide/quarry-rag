@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 )
 
@@ -42,12 +43,12 @@ func FileHandler(cs domain.ChunkStore, signer FileSigner, opts ...FileOption) ht
 		docIDStr := r.PathValue("doc_id")
 
 		if _, err := uuid.Parse(docIDStr); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
 			return
 		}
 
 		if signer == nil {
-			writeJSONError(w, http.StatusNotFound, "not_found", "file storage is not configured")
+			writeJSONError(r.Context(), w, http.StatusNotFound, "not_found", "file storage is not configured")
 			return
 		}
 
@@ -59,17 +60,17 @@ func FileHandler(cs domain.ChunkStore, signer FileSigner, opts ...FileOption) ht
 			return signErr
 		})
 		if signErr != nil {
-			slog.ErrorContext(r.Context(), "presign document file", "document_id", docID, "error", signErr)
-			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to generate download URL")
+			slog.ErrorContext(r.Context(), "presign document file", "document_id", docID, "error", tracing.ErrorForTelemetry(r.Context(), signErr))
+			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to generate download URL")
 			return
 		}
 		if err != nil {
-			slog.ErrorContext(r.Context(), "get document file", "document_id", docID, "error", err)
-			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to look up document")
+			slog.ErrorContext(r.Context(), "get document file", "document_id", docID, "error", tracing.ErrorForTelemetry(r.Context(), err))
+			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to look up document")
 			return
 		}
 		if !found {
-			writeJSONError(w, http.StatusNotFound, "not_found", "no file stored for this document")
+			writeJSONError(r.Context(), w, http.StatusNotFound, "not_found", "no file stored for this document")
 			return
 		}
 
@@ -80,7 +81,7 @@ func FileHandler(cs domain.ChunkStore, signer FileSigner, opts ...FileOption) ht
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			slog.ErrorContext(r.Context(), "encode file response", "error", err)
+			slog.ErrorContext(r.Context(), "encode file response", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		}
 	}
 }
@@ -107,29 +108,29 @@ func scopedFileHandler(cs domain.ChunkStore, signer FileSigner, opts fileOptions
 		}
 		parsedID, err := uuid.Parse(r.PathValue("doc_id"))
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
+			writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", "doc_id must be a valid UUID")
 			return
 		}
 		if _, remainingOK := remainingSigningSeconds(subject.ExpiresAt, now()); !remainingOK {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "credential_expired", parsedID.String(), "")
-			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+			writeJSONError(r.Context(), w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 			return
 		}
 		reader, capable := cs.(domain.ScopedDocumentFileReader)
 		if !capable {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "error", "file_storage_unavailable", parsedID.String(), "")
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document file access is unavailable")
+			writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document file access is unavailable")
 			return
 		}
 		if signer == nil {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "signer_unconfigured", parsedID.String(), "")
-			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
+			writeJSONError(r.Context(), w, http.StatusNotFound, "not_found", "document not found")
 			return
 		}
 		expiring, supportsTTL := signer.(ExpiringFileSigner)
 		if !supportsTTL {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "error", "file_storage_unavailable", parsedID.String(), "")
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "file signing is unavailable")
+			writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "file signing is unavailable")
 			return
 		}
 
@@ -148,36 +149,36 @@ func scopedFileHandler(cs domain.ChunkStore, signer FileSigner, opts fileOptions
 		})
 		if errors.Is(err, errScopedCredentialExpired) {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "credential_expired", parsedID.String(), "")
-			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+			writeJSONError(r.Context(), w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 			return
 		}
 		if signErr != nil {
-			slog.ErrorContext(r.Context(), "presign scoped document file", "error", signErr)
+			slog.ErrorContext(r.Context(), "presign scoped document file", "error", tracing.ErrorForTelemetry(r.Context(), signErr))
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "error", "presign_failed", parsedID.String(), "")
-			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to generate download URL")
+			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to generate download URL")
 			return
 		}
 		if err != nil {
-			slog.ErrorContext(r.Context(), "get scoped document file", "error", err)
+			slog.ErrorContext(r.Context(), "get scoped document file", "error", tracing.ErrorForTelemetry(r.Context(), err))
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "error", "file_lookup_failed", parsedID.String(), "")
-			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to look up document")
+			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to look up document")
 			return
 		}
 		if !res.Active {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "access_denied", parsedID.String(), "")
-			writeJSONError(w, http.StatusForbidden, "forbidden", "access denied")
+			writeJSONError(r.Context(), w, http.StatusForbidden, "forbidden", "access denied")
 			return
 		}
 		if !res.Found {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "not_found", parsedID.String(), "")
-			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
+			writeJSONError(r.Context(), w, http.StatusNotFound, "not_found", "document not found")
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(FileResponse{URL: presignedURL, ExpiresIn: ttlSeconds}); err != nil {
-			slog.ErrorContext(r.Context(), "encode scoped file response", "error", err)
+			slog.ErrorContext(r.Context(), "encode scoped file response", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		}
 	}
 }

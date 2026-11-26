@@ -47,7 +47,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -81,6 +81,10 @@ func run() error {
 	if cfg.AuthzMode == config.AuthzModeGrants {
 		ctx = tracing.WithRedactIdentifiers(ctx, true)
 	}
+	defer func() {
+		// The entry point renders this error after run returns.
+		runErr = tracing.ErrorForTelemetry(ctx, runErr)
+	}()
 	for _, warning := range cfg.Warnings {
 		slog.Warn(warning)
 	}
@@ -92,8 +96,8 @@ func run() error {
 		return fmt.Errorf("startup: postgres: %w", err)
 	}
 	defer func() {
-		if closeErr := pgClient.Close(context.Background()); closeErr != nil {
-			slog.Error("close postgres", "error", closeErr)
+		if closeErr := pgClient.Close(context.WithoutCancel(ctx)); closeErr != nil {
+			slog.ErrorContext(ctx, "close postgres", "error", tracing.ErrorForTelemetry(ctx, closeErr))
 		}
 	}()
 	pgClient.EnableHostedVectorManifests(cfg.HostedVectorManifest)
@@ -173,7 +177,7 @@ func run() error {
 			}
 			defer func() {
 				if closeErr := pcClient.Close(); closeErr != nil {
-					slog.Error("close pinecone", "error", closeErr)
+					slog.ErrorContext(ctx, "close pinecone", "error", tracing.ErrorForTelemetry(ctx, closeErr))
 				}
 			}()
 			vectorStore = pcstore.NewDriver(pcClient)
@@ -205,7 +209,7 @@ func run() error {
 				return fmt.Errorf("startup: s3: %w", s3Err)
 			}
 			if s3Err != nil {
-				logger.Warn("S3 initialization or bucket verification failed", "error", s3Err)
+				logger.WarnContext(s3Ctx, "S3 initialization or bucket verification failed", "error", tracing.ErrorForTelemetry(s3Ctx, s3Err))
 			}
 			s3Client = s3c
 		}
@@ -249,7 +253,7 @@ func run() error {
 		defer gaugeCancel()
 		count, countErr := pgClient.PendingIngestJobs(gaugeCtx)
 		if countErr != nil {
-			slog.ErrorContext(gaugeCtx, "count pending ingestion jobs", "error", countErr)
+			slog.ErrorContext(gaugeCtx, "count pending ingestion jobs", "error", tracing.ErrorForTelemetry(gaugeCtx, countErr))
 		}
 		return float64(count), countErr
 	}))
@@ -271,10 +275,10 @@ func run() error {
 	w := worker.New(pgClient, ingestStages, vecDeleter, worker.Options{FixtureVectorIdentity: fixtureVectorIdentity, HostedVectorManifest: cfg.HostedVectorManifest, Metrics: serviceMetrics, Workers: cfg.IngestWorkers, MaxAttempts: cfg.IngestMaxAttempts, Lease: cfg.IngestLease, JobTimeout: cfg.IngestJobTimeout, PollInterval: cfg.IngestPollInterval, Owner: owner, OCR: textDetector, RedactTelemetry: cfg.AuthzMode == config.AuthzModeGrants})
 	w.Start(ctx)
 	defer func() {
-		shutdownCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
+		shutdownCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer stop()
 		if shutdownErr := w.ShutdownContext(shutdownCtx); shutdownErr != nil {
-			slog.Error("worker shutdown", "error", shutdownErr)
+			slog.ErrorContext(shutdownCtx, "worker shutdown", "error", tracing.ErrorForTelemetry(shutdownCtx, shutdownErr))
 		}
 	}()
 	if cfg.HostedVectorManifest && cfg.HostedVectorSweepInterval > 0 {
@@ -292,10 +296,10 @@ func run() error {
 			})
 			sweeper.Start(ctx)
 			defer func() {
-				shutdownCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
+				shutdownCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 				defer stop()
 				if shutdownErr := sweeper.ShutdownContext(shutdownCtx); shutdownErr != nil {
-					slog.Error("vector sweeper shutdown", "error", shutdownErr)
+					slog.ErrorContext(shutdownCtx, "vector sweeper shutdown", "error", tracing.ErrorForTelemetry(shutdownCtx, shutdownErr))
 				}
 			}()
 		}
@@ -347,6 +351,7 @@ func run() error {
 	var additional []httpEndpoint
 	if cfg.MetricsAddr != "" {
 		metricsSrv := metricsServer(cfg.MetricsAddr, serviceMetrics.Registry)
+		metricsSrv.BaseContext = func(net.Listener) context.Context { return ctx }
 		metricsListener, listenErr := (&net.ListenConfig{}).Listen(signalCtx, "tcp", metricsSrv.Addr)
 		if listenErr != nil {
 			return errors.Join(fmt.Errorf("metrics: listen: %w", listenErr), listener.Close())
@@ -411,7 +416,7 @@ func metricsServer(addr string, registry *metrics.Registry) *http.Server {
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		if err := registry.WriteText(w); err != nil {
-			slog.ErrorContext(r.Context(), "write metrics", "error", err)
+			slog.ErrorContext(r.Context(), "write metrics", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		}
 	})
 	return &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: time.Minute}

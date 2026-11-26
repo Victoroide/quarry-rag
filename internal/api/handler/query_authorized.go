@@ -13,6 +13,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 )
 
 // errScopeTooLarge reports a valid scope that a hosted search cannot carry.
@@ -38,9 +39,9 @@ func newAuthorizedQuery(authority domain.ReadAuthority, ret *retriever.Retriever
 	return &authorizedQuery{authority: authority, kind: kind}, true
 }
 
-func refuseAuthorizedQuery(w http.ResponseWriter) {
+func refuseAuthorizedQuery(ctx context.Context, w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "private, no-store")
-	writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "authorization unavailable")
+	writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "authorization unavailable")
 }
 
 // derive intersects the principal's current readable documents with the inline
@@ -121,17 +122,17 @@ func (a *authorizedQuery) stages(ret *retriever.Retriever, principal domain.Prin
 func authorizedFailure(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, errScopeTooLarge):
-		writeJSONError(w, http.StatusUnprocessableEntity, "scope_too_large", "authorized document scope exceeds the supported size")
+		writeJSONError(r.Context(), w, http.StatusUnprocessableEntity, "scope_too_large", "authorized document scope exceeds the supported size")
 	case errors.Is(err, domain.ErrDocumentSetNotFound):
-		writeJSONError(w, http.StatusNotFound, "not_found", documentSetNotFoundMessage)
+		writeJSONError(r.Context(), w, http.StatusNotFound, "not_found", documentSetNotFoundMessage)
 	case errors.Is(err, domain.ErrReadDenied):
-		writeJSONError(w, http.StatusForbidden, "forbidden", "access denied")
+		writeJSONError(r.Context(), w, http.StatusForbidden, "forbidden", "access denied")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded), errors.Is(err, pipeline.ErrCredentialExpired):
 		writeQueryError(w, r, err)
 	default:
 		// A lookup that failed never decides the scope, so nothing is searched.
-		slog.ErrorContext(r.Context(), "derive read scope", "error", err)
-		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "authorization unavailable")
+		slog.ErrorContext(r.Context(), "derive read scope", "error", tracing.ErrorForTelemetry(r.Context(), err))
+		writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "authorization unavailable")
 	}
 }
 

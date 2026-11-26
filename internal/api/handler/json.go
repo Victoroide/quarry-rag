@@ -33,7 +33,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) bo
 	}
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
-		writeJSONError(w, http.StatusRequestEntityTooLarge, "validation", "request body exceeds maximum size")
+		writeJSONError(r.Context(), w, http.StatusRequestEntityTooLarge, "validation", "request body exceeds maximum size")
 	} else {
 		message := "invalid JSON body"
 		var field fieldError
@@ -45,7 +45,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) bo
 		case strings.HasPrefix(err.Error(), "duplicate field "):
 			message = err.Error()
 		}
-		writeJSONError(w, http.StatusBadRequest, "validation", message)
+		writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", message)
 	}
 	return false
 }

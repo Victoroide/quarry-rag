@@ -7,8 +7,10 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/client"
+	"github.com/Victoroide/quarry-rag/internal/api/handler"
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -35,12 +38,18 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/subjectauth"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 const (
@@ -810,4 +819,267 @@ func TestGrantsModeEndToEndIsolationCutoverAuditAndRedaction(t *testing.T) {
 	require.Contains(t, string(auditJSON), "query")
 	require.Contains(t, string(auditJSON), "document_list")
 	require.Contains(t, string(auditJSON), "document_status")
+}
+
+type grantsFailureStore struct {
+	*grantsMemoryStore
+	err         error
+	panicOnList bool
+}
+
+func (s *grantsFailureStore) ListScopedDocumentsPage(ctx context.Context, _ domain.Principal, _ string, _ int, _ string, _ bool) (domain.ScopedDocumentPage, error) {
+	if s.panicOnList {
+		panic(s.err)
+	}
+	db := tracing.NewQueryTracer()
+	ctx = db.TraceQueryStart(ctx, nil, pgx.TraceQueryStartData{SQL: "SELECT 'synthetic-input-excerpt'"})
+	db.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{Err: s.err})
+	return domain.ScopedDocumentPage{}, s.err
+}
+
+func (s *grantsFailureStore) ListDocuments(context.Context) ([]domain.DocumentRef, error) {
+	return nil, s.err
+}
+
+type grantsFailureVectors struct {
+	*grantsVectorStore
+	err error
+}
+
+func (v grantsFailureVectors) Ping(context.Context) error { return v.err }
+
+type grantsFailureModel struct {
+	*llm.FakeConverser
+	err error
+}
+
+func (m grantsFailureModel) ConverseWithModelAndSystem(context.Context, string, string, []brtypes.Message, float32, int) (*bedrockruntime.ConverseOutput, error) {
+	return nil, m.err
+}
+func (m grantsFailureModel) ConverseStreamWithModelAndSystem(context.Context, string, string, []brtypes.Message, float32, int, func(string) error) (*bedrockruntime.ConverseOutput, error) {
+	return nil, m.err
+}
+
+func TestGrantsRequestFailureTelemetryRedaction(t *testing.T) {
+	const (
+		doc       = "f40fe629-f807-4f5c-b47a-781421bcfe76"
+		chunk     = "synthetic-chunk-key"
+		object    = "synthetic-object-key"
+		excerpt   = "synthetic-input-excerpt"
+		requestID = "test-correlated-request"
+		subject   = "failure-test-subject"
+		token     = "grants-test-service-token"
+	)
+	canaries := []string{doc, chunk, object, excerpt}
+	failure := &pgconn.PgError{Code: "22000", Message: strings.Join(canaries[:2], " "), Detail: strings.Join(canaries[2:], " ")}
+
+	var logs bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(logctx.NewHandler(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+	prevTracer := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		require.NoError(t, provider.Shutdown(context.WithoutCancel(t.Context())))
+		otel.SetTracerProvider(prevTracer)
+	})
+
+	issuer := (&url.URL{Scheme: "https", Host: "failure-test.invalid"}).String()
+	const audience = "quarry-api"
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	jwks, err := json.Marshal(map[string]any{
+		"expires_at": time.Now().Add(time.Hour),
+		"keys":       []jose.JSONWebKey{{Key: key.Public(), KeyID: "key"}},
+	})
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "jwks.json")
+	require.NoError(t, os.WriteFile(path, jwks, 0o600))
+	verifier, err := subjectauth.NewVerifier(issuer, audience, path)
+	require.NoError(t, err)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, (&jose.SignerOptions{}).WithType("at+jwt").WithHeader("kid", "key"))
+	require.NoError(t, err)
+	now := time.Now()
+	claims, err := json.Marshal(map[string]any{
+		"iss": issuer, "aud": audience, "sub": subject, "client_id": "test-mcp",
+		"jti": uuid.NewString(), "iat": now.Unix(), "exp": now.Add(time.Minute).Unix(),
+	})
+	require.NoError(t, err)
+	signed, err := signer.Sign(claims)
+	require.NoError(t, err)
+	credential, err := signed.CompactSerialize()
+	require.NoError(t, err)
+
+	objectCalls := atomic.Int32{}
+	objectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		objectCalls.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, "<Error><Code>InvalidRequest</Code><Message>"+strings.Join(canaries, " ")+"</Message></Error>")
+	}))
+	t.Cleanup(objectServer.Close)
+	t.Setenv("AWS_ENDPOINT_URL_S3", objectServer.URL)
+	objects, err := s3store.New(t.Context(), &config.Config{AWSRegion: "us-east-1", AWSAccessKeyID: "key", AWSSecretKey: "secret", S3Bucket: "fixture-bucket"})
+	require.NoError(t, err)
+	store := &grantsFailureStore{grantsMemoryStore: newGrantsMemoryStore(), err: failure}
+	store.principals[issuer+"\x00"+subject] = domain.Principal{ID: grantsOwnerA, TenantID: grantsTenantA}
+	objectKey := object
+	store.docs[doc] = &grantsStoredDoc{id: doc, incarnation: uuid.NewString(), tenant: grantsTenantA, ownerID: grantsOwnerA, s3Key: &objectKey}
+	vectors := newGrantsVectorStore(store.grantsMemoryStore)
+	require.NoError(t, vectors.Upsert(t.Context(), "", []domain.Chunk{{
+		ID: chunk, DocumentID: doc, Text: excerpt, Embedding: make([]float32, 8),
+	}}))
+	probeVectors := grantsFailureVectors{grantsVectorStore: vectors, err: failure}
+	cfg := &config.Config{
+		AuthzMode: config.AuthzModeGrants, ServiceTokens: []string{token}, Tracing: config.TracingConfig{CaptureContent: true},
+		MaxUploadBytes: 4 << 20, IngestContentDedup: domain.ContentDedupOff, WorkerQueueSize: 16,
+		MaxChunksPerQuery: 10, QueryConcurrency: 1, QueryTimeout: 5 * time.Second,
+		BedrockFallbackModel: "fixture-model", VectorStore: "postgres",
+	}
+	amb := llm.NewAmbassador(cfg)
+	amb.SetClient(tracing.WrapConverser(grantsFailureModel{FakeConverser: llm.NewFakeConverser(), err: errors.New(strings.Join(canaries, "\n"))}, "fixture", "fixture-model"))
+	ret := retriever.NewRetriever(vectors, embedder.NewFakeEmbedder(8), 0, 10)
+	serviceMetrics := metrics.NewService(nil)
+	deps := &RouterDeps{
+		ChunkStore: store, ReadAuthority: store, SubjectResolver: store, AuditRecorder: store, VectorStore: probeVectors,
+		PineconeDriver: vectors, S3Client: objects, Retriever: ret, Ambassador: amb, Config: cfg,
+		SubjectVerifier: verifier, Metrics: serviceMetrics, Worker: worker.New(store, nil, nil, worker.Options{}),
+		Probes: handler.NewProbes(probeVectors, store, nil, time.Minute),
+	}
+	router := NewRouter(deps)
+	send := func(h http.Handler, method, path, accept, contentType string, body io.Reader) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequestWithContext(t.Context(), method, path, body)
+		r.Header.Set("Authorization", "Bearer "+credential)
+		r.Header.Set("X-Service-Token", token)
+		r.Header.Set("X-Request-ID", requestID)
+		r.Header.Set("Content-Type", contentType)
+		r.Header.Set("Accept", accept)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		require.Equal(t, requestID, w.Header().Get("X-Request-ID"))
+		return w
+	}
+	list := send(router, http.MethodGet, "/documents?limit=10", "", "", nil)
+	require.Equal(t, http.StatusInternalServerError, list.Code)
+	require.Contains(t, list.Body.String(), "failed to list documents")
+	store.panicOnList = true
+	panicked := send(router, http.MethodGet, "/documents?limit=10", "", "", nil)
+	require.Equal(t, http.StatusInternalServerError, panicked.Code)
+	require.Contains(t, panicked.Body.String(), "internal server error")
+	store.panicOnList = false
+
+	beforeProbe := len(recorder.Ended())
+	probe := send(router, http.MethodGet, "/health", "", "", nil)
+	require.Equal(t, http.StatusServiceUnavailable, probe.Code)
+	require.Len(t, recorder.Ended(), beforeProbe)
+	require.Contains(t, logs.String(), "health probe failed")
+
+	var form bytes.Buffer
+	writer := multipart.NewWriter(&form)
+	file, err := writer.CreateFormFile("file", "fixture.txt")
+	require.NoError(t, err)
+	_, err = io.WriteString(file, excerpt)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	upload := send(router, http.MethodPost, "/ingest", "", writer.FormDataContentType(), &form)
+	require.Equal(t, http.StatusServiceUnavailable, upload.Code)
+	require.Contains(t, upload.Body.String(), "storage")
+	require.EqualValues(t, 1, objectCalls.Load())
+
+	// A malformed endpoint fails AWS presigning locally before any request is sent.
+	t.Setenv("AWS_ENDPOINT_URL_S3", "%zz/"+object)
+	brokenSigner, err := s3store.New(t.Context(), &config.Config{AWSRegion: "us-east-1", AWSAccessKeyID: "key", AWSSecretKey: "secret", S3Bucket: "fixture-bucket"})
+	require.NoError(t, err)
+	fileDeps := *deps
+	fileDeps.S3Client = brokenSigner
+	signResponse := send(NewRouter(&fileDeps), http.MethodGet, "/documents/"+doc+"/file", "", "", nil)
+	require.Equal(t, http.StatusInternalServerError, signResponse.Code)
+	require.Contains(t, signResponse.Body.String(), "failed to generate download URL")
+	require.EqualValues(t, 1, objectCalls.Load())
+
+	queryBody := `{"query":"synthetic question","mode":"global","answer_mode":"generated"}`
+	jsonQuery := send(router, http.MethodPost, "/query", "application/json", "application/json", strings.NewReader(queryBody))
+	require.Equal(t, http.StatusInternalServerError, jsonQuery.Code)
+	require.Contains(t, jsonQuery.Body.String(), "query processing failed")
+	sseQuery := send(router, http.MethodPost, "/query", "text/event-stream", "application/json", strings.NewReader(queryBody))
+	require.Equal(t, http.StatusOK, sseQuery.Code)
+	require.Contains(t, sseQuery.Body.String(), "event: error")
+	require.NotContains(t, sseQuery.Body.String(), "event: done")
+	visibleFrame, terminalFrame, ok := strings.Cut(sseQuery.Body.String(), "event: error")
+	require.True(t, ok)
+	require.Contains(t, visibleFrame, doc)
+	require.Contains(t, visibleFrame, excerpt)
+	require.Contains(t, terminalFrame, "query processing failed")
+
+	for _, message := range []string{"list scoped documents page", "panic recovered", "upload source file", "presign scoped document file", "query processing failed"} {
+		require.Contains(t, logs.String(), message)
+	}
+	require.Contains(t, logs.String(), requestID)
+	require.Contains(t, logs.String(), "operation failed")
+	hasError := make(map[string]bool)
+	for _, span := range recorder.Ended() {
+		dump := fmt.Sprint(span.Name(), span.Status(), span.Events(), span.Attributes())
+		for _, canary := range canaries {
+			require.NotContains(t, dump, canary)
+		}
+		if span.Status().Code == codes.Error {
+			hasError[span.Name()] = true
+			require.Equal(t, "operation failed", span.Status().Description)
+		}
+	}
+	require.True(t, hasError["db.query"])
+	require.True(t, hasError["query.synthesis"])
+	for _, canary := range canaries {
+		require.NotContains(t, logs.String(), canary)
+		require.NotContains(t, terminalFrame, canary)
+		for _, response := range []*httptest.ResponseRecorder{list, panicked, probe, upload, signResponse, jsonQuery} {
+			require.NotContains(t, response.Body.String(), canary)
+		}
+	}
+	require.NotContains(t, logs.String(), `"stack":`)
+	require.NotContains(t, logs.String(), `"panic":`)
+	require.Contains(t, store.auditEvents, domain.SecurityAuditEvent{
+		RequestID: requestID, TenantID: grantsTenantA, PrincipalID: grantsOwnerA, Action: "document_list", Outcome: "error", Reason: "internal",
+	})
+	require.Contains(t, store.auditEvents, domain.SecurityAuditEvent{
+		RequestID: requestID, TenantID: grantsTenantA, PrincipalID: grantsOwnerA, Action: "file_sign", Outcome: "error", Reason: "presign_failed", DocumentID: doc,
+	})
+	var metricOutput bytes.Buffer
+	require.NoError(t, serviceMetrics.Registry.WriteText(&metricOutput))
+	httpSeries := make(map[string]bool)
+	for line := range strings.SplitSeq(metricOutput.String(), "\n") {
+		if strings.HasPrefix(line, "quarry_http_requests_total{") {
+			httpSeries[line] = true
+		}
+	}
+	require.Equal(t, map[string]bool{
+		`quarry_http_requests_total{route="GET /documents",code="500"} 2`:               true,
+		`quarry_http_requests_total{route="GET /health",code="503"} 1`:                  true,
+		`quarry_http_requests_total{route="POST /ingest",code="503"} 1`:                 true,
+		`quarry_http_requests_total{route="GET /documents/{doc_id}/file",code="500"} 1`: true,
+		`quarry_http_requests_total{route="POST /query",code="500"} 1`:                  true,
+		`quarry_http_requests_total{route="POST /query",code="200"} 1`:                  true,
+	}, httpSeries)
+	require.NotContains(t, metricOutput.String(), requestID)
+	for _, canary := range canaries {
+		require.NotContains(t, metricOutput.String(), canary)
+	}
+
+	otel.SetTracerProvider(noop.NewTracerProvider())
+	logs.Reset()
+	list = send(router, http.MethodGet, "/documents", "", "", nil)
+	require.Equal(t, http.StatusInternalServerError, list.Code)
+	require.Contains(t, logs.String(), "operation failed")
+	require.NotContains(t, logs.String(), doc)
+
+	store.corpusMode = config.AuthzModeService
+	service := NewRouter(&RouterDeps{Config: &config.Config{ServiceTokens: []string{token}}, ChunkStore: store})
+	logs.Reset()
+	legacy := send(service, http.MethodGet, "/documents", "", "", nil)
+	require.GreaterOrEqual(t, legacy.Code, 500)
+	require.Contains(t, logs.String(), doc)
 }

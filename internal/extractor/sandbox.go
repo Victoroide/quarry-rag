@@ -40,15 +40,18 @@ type SandboxConfig struct {
 	MemoryLimitMB int
 	DOCStories    DOCStories
 	DOCXStories   DOCXStories
+	// RedactTelemetry suppresses raw child process errors and stderr in logs.
+	RedactTelemetry bool
 }
 
 // Sandbox extracts documents in a separate process with bounded input and output.
 type Sandbox struct {
-	executable    string
-	timeout       time.Duration
-	memoryLimitMB int
-	docStories    DOCStories
-	docxStories   DOCXStories
+	executable      string
+	timeout         time.Duration
+	memoryLimitMB   int
+	docStories      DOCStories
+	docxStories     DOCXStories
+	redactTelemetry bool
 }
 
 // NewSandbox defaults to the current executable and checks its availability.
@@ -79,7 +82,7 @@ func NewSandbox(cfg SandboxConfig) (*Sandbox, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrExtractionUnavailable, err)
 	}
-	return &Sandbox{executable: path, timeout: cfg.Timeout, memoryLimitMB: cfg.MemoryLimitMB, docStories: cfg.DOCStories, docxStories: cfg.DOCXStories}, nil
+	return &Sandbox{executable: path, timeout: cfg.Timeout, memoryLimitMB: cfg.MemoryLimitMB, docStories: cfg.DOCStories, docxStories: cfg.DOCXStories, redactTelemetry: cfg.RedactTelemetry}, nil
 }
 
 type childHeader struct {
@@ -166,7 +169,11 @@ func (s *Sandbox) extract(ctx context.Context, ft FileType, data []byte, pageAwa
 	cmd.WaitDelay = 2 * time.Second
 	err = cmd.Run()
 	if err != nil || stdout.exceeded || stderr.exceeded {
-		slog.WarnContext(ctx, "document extraction child failed", "error", err, "stderr", stderr.buffer.String())
+		if s.redactTelemetry {
+			slog.WarnContext(ctx, "document extraction child failed")
+		} else {
+			slog.WarnContext(ctx, "document extraction child failed", "error", err, "stderr", stderr.buffer.String())
+		}
 		if stdout.exceeded || stderr.exceeded {
 			return childResponse{}, ErrExtractionFailed
 		}

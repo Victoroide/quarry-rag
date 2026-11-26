@@ -3,9 +3,12 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 )
 
 // HealthStatus represents the health check response body.
@@ -29,15 +32,15 @@ func HealthHandler(p *Probes) http.HandlerFunc {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		if err := json.NewEncoder(w).Encode(status); err != nil {
-			slog.ErrorContext(r.Context(), "encode health response", "error", err)
+			slog.ErrorContext(r.Context(), "encode health response", "error", tracing.ErrorForTelemetry(r.Context(), err))
 		}
 	}
 }
 
 // LivenessHandler reports process availability without probing dependencies.
 func LivenessHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		writeProbeStatus(w, http.StatusOK, "ok")
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeProbeStatus(r.Context(), w, http.StatusOK, "ok")
 	}
 }
 
@@ -45,29 +48,29 @@ func LivenessHandler() http.HandlerFunc {
 func ReadinessHandler(p *Probes) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if p.Draining() {
-			writeProbeStatus(w, http.StatusServiceUnavailable, "draining")
+			writeProbeStatus(r.Context(), w, http.StatusServiceUnavailable, "draining")
 			return
 		}
 		status := p.Snapshot(r.Context())
 		switch {
 		case p.Draining():
-			writeProbeStatus(w, http.StatusServiceUnavailable, "draining")
+			writeProbeStatus(r.Context(), w, http.StatusServiceUnavailable, "draining")
 		case status.Postgres != "ok":
-			writeProbeStatus(w, http.StatusServiceUnavailable, "unavailable")
+			writeProbeStatus(r.Context(), w, http.StatusServiceUnavailable, "unavailable")
 		case !p.authzReady(r.Context()):
-			writeProbeStatus(w, http.StatusServiceUnavailable, "unavailable")
+			writeProbeStatus(r.Context(), w, http.StatusServiceUnavailable, "unavailable")
 		default:
-			writeProbeStatus(w, http.StatusOK, "ready")
+			writeProbeStatus(r.Context(), w, http.StatusOK, "ready")
 		}
 	}
 }
 
-func writeProbeStatus(w http.ResponseWriter, code int, status string) {
+func writeProbeStatus(ctx context.Context, w http.ResponseWriter, code int, status string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(struct {
 		Status string `json:"status"`
 	}{Status: status}); err != nil {
-		slog.Error("encode probe response", "error", err)
+		slog.ErrorContext(ctx, "encode probe response", "error", tracing.ErrorForTelemetry(ctx, err))
 	}
 }

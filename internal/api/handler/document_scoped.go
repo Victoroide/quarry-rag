@@ -126,7 +126,7 @@ func requireScopedSubject(w http.ResponseWriter, r *http.Request, now func() tim
 	w.Header().Set("Cache-Control", "private, no-store")
 	subject, ok := middleware.SubjectFromContext(r.Context())
 	if !ok || !subject.ValidAt(now()) {
-		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+		writeJSONError(r.Context(), w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 		return middleware.VerifiedSubject{}, false
 	}
 	return subject, true

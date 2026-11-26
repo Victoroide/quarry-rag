@@ -58,6 +58,7 @@ type RouterDeps struct {
 // NewRouter wires all HTTP routes, handlers, and middleware.
 func NewRouter(deps *RouterDeps) http.Handler {
 	mux := http.NewServeMux()
+	grantsMode := deps.Config.AuthzMode == config.AuthzModeGrants
 	// Service-to-service auth: when service tokens are set, every route except the
 	// public probes requires a matching X-Service-Token header. The presigned
 	// file GET is included because it mints S3 download URLs for any document id
@@ -84,9 +85,14 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		sb, err := extractor.NewSandbox(extractor.SandboxConfig{
 			Timeout: deps.Config.ExtractTimeout, MemoryLimitMB: deps.Config.ExtractMemoryLimitMB,
 			DOCStories: deps.Config.DOCStories, DOCXStories: deps.Config.DOCXStories,
+			RedactTelemetry: grantsMode,
 		})
 		if err != nil {
-			slog.Error("initialize document extraction", "error", err)
+			if grantsMode {
+				slog.Error("initialize document extraction")
+			} else {
+				slog.Error("initialize document extraction", "error", err)
+			}
 			ingestOpts = append(ingestOpts, handler.WithExtractor(func(context.Context, extractor.FileType, []byte) (string, error) {
 				return "", extractor.ErrExtractionUnavailable
 			}))
@@ -117,7 +123,6 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	if probes == nil {
 		probes = handler.NewProbes(deps.VectorStore, deps.ChunkStore, deps.S3Client, deps.Config.HealthCacheTTL)
 	}
-	grantsMode := deps.Config.AuthzMode == config.AuthzModeGrants
 	var modeReader domain.CorpusModeReader
 	if reader, ok := deps.ChunkStore.(domain.CorpusModeReader); ok {
 		modeReader = reader

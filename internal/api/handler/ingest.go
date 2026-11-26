@@ -94,7 +94,7 @@ func IngestHandler(wk *worker.Worker, cs domain.ChunkStore, s3Client ObjectStore
 		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err == nil && mediaType == "multipart/form-data" {
 			if len(r.Header.Values(evaluation.ReceiptHeader)) != 0 {
-				fixtureUnavailable(rw)
+				fixtureUnavailable(r.Context(), rw)
 				return
 			}
 			handleFileIngest(rw, r, wk, cs, s3Client, maxUploadBytes, options)
@@ -106,7 +106,7 @@ func IngestHandler(wk *worker.Worker, cs domain.ChunkStore, s3Client ObjectStore
 
 func handleJSONIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker, cs domain.ChunkStore, opts ingestOptions) {
 	if !isJSONRequest(r) {
-		writeJSONError(rw, http.StatusUnsupportedMediaType, "validation", "Content-Type must be application/json or multipart/form-data")
+		writeJSONError(r.Context(), rw, http.StatusUnsupportedMediaType, "validation", "Content-Type must be application/json or multipart/form-data")
 		return
 	}
 	var req IngestRequest
@@ -116,11 +116,11 @@ func handleJSONIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 
 	req.Content = strings.ReplaceAll(req.Content, "\x00", "")
 	if apiErr := validateIngestRequest(&req); apiErr != nil {
-		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
 	}
 
-	docID, ok := ingestDocumentID(rw, req.DocumentID)
+	docID, ok := ingestDocumentID(r.Context(), rw, req.DocumentID)
 	if !ok {
 		return
 	}
@@ -129,7 +129,7 @@ func handleJSONIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		ns, supplied, fixture, valid := fixtureRequest(r, opts.fixturePrefix, docID)
 		if _, supported := cs.(domain.EvaluationFixtureStore); !valid || !supported || opts.fixtureVectorIdentity == "" ||
 			req.Collection != ns.Collection(fixture.Distractor) || req.Content != fixture.Text {
-			fixtureUnavailable(rw)
+			fixtureUnavailable(r.Context(), rw)
 			return
 		}
 		receipt = supplied
@@ -153,7 +153,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		release, err := opts.limiter.Acquire(r.Context())
 		if err != nil {
 			rw.Header().Set("Retry-After", "5")
-			writeJSONError(rw, http.StatusServiceUnavailable, "busy", "too many concurrent uploads")
+			writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "busy", "too many concurrent uploads")
 			return
 		}
 		defer release()
@@ -163,7 +163,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	defer func(ctx context.Context) {
 		if r.MultipartForm != nil {
 			if err := r.MultipartForm.RemoveAll(); err != nil {
-				slog.WarnContext(ctx, "remove multipart temporary files", "error", err)
+				slog.WarnContext(ctx, "remove multipart temporary files", "error", tracing.ErrorForTelemetry(ctx, err))
 			}
 		}
 	}(r.Context())
@@ -171,15 +171,15 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeJSONError(rw, http.StatusRequestEntityTooLarge, "validation", "request body exceeds maximum upload size")
+			writeJSONError(r.Context(), rw, http.StatusRequestEntityTooLarge, "validation", "request body exceeds maximum upload size")
 			return
 		}
-		writeJSONError(rw, http.StatusBadRequest, "validation", "file field is required")
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, "validation", "file field is required")
 		return
 	}
 	defer func(ctx context.Context) {
 		if closeErr := file.Close(); closeErr != nil {
-			slog.WarnContext(ctx, "close uploaded file", "error", closeErr)
+			slog.WarnContext(ctx, "close uploaded file", "error", tracing.ErrorForTelemetry(ctx, closeErr))
 		}
 	}(r.Context())
 
@@ -188,10 +188,10 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeJSONError(rw, http.StatusRequestEntityTooLarge, "validation", "request body exceeds maximum upload size")
+			writeJSONError(r.Context(), rw, http.StatusRequestEntityTooLarge, "validation", "request body exceeds maximum upload size")
 			return
 		}
-		writeJSONError(rw, http.StatusBadRequest, "validation", "failed to read file")
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, "validation", "failed to read file")
 		return
 	}
 
@@ -202,7 +202,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	}
 
 	suppliedID := r.FormValue("document_id")
-	docID, ok := ingestDocumentID(rw, suppliedID)
+	docID, ok := ingestDocumentID(r.Context(), rw, suppliedID)
 	if !ok {
 		return
 	}
@@ -211,11 +211,11 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	metadata := make(map[string]any)
 	if values, present := r.MultipartForm.Value["metadata"]; present {
 		if len(values) != 1 || decodeJSONObject([]byte(values[0]), &metadata) != nil {
-			writeJSONError(rw, http.StatusBadRequest, "validation", "metadata must be a JSON object without duplicate keys or trailing data")
+			writeJSONError(r.Context(), rw, http.StatusBadRequest, "validation", "metadata must be a JSON object without duplicate keys or trailing data")
 			return
 		}
 		if apiErr := validateMetadata(metadata); apiErr != nil {
-			writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			writeJSONError(r.Context(), rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
 	}
@@ -223,14 +223,14 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	collection := ""
 	if values, present := r.MultipartForm.Value["collection"]; present {
 		if len(values) != 1 {
-			writeJSONError(rw, http.StatusBadRequest, "validation", "collection must be supplied at most once")
+			writeJSONError(r.Context(), rw, http.StatusBadRequest, "validation", "collection must be supplied at most once")
 			return
 		}
 		collection = values[0]
 	}
 	req := IngestRequest{DocType: formDocType, Collection: collection, Metadata: metadata}
 	if apiErr := validateIngestFields(&req); apiErr != nil {
-		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
 	}
 	formDocType = req.DocType
@@ -257,7 +257,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		return
 	}
 	if apiErr != nil {
-		writeJSONError(rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+		writeJSONError(r.Context(), rw, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 		return
 	}
 	text, ocrPending, pdfExtraction := upload.text, upload.ocrPending, upload.pdf
@@ -283,7 +283,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		if !checkIdentity && s3Client != nil {
 			_, matches, lookupErr := cs.CheckFingerprint(r.Context(), acceptReq.Fingerprint)
 			if lookupErr != nil {
-				writeJSONError(rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
+				writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 				return
 			}
 			checkIdentity = matches
@@ -297,7 +297,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	}
 	if (ocrPending || pdfExtraction != nil) && s3Client == nil {
 		rw.Header().Set("Retry-After", "30")
-		writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
+		writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 		return
 	}
 	var s3Key *string
@@ -311,9 +311,9 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 		var uploadErr error
 		written, uploadErr = writer.write(r.Context(), docID, req.Collection, docType, fileName, ft, "", fileData)
 		if uploadErr != nil {
-			slog.ErrorContext(r.Context(), "upload source file", "error", uploadErr)
+			slog.ErrorContext(r.Context(), "upload source file", "error", tracing.ErrorForTelemetry(r.Context(), uploadErr))
 			rw.Header().Set("Retry-After", "30")
-			writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
+			writeJSONError(r.Context(), rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 			return
 		}
 		s3Key = &written.key
@@ -339,15 +339,15 @@ func releaseAttemptObject(ctx context.Context, cs domain.ChunkStore, s3Client Ob
 		storedKey, lookupErr := cs.GetDocumentS3Key(cleanupCtx, domain.DocumentID(docID))
 		if lookupErr != nil || (storedKey != nil && *storedKey == key) {
 			if tracing.RedactIdentifiers(cleanupCtx) {
-				slog.WarnContext(cleanupCtx, "retain source file after uncertain acceptance", "error", lookupErr)
+				slog.WarnContext(cleanupCtx, "retain source file after uncertain acceptance", "error", tracing.ErrorForTelemetry(cleanupCtx, lookupErr))
 			} else {
-				slog.WarnContext(cleanupCtx, "retain source file after uncertain acceptance", "document_id", docID, "error", lookupErr)
+				slog.WarnContext(cleanupCtx, "retain source file after uncertain acceptance", "document_id", docID, "error", tracing.ErrorForTelemetry(cleanupCtx, lookupErr))
 			}
 			return
 		}
 	}
 	if err := s3Client.Delete(cleanupCtx, key); err != nil {
-		slog.ErrorContext(cleanupCtx, "remove unaccepted source file", "error", err)
+		slog.ErrorContext(cleanupCtx, "remove unaccepted source file", "error", tracing.ErrorForTelemetry(cleanupCtx, err))
 	}
 }
 
