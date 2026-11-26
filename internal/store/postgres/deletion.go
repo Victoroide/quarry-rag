@@ -10,6 +10,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/logctx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Vector targets recorded with a cleanup receipt.
@@ -513,10 +514,21 @@ func (c *Client) checkpointDeletion(ctx context.Context, id domain.DocumentID, i
 }
 
 func (c *Client) releaseDeletionClaim(ctx context.Context, id domain.DocumentID, claim string) {
-	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deletionClaimReleaseTimeout)
 	defer cancel()
-	_, _ = c.Pool.Exec(releaseCtx, `UPDATE document_deletions SET claim=NULL,claim_until=NULL
+	_ = clearDeletionClaim(releaseCtx, c.Pool, id, claim)
+}
+
+const deletionClaimReleaseTimeout = 3 * time.Second
+
+type deletionExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func clearDeletionClaim(ctx context.Context, db deletionExecer, id domain.DocumentID, claim string) error {
+	_, err := db.Exec(ctx, `UPDATE document_deletions SET claim=NULL,claim_until=NULL
 		WHERE document_id=$1 AND claim=$2`, string(id), claim)
+	return err
 }
 
 // finalizeDeletion removes the document and completes its receipt in one

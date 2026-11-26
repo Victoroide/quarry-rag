@@ -182,80 +182,191 @@ type releaseReceipt struct {
 	held, finalized, claimValid bool
 }
 
+const releaseReceiptColumns = `kind, vector_mode, source_key, source_bucket, vector_index, memory_owner::text,
+	step, held, finalized, COALESCE(claim_until > clock_timestamp(), FALSE)`
+
+func scanReleaseReceipt(row pgx.Row) (releaseReceipt, error) {
+	var r releaseReceipt
+	err := row.Scan(&r.kind, &r.mode, &r.source, &r.bucket, &r.index, &r.owner, &r.step, &r.held, &r.finalized, &r.claimValid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = domain.ErrDeletionPreconditionFailed
+	}
+	return r, err
+}
+
+func (r releaseReceipt) checkEligibility(legacyOnly bool) error {
+	if r.claimValid {
+		return domain.ErrDeletionBusy
+	}
+	if (r.finalized && !r.held) || (!r.finalized && r.kind != "legacy_reservation") {
+		return domain.ErrDeletionPreconditionFailed
+	}
+	if legacyOnly && (r.mode != legacyVectors || (r.finalized && r.step != stepDone)) {
+		return domain.ErrDeletionPreconditionFailed
+	}
+	return nil
+}
+
+func canonicalReleasePair(id domain.DocumentID, incarnation string) (domain.DocumentID, string, error) {
+	parsed, err := uuid.Parse(string(id))
+	if err != nil {
+		return "", "", domain.ErrDocumentNotFound
+	}
+	expected, err := canonicalIncarnation(incarnation)
+	if err != nil {
+		return "", "", err
+	}
+	if expected == "" {
+		return "", "", domain.ErrDeletionPreconditionRequired
+	}
+	return domain.DocumentID(parsed.String()), expected, nil
+}
+
+// HeldDeletionReleaseMode identifies the eligible receipt for an exact absent
+// document lifetime before the caller initializes a provider. Claiming the
+// receipt still requires an authoritative check in the release transaction.
+func (c *Client) HeldDeletionReleaseMode(ctx context.Context, id domain.DocumentID, incarnation string) (mode, index string, err error) {
+	id, incarnation, err = canonicalReleasePair(id, incarnation)
+	if err != nil {
+		return "", "", err
+	}
+	r, err := scanReleaseReceipt(c.Pool.QueryRow(ctx, `SELECT `+releaseReceiptColumns+`
+		FROM document_deletions WHERE document_id=$1 AND incarnation=$2
+		AND NOT EXISTS(SELECT 1 FROM documents WHERE id=$1)`, string(id), incarnation))
+	if err != nil {
+		return "", "", err
+	}
+	if eligibilityErr := r.checkEligibility(r.mode == legacyVectors); eligibilityErr != nil {
+		return "", "", eligibilityErr
+	}
+	return r.mode, deref(r.index), nil
+}
+
+type heldReleaseDatabase interface {
+	deletionExecer
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+}
+
+type heldRelease struct {
+	db              heldReleaseDatabase
+	outcome         queryRower
+	legacyOnly      bool
+	claimConnConfig *pgx.ConnConfig
+}
+
 // ReleaseHeldDeletion claims a held finalized receipt or an unfinished legacy
 // reservation whose document row is absent, completes any permitted remaining
 // cleanup under the claim, and atomically releases the UUID.
 func (c *Client) ReleaseHeldDeletion(ctx context.Context, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
-	parsed, err := uuid.Parse(string(id))
-	if err != nil {
-		return domain.ErrDocumentNotFound
-	}
-	id = domain.DocumentID(parsed.String())
-	expected, err := canonicalIncarnation(incarnation)
+	id, incarnation, err := canonicalReleasePair(id, incarnation)
 	if err != nil {
 		return err
 	}
-	if expected == "" {
-		return domain.ErrDeletionPreconditionRequired
+	return (heldRelease{db: c.Pool, outcome: c.Pool}).release(ctx, id, incarnation, ops)
+}
+
+// ReleaseLegacyHostedHold releases a receipt for the exact retired hosted
+// index under the writer barrier. Only pending source cleanup can run.
+func (c *Client) ReleaseLegacyHostedHold(ctx context.Context, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
+	id, incarnation, err := canonicalReleasePair(id, incarnation)
+	if err != nil {
+		return err
 	}
+	ctx, cancel, _ := deletionDeadline(ctx)
+	defer cancel()
+	guard, release, err := c.AcquireHeldRecoveryWriter(ctx)
+	if err != nil {
+		return fmt.Errorf("check document writers: %w", err)
+	}
+	defer release()
+
+	// Freeze can hold the only pooled connection while waiting for the guard.
+	// Claim, checkpoint and finalize in a separate session so the release can
+	// still finish and let freeze proceed.
+	config := c.Pool.Config().ConnConfig
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		return fmt.Errorf("connect legacy hold release: %w", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
+	sourceOnly := domain.DeleteOperations{VectorIndex: ops.VectorIndex, SourceBucket: ops.SourceBucket, Source: ops.Source}
+	return (heldRelease{db: conn, outcome: guard, legacyOnly: true, claimConnConfig: config}).release(ctx, id, incarnation, sourceOnly)
+}
+
+func (h heldRelease) release(ctx context.Context, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
 	ctx, cancel, deadline := deletionDeadline(ctx)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		return context.DeadlineExceeded
 	}
 	claim := uuid.NewString()
-	receipt, err := c.claimHeldDeletion(ctx, id, expected, claim, remaining, ops)
+	receipt, err := h.claimHeldDeletion(ctx, id, incarnation, claim, remaining, ops)
 	if err != nil {
 		return err
 	}
-	defer c.releaseDeletionClaim(ctx, id, claim)
+	defer h.releaseClaim(ctx, id, claim)
 
-	if cleanupErr := c.executeReleaseCleanup(ctx, id, expected, claim, receipt, ops); cleanupErr != nil {
+	if cleanupErr := h.executeReleaseCleanup(ctx, id, incarnation, claim, receipt, ops); cleanupErr != nil {
 		return cleanupErr
 	}
-	return c.finalizeRelease(ctx, id, expected, claim)
+	return h.finalizeRelease(ctx, id, incarnation, claim)
 }
 
-func (c *Client) claimHeldDeletion(ctx context.Context, id domain.DocumentID, incarnation, claim string, remaining time.Duration, ops domain.DeleteOperations) (releaseReceipt, error) {
-	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+func (h heldRelease) releaseClaim(ctx context.Context, id domain.DocumentID, claim string) {
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deletionClaimReleaseTimeout)
+	err := clearDeletionClaim(releaseCtx, h.db, id, claim)
+	cancel()
+	if err == nil || h.claimConnConfig == nil {
+		return
+	}
+
+	// A canceled transaction can close the mutation session. Retry only the
+	// claim update outside the pool while the writer barrier is still held.
+	retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deletionClaimReleaseTimeout)
+	defer cancel()
+	conn, err := pgx.ConnectConfig(retryCtx, h.claimConnConfig)
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.Close(retryCtx) }()
+	_ = clearDeletionClaim(retryCtx, conn, id, claim)
+}
+
+func (h heldRelease) claimHeldDeletion(ctx context.Context, id domain.DocumentID, incarnation, claim string, remaining time.Duration, ops domain.DeleteOperations) (releaseReceipt, error) {
+	tx, err := h.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return releaseReceipt{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
-		return releaseReceipt{}, err
+	// An unfinished or held exact legacy receipt already blocks admission.
+	// Taking the admission lock here would invert the order used by freeze.
+	if !h.legacyOnly {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
+			return releaseReceipt{}, err
+		}
 	}
-	var liveID string
-	err = tx.QueryRow(ctx, `SELECT id::text FROM documents WHERE id=$1 FOR UPDATE`, string(id)).Scan(&liveID)
-	if err == nil {
-		return releaseReceipt{}, domain.ErrDeletionPreconditionFailed
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return releaseReceipt{}, err
+	if absentErr := requireAbsentReleaseDocument(ctx, tx, id); absentErr != nil {
+		return releaseReceipt{}, absentErr
 	}
 
-	var r releaseReceipt
-	var recordedIncarnation string
-	err = tx.QueryRow(ctx, `SELECT incarnation::text, kind, vector_mode, source_key, source_bucket, vector_index, memory_owner::text,
-		step, held, finalized, COALESCE(claim_until > clock_timestamp(), FALSE)
-		FROM document_deletions WHERE document_id=$1 FOR UPDATE`, string(id)).
-		Scan(&recordedIncarnation, &r.kind, &r.mode, &r.source, &r.bucket, &r.index, &r.owner, &r.step, &r.held, &r.finalized, &r.claimValid)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return releaseReceipt{}, domain.ErrDeletionPreconditionFailed
-	}
+	r, err := scanReleaseReceipt(tx.QueryRow(ctx, `SELECT `+releaseReceiptColumns+`
+		FROM document_deletions WHERE document_id=$1 AND incarnation=$2 FOR UPDATE`, string(id), incarnation))
 	if err != nil {
 		return releaseReceipt{}, err
 	}
-	if recordedIncarnation != incarnation {
-		return releaseReceipt{}, domain.ErrDeletionPreconditionFailed
+	if eligibilityErr := r.checkEligibility(h.legacyOnly); eligibilityErr != nil {
+		return releaseReceipt{}, eligibilityErr
 	}
-	if r.claimValid {
-		return releaseReceipt{}, domain.ErrDeletionBusy
-	}
-	eligible := (r.finalized && r.held) || (!r.finalized && r.kind == "legacy_reservation")
-	if !eligible {
-		return releaseReceipt{}, domain.ErrDeletionPreconditionFailed
+	if h.legacyOnly && ops.VectorIndex == "" {
+		return releaseReceipt{}, domain.ErrDeletionTargetMismatch
 	}
 	if targetErr := checkReleaseTarget(r, ops); targetErr != nil {
 		return releaseReceipt{}, targetErr
@@ -272,6 +383,18 @@ func (c *Client) claimHeldDeletion(ctx context.Context, id domain.DocumentID, in
 		return releaseReceipt{}, commitErr
 	}
 	return r, nil
+}
+
+func requireAbsentReleaseDocument(ctx context.Context, tx pgx.Tx, id domain.DocumentID) error {
+	var liveID string
+	err := tx.QueryRow(ctx, `SELECT id::text FROM documents WHERE id=$1 FOR UPDATE`, string(id)).Scan(&liveID)
+	if err == nil {
+		return domain.ErrDeletionPreconditionFailed
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	return err
 }
 
 func checkReleaseTarget(r releaseReceipt, ops domain.DeleteOperations) error {
@@ -318,7 +441,7 @@ func checkReleaseTarget(r releaseReceipt, ops domain.DeleteOperations) error {
 	return nil
 }
 
-func (c *Client) executeReleaseCleanup(ctx context.Context, id domain.DocumentID, incarnation, claim string, r releaseReceipt, ops domain.DeleteOperations) error {
+func (h heldRelease) executeReleaseCleanup(ctx context.Context, id domain.DocumentID, incarnation, claim string, r releaseReceipt, ops domain.DeleteOperations) error {
 	if r.finalized {
 		// Finalized legacy holds issue zero new document-wide deletes; only
 		// revision-scoped receipts or the live memory owner can sweep vectors.
@@ -355,7 +478,7 @@ func (c *Client) executeReleaseCleanup(ctx context.Context, id domain.DocumentID
 				if err := ops.LegacyNamespace(domain.TrackVectorMutation(ctx), string(id)); err != nil {
 					return err
 				}
-				if err := c.checkpointReleaseStep(ctx, id, incarnation, claim, stepVectors); err != nil {
+				if err := h.checkpointReleaseStep(ctx, id, incarnation, claim, stepVectors); err != nil {
 					return err
 				}
 				step = stepVectors
@@ -367,7 +490,7 @@ func (c *Client) executeReleaseCleanup(ctx context.Context, id domain.DocumentID
 				if err := ops.LegacyVectors(domain.TrackVectorMutation(ctx), string(id)); err != nil {
 					return err
 				}
-				if err := c.checkpointReleaseStep(ctx, id, incarnation, claim, stepSource); err != nil {
+				if err := h.checkpointReleaseStep(ctx, id, incarnation, claim, stepSource); err != nil {
 					return err
 				}
 				step = stepSource
@@ -380,7 +503,7 @@ func (c *Client) executeReleaseCleanup(ctx context.Context, id domain.DocumentID
 				if err := ops.RevisionVectors(domain.TrackVectorMutation(ctx), string(id), incarnation); err != nil {
 					return err
 				}
-				if err := c.checkpointReleaseStep(ctx, id, incarnation, claim, stepSource); err != nil {
+				if err := h.checkpointReleaseStep(ctx, id, incarnation, claim, stepSource); err != nil {
 					return err
 				}
 				step = stepSource
@@ -393,7 +516,7 @@ func (c *Client) executeReleaseCleanup(ctx context.Context, id domain.DocumentID
 		if err := ops.RevisionVectors(domain.TrackVectorMutation(ctx), string(id), incarnation); err != nil {
 			return err
 		}
-		if err := c.checkpointReleaseStep(ctx, id, incarnation, claim, stepSource); err != nil {
+		if err := h.checkpointReleaseStep(ctx, id, incarnation, claim, stepSource); err != nil {
 			return err
 		}
 		step = stepSource
@@ -406,17 +529,17 @@ func (c *Client) executeReleaseCleanup(ctx context.Context, id domain.DocumentID
 		if err := ops.Source(ctx, *r.source); err != nil {
 			return err
 		}
-		if err := c.checkpointReleaseStep(ctx, id, incarnation, claim, stepDone); err != nil {
+		if err := h.checkpointReleaseStep(ctx, id, incarnation, claim, stepDone); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) checkpointReleaseStep(ctx context.Context, id domain.DocumentID, incarnation, claim string, nextStep int) error {
+func (h heldRelease) checkpointReleaseStep(ctx context.Context, id domain.DocumentID, incarnation, claim string, nextStep int) error {
 	checkpointCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
-	tag, err := c.Pool.Exec(checkpointCtx, `UPDATE document_deletions SET step=$4
+	tag, err := h.db.Exec(checkpointCtx, `UPDATE document_deletions SET step=$4
 		WHERE document_id=$1 AND incarnation=$2 AND claim=$3 AND step<$4 AND claim_until>clock_timestamp()`,
 		string(id), incarnation, claim, nextStep)
 	if err != nil {
@@ -428,23 +551,24 @@ func (c *Client) checkpointReleaseStep(ctx context.Context, id domain.DocumentID
 	return nil
 }
 
-func (c *Client) finalizeRelease(ctx context.Context, id domain.DocumentID, incarnation, claim string) error {
-	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+func (h heldRelease) finalizeRelease(ctx context.Context, id domain.DocumentID, incarnation, claim string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tx, err := h.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
-		return err
+	if !h.legacyOnly {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
+			return err
+		}
 	}
-	var liveID string
-	err = tx.QueryRow(ctx, `SELECT id::text FROM documents WHERE id=$1 FOR UPDATE`, string(id)).Scan(&liveID)
-	if err == nil {
-		return domain.ErrDeletionPreconditionFailed
+	if absentErr := requireAbsentReleaseDocument(ctx, tx, id); absentErr != nil {
+		return absentErr
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
+	// Admission may reuse the UUID only after this exact release commits.
 	tag, err := tx.Exec(ctx, `UPDATE document_deletions
 		SET finalized=TRUE, held=FALSE, step=$4, source_key=NULL, claim=NULL, claim_until=NULL
 		WHERE document_id=$1 AND incarnation=$2 AND claim=$3 AND claim_until>clock_timestamp()`,
@@ -458,7 +582,7 @@ func (c *Client) finalizeRelease(ctx context.Context, id domain.DocumentID, inca
 	if commitErr := tx.Commit(ctx); commitErr != nil {
 		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
-		released, checkErr := c.deletionReleased(checkCtx, id, incarnation)
+		released, checkErr := h.deletionReleased(checkCtx, id, incarnation)
 		if checkErr == nil && released {
 			return nil
 		}
@@ -467,9 +591,9 @@ func (c *Client) finalizeRelease(ctx context.Context, id domain.DocumentID, inca
 	return nil
 }
 
-func (c *Client) deletionReleased(ctx context.Context, id domain.DocumentID, incarnation string) (bool, error) {
+func (h heldRelease) deletionReleased(ctx context.Context, id domain.DocumentID, incarnation string) (bool, error) {
 	var released bool
-	err := c.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM document_deletions r
+	err := h.outcome.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM document_deletions r
 		WHERE r.document_id=$1 AND r.incarnation=$2 AND r.finalized AND NOT r.held
 		AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.id=$1))`, string(id), incarnation).Scan(&released)
 	return released, err

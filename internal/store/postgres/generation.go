@@ -211,19 +211,48 @@ var _ domain.WriterGate = (*Client)(nil)
 
 // AcquireWriter holds the freeze barrier across a maintenance operation.
 func (c *Client) AcquireWriter(ctx context.Context) (func(), error) {
+	_, release, err := c.acquireWriterSession(ctx, pgx.TxOptions{}, c.gate)
+	return release, err
+}
+
+// AcquireHeldRecoveryWriter holds the freeze barrier for recovery that sends no
+// vector requests. The receipt separately identifies the retired physical index.
+// The returned transaction can also observe the outcome of a release commit.
+func (c *Client) AcquireHeldRecoveryWriter(ctx context.Context) (pgx.Tx, func(), error) {
+	return c.acquireWriterSession(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(ctx context.Context, q queryRower) error {
+		var active string
+		var frozen bool
+		if err := q.QueryRow(ctx, `SELECT active, frozen FROM vector_writer_state()`).Scan(&active, &frozen); err != nil {
+			return fmt.Errorf("postgres: read vector state: %w", err)
+		}
+		configured := c.servingPin().generation
+		if !ValidGenerationName(active) || active != configured {
+			return fmt.Errorf("%w: replica serves %q, active is %q", domain.ErrGenerationMismatch, configured, active)
+		}
+		if frozen {
+			return domain.ErrWritersFrozen
+		}
+		return c.checkAuthzMode(ctx, q)
+	})
+}
+
+func (c *Client) acquireWriterSession(ctx context.Context, opts pgx.TxOptions, check func(context.Context, queryRower) error) (pgx.Tx, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	select {
 	case c.writerSlots <- struct{}{}:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	}
 	// The lock must not consume a pool connection while the operation uses
 	// the pool for document metadata or while a freeze is waiting for it.
 	conn, err := pgx.ConnectConfig(ctx, c.Pool.Config().ConnConfig)
 	if err != nil {
 		<-c.writerSlots
-		return nil, err
+		return nil, nil, err
 	}
-	tx, err := conn.Begin(ctx)
+	tx, err := conn.BeginTx(ctx, opts)
 	release := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
@@ -235,13 +264,13 @@ func (c *Client) AcquireWriter(ctx context.Context) (func(), error) {
 	}
 	if err != nil {
 		release()
-		return nil, err
+		return nil, nil, err
 	}
-	if err = c.gate(ctx, tx); err != nil {
+	if err = check(ctx, tx); err != nil {
 		release()
-		return nil, err
+		return nil, nil, err
 	}
-	return release, nil
+	return tx, release, nil
 }
 
 var _ domain.WriterLocker = (*Client)(nil)

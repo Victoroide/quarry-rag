@@ -3,12 +3,14 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,6 +23,34 @@ func TestHeldPhaseClassification(t *testing.T) {
 	require.Equal(t, "vectors", heldPhase("legacy_reservation", false, false, stepVectors))
 	require.Equal(t, "source", heldPhase("legacy_reservation", false, false, stepSource))
 	require.Equal(t, "finalize", heldPhase("legacy_reservation", false, true, stepDone))
+}
+
+func TestLegacyHostedReleaseEligibility(t *testing.T) {
+	complete := releaseReceipt{kind: "quarantine", mode: legacyVectors, step: stepDone, held: true, finalized: true}
+	require.NoError(t, complete.checkEligibility(true))
+	complete.step = stepSource
+	require.ErrorIs(t, complete.checkEligibility(true), domain.ErrDeletionPreconditionFailed)
+	reserved := releaseReceipt{kind: "legacy_reservation", mode: legacyVectors, step: stepNamespace}
+	require.NoError(t, reserved.checkEligibility(true))
+	reserved.claimValid = true
+	require.ErrorIs(t, reserved.checkEligibility(true), domain.ErrDeletionBusy)
+	complete.step = stepDone
+	complete.mode = revisionVectors
+	require.NoError(t, complete.checkEligibility(false))
+	require.ErrorIs(t, complete.checkEligibility(true), domain.ErrDeletionPreconditionFailed)
+}
+
+type refusedReleaseBegin struct{ heldReleaseDatabase }
+
+func (refusedReleaseBegin) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	return nil, errors.New("finalization attempted to begin a transaction")
+}
+
+func TestHeldReleaseFinalizeSkipsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	release := heldRelease{db: refusedReleaseBegin{}}
+	require.ErrorIs(t, release.finalizeRelease(ctx, domain.DocumentID(uuid.NewString()), uuid.NewString(), uuid.NewString()), context.Canceled)
 }
 
 func TestCheckReleaseTargetRejectsMismatchedStores(t *testing.T) {
@@ -576,4 +606,309 @@ func TestHeldQualifiedMemoryDeletionReleasesOnItsOwner(t *testing.T) {
 		domain.ErrDeletionPreconditionFailed, "another process cannot release it")
 	require.NoError(t, c.ReleaseHeldDeletion(ctx, result.DocumentID, job.Incarnation, ops), "the owning process releases it")
 	require.False(t, readReceipt(t, c, result.DocumentID).held)
+}
+
+func TestLegacyHostedReleaseRequiresExactReceipt(t *testing.T) {
+	c := jobsDatabase(t)
+	const index = "retired-index"
+	for _, tt := range []struct {
+		name, kind, mode, storedIndex, configuredIndex string
+		step                                           int
+		held, finalized, live, busy                    bool
+		token                                          string
+		want                                           error
+	}{
+		{name: "wrong index", storedIndex: index, configuredIndex: "other", want: domain.ErrDeletionTargetMismatch},
+		{name: "missing configured index", storedIndex: index, want: domain.ErrDeletionTargetMismatch},
+		{name: "missing recorded index", configuredIndex: index, want: domain.ErrDeletionTargetMismatch},
+		{name: "wrong token", storedIndex: index, configuredIndex: index, token: "wrong", want: domain.ErrDeletionPreconditionFailed},
+		{name: "missing token", storedIndex: index, configuredIndex: index, token: "missing", want: domain.ErrDeletionPreconditionRequired},
+		{name: "live row", storedIndex: index, configuredIndex: index, live: true, want: domain.ErrDeletionPreconditionFailed},
+		{name: "released", kind: "quarantine", step: stepDone, finalized: true, want: domain.ErrDeletionPreconditionFailed},
+		{name: "ineligible kind", kind: "qualified_intent", held: true, want: domain.ErrDeletionPreconditionFailed},
+		{name: "unexpected finalized phase", kind: "legacy_reservation", finalized: true, held: true, want: domain.ErrDeletionPreconditionFailed},
+		{name: "busy", storedIndex: index, configuredIndex: index, busy: true, want: domain.ErrDeletionBusy},
+		{name: "revision path", mode: revisionVectors, storedIndex: index, configuredIndex: index, want: domain.ErrDeletionPreconditionFailed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			id, inc := domain.DocumentID(uuid.NewString()), uuid.NewString()
+			if tt.live {
+				doc := acceptDocument(t, c, tt.name, false, false)
+				id, inc = doc.id, doc.incarnation
+			}
+			if tt.kind == "" {
+				tt.kind, tt.finalized, tt.held, tt.step = "quarantine", true, true, stepDone
+			}
+			if tt.mode == "" {
+				tt.mode = legacyVectors
+			}
+			_, err := c.Pool.Exec(ctx, `INSERT INTO document_deletions
+				(document_id, incarnation, kind, vector_mode, vector_index, step, held, finalized, claim, claim_until)
+				VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,
+				CASE WHEN $9 THEN gen_random_uuid() END, CASE WHEN $9 THEN clock_timestamp()+interval '1 minute' END)`,
+				string(id), inc, tt.kind, tt.mode, tt.storedIndex, tt.step, tt.held, tt.finalized, tt.busy)
+			require.NoError(t, err)
+			before := readReceipt(t, c, id)
+			token := inc
+			switch tt.token {
+			case "wrong":
+				token = uuid.NewString()
+			case "missing":
+				token = ""
+			}
+			noSource := func(context.Context, string) error {
+				t.Error("a refused release attempted cleanup")
+				return nil
+			}
+			err = c.ReleaseLegacyHostedHold(ctx, id, token, domain.DeleteOperations{
+				VectorIndex: tt.configuredIndex, Source: noSource, LegacyNamespace: noSource, LegacyVectors: noSource,
+			})
+			require.ErrorIs(t, err, tt.want)
+			require.Equal(t, before, readReceipt(t, c, id))
+			if errors.Is(tt.want, domain.ErrDeletionTargetMismatch) {
+				mode, recordedIndex, lookupErr := c.HeldDeletionReleaseMode(ctx, id, token)
+				require.NoError(t, lookupErr)
+				require.Equal(t, legacyVectors, mode)
+				require.Equal(t, tt.storedIndex, recordedIndex)
+			} else {
+				_, _, lookupErr := c.HeldDeletionReleaseMode(ctx, id, token)
+				if tt.mode == revisionVectors {
+					require.NoError(t, lookupErr, "revision selection must reach the provider path")
+				} else {
+					require.ErrorIs(t, lookupErr, tt.want)
+				}
+			}
+		})
+	}
+	ctx := t.Context()
+	id := domain.DocumentID(uuid.NewString())
+	_, _, err := c.HeldDeletionReleaseMode(ctx, id, uuid.NewString())
+	require.ErrorIs(t, err, domain.ErrDeletionPreconditionFailed)
+	first, err := c.QuarantineDeletion(ctx, id, domain.QuarantineTarget{VectorMode: legacyVectors, VectorIndex: index})
+	require.NoError(t, err)
+	mode, recordedIndex, err := c.HeldDeletionReleaseMode(ctx, id, first.Incarnation)
+	require.NoError(t, err)
+	require.Equal(t, legacyVectors, mode)
+	require.Equal(t, index, recordedIndex)
+	ops := domain.DeleteOperations{VectorIndex: index}
+	_, err = c.Pool.Exec(ctx, `DELETE FROM vector_state`)
+	require.NoError(t, err)
+	require.ErrorIs(t, c.ReleaseLegacyHostedHold(ctx, id, first.Incarnation, ops), pgx.ErrNoRows)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO vector_state (active_profile_hash) VALUES ('current-profile')`)
+	require.NoError(t, err)
+	require.NoError(t, c.ReleaseLegacyHostedHold(ctx, id, first.Incarnation, ops))
+	_, err = c.Pool.Exec(ctx, `UPDATE vector_state SET active_profile_hash=''`)
+	require.NoError(t, err)
+	second, err := c.QuarantineDeletion(ctx, id, domain.QuarantineTarget{VectorMode: legacyVectors, VectorIndex: index})
+	require.NoError(t, err)
+	require.NotEqual(t, first.Incarnation, second.Incarnation)
+	require.ErrorIs(t, c.ReleaseLegacyHostedHold(ctx, id, first.Incarnation, ops), domain.ErrDeletionPreconditionFailed)
+	require.Equal(t, domain.AcceptDeletionConflict, admit(ctx, t, c, id, "re-quarantined lifetime"))
+}
+
+func TestLegacyHostedReleaseSerializesWithFreezeAndAdmission(t *testing.T) {
+	c, observer := sessionTestClientWithPool(t, 1)
+	other := otherConnection(t, c)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	doc := acceptDocument(t, c, "legacy source with active freeze", false, true)
+	_, err := c.Pool.Exec(ctx, `INSERT INTO document_deletions
+		(document_id,incarnation,kind,vector_mode,vector_index,source_bucket,source_key,held)
+		VALUES($1,$2,'legacy_reservation','legacy','retired-index','originals',$3,TRUE)`, string(doc.id), doc.incarnation, doc.key)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, string(doc.id))
+	require.NoError(t, err)
+	started, complete := make(chan struct{}), make(chan struct{})
+	ops := domain.DeleteOperations{
+		VectorIndex: "retired-index", SourceBucket: "originals",
+		Source: func(sourceCtx context.Context, _ string) error {
+			close(started)
+			select {
+			case <-sourceCtx.Done():
+				return sourceCtx.Err()
+			case <-complete:
+				return nil
+			}
+		},
+	}
+
+	c.SetVectorGeneration("different")
+	require.ErrorIs(t, c.ReleaseLegacyHostedHold(ctx, doc.id, doc.incarnation, ops), domain.ErrGenerationMismatch)
+	c.SetVectorGeneration(LegacyGeneration)
+	require.NoError(t, c.FreezeWriters(ctx, "next"))
+	require.ErrorIs(t, c.ReleaseLegacyHostedHold(ctx, doc.id, doc.incarnation, ops), domain.ErrWritersFrozen)
+	require.NoError(t, c.ThawWriters(ctx))
+
+	released, frozen, admitted := make(chan error, 1), make(chan error, 1), make(chan domain.AcceptResult, 1)
+	go func() { released <- c.ReleaseLegacyHostedHold(ctx, doc.id, doc.incarnation, ops) }()
+	select {
+	case <-started:
+	case releaseErr := <-released:
+		t.Fatalf("release ended before source cleanup: %v", releaseErr)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	_, _, err = other.HeldDeletionReleaseMode(ctx, doc.id, doc.incarnation)
+	require.ErrorIs(t, err, domain.ErrDeletionBusy)
+	require.ErrorIs(t, other.ReleaseLegacyHostedHold(ctx, doc.id, doc.incarnation, ops), domain.ErrDeletionBusy)
+	require.Equal(t, domain.AcceptDeletionConflict, admit(ctx, t, other, doc.id, "concurrent replacement"))
+	waiter, cancelWaiter := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancelWaiter()
+	require.ErrorIs(t, c.ReleaseLegacyHostedHold(waiter, doc.id, doc.incarnation, ops), context.DeadlineExceeded)
+
+	go func() { frozen <- c.FreezeWriters(ctx, "next") }()
+	require.Eventually(t, func() bool {
+		var blocked bool
+		err := observer.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND application_name=current_setting('application_name')
+			AND wait_event_type='Lock'
+			AND query LIKE 'UPDATE vector_state SET frozen=TRUE%')`).Scan(&blocked)
+		return err == nil && blocked
+	}, 5*time.Second, 10*time.Millisecond)
+	admitErr := make(chan error, 1)
+	go func() {
+		req := jobsRequest("replacement waiting for freeze")
+		req.Document.ID, req.CallerSupplied = doc.id, true
+		res, err := other.AcceptDocument(ctx, req)
+		admitErr <- err
+		admitted <- res
+	}()
+	require.Eventually(t, func() bool {
+		var blocked bool
+		err := observer.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND application_name=current_setting('application_name')
+			AND wait_event='advisory' AND query='SELECT pg_advisory_xact_lock($1)')`).Scan(&blocked)
+		return err == nil && blocked
+	}, 5*time.Second, 10*time.Millisecond)
+	close(complete)
+	require.NoError(t, <-released)
+	require.NoError(t, <-frozen)
+	require.NoError(t, <-admitErr)
+	require.Equal(t, domain.AcceptFrozen, (<-admitted).Outcome)
+	r := readReceipt(t, c, doc.id)
+	require.True(t, r.finalized)
+	require.False(t, r.held)
+	require.Nil(t, r.claim)
+	requireDedicatedSessions(t, c, observer, int(other.Pool.Stat().TotalConns()))
+	require.NoError(t, c.ThawWriters(ctx))
+	require.Equal(t, domain.AcceptAccepted, admit(ctx, t, c, doc.id, "replacement after thaw"))
+}
+
+type interruptHeldReleaseKey struct{}
+
+type interruptHeldReleaseTracer struct{}
+
+func (interruptHeldReleaseTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if interrupt, ok := ctx.Value(interruptHeldReleaseKey{}).(func(string)); ok {
+		interrupt(data.SQL)
+	}
+	return ctx
+}
+
+func (interruptHeldReleaseTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+}
+
+func TestLegacyHostedReleaseRetriesOnlyPendingSource(t *testing.T) {
+	c := jobsDatabase(t, WithQueryTracer(interruptHeldReleaseTracer{}))
+	for _, test := range []struct {
+		name, finalizationSQLPrefix string
+	}{
+		{name: "source completion"},
+		{name: "finalization begin", finalizationSQLPrefix: "begin "},
+		{name: "finalization commit", finalizationSQLPrefix: "commit"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testLegacyHostedReleaseSourceRetry(t, c, test.finalizationSQLPrefix)
+		})
+	}
+}
+
+func testLegacyHostedReleaseSourceRetry(t *testing.T, c *Client, finalizationSQLPrefix string) {
+	t.Helper()
+	ctx := t.Context()
+	doc := acceptDocument(t, c, "legacy source checkpoint "+t.Name(), false, true)
+	_, err := c.Pool.Exec(ctx, `INSERT INTO document_deletions
+		(document_id,incarnation,kind,vector_mode,vector_index,source_bucket,source_key,held)
+		VALUES($1,$2,'legacy_reservation','legacy','retired-index','originals',$3,TRUE)`, string(doc.id), doc.incarnation, doc.key)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, string(doc.id))
+	require.NoError(t, err)
+
+	interrupt, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var keys []string
+	interrupt = context.WithValue(interrupt, interruptHeldReleaseKey{}, func(sql string) {
+		if len(keys) != 0 && finalizationSQLPrefix != "" && strings.HasPrefix(sql, finalizationSQLPrefix) {
+			cancel()
+		}
+	})
+	ops := domain.DeleteOperations{
+		VectorIndex: "retired-index", SourceBucket: "originals",
+		Source: func(_ context.Context, key string) error {
+			keys = append(keys, key)
+			if finalizationSQLPrefix == "" {
+				cancel()
+			}
+			return nil
+		},
+	}
+	require.ErrorIs(t, c.ReleaseLegacyHostedHold(interrupt, doc.id, doc.incarnation, ops), context.Canceled)
+	require.Equal(t, []string{doc.key}, keys)
+	r := readReceipt(t, c, doc.id)
+	require.Equal(t, stepDone, r.step)
+	require.True(t, r.held)
+	require.False(t, r.finalized)
+	require.Nil(t, r.claim)
+	require.Equal(t, domain.AcceptDeletionConflict, admit(ctx, t, c, doc.id, "replacement before retry "+t.Name()))
+	require.NoError(t, c.ReleaseLegacyHostedHold(ctx, doc.id, doc.incarnation, ops))
+	require.Equal(t, []string{doc.key}, keys)
+
+	// A finalized held receipt may still retain its original source key.
+	_, err = c.Pool.Exec(ctx, `UPDATE document_deletions SET held=TRUE,source_key=$2 WHERE document_id=$1`, string(doc.id), doc.key)
+	require.NoError(t, err)
+	require.NoError(t, c.ReleaseLegacyHostedHold(ctx, doc.id, doc.incarnation, ops))
+	require.Equal(t, []string{doc.key}, keys)
+}
+
+type lostReleaseReplyDB struct{ heldReleaseDatabase }
+
+func (db lostReleaseReplyDB) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+	tx, err := db.heldReleaseDatabase.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return lostReleaseReplyTx{Tx: tx}, nil
+}
+
+type lostReleaseReplyTx struct{ pgx.Tx }
+
+func (tx lostReleaseReplyTx) Commit(ctx context.Context) error {
+	if err := tx.Tx.Commit(ctx); err != nil {
+		return err
+	}
+	return errors.New("final release reply lost")
+}
+
+func TestLegacyHostedReleaseChecksLostFinalReply(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+	id := domain.DocumentID(uuid.NewString())
+	hold, err := c.QuarantineDeletion(ctx, id, domain.QuarantineTarget{VectorMode: legacyVectors, VectorIndex: "retired-index"})
+	require.NoError(t, err)
+	guard, closeGuard, err := c.AcquireHeldRecoveryWriter(ctx)
+	require.NoError(t, err)
+	defer closeGuard()
+	claim := uuid.NewString()
+	ops := domain.DeleteOperations{VectorIndex: hold.VectorIndex}
+	h := heldRelease{db: c.Pool, outcome: guard, legacyOnly: true}
+	_, err = h.claimHeldDeletion(ctx, id, hold.Incarnation, claim, time.Minute, ops)
+	require.NoError(t, err)
+	h.db = lostReleaseReplyDB{h.db}
+	require.NoError(t, h.finalizeRelease(ctx, id, hold.Incarnation, claim))
+	r := readReceipt(t, c, id)
+	require.True(t, r.finalized)
+	require.False(t, r.held)
+	require.Nil(t, r.claim)
 }
