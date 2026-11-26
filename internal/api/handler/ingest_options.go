@@ -12,6 +12,7 @@ type ingestOptions struct {
 	extract               func(context.Context, extractor.FileType, []byte) (string, error)
 	limiter               *extractor.Limiter
 	extractPages          func(context.Context, []byte) (domain.PDFPages, error)
+	pdfLayout             bool
 	ocr                   bool
 	contentDedup          domain.ContentDedup
 	fixturePrefix         string
@@ -39,6 +40,11 @@ func WithEvaluationFixtures(prefix, vectorIdentity string) IngestOption {
 // WithMixedPDFOCR enables page-aware ingestion using the isolated PDF parser.
 func WithMixedPDFOCR(extract func(context.Context, []byte) (domain.PDFPages, error)) IngestOption {
 	return func(opts *ingestOptions) { opts.extractPages = extract }
+}
+
+// WithPDFLayout enables Textract layout and table extraction for PDF uploads.
+func WithPDFLayout(enabled bool) IngestOption {
+	return func(opts *ingestOptions) { opts.pdfLayout = enabled }
 }
 
 // WithOCR enables deferred text detection for image-only PDF uploads.

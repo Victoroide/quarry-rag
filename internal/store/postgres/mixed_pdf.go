@@ -11,11 +11,22 @@ import (
 )
 
 func validatePDFAdmission(req domain.AcceptRequest) error {
-	if req.PDF.Profile != domain.MixedPDFProfile || !req.RequireSource {
+	if (req.PDF.Profile != domain.MixedPDFProfile && req.PDF.Profile != domain.LayoutPDFProfile) || !req.RequireSource {
 		return errors.New("postgres: invalid PDF admission profile or source requirement")
 	}
 	if err := req.PDF.Pages.Validate(); err != nil {
 		return err
+	}
+	if req.PDF.Profile == domain.LayoutPDFProfile {
+		if req.PDF.Coverage != domain.PDFPending || req.Document.Content != "" {
+			return errors.New("postgres: layout PDF admission requires pending coverage and empty content")
+		}
+		for _, page := range req.PDF.Pages {
+			if page.Evidence != domain.PDFBlank {
+				return nil
+			}
+		}
+		return errors.New("postgres: layout PDF admission requires at least one non-blank page")
 	}
 	coverage := req.PDF.Pages.CoverageBeforeOCR()
 	if req.PDF.Coverage == coverage && (coverage == domain.PDFPending && req.Document.Content == "" ||
@@ -25,7 +36,20 @@ func validatePDFAdmission(req domain.AcceptRequest) error {
 	return errors.New("postgres: PDF admission coverage does not match page evidence")
 }
 
+func requestedPDFProfile(req domain.AcceptRequest) string {
+	if req.PDF != nil && req.PDF.Profile != "" {
+		return req.PDF.Profile
+	}
+	if req.PDFProfile != "" {
+		return req.PDFProfile
+	}
+	return domain.MixedPDFProfile
+}
+
 func matchesLegacyPDF(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest, policy domain.ContentDedup, stored string) (bool, error) {
+	if requestedPDFProfile(req) == domain.LayoutPDFProfile {
+		return false, nil
+	}
 	parser := req.LegacyParserFingerprint != "" && stored == identityFingerprint(policy, req.Document.ID, req.LegacyParserFingerprint)
 	detection := req.LegacyOCRFingerprint != "" && stored == identityFingerprint(policy, req.Document.ID, req.LegacyOCRFingerprint)
 	if !parser && !detection {
@@ -46,12 +70,15 @@ func matchExistingPDF(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest, 
 	if err != nil {
 		return domain.AcceptConflict, err
 	}
+	expectedProfile := requestedPDFProfile(req)
 	var candidate string
 	switch {
 	case profile != nil:
-		if *profile == domain.MixedPDFProfile {
+		if *profile == expectedProfile {
 			candidate = req.Fingerprint
 		}
+	case expectedProfile == domain.LayoutPDFProfile:
+		return domain.AcceptConflict, nil
 	case !includeLegacy:
 		return domain.AcceptNeedsSource, nil
 	case source == "parser":
@@ -69,6 +96,16 @@ func matchExistingPDF(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest, 
 }
 
 func findSharedPDF(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest) (id, state string, err error) {
+	expectedProfile := requestedPDFProfile(req)
+	if expectedProfile == domain.LayoutPDFProfile {
+		err = tx.QueryRow(ctx, `SELECT d.id::text,d.status FROM document_fingerprints f
+			JOIN documents d ON d.id=f.document_id
+			JOIN document_pdf_extractions p ON p.document_id=d.id
+			WHERE d.collection=$2 AND d.content_dedup='collection' AND f.fingerprint=$1 AND p.profile=$3
+			AND d.text_source IN ('parser','pdf_layout')
+			LIMIT 1 FOR UPDATE OF d`, req.Fingerprint, req.Collection, domain.LayoutPDFProfile).Scan(&id, &state)
+		return id, state, err
+	}
 	// A text-only identity cannot establish that a different original has the
 	// same scanned pages. On unqualified requests it is safe only for clean PDFs.
 	var parser string
@@ -225,7 +262,11 @@ func (c *Client) StorePDFOCR(ctx context.Context, job domain.Job, result domain.
 		if len(preview) > 120 {
 			preview = preview[:120]
 		}
-		_, err = tx.Exec(ctx, `UPDATE documents SET content=$2,content_preview=$3,text_source='pdf_mixed',updated_at=NOW() WHERE id=$1`, id, result.Text, string(preview))
+		textSource := "pdf_mixed"
+		if job.PDF.Profile == domain.LayoutPDFProfile {
+			textSource = "pdf_layout"
+		}
+		_, err = tx.Exec(ctx, `UPDATE documents SET content=$2,content_preview=$3,text_source=$4,updated_at=NOW() WHERE id=$1`, id, result.Text, string(preview), textSource)
 		return err
 	})
 }

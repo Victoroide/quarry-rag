@@ -136,7 +136,9 @@ func (w *Worker) loop(ctx context.Context) {
 }
 
 func (w *Worker) claim(ctx context.Context) (*domain.Job, error) {
-	if _, ready := w.opts.OCR.(pdfDetector); ready {
+	_, hasDetector := w.opts.OCR.(pdfDetector)
+	_, hasAnalyzer := w.opts.OCR.(pdfAnalyzer)
+	if hasDetector || hasAnalyzer {
 		if store, ok := w.store.(interface {
 			ClaimPDFJobForFixtureStore(context.Context, string, time.Duration, int, string) (*domain.Job, error)
 		}); ok {
@@ -297,6 +299,8 @@ func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestCon
 		}
 	case job.PDF != nil && job.PDF.Coverage == domain.PDFPartial && len(ic.RawText) < domain.MinPDFTextBytes:
 		return domain.Permanent(ocr.ErrNoText)
+	case job.PDF != nil && job.PDF.Profile == domain.LayoutPDFProfile && len(job.PDF.PageResults) > 0:
+		ic.LayoutSections = layoutSectionsFromResults(job.PDF.PageResults)
 	case job.Document.TextSource == "ocr_pending":
 		if extractErr := w.extractText(ctx, job, ic); extractErr != nil {
 			return extractErr

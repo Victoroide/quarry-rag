@@ -30,6 +30,12 @@ const (
 	OCRPDFMixed     = "mixed"
 )
 
+// PDF layout modes control whether plain parser extraction or Textract layout analysis is used.
+const (
+	PDFLayoutPlain    = "plain"
+	PDFLayoutTextract = "textract"
+)
+
 // Synthesis context policies control how retrieved chunks fill the synthesis budget.
 const (
 	SynthesisContextPolicyRanked  = "ranked"
@@ -86,9 +92,10 @@ type Config struct {
 	S3Bucket       string
 	MaxUploadBytes int64
 
-	OCRProvider string
-	OCRPDFMode  string
-	OCRTimeout  time.Duration
+	OCRProvider   string
+	OCRPDFMode    string
+	PDFLayoutMode string
+	OCRTimeout    time.Duration
 
 	// SynthesisModel selects primary, fallback or hybrid answer routing.
 	SynthesisModel string
@@ -218,6 +225,7 @@ func Load() (*Config, error) {
 		RerankModelARN:            os.Getenv("RERANK_MODEL_ARN"),
 		OCRProvider:               envOrDefault("OCR_PROVIDER", "none"),
 		OCRPDFMode:                envOrDefault("OCR_PDF_MODE", OCRPDFImageOnly),
+		PDFLayoutMode:             envOrDefault("PDF_LAYOUT_MODE", PDFLayoutPlain),
 		IngestContentDedup:        domain.ContentDedup(envOrDefault("INGEST_CONTENT_DEDUP", string(domain.ContentDedupCollection))),
 		IndexVisibilityMode:       envOrDefault("INDEX_VISIBILITY_MODE", "sample"),
 	}
@@ -423,6 +431,15 @@ func (c *Config) validate() error {
 		}
 	default:
 		return fmt.Errorf("config: OCR_PDF_MODE must be image_only or mixed")
+	}
+	switch c.PDFLayoutMode {
+	case "", PDFLayoutPlain:
+	case PDFLayoutTextract:
+		if c.OCRProvider != "textract" || c.FakeMode || !c.ExtractIsolation {
+			return fmt.Errorf("config: PDF_LAYOUT_MODE=textract requires OCR_PROVIDER=textract, S3_BUCKET, EXTRACT_ISOLATION=true and GO_RAG_FAKE_MODE=false")
+		}
+	default:
+		return fmt.Errorf("config: PDF_LAYOUT_MODE must be plain or textract")
 	}
 	if c.SourceUploadJournal && strings.TrimSpace(c.S3Bucket) == "" {
 		return fmt.Errorf("config: SOURCE_UPLOAD_JOURNAL=true requires S3_BUCKET")

@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"slices"
+
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 )
@@ -46,7 +48,49 @@ func scoredChunkResponse(sc domain.ScoredChunk, text string, excerpt int, trunca
 		Text:        text,
 		Kind:        kind,
 		Quality:     quality,
+		Pages:       metadataInts(sc.Chunk.Metadata, "pages"),
+		TableIDs:    metadataStrings(sc.Chunk.Metadata, "table_ids"),
+		RowIDs:      metadataStrings(sc.Chunk.Metadata, "row_ids"),
 		Excerpt:     excerpt,
 		Truncated:   truncated,
 	}
+}
+
+func metadataInts(md map[string]any, key string) []int {
+	switch v := md[key].(type) {
+	case []int:
+		return slices.Clone(v)
+	case []any:
+		out := make([]int, 0, len(v))
+		for _, item := range v {
+			switch n := item.(type) {
+			case int:
+				out = append(out, n)
+			case float64:
+				out = append(out, int(n))
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func metadataStrings(md map[string]any, key string) []string {
+	switch v := md[key].(type) {
+	case []string:
+		return slices.Clone(v)
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
 }

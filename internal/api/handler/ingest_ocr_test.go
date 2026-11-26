@@ -290,3 +290,50 @@ func TestMixedPDFLegacyIdentityLookupFailureStopsBeforeAdmission(t *testing.T) {
 		})
 	}
 }
+
+func TestPDFLayoutUploadQueuesBornDigitalAndRejectsBlank(t *testing.T) {
+	data := []byte("%PDF-1.4\nsynthetic digital PDF")
+	t.Run("born-digital queued under layout profile", func(t *testing.T) {
+		s := &ocrAcceptStore{outcome: domain.AcceptNeedsSource}
+		objects := &ocrObjects{}
+		digital := domain.PDFPages{{Number: 1, Evidence: domain.PDFEmbedded, Text: "Archive operating hours"}}
+		h := IngestHandler(nil, s, objects, 1<<20, WithPDFLayout(true), WithMixedPDFOCR(func(context.Context, []byte) (domain.PDFPages, error) {
+			return digital, nil
+		}))
+		rw := httptest.NewRecorder()
+		h(rw, ocrUpload(t, "digital.pdf", "archive", data))
+		require.Equal(t, http.StatusAccepted, rw.Code, rw.Body.String())
+		require.Equal(t, data, objects.data)
+		require.Len(t, s.accepted, 2)
+		req := s.accepted[1]
+		require.NotNil(t, req.PDF)
+		require.Equal(t, domain.LayoutPDFProfile, req.PDF.Profile)
+		require.Equal(t, domain.PDFPending, req.PDF.Coverage)
+		require.Empty(t, req.Document.Content)
+		require.False(t, req.TryLegacyPDFText)
+		require.Equal(t, pdfProfileFingerprint(domain.LayoutPDFProfile, "archive", string(data)), req.Fingerprint)
+	})
+
+	t.Run("all-blank rejected before S3 upload", func(t *testing.T) {
+		s := &ocrAcceptStore{outcome: domain.AcceptNeedsSource}
+		objects := &ocrObjects{}
+		blank := domain.PDFPages{{Number: 1, Evidence: domain.PDFBlank}}
+		h := IngestHandler(nil, s, objects, 1<<20, WithPDFLayout(true), WithMixedPDFOCR(func(context.Context, []byte) (domain.PDFPages, error) {
+			return blank, nil
+		}))
+		rw := httptest.NewRecorder()
+		h(rw, ocrUpload(t, "blank.pdf", "archive", data))
+		require.Equal(t, http.StatusUnprocessableEntity, rw.Code, rw.Body.String())
+		require.Empty(t, objects.data)
+	})
+
+	t.Run("unavailable isolated extractor returns 503", func(t *testing.T) {
+		s := &ocrAcceptStore{outcome: domain.AcceptNeedsSource}
+		objects := &ocrObjects{}
+		h := IngestHandler(nil, s, objects, 1<<20, WithPDFLayout(true))
+		rw := httptest.NewRecorder()
+		h(rw, ocrUpload(t, "digital.pdf", "archive", data))
+		require.Equal(t, http.StatusServiceUnavailable, rw.Code, rw.Body.String())
+		require.Empty(t, objects.data)
+	})
+}

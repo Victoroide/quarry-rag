@@ -95,6 +95,7 @@ var reservedMetadataKeys = map[string]struct{}{
 	"tenant": {}, "owner": {}, "owner_id": {}, "principal": {}, "principal_id": {},
 	"incarnation": {}, "document_id": {}, "doc_id": {}, "collection": {}, "doc_type": {},
 	"chunk_index": {}, "chunk_id": {}, "kind": {}, "quality": {}, "text": {}, "token_count": {}, "namespace": {},
+	"pages": {}, "table_ids": {}, "row_ids": {},
 }
 
 func validateOwnedMetadata(metadata map[string]any) *APIError {

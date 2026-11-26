@@ -68,6 +68,7 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		handler.WithContentDedup(deps.Config.IngestContentDedup),
 		handler.WithOCR(deps.Config.OCRProvider == "textract" && !deps.Config.FakeMode),
 	}
+	needsPDFPages := deps.Config.OCRPDFMode == config.OCRPDFMixed || deps.Config.PDFLayoutMode == config.PDFLayoutTextract
 	if deps.Config.ExtractIsolation {
 		sb, err := extractor.NewSandbox(extractor.SandboxConfig{
 			Timeout: deps.Config.ExtractTimeout, MemoryLimitMB: deps.Config.ExtractMemoryLimitMB,
@@ -78,14 +79,14 @@ func NewRouter(deps *RouterDeps) http.Handler {
 			ingestOpts = append(ingestOpts, handler.WithExtractor(func(context.Context, extractor.FileType, []byte) (string, error) {
 				return "", extractor.ErrExtractionUnavailable
 			}))
-			if deps.Config.OCRPDFMode == config.OCRPDFMixed {
+			if needsPDFPages {
 				ingestOpts = append(ingestOpts, handler.WithMixedPDFOCR(func(context.Context, []byte) (domain.PDFPages, error) {
 					return nil, extractor.ErrExtractionUnavailable
 				}))
 			}
 		} else {
 			ingestOpts = append(ingestOpts, handler.WithExtractor(tracing.WrapExtract(sb.Extract)))
-			if deps.Config.OCRPDFMode == config.OCRPDFMixed {
+			if needsPDFPages {
 				ingestOpts = append(ingestOpts, handler.WithMixedPDFOCR(sb.ExtractPDFPages))
 			}
 		}
@@ -97,6 +98,9 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	}
 	if deps.Config.SourceUploadJournal {
 		ingestOpts = append(ingestOpts, handler.WithSourceUploadJournal(sourceUploadJournal(deps.ChunkStore)))
+	}
+	if deps.Config.PDFLayoutMode == config.PDFLayoutTextract {
+		ingestOpts = append(ingestOpts, handler.WithPDFLayout(true))
 	}
 	probes := deps.Probes
 	if probes == nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -320,10 +321,13 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 		chunks[i] = c
 		src, ok := reusable[string(c.ID)]
 		srcTenant, _ := src.Metadata[domain.VectorTenantKey].(string)
-		if ok && src.DocumentID == c.DocumentID && src.Text == c.Text && src.Index == c.Index &&
+		identityMatches := ok && src.DocumentID == c.DocumentID && src.Text == c.Text && src.Index == c.Index &&
 			(src.VectorIncarnation == "" || src.VectorIncarnation == snap.Incarnation) &&
-			(srcTenant == "" || srcTenant == snap.TenantID) &&
-			validVector(src.Embedding, s.profile.Dimensions) == nil {
+			(srcTenant == "" || srcTenant == snap.TenantID)
+		if identityMatches {
+			copyLayoutMetadata(chunks[i].Metadata, src.Metadata)
+		}
+		if identityMatches && validVector(src.Embedding, s.profile.Dimensions) == nil {
 			chunks[i].Embedding = src.Embedding
 			copied++
 			continue
@@ -366,7 +370,26 @@ func chunkMetadata(snap *pgstore.DocumentSnapshot, c domain.Chunk) map[string]an
 	if snap.TenantID != "" {
 		md[domain.VectorTenantKey] = snap.TenantID
 	}
+	copyLayoutMetadata(md, c.Metadata)
 	return md
+}
+
+func copyLayoutMetadata(dst, src map[string]any) {
+	if len(src) == 0 {
+		return
+	}
+	if pages, ok := src["pages"].([]int); ok && len(pages) > 0 {
+		if _, exists := dst["pages"]; !exists {
+			dst["pages"] = slices.Clone(pages)
+		}
+	}
+	for _, key := range []string{"table_ids", "row_ids"} {
+		if items, ok := src[key].([]string); ok && len(items) > 0 {
+			if _, exists := dst[key]; !exists {
+				dst[key] = slices.Clone(items)
+			}
+		}
+	}
 }
 
 // prune removes target keys of documents that are no longer eligible sources.

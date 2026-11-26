@@ -2,10 +2,12 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 
+	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -136,8 +138,24 @@ func (c *Client) LoadDocumentSnapshotBounded(ctx context.Context, id string, max
 		chunk.ID = domain.ChunkID(key)
 		snapshot.Chunks = append(snapshot.Chunks, chunk)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, rowsErr
+	}
+	var pdfProfile *string
+	var pageResults []byte
+	if err = tx.QueryRow(ctx, `SELECT profile, page_results FROM document_pdf_extractions WHERE document_id = $1::uuid`, id).Scan(&pdfProfile, &pageResults); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: load layout provenance of document %s: %w", id, err)
+	}
+	if pdfProfile != nil && *pdfProfile == domain.LayoutPDFProfile && len(pageResults) > 0 {
+		var pages []domain.PDFPageResult
+		if err = json.Unmarshal(pageResults, &pages); err != nil {
+			return nil, fmt.Errorf("postgres: decode layout provenance of document %s: %w", id, err)
+		}
+		var sections []domain.LayoutSection
+		for _, page := range pages {
+			sections = append(sections, page.Sections...)
+		}
+		chunker.AttachLayoutProvenanceToChunks(snapshot.Chunks, sections)
 	}
 	return &snapshot, nil
 }

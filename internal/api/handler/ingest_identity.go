@@ -30,13 +30,21 @@ func ingestDocumentID(rw http.ResponseWriter, supplied string) (string, bool) {
 	return parsed.String(), true
 }
 
-func mixedPDFFingerprint(collection, original string) string {
-	return chunker.ScopedFingerprint(collection, domain.MixedPDFProfile+"\x00"+original)
+func pdfProfileFingerprint(profile, collection, original string) string {
+	return chunker.ScopedFingerprint(collection, profile+"\x00"+original)
 }
 
-func setPDFOriginalFingerprints(req *domain.AcceptRequest, file []byte) {
+func activePDFProfile(opts ingestOptions) string {
+	if opts.pdfLayout {
+		return domain.LayoutPDFProfile
+	}
+	return domain.MixedPDFProfile
+}
+
+func setPDFOriginalFingerprints(req *domain.AcceptRequest, file []byte, profile string) {
 	original := string(file)
-	req.Fingerprint = mixedPDFFingerprint(req.Collection, original)
+	req.PDFProfile = profile
+	req.Fingerprint = pdfProfileFingerprint(profile, req.Collection, original)
 	req.LegacyOCRFingerprint = chunker.ScopedFingerprint(req.Collection, original)
 }
 

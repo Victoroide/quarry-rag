@@ -379,7 +379,7 @@ const claimJobSuffix = `
 		ORDER BY ready.next_attempt_at,ready.created_at FOR UPDATE OF ready SKIP LOCKED LIMIT 1)
 	RETURNING j.document_id,j.attempts,j.lease_token)
 	SELECT d.id::text,j.attempts,d.content,d.metadata,d.file_name,d.file_type,d.s3_key,d.doc_type,d.fingerprint,d.collection,
-		d.text_source,COALESCE(d.incarnation,d.id)::text,j.lease_token::text,d.scoped_vectors,p.profile,p.coverage,p.manifest,
+		d.text_source,COALESCE(d.incarnation,d.id)::text,j.lease_token::text,d.scoped_vectors,p.profile,p.coverage,p.manifest,p.page_results,
 		d.grant_catalog_assigned
 	FROM claimed j JOIN documents d ON d.id=j.document_id
 	LEFT JOIN document_pdf_extractions p ON p.document_id=d.id`
@@ -427,13 +427,13 @@ func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, st
 	for range 10 {
 		j := &domain.Job{LeaseOwner: owner}
 		var id string
-		var metadata, manifest []byte
+		var metadata, manifest, pageResults []byte
 		var fingerprint, profile *string
 		var coverage *domain.PDFCoverage
 		var assigned bool
 		err := c.claimJobLease(ctx, statement, args, func(row pgx.Row) error {
 			return row.Scan(&id, &j.Attempts, &j.Document.Content, &metadata, &j.Document.FileName, &j.Document.FileType,
-				&j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource, &j.Incarnation, &j.LeaseToken, &j.ScopedVectors, &profile, &coverage, &manifest, &assigned)
+				&j.Document.S3Key, &j.DocType, &fingerprint, &j.Collection, &j.Document.TextSource, &j.Incarnation, &j.LeaseToken, &j.ScopedVectors, &profile, &coverage, &manifest, &pageResults, &assigned)
 		})
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, domain.ErrWritersFrozen) {
 			return nil, nil
@@ -470,6 +470,10 @@ func (c *Client) claimJob(ctx context.Context, owner string, maxAttempts int, st
 			j.PDF.Pages, err = domain.DecodePDFPages(manifest)
 			if err != nil {
 				return nil, fmt.Errorf("postgres: load PDF job manifest: %w", err)
+			}
+		} else if j.PDF != nil && j.PDF.Profile == domain.LayoutPDFProfile && len(pageResults) > 0 {
+			if err = json.Unmarshal(pageResults, &j.PDF.PageResults); err != nil {
+				return nil, fmt.Errorf("postgres: load PDF layout sections: %w", err)
 			}
 		}
 		if err = json.Unmarshal(metadata, &j.Document.Metadata); err != nil {

@@ -56,6 +56,7 @@ type AcceptRequest struct {
 	MaxPending               int
 	EvaluationReceipt        string
 	EvaluationVectorIdentity string
+	PDFProfile               string
 	PDF                      *PDFExtraction
 	LegacyParserFingerprint  string
 	LegacyOCRFingerprint     string

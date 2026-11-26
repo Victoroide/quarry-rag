@@ -55,6 +55,9 @@ type ScoredChunkResponse struct {
 	Text        string   `json:"text"`
 	Kind        string   `json:"kind,omitempty"`
 	Quality     string   `json:"quality,omitempty"`
+	Pages       []int    `json:"pages,omitzero"`
+	TableIDs    []string `json:"table_ids,omitzero"`
+	RowIDs      []string `json:"row_ids,omitzero"`
 	Excerpt     int      `json:"excerpt,omitempty"`
 	Truncated   bool     `json:"truncated,omitempty"`
 	RerankScore *float64 `json:"rerank_score,omitempty"`

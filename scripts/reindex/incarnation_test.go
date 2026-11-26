@@ -257,6 +257,100 @@ func TestVerificationFailsForTaggedVectorDocuments(t *testing.T) {
 	require.Contains(t, rep.Failures, "1 documents store tagged vectors, which a reindex does not stage")
 }
 
+func TestStagedRecordsPreserveLayoutProvenance(t *testing.T) {
+	doc := newDoc("alpha", "report", "Region: EMEA | Revenue: 120")
+	makeSource := func(incarnation string, zeroVector bool) vectorReader {
+		src, _ := memoryPinecone()
+		chunks := sourceChunks(doc, incarnationSnapshot(doc).Chunks, sourceModel)
+		chunks[0].VectorIncarnation = incarnation
+		if zeroVector {
+			chunks[0].Embedding = make([]float32, testDims)
+		}
+		chunks[0].Metadata["pages"] = []int{2, 5}
+		chunks[0].Metadata["table_ids"] = []string{"p2-t1"}
+		chunks[0].Metadata["row_ids"] = []string{"p2-t1-r3"}
+		require.NoError(t, src.Upsert(t.Context(), "", chunks))
+		return src
+	}
+
+	for _, tc := range []struct {
+		name           string
+		snapProvenance bool
+		source         func() vectorReader
+		copied         int
+		embedded       int
+		wantProvenance bool
+	}{
+		{
+			name:           "copied from a Pinecone source record",
+			snapProvenance: false,
+			source:         func() vectorReader { return makeSource(doc.ID, false) },
+			copied:         1,
+			embedded:       0,
+			wantProvenance: true,
+		},
+		{
+			name:           "recomputed from snapshot layout provenance",
+			snapProvenance: true,
+			source:         func() vectorReader { return nil },
+			copied:         0,
+			embedded:       1,
+			wantProvenance: true,
+		},
+		{
+			name:           "recomputed from invalid embedding keeps source provenance",
+			snapProvenance: false,
+			source:         func() vectorReader { return makeSource(doc.ID, true) },
+			copied:         0,
+			embedded:       1,
+			wantProvenance: true,
+		},
+		{
+			name:           "stale incarnation source provenance is not copied",
+			snapProvenance: false,
+			source:         func() vectorReader { return makeSource(otherIncarnation, false) },
+			copied:         0,
+			embedded:       1,
+			wantProvenance: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := incarnationSnapshot(doc)
+			if tc.snapProvenance {
+				snapshot.Chunks[0].Metadata = map[string]any{
+					"pages":     []int{2, 5},
+					"table_ids": []string{"p2-t1"},
+					"row_ids":   []string{"p2-t1-r3"},
+				}
+			}
+			embedder := &countingEmbedder{model: sourceModel}
+			rep, target, _ := stageSnapshot(t, snapshot, tc.source(), embedder)
+			require.True(t, rep.Complete)
+			require.Equal(t, tc.copied, rep.Copied)
+			require.Equal(t, tc.embedded, rep.Embedded)
+
+			fetched, err := target.Fetch(t.Context(), []string{incarnationChunk})
+			require.NoError(t, err)
+			require.Contains(t, fetched, incarnationChunk)
+			queried, err := target.QueryFiltered(t.Context(), embedWith(sourceModel, doc.Texts[0]), 1, domain.VectorFilter{DocumentIDs: []string{doc.ID}})
+			require.NoError(t, err)
+			require.Len(t, queried, 1)
+
+			for _, md := range []map[string]any{fetched[incarnationChunk].Metadata, queried[0].Chunk.Metadata} {
+				if tc.wantProvenance {
+					require.Equal(t, []int{2, 5}, md["pages"])
+					require.Equal(t, []string{"p2-t1"}, md["table_ids"])
+					require.Equal(t, []string{"p2-t1-r3"}, md["row_ids"])
+				} else {
+					require.NotContains(t, md, "pages")
+					require.NotContains(t, md, "table_ids")
+					require.NotContains(t, md, "row_ids")
+				}
+			}
+		})
+	}
+}
+
 func TestTaggedVectorDocumentsBlockStagingAndAreCounted(t *testing.T) {
 	f := newFixture(t)
 	h := newHarness(t, f, "pinecone")

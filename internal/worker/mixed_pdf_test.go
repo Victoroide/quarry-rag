@@ -252,3 +252,75 @@ func TestMixedPDFWorkerCheckpointsBeforePipeline(t *testing.T) {
 		})
 	}
 }
+
+type layoutTestAnalyzer struct {
+	fn func(context.Context, string, string, string, int, func(context.Context) error) (ocr.LayoutResults, error)
+}
+
+func (a layoutTestAnalyzer) Extract(context.Context, string) (string, error) {
+	return "", errors.New("legacy detection called for layout PDF")
+}
+
+func (a layoutTestAnalyzer) ExtractPages(context.Context, string, string, string, int, func(context.Context) error) (ocr.PageResults, error) {
+	return ocr.PageResults{}, errors.New("mixed detection called for layout PDF")
+}
+
+func (a layoutTestAnalyzer) AnalyzePages(ctx context.Context, key, profile, window string, count int, accepted func(context.Context) error) (ocr.LayoutResults, error) {
+	res, err := a.fn(ctx, key, profile, window, count, accepted)
+	if err == nil && accepted != nil {
+		err = accepted(ctx)
+	}
+	return res, err
+}
+
+func TestLayoutPDFWorkerUsesAnalyzePagesOnlyAndCarriesSections(t *testing.T) {
+	s := &pdfTestStore{ocrLeaseStore: &ocrLeaseStore{leaseTestStore: leaseStore(0)}}
+	job := ocrJob()
+	job.Document.TextSource = "parser"
+	job.Document.Content = ""
+	job.PDF = &domain.PDFExtraction{
+		Profile:  domain.LayoutPDFProfile,
+		Coverage: domain.PDFPending,
+		Pages: domain.PDFPages{
+			{Number: 1, Evidence: domain.PDFEmbedded, Text: "Embedded digital text"},
+			{Number: 2, Evidence: domain.PDFBlank},
+		},
+	}
+
+	calls := 0
+	var gotSections []domain.LayoutSection
+	var gotText string
+	wk := New(s, []pipeline.Stage{ocrStage{func(ic *pipeline.IngestContext) error {
+		gotSections = ic.LayoutSections
+		gotText = ic.RawText
+		return nil
+	}}}, nil, Options{OCR: layoutTestAnalyzer{fn: func(_ context.Context, key, profile, _ string, count int, _ func(context.Context) error) (ocr.LayoutResults, error) {
+		calls++
+		require.Equal(t, *job.Document.S3Key, key)
+		require.Equal(t, domain.LayoutPDFProfile, profile)
+		require.Equal(t, 2, count)
+		return ocr.LayoutResults{Pages: map[int]ocr.LayoutPage{
+			1: {Present: true, Sections: []domain.LayoutSection{{Page: 1, TableID: "p1-t1", RowID: "p1-t1-r1", Text: "Column: Value"}}, Text: "Column: Value"},
+			2: {Present: true},
+		}}, nil
+	}}})
+	wk.process(t.Context(), job)
+	require.Equal(t, 1, calls)
+	require.NotNil(t, s.saved)
+	require.Equal(t, domain.PDFComplete, s.saved.Coverage)
+	require.Equal(t, "Column: Value", gotText)
+	require.Equal(t, []domain.LayoutSection{{Page: 1, TableID: "p1-t1", RowID: "p1-t1-r1", Text: "Column: Value"}}, gotSections)
+
+	// Retry after checkpoint reuses persisted PageResults sections without calling Textract again.
+	retryJob := ocrJob()
+	retryJob.Document.Content = "Column: Value"
+	retryJob.PDF = &domain.PDFExtraction{
+		Profile:     domain.LayoutPDFProfile,
+		Coverage:    domain.PDFComplete,
+		PageResults: s.saved.Pages,
+	}
+	gotSections = nil
+	wk.process(t.Context(), retryJob)
+	require.Equal(t, 1, calls)
+	require.Equal(t, []domain.LayoutSection{{Page: 1, TableID: "p1-t1", RowID: "p1-t1-r1", Text: "Column: Value"}}, gotSections)
+}

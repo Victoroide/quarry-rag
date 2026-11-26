@@ -361,6 +361,7 @@ func TestOwnedIngestRejectsReservedMetadata(t *testing.T) {
 		"vector_attempt", "Vector_Attempt", "document_incarnation", "Document_Incarnation",
 		"owner_id", "principal_id", "incarnation", "doc_id", "document_id",
 		"collection", "doc_type", "chunk_index", "kind", "text",
+		"pages", "Pages", "table_ids", "row_ids",
 	} {
 		t.Run(key, func(t *testing.T) {
 			h := newOwnedHarness(t)
@@ -506,7 +507,7 @@ func TestOwnedMixedPDFNeverUsesSharedOrLegacyLookups(t *testing.T) {
 	require.NotNil(t, req.PDF)
 	require.False(t, req.TryLegacyPDFText)
 	require.Equal(t, domain.ContentDedupOff, req.ContentDedup)
-	require.Equal(t, mixedPDFFingerprint("team", string(data)), req.Fingerprint)
+	require.Equal(t, pdfProfileFingerprint(domain.MixedPDFProfile, "team", string(data)), req.Fingerprint)
 	require.Zero(t, h.store.sharedReads)
 	require.Len(t, h.objects.uploads, 1)
 }

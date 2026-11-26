@@ -24,8 +24,10 @@ func extractUploadText(ctx context.Context, opts ingestOptions, ft extractor.Fil
 	var text string
 	var extractErr error
 	switch {
+	case ft == extractor.FileTypePDF && opts.pdfLayout && opts.extractPages == nil:
+		extractErr = extractor.ErrExtractionUnavailable
 	case ft == extractor.FileTypePDF && opts.extractPages != nil:
-		out.pdf, text, extractErr = inspectPDFUpload(ctx, opts.extractPages, data)
+		out.pdf, text, extractErr = inspectPDFUpload(ctx, opts.extractPages, data, opts.pdfLayout)
 	case ft == extractor.FileTypeText:
 		extract := tracing.WrapExtract(func(ctx context.Context, ft extractor.FileType, data []byte) (string, error) {
 			return extractor.New(ft).Extract(ctx, bytes.NewReader(data))
