@@ -88,6 +88,7 @@ GRANT SELECT, INSERT, UPDATE ON public.document_pdf_extractions TO quarry_servic
 GRANT SELECT, INSERT, UPDATE ON public.document_deletions TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
   public.evaluation_fixture_reserved(uuid), public.document_deletion_active(),
+  public.document_deletion_active_shared(),
   public.document_deletion_reserved(uuid) TO quarry_service;
 GRANT SELECT (revision) ON public.grant_catalog_policy_revision TO quarry_operator;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_source_snapshot(uuid) TO quarry_operator;
@@ -169,14 +170,25 @@ four functions and access to the deletion receipts before starting upgraded
 processes. Ordinary admission, job leasing, removal and the deletion-mode
 check use these functions even when evaluation fixtures are disabled and
 checkpointed deletion is inactive. The login reads the activation marker only
-through `document_deletion_active` and needs no privilege on its table.
-Substitute the deployed schema and serving role names as needed.
+through `document_deletion_active` and `document_deletion_active_shared` and
+needs no privilege on its table. Substitute the deployed schema and serving
+role names as needed.
 
 ```sql
 GRANT SELECT, INSERT, UPDATE ON public.document_deletions TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
   public.evaluation_fixture_reserved(uuid), public.document_deletion_active(),
   public.document_deletion_reserved(uuid) TO quarry_service;
+```
+
+After applying `030_deletion_mode_lock.sql`, grant execution of
+`document_deletion_active_shared` before enabling
+[owned ingestion](#owned-ingestion) with a hosted or offline vector store.
+Admission that may select the tagged vector format holds the activation marker
+through it.
+
+```sql
+GRANT EXECUTE ON FUNCTION public.document_deletion_active_shared() TO quarry_service;
 ```
 
 After applying migration `020_owned_ingestion.sql`, grant reading
