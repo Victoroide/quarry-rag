@@ -55,9 +55,10 @@ func loadContextCoverageFixture(t *testing.T) contextCoverageEvalFixture {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "context_coverage_eval.json"))
 	require.NoError(t, err)
-	require.Equal(t, "c3a3153cee60c87a5f0bc7122a2bc17c3601ddcc579dc44bde0056db44bb5b32", fmt.Sprintf("%x", sha256.Sum256(data)), "frozen context coverage manifest changed")
+	require.Equal(t, "b2941a2e6ebd03844cbdeb8b6c05d6031feb99e948e82ccd5d3ce5cc6d961aa3", fmt.Sprintf("%x", sha256.Sum256(data)), "frozen context coverage manifest changed")
 	var fix contextCoverageEvalFixture
 	require.NoError(t, json.Unmarshal(data, &fix))
+	require.Equal(t, "context-coverage-v2", fix.CorpusVersion)
 	return fix
 }
 
@@ -235,8 +236,20 @@ func TestContextCoverageHeldOutPairedEvaluation(t *testing.T) {
 		require.Zero(t, dRes.outOfScopeHits, q.ID)
 		require.Zero(t, eRes.outOfScopeHits, q.ID)
 		require.Equal(t, candidateChunkIDs(rRes.qc.RetrievedChunks), candidateChunkIDs(dRes.qc.RetrievedChunks), q.ID)
-		require.Equal(t, dRes.qc.Excerpts, eRes.qc.Excerpts, q.ID)
-		require.Equal(t, dRes.qc.Truncated, eRes.qc.Truncated, q.ID)
+		// Evidence mode skips reranking, so compare excerpts under equal ordering.
+		if len(q.RerankOrder) == 0 {
+			require.Equal(t, dRes.qc.Excerpts, eRes.qc.Excerpts, q.ID)
+			require.Equal(t, dRes.qc.Truncated, eRes.qc.Truncated, q.ID)
+		}
+		if strings.HasPrefix(q.ID, "ov-precision-") {
+			require.Len(t, rRes.qc.RetrievedChunks, len(q.RerankOrder), q.ID)
+			for i, chunk := range rRes.qc.RetrievedChunks {
+				require.Equal(t, q.RerankOrder[i], fmt.Sprintf("%s#%d", chunk.Chunk.DocumentID, chunk.Chunk.Index), q.ID)
+			}
+			if dRes.allFactsFound != 1 {
+				t.Errorf("%s: diverse selection missed required facts", q.ID)
+			}
+		}
 
 		rankedOverlapSum += rRes.allFactsFound
 		diverseOverlapSum += dRes.allFactsFound

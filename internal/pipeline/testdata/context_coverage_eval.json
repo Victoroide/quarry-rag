@@ -1,5 +1,5 @@
 {
-  "corpus_version": "context-coverage-v1",
+  "corpus_version": "context-coverage-v2",
   "chunk_tokens": 128,
   "chunk_overlap": 32,
   "max_chunks": 10,
@@ -1070,6 +1070,294 @@
       "visible": true,
       "content": "Tribology bearing wear viscosity viscometers calibrate monthly using certified mineral reference oil.",
       "preview": "Tribology bearing wear viscosity viscometers calibrate monthly using certified mineral reference oil."
+    },
+    {
+      "id": "precision-ko-equipment-lead",
+      "collection": "precision-ko-equipment",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Equipment intake register. 장비 등록 신청서는 각 부서 책임자가 전자 결재로 확인합니다. The equipment intake register lists asset tags and handover dates. Before dispatch, the team signs a receipt, records the serial identifier on the intake form and files the receipt alongside the signed invoice. At closing, the clerk reconciles the equipment register against the delivery manifest and locks the cabinet. 부록은 등급을 설명합니다.",
+      "preview": "Equipment intake register. 장비 등록 신청서는 각 부서 책임자가 전자 결재로 확인합니다. The equipment intake register lists asset tags and handove"
+    },
+    {
+      "id": "precision-ko-equipment-variant",
+      "collection": "precision-ko-equipment",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Equipment intake register. 장비 등록 신청서는 각 부서 책임자가 전자 결재로 확인합니다. The equipment intake register lists asset tags and handover dates. Before dispatch, the team signs a receipt, records the serial identifier on the intake form and files the receipt alongside the signed invoice. At closing, the clerk reconciles the equipment register against the delivery manifest and locks the cabinet. 현장 안전 안내는 별지입니다.",
+      "preview": "Equipment intake register. 장비 등록 신청서는 각 부서 책임자가 전자 결재로 확인합니다. The equipment intake register lists asset tags and handove"
+    },
+    {
+      "id": "precision-ko-equipment-second",
+      "collection": "precision-ko-equipment",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Equipment intake register. 반납할 장비는 건물 서쪽의 자산 보관실에 직접 제출합니다. At the return counter, asset staff use the equipment intake register as an inventory reference. A technician checks the connectors and records any damage before the case is moved to the appropriate shelf. Staff sign the custody slip, attach a copy to the outer case, then place the original with returned inventory.",
+      "preview": "Equipment intake register. 반납할 장비는 건물 서쪽의 자산 보관실에 직접 제출합니다. At the return counter, asset staff use the equipment intake "
+    },
+    {
+      "id": "precision-ko-archive-lead",
+      "collection": "precision-ko-archive",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Meeting archive transfer. 회의 기록의 원본은 기록실의 잠금 서랍에 보관합니다. The meeting archive transfer log assigns each folder a reference code based on the committee and filing date. The secretary checks the minutes against the sign-in sheet and inserts any corrected pages next to the signed original. The archive keeps bound indexes in filing order and gives visitors temporary access slips. 색상표는 별지에 있습니다.",
+      "preview": "Meeting archive transfer. 회의 기록의 원본은 기록실의 잠금 서랍에 보관합니다. The meeting archive transfer log assigns each folder a reference"
+    },
+    {
+      "id": "precision-ko-archive-variant",
+      "collection": "precision-ko-archive",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Meeting archive transfer. 회의 기록의 원본은 기록실의 잠금 서랍에 보관합니다. The meeting archive transfer log assigns each folder a reference code based on the committee and filing date. The secretary checks the minutes against the sign-in sheet and inserts any corrected pages next to the signed original. The archive keeps bound indexes in filing order and gives visitors temporary access slips. 업무 개선 제안은 별지입니다.",
+      "preview": "Meeting archive transfer. 회의 기록의 원본은 기록실의 잠금 서랍에 보관합니다. The meeting archive transfer log assigns each folder a reference"
+    },
+    {
+      "id": "precision-ko-archive-second",
+      "collection": "precision-ko-archive",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Meeting archive transfer. 이관할 회의 기록은 목요일 오후에 중앙 문서고가 인수합니다. During meeting archive transfer, the records manager takes custody of containers at the delivery desk. A worker sorts each batch by preservation needs and stores fragile papers on separate shelves. The transport team records the date of receipt on the delivery sheet and returns a signed copy to the originating office.",
+      "preview": "Meeting archive transfer. 이관할 회의 기록은 목요일 오후에 중앙 문서고가 인수합니다. During meeting archive transfer, the records manager takes c"
+    },
+    {
+      "id": "precision-zh-lab-lead",
+      "collection": "precision-zh-lab",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Lab instrument checkout. 实验仪器借用申请应由当班主管签字。 The lab instrument checkout register lists the equipment serial identifier, the user and the scheduled pickup time. Before removing an instrument, staff compare the latch and power cable against the inventory slip. The laboratory keeps signed slips together in a locked drawer next to the main entrance and updates its inventory after each shift. 附录介绍普通纸张规格。",
+      "preview": "Lab instrument checkout. 实验仪器借用申请应由当班主管签字。 The lab instrument checkout register lists the equipment serial identifier, t"
+    },
+    {
+      "id": "precision-zh-lab-variant",
+      "collection": "precision-zh-lab",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Lab instrument checkout. 实验仪器借用申请应由当班主管签字。 The lab instrument checkout register lists the equipment serial identifier, the user and the scheduled pickup time. Before removing an instrument, staff compare the latch and power cable against the inventory slip. The laboratory keeps signed slips together in a locked drawer next to the main entrance and updates its inventory after each shift. 另附宣传组的非常规海报。",
+      "preview": "Lab instrument checkout. 实验仪器借用申请应由当班主管签字。 The lab instrument checkout register lists the equipment serial identifier, t"
+    },
+    {
+      "id": "precision-zh-lab-second",
+      "collection": "precision-zh-lab",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Lab instrument checkout. 归还实验仪器时须在交接台出示校准单。 During lab instrument checkout and return, staff log the baseline readings and take humidity measurements at the receiving counter. A calibration technician inspects the seals and records visible wear. The receiving team attaches a tag that specifies either immediate servicing or temporary storage in the climate-controlled room.",
+      "preview": "Lab instrument checkout. 归还实验仪器时须在交接台出示校准单。 During lab instrument checkout and return, staff log the baseline readings a"
+    },
+    {
+      "id": "precision-ja-library-lead",
+      "collection": "precision-ja-library",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Reading room collections. 閲覧資料の予約は地域資料室の受付で行います。 To access reading room collections, visitors bring their membership card to the service desk and complete an item request. Staff locate the shelf reference in the catalog, inspect the cover for visible damage and reserve an appropriate study table. Each request moves into the daily register after a worker confirms the pickup time. 野外展示の案内は別紙です。",
+      "preview": "Reading room collections. 閲覧資料の予約は地域資料室の受付で行います。 To access reading room collections, visitors bring their membership car"
+    },
+    {
+      "id": "precision-ja-library-variant",
+      "collection": "precision-ja-library",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Reading room collections. 閲覧資料の予約は地域資料室の受付で行います。 To access reading room collections, visitors bring their membership card to the service desk and complete an item request. Staff locate the shelf reference in the catalog, inspect the cover for visible damage and reserve an appropriate study table. Each request moves into the daily register after a worker confirms the pickup time. 次回は無料講座の特集です。",
+      "preview": "Reading room collections. 閲覧資料の予約は地域資料室の受付で行います。 To access reading room collections, visitors bring their membership car"
+    },
+    {
+      "id": "precision-ja-library-second",
+      "collection": "precision-ja-library",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Reading room collections. 閲覧資料を返却する際は机に置いた青い札を係員に渡してください。 When returning reading room collections, visitors hand the item to a desk attendant. The attendant checks the protective cover and enters the condition in the preservation record. Oversized documents stay on a receiving table until a cart becomes available. Staff move fragile volumes to a separate shelf in the cabinet.",
+      "preview": "Reading room collections. 閲覧資料を返却する際は机に置いた青い札を係員に渡してください。 When returning reading room collections, visitors hand the ite"
+    },
+    {
+      "id": "precision-manual-pages-lead",
+      "collection": "precision-manual-pages",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "The dispatch supervisor signs each parcel manifest before the courier collects it. Clerks reconcile label records against the station log, verify the carrier assignment and enter the pickup time in the dispatch ledger. Signed copies are archived in the depot cabinet by date. The day shift records delayed collections and briefs the receiving desk on changes to the route or vehicle assignment. Page 3 of 12",
+      "preview": "The dispatch supervisor signs each parcel manifest before the courier collects it. Clerks reconcile label records agains"
+    },
+    {
+      "id": "precision-manual-pages-variant",
+      "collection": "precision-manual-pages",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "The dispatch supervisor signs each parcel manifest before the courier collects it. Clerks reconcile label records against the station log, verify the carrier assignment and enter the pickup time in the dispatch ledger. Signed copies are archived in the depot cabinet by date. The day shift records delayed collections and briefs the receiving desk on changes to the route or vehicle assignment. Page 4 of 12",
+      "preview": "The dispatch supervisor signs each parcel manifest before the courier collects it. Clerks reconcile label records agains"
+    },
+    {
+      "id": "precision-manual-pages-second",
+      "collection": "precision-manual-pages",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Damaged parcels are held inside the inspection cage pending an assessment. Receiving staff photograph the damage and attach the images to their incident entry, including the delivery address and the condition of the seal. The handler weighs the parcel and uses padded containers to secure loose items while awaiting instructions from the carrier. A depot supervisor assigns the incident to the claim team.",
+      "preview": "Damaged parcels are held inside the inspection cage pending an assessment. Receiving staff photograph the damage and att"
+    },
+    {
+      "id": "precision-manual-copyright-lead",
+      "collection": "precision-manual-copyright",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "The maintenance crew checks all trail bridges on the first Monday of each month. During inspections, crew members clear debris around support posts and record movement on the deck. They mark repairs on the trail maintenance map and identify which equipment the depot should supply. The inspection lead sends bridge records to the park office and files the signed sheet with the seasonal work schedule. © 2024 Parks Office",
+      "preview": "The maintenance crew checks all trail bridges on the first Monday of each month. During inspections, crew members clear "
+    },
+    {
+      "id": "precision-manual-copyright-variant",
+      "collection": "precision-manual-copyright",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "The maintenance crew checks all trail bridges on the first Monday of each month. During inspections, crew members clear debris around support posts and record movement on the deck. They mark repairs on the trail maintenance map and identify which equipment the depot should supply. The inspection lead sends bridge records to the park office and files the signed sheet with the seasonal work schedule. © 2025 Parks Office",
+      "preview": "The maintenance crew checks all trail bridges on the first Monday of each month. During inspections, crew members clear "
+    },
+    {
+      "id": "precision-manual-copyright-second",
+      "collection": "precision-manual-copyright",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "The ranger posts temporary trail closures at the northern entrance. The ranger selects a diversion with access to emergency call points and records the boundary in the shift log. Crews bring portable fences to the trail and make space for the vehicle bringing replacement panels. The visitor center updates its map at the end of each shift and relays changes to the following patrol.",
+      "preview": "The ranger posts temporary trail closures at the northern entrance. The ranger selects a diversion with access to emerge"
+    },
+    {
+      "id": "precision-ko-an-lead",
+      "collection": "precision-ko-an",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Remote duty requests. 위원회는 외부 기관의 원격 근무 업무를 접수합니다. For remote duty requests, committee members record a contact address and a statement of work. The team schedules a weekly meeting to evaluate equipment availability, reporting requirements and travel arrangements. A duty supervisor files the decision and sends a copy to the departmental coordinator.",
+      "preview": "Remote duty requests. 위원회는 외부 기관의 원격 근무 업무를 접수합니다. For remote duty requests, committee members record a contact address "
+    },
+    {
+      "id": "precision-ko-an-variant",
+      "collection": "precision-ko-an",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Remote duty requests. 위원회는 외부 기관의 원격 근무 업무를 안 받습니다. For remote duty requests, committee members record a contact address and a statement of work. The team schedules a weekly meeting to evaluate equipment availability, reporting requirements and travel arrangements. A duty supervisor files the decision and sends a copy to the departmental coordinator.",
+      "preview": "Remote duty requests. 위원회는 외부 기관의 원격 근무 업무를 안 받습니다. For remote duty requests, committee members record a contact address"
+    },
+    {
+      "id": "precision-ko-an-second",
+      "collection": "precision-ko-an",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Remote duty requests. 접수 창구는 금요일 오후에 문을 닫습니다. The remote duty requests portal accepts attachments in plain text. After submitting a file, staff can check the status in the portal or ask the support desk for an identifier. The correspondence officer collates questions at the end of each shift and circulates a digest to the staff assigned to the intake queue.",
+      "preview": "Remote duty requests. 접수 창구는 금요일 오후에 문을 닫습니다. The remote duty requests portal accepts attachments in plain text. After s"
+    },
+    {
+      "id": "precision-ko-mot-lead",
+      "collection": "precision-ko-mot",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Minutes correction requests. 서기는 인계 이후에 회의 기록을 수정할 수 있습니다. For minutes correction requests, a clerk collects the marked draft and makes a copy for the recording secretary. Each page carries the committee name and a revision stamp. The committee uses the register to trace the custody of the document and signs the cover sheet when it assigns the request.",
+      "preview": "Minutes correction requests. 서기는 인계 이후에 회의 기록을 수정할 수 있습니다. For minutes correction requests, a clerk collects the marked "
+    },
+    {
+      "id": "precision-ko-mot-variant",
+      "collection": "precision-ko-mot",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Minutes correction requests. 서기는 인계 이후에 회의 기록을 수정하지 못합니다. For minutes correction requests, a clerk collects the marked draft and makes a copy for the recording secretary. Each page carries the committee name and a revision stamp. The committee uses the register to trace the custody of the document and signs the cover sheet when it assigns the request.",
+      "preview": "Minutes correction requests. 서기는 인계 이후에 회의 기록을 수정하지 못합니다. For minutes correction requests, a clerk collects the marked d"
+    },
+    {
+      "id": "precision-ko-mot-second",
+      "collection": "precision-ko-mot",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Minutes correction requests. 위원장은 서류에 적힌 회의 날짜를 확인합니다. The minutes correction requests desk keeps a schedule of meetings and receives reports about errors in printed copies. The desk sends each report to the chair, who checks the time and date of the original session. After filing a report, the desk issues a brief receipt that records the reviewer and filing date.",
+      "preview": "Minutes correction requests. 위원장은 서류에 적힌 회의 날짜를 확인합니다. The minutes correction requests desk keeps a schedule of meetings"
+    },
+    {
+      "id": "precision-zh-bu-lead",
+      "collection": "precision-zh-bu",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Lab operator entry. 注册操作员获准进入实验室。 The lab operator entry register describes the preparation area and the duties of the shift supervisor. Each operator records a station assignment, takes a clean protective coat and reviews the equipment status sheet. Before the session begins, the supervisor checks the visitor register against the scheduled work.",
+      "preview": "Lab operator entry. 注册操作员获准进入实验室。 The lab operator entry register describes the preparation area and the duties of the s"
+    },
+    {
+      "id": "precision-zh-bu-variant",
+      "collection": "precision-zh-bu",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Lab operator entry. 注册操作员不获准进入实验室。 The lab operator entry register describes the preparation area and the duties of the shift supervisor. Each operator records a station assignment, takes a clean protective coat and reviews the equipment status sheet. Before the session begins, the supervisor checks the visitor register against the scheduled work.",
+      "preview": "Lab operator entry. 注册操作员不获准进入实验室。 The lab operator entry register describes the preparation area and the duties of the "
+    },
+    {
+      "id": "precision-zh-bu-second",
+      "collection": "precision-zh-bu",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Lab operator entry. 实验访客应在外部柜台登记。 The lab operator entry desk schedules visitors using the outside calendar. Staff reserve a waiting bench for each group and give the guide a summary of the planned route. The building supervisor confirms that the group has left the site and records the departure in a daily spreadsheet before the desk closes.",
+      "preview": "Lab operator entry. 实验访客应在外部柜台登记。 The lab operator entry desk schedules visitors using the outside calendar. Staff reser"
+    },
+    {
+      "id": "precision-ja-nai-lead",
+      "collection": "precision-ja-nai",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Collection withdrawal procedure. 職員は閉館前に閲覧資料を外へ持ち出せる。 The collection withdrawal procedure requires staff to record the item identifier and describe the container. At the service window, the attendant checks the register for any pending requests and prepares a receipt. Records of material transfers are filed in the back office according to the date of the transaction.",
+      "preview": "Collection withdrawal procedure. 職員は閉館前に閲覧資料を外へ持ち出せる。 The collection withdrawal procedure requires staff to record the i"
+    },
+    {
+      "id": "precision-ja-nai-variant",
+      "collection": "precision-ja-nai",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Collection withdrawal procedure. 職員は閉館前に閲覧資料を外へ持ち出せない。 The collection withdrawal procedure requires staff to record the item identifier and describe the container. At the service window, the attendant checks the register for any pending requests and prepares a receipt. Records of material transfers are filed in the back office according to the date of the transaction.",
+      "preview": "Collection withdrawal procedure. 職員は閉館前に閲覧資料を外へ持ち出せない。 The collection withdrawal procedure requires staff to record the "
+    },
+    {
+      "id": "precision-ja-nai-second",
+      "collection": "precision-ja-nai",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Collection withdrawal procedure. 搬入口で到着した資料を台帳に記録します。 The collection withdrawal procedure includes a separate route for deliveries arriving through the main gate. An employee meets each driver, confirms the assigned entrance and issues a receipt for the shipment. Empty transport crates return to storage after the receiving office has counted their contents.",
+      "preview": "Collection withdrawal procedure. 搬入口で到着した資料を台帳に記録します。 The collection withdrawal procedure includes a separate route for "
+    },
+    {
+      "id": "precision-unit-cap-lead",
+      "collection": "precision-unit-cap",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Lithium cell storage. The stockroom holds up to 45 cases of lithium cells behind the mesh barrier. The lithium cell storage stockroom records incoming containers by supplier and keeps the dispatch slips in a drawer. Workers inspect packing materials before accepting a delivery. A battery specialist records the inspection result, assigns shelf space and adds a warning tag to damaged containers.",
+      "preview": "Lithium cell storage. The stockroom holds up to 45 cases of lithium cells behind the mesh barrier. The lithium cell stor"
+    },
+    {
+      "id": "precision-unit-cap-variant",
+      "collection": "precision-unit-cap",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Lithium cell storage. The stockroom holds up to 50 crates of lithium cells behind the mesh barrier. The lithium cell storage stockroom records incoming containers by supplier and keeps the dispatch slips in a drawer. Workers inspect packing materials before accepting a delivery. A battery specialist records the inspection result, assigns shelf space and adds a warning tag to damaged containers.",
+      "preview": "Lithium cell storage. The stockroom holds up to 50 crates of lithium cells behind the mesh barrier. The lithium cell sto"
+    },
+    {
+      "id": "precision-unit-cap-second",
+      "collection": "precision-unit-cap",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Lithium cell storage. The stockroom manager checks the battery cabinet ventilation each morning. The lithium cell storage lab checks cell voltage after incoming material is unpacked. Staff enter results in the measurement log, collect protective sleeves and deposit them in a locked bin. The specialist records the calibration status of the meter at the close of each shift and signs the equipment register.",
+      "preview": "Lithium cell storage. The stockroom manager checks the battery cabinet ventilation each morning. The lithium cell storag"
+    },
+    {
+      "id": "precision-version-lead",
+      "collection": "precision-version",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Trail map versions. Trail map v3.1 remains supported by the park office through the winter. The trail map versions register tracks seasonal route edits and the names of the survey staff assigned to each branch. Workers place display copies at the trail entrances. The park office keeps the release notes in the same cabinet as the signed inspection records and updates the register after distribution.",
+      "preview": "Trail map versions. Trail map v3.1 remains supported by the park office through the winter. The trail map versions regis"
+    },
+    {
+      "id": "precision-version-variant",
+      "collection": "precision-version",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Trail map versions. Trail map v3.2 remains supported by the park office through the winter. The trail map versions register tracks seasonal route edits and the names of the survey staff assigned to each branch. Workers place display copies at the trail entrances. The park office keeps the release notes in the same cabinet as the signed inspection records and updates the register after distribution.",
+      "preview": "Trail map versions. Trail map v3.2 remains supported by the park office through the winter. The trail map versions regis"
+    },
+    {
+      "id": "precision-version-second",
+      "collection": "precision-version",
+      "doc_type": "manual",
+      "visible": true,
+      "content": "Trail map versions. The cartography desk sends updated trail map indexes to ranger stations. The trail map versions catalog stores print plates and annotated surveys in the regional archive. A clerk logs requests for older maps, scans each requested sheet and places the original back in its envelope. Drawers are arranged by route name so that staff can trace changes in the field without removing the archive copy.",
+      "preview": "Trail map versions. The cartography desk sends updated trail map indexes to ranger stations. The trail map versions cata"
     }
   ],
   "overlap_queries": [
@@ -1374,6 +1662,180 @@
         {
           "document_id": "eval-energy-b",
           "excerpt": "Diesel backup generators perform automated thirty-minute load tests biweekly."
+        }
+      ]
+    },
+    {
+      "id": "ov-precision-ko-equipment",
+      "query": "Equipment intake register",
+      "collection": "precision-ko-equipment",
+      "allowed_document_ids": [
+        "precision-ko-equipment-lead",
+        "precision-ko-equipment-variant",
+        "precision-ko-equipment-second"
+      ],
+      "rerank_order": [
+        "precision-ko-equipment-lead#0",
+        "precision-ko-equipment-variant#0",
+        "precision-ko-equipment-second#0"
+      ],
+      "required_docs": [
+        "precision-ko-equipment-lead",
+        "precision-ko-equipment-second"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-ko-equipment-lead",
+          "excerpt": "장비 등록 신청서는 각 부서 책임자가 전자 결재로 확인합니다."
+        },
+        {
+          "document_id": "precision-ko-equipment-second",
+          "excerpt": "반납할 장비는 건물 서쪽의 자산 보관실에 직접 제출합니다."
+        }
+      ]
+    },
+    {
+      "id": "ov-precision-ko-archive",
+      "query": "Meeting archive transfer",
+      "collection": "precision-ko-archive",
+      "allowed_document_ids": [
+        "precision-ko-archive-lead",
+        "precision-ko-archive-variant",
+        "precision-ko-archive-second"
+      ],
+      "rerank_order": [
+        "precision-ko-archive-lead#0",
+        "precision-ko-archive-variant#0",
+        "precision-ko-archive-second#0"
+      ],
+      "required_docs": [
+        "precision-ko-archive-lead",
+        "precision-ko-archive-second"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-ko-archive-lead",
+          "excerpt": "회의 기록의 원본은 기록실의 잠금 서랍에 보관합니다."
+        },
+        {
+          "document_id": "precision-ko-archive-second",
+          "excerpt": "이관할 회의 기록은 목요일 오후에 중앙 문서고가 인수합니다."
+        }
+      ]
+    },
+    {
+      "id": "ov-precision-zh-lab",
+      "query": "Lab instrument checkout",
+      "collection": "precision-zh-lab",
+      "allowed_document_ids": [
+        "precision-zh-lab-lead",
+        "precision-zh-lab-variant",
+        "precision-zh-lab-second"
+      ],
+      "rerank_order": [
+        "precision-zh-lab-lead#0",
+        "precision-zh-lab-variant#0",
+        "precision-zh-lab-second#0"
+      ],
+      "required_docs": [
+        "precision-zh-lab-lead",
+        "precision-zh-lab-second"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-zh-lab-lead",
+          "excerpt": "实验仪器借用申请应由当班主管签字。"
+        },
+        {
+          "document_id": "precision-zh-lab-second",
+          "excerpt": "归还实验仪器时须在交接台出示校准单。"
+        }
+      ]
+    },
+    {
+      "id": "ov-precision-ja-library",
+      "query": "Reading room collections",
+      "collection": "precision-ja-library",
+      "allowed_document_ids": [
+        "precision-ja-library-lead",
+        "precision-ja-library-variant",
+        "precision-ja-library-second"
+      ],
+      "rerank_order": [
+        "precision-ja-library-lead#0",
+        "precision-ja-library-variant#0",
+        "precision-ja-library-second#0"
+      ],
+      "required_docs": [
+        "precision-ja-library-lead",
+        "precision-ja-library-second"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-ja-library-lead",
+          "excerpt": "閲覧資料の予約は地域資料室の受付で行います。"
+        },
+        {
+          "document_id": "precision-ja-library-second",
+          "excerpt": "閲覧資料を返却する際は机に置いた青い札を係員に渡してください。"
+        }
+      ]
+    },
+    {
+      "id": "ov-precision-manual-pages",
+      "query": "dispatch parcel manifest seals and damaged parcels",
+      "collection": "precision-manual-pages",
+      "allowed_document_ids": [
+        "precision-manual-pages-lead",
+        "precision-manual-pages-variant",
+        "precision-manual-pages-second"
+      ],
+      "rerank_order": [
+        "precision-manual-pages-lead#0",
+        "precision-manual-pages-variant#0",
+        "precision-manual-pages-second#0"
+      ],
+      "required_docs": [
+        "precision-manual-pages-lead",
+        "precision-manual-pages-second"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-manual-pages-lead",
+          "excerpt": "The dispatch supervisor signs each parcel manifest before the courier collects it."
+        },
+        {
+          "document_id": "precision-manual-pages-second",
+          "excerpt": "Damaged parcels are held inside the inspection cage pending an assessment."
+        }
+      ]
+    },
+    {
+      "id": "ov-precision-manual-copyright",
+      "query": "park trail maintenance and temporary closure",
+      "collection": "precision-manual-copyright",
+      "allowed_document_ids": [
+        "precision-manual-copyright-lead",
+        "precision-manual-copyright-variant",
+        "precision-manual-copyright-second"
+      ],
+      "rerank_order": [
+        "precision-manual-copyright-lead#0",
+        "precision-manual-copyright-variant#0",
+        "precision-manual-copyright-second#0"
+      ],
+      "required_docs": [
+        "precision-manual-copyright-lead",
+        "precision-manual-copyright-second"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-manual-copyright-lead",
+          "excerpt": "The maintenance crew checks all trail bridges on the first Monday of each month."
+        },
+        {
+          "document_id": "precision-manual-copyright-second",
+          "excerpt": "The ranger posts temporary trail closures at the northern entrance."
         }
       ]
     }
@@ -1895,6 +2357,150 @@
         {
           "document_id": "ctrl-ext-tribology-target",
           "excerpt": "Tribology bearing wear viscosity viscometers calibrate monthly using certified mineral reference oil."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-precision-ko-an",
+      "query": "Remote duty requests",
+      "collection": "precision-ko-an",
+      "allowed_document_ids": [
+        "precision-ko-an-lead",
+        "precision-ko-an-variant",
+        "precision-ko-an-second"
+      ],
+      "rerank_order": [
+        "precision-ko-an-lead#0",
+        "precision-ko-an-variant#0",
+        "precision-ko-an-second#0"
+      ],
+      "required_docs": [
+        "precision-ko-an-variant"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-ko-an-variant",
+          "excerpt": "위원회는 외부 기관의 원격 근무 업무를 안 받습니다."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-precision-ko-mot",
+      "query": "Minutes correction requests",
+      "collection": "precision-ko-mot",
+      "allowed_document_ids": [
+        "precision-ko-mot-lead",
+        "precision-ko-mot-variant",
+        "precision-ko-mot-second"
+      ],
+      "rerank_order": [
+        "precision-ko-mot-lead#0",
+        "precision-ko-mot-variant#0",
+        "precision-ko-mot-second#0"
+      ],
+      "required_docs": [
+        "precision-ko-mot-variant"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-ko-mot-variant",
+          "excerpt": "서기는 인계 이후에 회의 기록을 수정하지 못합니다."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-precision-zh-bu",
+      "query": "Lab operator entry",
+      "collection": "precision-zh-bu",
+      "allowed_document_ids": [
+        "precision-zh-bu-lead",
+        "precision-zh-bu-variant",
+        "precision-zh-bu-second"
+      ],
+      "rerank_order": [
+        "precision-zh-bu-lead#0",
+        "precision-zh-bu-variant#0",
+        "precision-zh-bu-second#0"
+      ],
+      "required_docs": [
+        "precision-zh-bu-variant"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-zh-bu-variant",
+          "excerpt": "注册操作员不获准进入实验室。"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-precision-ja-nai",
+      "query": "Collection withdrawal procedure",
+      "collection": "precision-ja-nai",
+      "allowed_document_ids": [
+        "precision-ja-nai-lead",
+        "precision-ja-nai-variant",
+        "precision-ja-nai-second"
+      ],
+      "rerank_order": [
+        "precision-ja-nai-lead#0",
+        "precision-ja-nai-variant#0",
+        "precision-ja-nai-second#0"
+      ],
+      "required_docs": [
+        "precision-ja-nai-variant"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-ja-nai-variant",
+          "excerpt": "職員は閉館前に閲覧資料を外へ持ち出せない。"
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-precision-unit-cap",
+      "query": "Lithium cell storage",
+      "collection": "precision-unit-cap",
+      "allowed_document_ids": [
+        "precision-unit-cap-lead",
+        "precision-unit-cap-variant",
+        "precision-unit-cap-second"
+      ],
+      "rerank_order": [
+        "precision-unit-cap-lead#0",
+        "precision-unit-cap-variant#0",
+        "precision-unit-cap-second#0"
+      ],
+      "required_docs": [
+        "precision-unit-cap-variant"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-unit-cap-variant",
+          "excerpt": "The stockroom holds up to 50 crates of lithium cells behind the mesh barrier."
+        }
+      ]
+    },
+    {
+      "id": "sq-ext-precision-version",
+      "query": "Trail map versions",
+      "collection": "precision-version",
+      "allowed_document_ids": [
+        "precision-version-lead",
+        "precision-version-variant",
+        "precision-version-second"
+      ],
+      "rerank_order": [
+        "precision-version-lead#0",
+        "precision-version-variant#0",
+        "precision-version-second#0"
+      ],
+      "required_docs": [
+        "precision-version-variant"
+      ],
+      "required_facts": [
+        {
+          "document_id": "precision-version-variant",
+          "excerpt": "Trail map v3.2 remains supported by the park office through the winter."
         }
       ]
     }
