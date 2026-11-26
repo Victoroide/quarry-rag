@@ -54,6 +54,8 @@ func ReadinessHandler(p *Probes) http.HandlerFunc {
 			writeProbeStatus(w, http.StatusServiceUnavailable, "draining")
 		case status.Postgres != "ok":
 			writeProbeStatus(w, http.StatusServiceUnavailable, "unavailable")
+		case !p.authzReady(r.Context()):
+			writeProbeStatus(w, http.StatusServiceUnavailable, "unavailable")
 		default:
 			writeProbeStatus(w, http.StatusOK, "ready")
 		}

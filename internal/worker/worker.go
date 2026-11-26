@@ -33,6 +33,7 @@ type Options struct {
 	Owner                           string
 	Metrics                         *metrics.Service
 	OCR                             TextExtractor
+	RedactTelemetry                 bool
 }
 
 // TextExtractor detects text in an original object stored in S3.
@@ -231,7 +232,13 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 	if w.hostedManifestEnabled() {
 		job.RevisionID = revisionIDForAttempt(job, w.opts.Owner)
 	}
-	attrs := append(tracing.DocumentAttributes(string(job.Document.ID)), attribute.String(tracing.LangSmithKind, "chain"), attribute.Int("quarry.job.attempt", job.Attempts))
+	redact := w.opts.RedactTelemetry || job.Tenant != ""
+	attrs := []attribute.KeyValue{attribute.String(tracing.LangSmithKind, "chain"), attribute.Int("quarry.job.attempt", job.Attempts)}
+	if !redact {
+		attrs = append(tracing.DocumentAttributes(string(job.Document.ID)), attrs...)
+	} else {
+		parent = tracing.WithRedactIdentifiers(parent, true)
+	}
 	parent, span := otel.Tracer("github.com/Victoroide/quarry-rag/internal/worker").Start(parent, "ingest.job", trace.WithNewRoot(), trace.WithAttributes(attrs...))
 	defer span.End()
 	parent = metrics.WithService(parent, w.opts.Metrics)
@@ -255,7 +262,11 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 			case <-ticker.C:
 				ok, err := w.store.HeartbeatJob(leaseCtx, job, w.opts.Lease)
 				if err != nil {
-					slog.ErrorContext(leaseCtx, "renew ingestion lease", "document_id", job.Document.ID, "error", err)
+					if redact {
+						slog.ErrorContext(leaseCtx, "renew ingestion lease", "error", err)
+					} else {
+						slog.ErrorContext(leaseCtx, "renew ingestion lease", "document_id", job.Document.ID, "error", err)
+					}
 				}
 				if err != nil || !ok {
 					cancelLease(errLeaseLost)
@@ -314,7 +325,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		owned, confirmErr := w.store.HeartbeatJob(confirmCtx, job, w.opts.Lease)
 		confirmCancel()
 		if confirmErr != nil || !owned {
-			w.logStateError(job, confirmErr)
+			w.logStateError(redact, job, confirmErr)
 			if w.hostedManifestEnabled() {
 				w.compensateDeleted(parent, job, ic.Chunks)
 			}
@@ -463,7 +474,7 @@ func (w *Worker) compensateDeleted(ctx context.Context, job domain.Job, chunks [
 	defer cancel()
 	exists, err := ds.DocumentExists(checkCtx, job.Document.ID)
 	if err != nil {
-		w.logStateError(job, err)
+		w.logStateError(w.opts.RedactTelemetry || job.Tenant != "", job, err)
 		return
 	}
 	if !exists {
@@ -476,11 +487,12 @@ func (w *Worker) deleteVectors(ctx context.Context, job domain.Job, chunks []dom
 	}
 	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	redact := w.opts.RedactTelemetry || job.Tenant != ""
 	if w.hostedManifestEnabled() {
-		w.logStateError(job, w.deleteAttemptVectors(cleanupCtx, job, chunks))
+		w.logStateError(redact, job, w.deleteAttemptVectors(cleanupCtx, job, chunks))
 		return
 	}
-	w.logStateError(job, w.removeJobVectors(cleanupCtx, job))
+	w.logStateError(redact, job, w.removeJobVectors(cleanupCtx, job))
 }
 
 func (w *Worker) removeJobVectors(ctx context.Context, job domain.Job) error {
@@ -533,14 +545,18 @@ func (w *Worker) deleteAttemptVectors(ctx context.Context, job domain.Job, chunk
 	return revDeleter.DeleteByManifestRevision(ctx, string(job.Document.ID), job.RevisionID, knownIDs)
 }
 
-func (w *Worker) logStateError(job domain.Job, err error) {
+func (w *Worker) logStateError(redact bool, job domain.Job, err error) {
 	if err != nil {
+		if redact {
+			slog.Error("update ingestion state", "error", err)
+			return
+		}
 		slog.Error("update ingestion state", "document_id", job.Document.ID, "error", err)
 	}
 }
 
 func (w *Worker) recordOutcome(ctx context.Context, job domain.Job, result string, err error) {
-	w.logStateError(job, err)
+	w.logStateError(w.opts.RedactTelemetry || job.Tenant != "", job, err)
 	tracing.RecordError(trace.SpanFromContext(ctx), err)
 	if err == nil {
 		w.opts.Metrics.IngestJobs.WithLabelValues(result).Inc()

@@ -49,25 +49,45 @@ func SubjectFromContext(ctx context.Context) (VerifiedSubject, bool) {
 // RequireSubject guards a handler with independent service and delegated subject
 // credentials. Only handlers that enforce the associated grants may use it.
 func RequireSubject(tokens []string, verifier *subjectauth.Verifier, resolver SubjectResolver, next http.HandlerFunc) http.HandlerFunc {
+	return RequireSubjectWithAudit(tokens, verifier, resolver, nil, next)
+}
+
+// RequireSubjectWithAudit guards a handler with independent service and delegated
+// subject credentials and records credential and principal denials in auditor.
+func RequireSubjectWithAudit(tokens []string, verifier *subjectauth.Verifier, resolver SubjectResolver, auditor domain.SecurityAuditRecorder, next http.HandlerFunc) http.HandlerFunc {
 	digests := serviceTokenDigests(tokens)
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store")
-		if len(digests) == 0 || verifier == nil || resolver == nil {
+		// Nothing touches the authority or the audit trail before the service
+		// token matches, so anonymous traffic costs no database round trip.
+		if len(digests) == 0 {
 			subjectUnavailable(w)
 			return
 		}
 		service := r.Header.Values("X-Service-Token")
+		if len(service) != 1 || strings.Contains(service[0], ",") || !matchesServiceToken(service[0], digests) {
+			subjectUnauthorized(w)
+			return
+		}
+		if verifier == nil || resolver == nil {
+			recordSubjectAudit(r.Context(), auditor, "", "", "error", "authority_unavailable")
+			subjectUnavailable(w)
+			return
+		}
 		token := bearerToken(r.Header.Values("Authorization"))
-		if len(service) != 1 || strings.Contains(service[0], ",") || !matchesServiceToken(service[0], digests) || token == "" {
+		if token == "" {
+			recordSubjectAudit(r.Context(), auditor, "", "", "deny", "missing_subject_credential")
 			subjectUnauthorized(w)
 			return
 		}
 		identity, err := verifier.Verify(token)
 		if errors.Is(err, subjectauth.ErrAuthorityUnavailable) {
+			recordSubjectAudit(r.Context(), auditor, "", "", "error", "verifier_unavailable")
 			subjectUnavailable(w)
 			return
 		}
 		if err != nil || !time.Now().Before(identity.ExpiresAt) {
+			recordSubjectAudit(r.Context(), auditor, "", "", "deny", "invalid_or_expired_token")
 			subjectUnauthorized(w)
 			return
 		}
@@ -77,14 +97,17 @@ func RequireSubject(tokens []string, verifier *subjectauth.Verifier, resolver Su
 		subject := VerifiedSubject{Principal: principal, ExpiresAt: identity.ExpiresAt,
 			RecheckTrust: func() error { return verifier.CheckTrust(identity) }}
 		if !subject.ValidAt(time.Now()) {
+			recordSubjectAudit(r.Context(), auditor, principal.TenantID, principal.ID, "deny", "credential_expired")
 			subjectUnauthorized(w)
 			return
 		}
 		if err != nil {
+			recordSubjectAudit(r.Context(), auditor, "", "", "error", "principal_lookup_unavailable")
 			subjectUnavailable(w)
 			return
 		}
 		if !found {
+			recordSubjectAudit(r.Context(), auditor, "", "", "deny", "principal_missing_or_disabled")
 			writeJSONErr(w, http.StatusForbidden, "forbidden", "access denied")
 			return
 		}
@@ -93,15 +116,32 @@ func RequireSubject(tokens []string, verifier *subjectauth.Verifier, resolver Su
 		verified.Header.Del("X-Service-Token")
 		err = verifier.CheckTrust(identity)
 		if errors.Is(err, subjectauth.ErrAuthorityUnavailable) {
+			recordSubjectAudit(r.Context(), auditor, principal.TenantID, principal.ID, "error", "trust_check_unavailable")
 			subjectUnavailable(w)
 			return
 		}
 		if err != nil || !subject.ValidAt(time.Now()) {
+			recordSubjectAudit(r.Context(), auditor, principal.TenantID, principal.ID, "deny", "trust_check_failed")
 			subjectUnauthorized(w)
 			return
 		}
 		next(w, verified)
 	}
+}
+
+func recordSubjectAudit(ctx context.Context, auditor domain.SecurityAuditRecorder, tenantID, principalID, outcome, reason string) {
+	if auditor == nil {
+		return
+	}
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	_ = auditor.RecordSecurityAudit(auditCtx, domain.SecurityAuditEvent{
+		TenantID:    tenantID,
+		PrincipalID: principalID,
+		Action:      "subject_auth",
+		Outcome:     outcome,
+		Reason:      reason,
+	})
 }
 
 func bearerToken(values []string) string {

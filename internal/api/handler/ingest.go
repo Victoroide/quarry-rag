@@ -336,7 +336,11 @@ func releaseAttemptObject(ctx context.Context, cs domain.ChunkStore, s3Client Ob
 	if acceptErr != nil {
 		storedKey, lookupErr := cs.GetDocumentS3Key(cleanupCtx, domain.DocumentID(docID))
 		if lookupErr != nil || (storedKey != nil && *storedKey == key) {
-			slog.WarnContext(cleanupCtx, "retain source file after uncertain acceptance", "document_id", docID, "error", lookupErr)
+			if tracing.RedactIdentifiers(cleanupCtx) {
+				slog.WarnContext(cleanupCtx, "retain source file after uncertain acceptance", "error", lookupErr)
+			} else {
+				slog.WarnContext(cleanupCtx, "retain source file after uncertain acceptance", "document_id", docID, "error", lookupErr)
+			}
 			return
 		}
 	}

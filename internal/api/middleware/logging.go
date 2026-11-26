@@ -4,18 +4,44 @@ package middleware
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // Logging wraps an http.Handler and logs each request's method, path,
 // status code, bytes written, duration, and remote address.
 func Logging(next http.Handler) http.Handler {
+	return loggingHandler(next, false)
+}
+
+// LoggingWithRouteTemplates wraps an http.Handler and logs the matched route
+// template (or "unmatched") in place of the raw request path so path
+// identifiers never reach ordinary access logs.
+func LoggingWithRouteTemplates(next http.Handler) http.Handler {
+	return loggingHandler(next, true)
+}
+
+func loggingHandler(next http.Handler, routeTemplates bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(rw, r)
-		slog.InfoContext(r.Context(), "http request", "method", r.Method, "path", r.URL.Path, "status", rw.statusCode, "bytes", rw.bytes, "duration_ms", float64(time.Since(start))/float64(time.Millisecond), "remote_addr", r.RemoteAddr)
+		path := r.URL.Path
+		if routeTemplates {
+			path = routeTemplate(r.Pattern)
+		}
+		slog.InfoContext(r.Context(), "http request", "method", r.Method, "path", path, "status", rw.statusCode, "bytes", rw.bytes, "duration_ms", float64(time.Since(start))/float64(time.Millisecond), "remote_addr", r.RemoteAddr)
 	})
+}
+
+func routeTemplate(pattern string) string {
+	if pattern == "" {
+		return "unmatched"
+	}
+	if _, path, ok := strings.Cut(pattern, " "); ok && path != "" {
+		return path
+	}
+	return pattern
 }
 
 type responseWriter struct {

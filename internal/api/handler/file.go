@@ -101,7 +101,7 @@ func signDocumentFile(ctx context.Context, cs domain.ChunkStore, id domain.Docum
 func scopedFileHandler(cs domain.ChunkStore, signer FileSigner, opts fileOptions) http.HandlerFunc {
 	now := clockOrDefault(opts.now)
 	return func(w http.ResponseWriter, r *http.Request) {
-		subject, ok := requireScopedSubject(w, r, now)
+		subject, ok := requireAuditedScopedSubject(w, r, now, opts.audit, "file_sign")
 		if !ok {
 			return
 		}
@@ -111,20 +111,24 @@ func scopedFileHandler(cs domain.ChunkStore, signer FileSigner, opts fileOptions
 			return
 		}
 		if _, remainingOK := remainingSigningSeconds(subject.ExpiresAt, now()); !remainingOK {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "credential_expired", parsedID.String(), "")
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 			return
 		}
 		reader, capable := cs.(domain.ScopedDocumentFileReader)
 		if !capable {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "error", "file_storage_unavailable", parsedID.String(), "")
 			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "document file access is unavailable")
 			return
 		}
 		if signer == nil {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "signer_unconfigured", parsedID.String(), "")
 			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
 			return
 		}
 		expiring, supportsTTL := signer.(ExpiringFileSigner)
 		if !supportsTTL {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "error", "file_storage_unavailable", parsedID.String(), "")
 			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "file signing is unavailable")
 			return
 		}
@@ -143,24 +147,29 @@ func scopedFileHandler(cs domain.ChunkStore, signer FileSigner, opts fileOptions
 			return signErr
 		})
 		if errors.Is(err, errScopedCredentialExpired) {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "credential_expired", parsedID.String(), "")
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 			return
 		}
 		if signErr != nil {
-			slog.ErrorContext(r.Context(), "presign scoped document file", "document_id", docID, "error", signErr)
+			slog.ErrorContext(r.Context(), "presign scoped document file", "error", signErr)
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "error", "presign_failed", parsedID.String(), "")
 			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to generate download URL")
 			return
 		}
 		if err != nil {
-			slog.ErrorContext(r.Context(), "get scoped document file", "document_id", docID, "error", err)
+			slog.ErrorContext(r.Context(), "get scoped document file", "error", err)
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "error", "file_lookup_failed", parsedID.String(), "")
 			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to look up document")
 			return
 		}
 		if !res.Active {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "access_denied", parsedID.String(), "")
 			writeJSONError(w, http.StatusForbidden, "forbidden", "access denied")
 			return
 		}
 		if !res.Found {
+			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, nil, "file_sign", "deny", "not_found", parsedID.String(), "")
 			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")
 			return
 		}

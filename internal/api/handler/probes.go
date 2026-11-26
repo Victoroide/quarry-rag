@@ -14,15 +14,25 @@ import (
 
 // Probes shares cached dependency checks and shutdown readiness across handlers.
 type Probes struct {
-	vs       domain.VectorStore
-	cs       domain.ChunkStore
-	objects  *s3store.Client
-	ttl      time.Duration
-	mu       sync.RWMutex
-	status   HealthStatus
-	updated  time.Time
-	refresh  singleflight.Group
-	draining atomic.Bool
+	vs          domain.VectorStore
+	cs          domain.ChunkStore
+	objects     *s3store.Client
+	ttl         time.Duration
+	mu          sync.RWMutex
+	status      HealthStatus
+	updated     time.Time
+	refresh     singleflight.Group
+	draining    atomic.Bool
+	authzMode   string
+	trustCheck  func() error
+	authz       authzResult
+	authzFlight singleflight.Group
+}
+
+// authzResult is the corpus-mode comparison cached for the probe lifetime.
+type authzResult struct {
+	ready   bool
+	updated time.Time
 }
 
 // NewProbes creates dependency probes with a shared cache lifetime.
@@ -94,3 +104,68 @@ func (p *Probes) SetDraining(draining bool) { p.draining.Store(draining) }
 
 // Draining reports whether the server is waiting for traffic to drain.
 func (p *Probes) Draining() bool { return p.draining.Load() }
+
+// SetAuthzChecks configures runtime authorization mode and key-trust checks
+// for readiness probes.
+func (p *Probes) SetAuthzChecks(mode string, trustCheck func() error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.authzMode = mode
+	p.trustCheck = trustCheck
+	p.authz = authzResult{}
+}
+
+func (p *Probes) authzReady(ctx context.Context) bool {
+	p.mu.RLock()
+	mode := p.authzMode
+	trustCheck := p.trustCheck
+	p.mu.RUnlock()
+	if mode == "" {
+		return true
+	}
+	if mode == "grants" && (trustCheck == nil || trustCheck() != nil) {
+		return false
+	}
+	if mode != "service" && mode != "grants" {
+		return false
+	}
+	reader, ok := p.cs.(domain.CorpusModeReader)
+	if !ok {
+		return mode == "service"
+	}
+	return p.corpusModeReady(ctx, reader, mode)
+}
+
+// corpusModeReady compares the stored corpus mode with mode. The comparison is
+// cached for the probe lifetime and shared among concurrent callers, so the
+// public readiness endpoint costs at most one query per interval.
+func (p *Probes) corpusModeReady(ctx context.Context, reader domain.CorpusModeReader, mode string) bool {
+	if ready, fresh := p.cachedAuthz(); fresh {
+		return ready
+	}
+	result := p.authzFlight.DoChan("authz", func() (any, error) {
+		if ready, fresh := p.cachedAuthz(); fresh {
+			return ready, nil
+		}
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		corpusMode, err := reader.CorpusAuthzMode(checkCtx)
+		ready := err == nil && corpusMode == mode
+		p.mu.Lock()
+		p.authz = authzResult{ready: ready, updated: time.Now()}
+		p.mu.Unlock()
+		return ready, nil
+	})
+	select {
+	case outcome := <-result:
+		return outcome.Val.(bool)
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (p *Probes) cachedAuthz() (ready, fresh bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.authz.ready, !p.authz.updated.IsZero() && time.Since(p.authz.updated) < p.ttl
+}

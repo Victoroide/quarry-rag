@@ -20,6 +20,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
 	s3store "github.com/Victoroide/quarry-rag/internal/store/s3"
+	"github.com/Victoroide/quarry-rag/internal/subjectauth"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,6 +45,10 @@ type RouterDeps struct {
 	Reranker              retriever.Reranker
 	NoEvidenceCatalog     *pipeline.NoEvidenceCatalog
 	CitationVerifier      *citationsupport.Verifier
+	SubjectVerifier       *subjectauth.Verifier
+	SubjectResolver       middleware.SubjectResolver
+	ReadAuthority         domain.ReadAuthority
+	AuditRecorder         domain.SecurityAuditRecorder
 	// LegacyDeletionReservations makes ID-only deletion reserve its targets under
 	// the activation lock. The server entry point leaves it off until the
 	// deployment can also quarantine, release and activate.
@@ -106,6 +111,20 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	if probes == nil {
 		probes = handler.NewProbes(deps.VectorStore, deps.ChunkStore, deps.S3Client, deps.Config.HealthCacheTTL)
 	}
+	grantsMode := deps.Config.AuthzMode == config.AuthzModeGrants
+	var modeReader domain.CorpusModeReader
+	if reader, ok := deps.ChunkStore.(domain.CorpusModeReader); ok {
+		modeReader = reader
+	}
+	if grantsMode {
+		var trustCheck func() error
+		if deps.SubjectVerifier != nil {
+			trustCheck = deps.SubjectVerifier.ValidateTrust
+		}
+		probes.SetAuthzChecks(config.AuthzModeGrants, trustCheck)
+	} else if modeReader != nil {
+		probes.SetAuthzChecks(config.AuthzModeService, nil)
+	}
 	mux.HandleFunc("GET /health", handler.HealthHandler(probes))
 	mux.HandleFunc("GET /livez", handler.LivenessHandler())
 	mux.HandleFunc("GET /readyz", handler.ReadinessHandler(probes))
@@ -113,37 +132,79 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	if deps.S3Client != nil {
 		objects = tracing.WrapObjectStore(deps.S3Client)
 	}
-	mux.HandleFunc("POST /ingest", middleware.RequireServiceTokens(tokens, handler.IngestHandler(deps.Worker, deps.ChunkStore, objects, deps.Config.MaxUploadBytes, ingestOpts...)))
+	protectData := func(next http.HandlerFunc) http.HandlerFunc {
+		if grantsMode {
+			return middleware.RequireSubjectWithAudit(tokens, deps.SubjectVerifier, deps.SubjectResolver, deps.AuditRecorder,
+				middleware.RequireAuthzMode(config.AuthzModeGrants, modeReader, next))
+		}
+		return middleware.RequireServiceTokens(tokens, middleware.RequireAuthzMode(config.AuthzModeService, modeReader, next))
+	}
+	if grantsMode {
+		ingestOpts = append(ingestOpts, handler.WithOwnedIngestion(), handler.WithIngestAudit(deps.AuditRecorder))
+	}
+	mux.HandleFunc("POST /ingest", protectData(handler.IngestHandler(deps.Worker, deps.ChunkStore, objects, deps.Config.MaxUploadBytes, ingestOpts...)))
 	queryOpts := []handler.QueryOption{handler.WithReranker(deps.Reranker), handler.WithNoEvidenceCatalog(deps.NoEvidenceCatalog)}
 	if deps.CitationVerifier != nil {
 		queryOpts = append(queryOpts, handler.WithCitationSupport(deps.CitationVerifier))
 	}
-	mux.HandleFunc("POST /query", middleware.RequireServiceTokens(tokens, handler.QueryHandler(deps.Retriever, deps.Ambassador, deps.Config, deps.PGPool, queryOpts...)))
-	mux.HandleFunc("GET /documents", middleware.RequireServiceTokens(tokens, handler.ListDocumentsHandler(deps.ChunkStore)))
-	mux.HandleFunc("GET /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DocumentStatusHandler(deps.ChunkStore)))
+	if grantsMode {
+		queryOpts = append(queryOpts, handler.WithAuthorizedRetrieval(deps.ReadAuthority), handler.WithQueryAudit(deps.AuditRecorder))
+	}
+	mux.HandleFunc("POST /query", protectData(handler.QueryHandler(deps.Retriever, deps.Ambassador, deps.Config, deps.PGPool, queryOpts...)))
+	var listOpts []handler.DocumentListOption
+	var statusOpts []handler.DocumentStatusOption
+	var fileOpts []handler.FileOption
+	if grantsMode {
+		listOpts = append(listOpts, handler.WithScopedListing(), handler.WithListingAudit(deps.AuditRecorder))
+		statusOpts = append(statusOpts, handler.WithScopedStatus(), handler.WithStatusAudit(deps.AuditRecorder))
+		fileOpts = append(fileOpts, handler.WithScopedFile(), handler.WithFileAudit(deps.AuditRecorder))
+	}
+	mux.HandleFunc("GET /documents", protectData(handler.ListDocumentsHandler(deps.ChunkStore, listOpts...)))
+	mux.HandleFunc("GET /documents/{doc_id}", protectData(handler.DocumentStatusHandler(deps.ChunkStore, statusOpts...)))
 	var signer handler.FileSigner
 	if deps.S3Client != nil {
 		signer = deps.S3Client
 	}
-	mux.HandleFunc("GET /documents/{doc_id}/file", middleware.RequireServiceTokens(tokens, handler.FileHandler(deps.ChunkStore, signer)))
+	mux.HandleFunc("GET /documents/{doc_id}/file", protectData(handler.FileHandler(deps.ChunkStore, signer, fileOpts...)))
 	deleteOpts := []handler.DeleteOption{handler.WithCleanupTargets(deletionTargets(deps.Config, deps.VectorStore))}
 	if deps.LegacyDeletionReservations {
 		deleteOpts = append(deleteOpts, handler.WithLegacyReservations())
 	}
-	mux.HandleFunc("DELETE /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DeleteHandler(deps.ChunkStore, deps.PineconeDriver, objects, deleteOpts...)))
+	if grantsMode {
+		deleteOpts = append(deleteOpts, handler.WithScopedDeletion(), handler.WithDeleteAudit(deps.AuditRecorder))
+	}
+	mux.HandleFunc("DELETE /documents/{doc_id}", protectData(handler.DeleteHandler(deps.ChunkStore, deps.PineconeDriver, objects, deleteOpts...)))
 	// Offline fake mode keeps vectors in process memory. A receipt bound to a
 	// store that disappears on restart could never be proved clean again.
 	fixtureStore := deps.FixtureVectorIdentity
 	if deps.Config.FakeMode {
 		fixtureStore = ""
 	}
-	mux.HandleFunc("POST /evaluation/fixtures", middleware.RequireServiceTokens(tokens, handler.EvaluationFixtureIngestHandler(deps.Worker, deps.ChunkStore,
-		handler.WithEvaluationFixtures(deps.Config.EvaluationCollectionPrefix, fixtureStore),
-		handler.WithMaxPending(deps.Config.WorkerQueueSize), handler.WithContentDedup(deps.Config.IngestContentDedup))))
-	mux.HandleFunc("GET /evaluation/fixtures/{doc_id}", middleware.RequireServiceTokens(tokens, handler.EvaluationFixtureStatusHandler(deps.ChunkStore, deps.Config.EvaluationCollectionPrefix)))
-	mux.HandleFunc("DELETE /evaluation/fixtures/{doc_id}", middleware.RequireServiceTokens(tokens, handler.EvaluationFixtureDeleteHandler(deps.ChunkStore, deps.PineconeDriver,
-		handler.EvaluationFixtureOptions{Prefix: deps.Config.EvaluationCollectionPrefix, VectorIdentity: fixtureStore, LocalVectors: deps.Config.VectorStore == "postgres" && !deps.Config.FakeMode})))
-	return middleware.RequestID(middleware.Metrics(middleware.Tracing(middleware.Logging(middleware.Recovery(mux)), deps.Config.Tracing.CaptureContent), deps.Metrics))
+	var postFixture, getFixture, deleteFixture http.HandlerFunc
+	if grantsMode {
+		fixturesDisabled := func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Cache-Control", "private, no-store")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"unavailable","message":"evaluation fixtures are disabled in grants mode"}` + "\n"))
+		}
+		postFixture, getFixture, deleteFixture = fixturesDisabled, fixturesDisabled, fixturesDisabled
+	} else {
+		postFixture = handler.EvaluationFixtureIngestHandler(deps.Worker, deps.ChunkStore,
+			handler.WithEvaluationFixtures(deps.Config.EvaluationCollectionPrefix, fixtureStore),
+			handler.WithMaxPending(deps.Config.WorkerQueueSize), handler.WithContentDedup(deps.Config.IngestContentDedup))
+		getFixture = handler.EvaluationFixtureStatusHandler(deps.ChunkStore, deps.Config.EvaluationCollectionPrefix)
+		deleteFixture = handler.EvaluationFixtureDeleteHandler(deps.ChunkStore, deps.PineconeDriver,
+			handler.EvaluationFixtureOptions{Prefix: deps.Config.EvaluationCollectionPrefix, VectorIdentity: fixtureStore, LocalVectors: deps.Config.VectorStore == "postgres" && !deps.Config.FakeMode})
+	}
+	mux.HandleFunc("POST /evaluation/fixtures", middleware.RequireServiceTokens(tokens, postFixture))
+	mux.HandleFunc("GET /evaluation/fixtures/{doc_id}", middleware.RequireServiceTokens(tokens, getFixture))
+	mux.HandleFunc("DELETE /evaluation/fixtures/{doc_id}", middleware.RequireServiceTokens(tokens, deleteFixture))
+	logged := middleware.Logging(middleware.Recovery(mux))
+	if grantsMode {
+		logged = middleware.LoggingWithRouteTemplates(middleware.Recovery(mux))
+	}
+	return middleware.RequestID(middleware.Metrics(middleware.TracingWithRedaction(logged, deps.Config.Tracing.CaptureContent, grantsMode), deps.Metrics))
 }
 
 // sourceUploadJournal returns the store's journal, or one that refuses every

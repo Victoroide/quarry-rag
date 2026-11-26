@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -159,7 +160,10 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		var capable bool
 		if authz, capable = newAuthorizedQuery(options.authority, ret); !capable {
 			slog.Error("authorized retrieval requires a vector store that enforces read scopes")
-			return func(w http.ResponseWriter, _ *http.Request) { refuseAuthorizedQuery(w) }
+			return func(w http.ResponseWriter, r *http.Request) {
+				recordSecurityAuditBestEffort(r.Context(), options.audit, nil, nil, "query", "error", "authorization_unavailable", "", "")
+				refuseAuthorizedQuery(w)
+			}
 		}
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +173,11 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			var verified bool
 			subject, verified = middleware.SubjectFromContext(r.Context())
 			if !subjectValid(subject, verified) {
+				var auditSubject *middleware.VerifiedSubject
+				if verified {
+					auditSubject = &subject
+				}
+				recordSecurityAuditBestEffort(r.Context(), options.audit, auditSubject, nil, "query", "deny", "credential_expired", "", "")
 				writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 				return
 			}
@@ -212,12 +221,19 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		if authz != nil {
 			var staged bool
 			if routing, retrieval, evidence, staged = authz.stages(ret, subject.Principal, &req, routingCfg); !staged {
+				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "query", "error", "authorization_unavailable", "", "")
 				refuseAuthorizedQuery(w)
 				return
 			}
 			var err error
 			if authorization, req.AllowedDocumentIDs, err = authz.derive(ctx, subject, &req, cfg); err != nil {
-				authorizedFailure(w, r, credentialFailure(err, subject))
+				mappedErr := credentialFailure(err, subject)
+				recordQueryFailureAudit(ctx, options.audit, &subject, nil, mappedErr)
+				authorizedFailure(w, r, mappedErr)
+				return
+			}
+			rev := authorization.PolicyRevision()
+			if !requireAuditedAllow(ctx, w, options.audit, &subject, &rev, "query", "authorized", "", "") {
 				return
 			}
 		}
@@ -275,6 +291,10 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			err = ctx.Err()
 		}
 		err = boundedFailure(err, authorization)
+		if err != nil && authorization != nil {
+			rev := authorization.PolicyRevision()
+			recordQueryPostAdmissionAudit(r.Context(), options.audit, &subject, &rev, err)
+		}
 		if err == nil {
 			slog.DebugContext(r.Context(), "query completed", "mode", qc.RetrievalMode, "chunks", len(qc.RetrievedChunks), "duration", time.Since(start))
 		}
@@ -313,6 +333,10 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			return
 		}
 		if scopeErr := qc.CheckEvidenceScope(ctx); scopeErr != nil {
+			if authorization != nil {
+				rev := authorization.PolicyRevision()
+				recordQueryFailureAudit(r.Context(), options.audit, &subject, &rev, scopeErr)
+			}
 			writeQueryError(w, r, scopeErr)
 			return
 		}
@@ -356,5 +380,40 @@ func writeJSONError(w http.ResponseWriter, code int, errType, message string) {
 	resp := APIError{Error: errType, Message: message}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Error("encode error response", "error", err)
+	}
+}
+
+func recordQueryFailureAudit(ctx context.Context, recorder domain.SecurityAuditRecorder, subject *middleware.VerifiedSubject, rev *int64, err error) {
+	outcome, reason := "error", "authorization_failed"
+	switch {
+	case errors.Is(err, errScopeTooLarge):
+		outcome, reason = "deny", "scope_too_large"
+	case errors.Is(err, domain.ErrReadDenied):
+		outcome, reason = "deny", "access_denied"
+	case errors.Is(err, pipeline.ErrCredentialExpired):
+		outcome, reason = "deny", "credential_expired"
+	case errors.Is(err, pipeline.ErrReadAuthorityChanged), errors.Is(err, pipeline.ErrEvidenceScopeChanged):
+		outcome, reason = "deny", "scope_changed"
+	case errors.Is(err, pipeline.ErrAuthorizationUnavailable):
+		outcome, reason = "error", "authorization_unavailable"
+	case errors.Is(err, domain.ErrAuthzModeMismatch):
+		reason = "authz_mode_mismatch"
+	case errors.Is(err, context.Canceled):
+		outcome, reason = "deny", "request_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		outcome, reason = "deny", "request_timed_out"
+	}
+	recordSecurityAuditBestEffort(ctx, recorder, subject, rev, "query", outcome, reason, "", "")
+}
+
+func recordQueryPostAdmissionAudit(ctx context.Context, recorder domain.SecurityAuditRecorder, subject *middleware.VerifiedSubject, rev *int64, err error) {
+	switch {
+	case errors.Is(err, pipeline.ErrCredentialExpired),
+		errors.Is(err, domain.ErrReadDenied),
+		errors.Is(err, pipeline.ErrReadAuthorityChanged),
+		errors.Is(err, pipeline.ErrEvidenceScopeChanged),
+		errors.Is(err, pipeline.ErrAuthorizationUnavailable),
+		errors.Is(err, domain.ErrAuthzModeMismatch):
+		recordQueryFailureAudit(ctx, recorder, subject, rev, err)
 	}
 }

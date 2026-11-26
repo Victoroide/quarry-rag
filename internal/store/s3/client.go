@@ -19,6 +19,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -116,9 +117,16 @@ func (c *Client) PutSource(ctx context.Context, key string, ft extractor.FileTyp
 		opts.HTTPClient = attempts
 	})
 	if err != nil {
+		if tracing.RedactIdentifiers(ctx) {
+			return domain.SourceUploadResult{Settled: attempts.settled(false)}, fmt.Errorf("s3: upload failed: %w", err)
+		}
 		return domain.SourceUploadResult{Settled: attempts.settled(false)}, fmt.Errorf("s3: upload %s: %w", key, err)
 	}
-	slog.DebugContext(ctx, "s3 object uploaded", "key", key, "content_type", contentType)
+	if tracing.RedactIdentifiers(ctx) {
+		slog.DebugContext(ctx, "s3 object uploaded", "content_type", contentType)
+	} else {
+		slog.DebugContext(ctx, "s3 object uploaded", "key", key, "content_type", contentType)
+	}
 	return domain.SourceUploadResult{
 		VersionID: aws.ToString(out.VersionId), Acknowledged: true, Settled: attempts.settled(true),
 	}, nil
@@ -132,6 +140,9 @@ func (c *Client) PresignGet(ctx context.Context, s3Key string) (string, error) {
 // PresignGetWithTTL returns a presigned GET URL with a requested lifetime in [1s, 15m].
 func (c *Client) PresignGetWithTTL(ctx context.Context, s3Key string, ttl time.Duration) (string, error) {
 	if ttl < time.Second || ttl > 15*time.Minute {
+		if tracing.RedactIdentifiers(ctx) {
+			return "", fmt.Errorf("s3: presign invalid TTL %s", ttl)
+		}
 		return "", fmt.Errorf("s3: presign %s: invalid TTL %s", s3Key, ttl)
 	}
 	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(s3Key)})
@@ -146,6 +157,9 @@ func (c *Client) PresignGetWithTTL(ctx context.Context, s3Key string, ttl time.D
 		ResponseContentType:        &contentType,
 	}, s3.WithPresignExpires(ttl))
 	if err != nil {
+		if tracing.RedactIdentifiers(ctx) {
+			return "", fmt.Errorf("s3: presign failed: %w", err)
+		}
 		return "", fmt.Errorf("s3: presign %s: %w", s3Key, err)
 	}
 	return req.URL, nil
@@ -160,6 +174,9 @@ func (c *Client) Delete(ctx context.Context, s3Key string) error {
 // DeleteVersion permanently removes the named version of an object.
 func (c *Client) DeleteVersion(ctx context.Context, s3Key, versionID string) error {
 	if versionID == "" {
+		if tracing.RedactIdentifiers(ctx) {
+			return fmt.Errorf("s3: delete version failed: %w", ErrVersionIDMissing)
+		}
 		return fmt.Errorf("s3: delete version of %s: %w", s3Key, ErrVersionIDMissing)
 	}
 	return c.deleteObject(ctx, s3Key, &versionID)
@@ -173,9 +190,16 @@ func (c *Client) deleteObject(ctx context.Context, s3Key string, versionID *stri
 		ExpectedBucketOwner: c.owner,
 	}
 	if _, err := c.s3Client.DeleteObject(ctx, input); err != nil {
+		if tracing.RedactIdentifiers(ctx) {
+			return fmt.Errorf("s3: delete failed: %w", err)
+		}
 		return fmt.Errorf("s3: delete %s: %w", s3Key, err)
 	}
-	slog.DebugContext(ctx, "s3 object deleted", "key", s3Key)
+	if tracing.RedactIdentifiers(ctx) {
+		slog.DebugContext(ctx, "s3 object deleted")
+	} else {
+		slog.DebugContext(ctx, "s3 object deleted", "key", s3Key)
+	}
 	return nil
 }
 
