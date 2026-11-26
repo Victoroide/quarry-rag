@@ -59,6 +59,7 @@ Notable changes are grouped by release.
 - Deployment prerequisites now follow the selected vector store, model providers and optional AWS integrations. Offline setup documents the database, embedding dimensions and multipart parser behavior.
 - The ingestion and query sequence diagrams in the architecture documentation render again.
 - The architecture documentation lists the tracing middleware in the request middleware order.
+- Every Dockerfile base image is pinned by digest in the `FROM` line that uses it, so dependency scanners recognize each pin. The resolved images are unchanged.
 - **Breaking:** Startup rejects `CHUNK_OVERLAP` above `CHUNK_TOKEN_SIZE/2`, which was previously accepted, and chunk output now grows linearly with document size. Chunks keep the source spacing between sentences instead of adding a space after full-width terminators such as `。`.
 
 ### Security

@@ -62,7 +62,7 @@ The service is packaged using a multi-stage Docker build that outputs a minimal,
 
 ### Build Stages
 
-Both base images are pinned by multi-platform index digest in the Dockerfile. Dependabot updates their tags and digests together.
+Every base image is pinned by multi-platform index digest in the `FROM` line that uses it, so scanners see each pin without resolving build arguments. The `base` and `build-base` stages repeat the same Go image reference, a unit test keeps them identical, and Dependabot updates the tag and digest on each line together.
 
 1. **`base`**: Uses the Go image pinned in the [Dockerfile](../Dockerfile) for the requested platform, installs compilation tools (`gcc`, `musl-dev`, `git`), and downloads Go modules for the `test` and `lint` stages.
 2. **`test`**: Runs static checks (`go vet ./...`) and the short suite with data race instrumentation (`go test -short ./... -count=1 -race`); Docker-backed tests run in full on the host or CI runner.
