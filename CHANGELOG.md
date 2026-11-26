@@ -36,6 +36,7 @@ Notable changes are grouped by release.
 - Optional exact cosine search for small filtered pgvector scopes (`PGVECTOR_EXACT_SCOPE_MAX`, disabled by default) with bounded single-snapshot probing and `quarry_pgvector_search_total` metrics.
 - The [evidence evaluation](docs/development.md#evidence-evaluation) replays a labeled fixture locally and compares scoped retrieval, answer support and index visibility against opted-in staging deployments with receipt-qualified fixture cleanup.
 - Deployments can add fixed no-evidence translations through a [local catalog](docs/configuration.md#no-evidence-translation-catalog).
+- Optional diversity-aware synthesis context selection (`SYNTHESIS_CONTEXT_POLICY=diverse`, defaulting to `ranked`) to reduce repeated passages and pack complementary evidence within `SYNTHESIS_CONTEXT_TOKENS`.
 
 ### Changed
 
@@ -46,6 +47,7 @@ Notable changes are grouped by release.
 - The no-evidence answer follows `Accept-Language` for English, Spanish, Portuguese, French, German and Italian and sets `Content-Language`.
 - Documentation keeps each operational fact in one document and links to it elsewhere.
 - Synthesis context is selected by `SYNTHESIS_CONTEXT_TOKENS` estimated tokens and `SYNTHESIS_RELATIVE_SCORE_FLOOR` instead of at most 5 excerpts (8 for multi-part questions) cut near 1,200 characters.
+- Synthesis excerpt selection now drops empty or control-only bodies before choosing the leading passage in every mode (returning `no_evidence` with zero synthesis calls, `chunks_used: 0` and empty `scored_chunks` when none remain), skips later candidates with `NaN` scores, stops adding zero-token fragments once the token budget is spent and caps output at 100 excerpts.
 - Deployment documentation includes PostgreSQL connections in the cross-replica concurrency limits.
 - Documentation diagrams animate one step at a time at a slower pace, keep each highlight lit before it fades, and pause briefly before repeating.
 - The runtime image uses Alpine 3.24.4.
