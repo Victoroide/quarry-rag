@@ -102,6 +102,9 @@ type QueryContext struct {
 	// Authorization, when set, binds the query to a verified principal. Every
 	// search carries its scope and every disclosure boundary rechecks it.
 	Authorization *ReadAuthorization
+	// ForceGlobalRoute skips the routing probe and selects one global pass. A
+	// query whose hosted search budget cannot cover the full automatic route sets it.
+	ForceGlobalRoute bool
 	// HostedVisibilityRefill enables strict chunk checks and bounded hosted recovery.
 	HostedVisibilityRefill        bool
 	HostedVisibilityExtraRequests int

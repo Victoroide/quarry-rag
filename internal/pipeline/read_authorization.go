@@ -34,6 +34,9 @@ type ReadAuthorization struct {
 	// Scope is attached to every vector search. A relation store joins the live
 	// readable relation. A membership store receives its incarnation map.
 	Scope domain.AuthorizedScope
+	// DocumentSet, when set, is the immutable set the query selects from. Every
+	// check also requires it to be live under the same revision.
+	DocumentSet *domain.DocumentSetRef
 	// RecheckTrust confirms the signing key is still trusted. It may be nil.
 	RecheckTrust func() error
 	// Now supplies the clock. Nil means time.Now.
@@ -65,6 +68,23 @@ func (a *ReadAuthorization) PolicyRevision() int64 {
 	return a.revision
 }
 
+// readState reads the principal's standing and, for a query bound to a set,
+// whether that set is still live, in one statement. A set past its expiry by
+// this process's clock is already unusable, and an authority that cannot check
+// sets is unavailable, never a reason to skip the check.
+func (a *ReadAuthorization) readState(ctx context.Context) (state domain.ReadState, setLive bool, err error) {
+	if a.DocumentSet == nil {
+		state, err = a.Authority.ReadState(ctx, a.Principal)
+		return state, true, err
+	}
+	sets, ok := a.Authority.(domain.DocumentSetAuthority)
+	if !ok {
+		return domain.ReadState{}, false, errors.New("authority cannot check document sets")
+	}
+	state, setLive, err = sets.DocumentSetState(ctx, a.Principal, *a.DocumentSet)
+	return state, setLive && a.now().Before(a.DocumentSet.ExpiresAt), err
+}
+
 func (a *ReadAuthorization) expired() bool {
 	return a.ExpiresAt.IsZero() || !a.now().Before(a.ExpiresAt)
 }
@@ -88,7 +108,7 @@ func (a *ReadAuthorization) Check(ctx context.Context) error {
 			return ErrCredentialExpired
 		}
 	}
-	state, err := a.Authority.ReadState(ctx, a.Principal)
+	state, setLive, err := a.readState(ctx)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -97,6 +117,9 @@ func (a *ReadAuthorization) Check(ctx context.Context) error {
 	}
 	if !state.Active {
 		return ErrReadAuthorityChanged
+	}
+	if !setLive {
+		return domain.ErrDocumentSetNotFound
 	}
 	a.mu.Lock()
 	stale := state.Revision < a.revision

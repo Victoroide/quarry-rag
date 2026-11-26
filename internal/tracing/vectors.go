@@ -320,6 +320,23 @@ func (s *vectorStore) GrantScope() domain.GrantScopeKind {
 	return ""
 }
 
+// SupportsDocumentSets reports whether the wrapped store confines a search to a
+// document set's membership.
+func (s *vectorStore) SupportsDocumentSets() bool {
+	scoped, ok := s.VectorStore.(domain.DocumentSetScopedVectorStore)
+	return ok && scoped.SupportsDocumentSets()
+}
+
+// SearchPartitions reports how many hosted requests a search over the given
+// members makes, when the wrapped store can say.
+func (s *vectorStore) SearchPartitions(members int) (int, bool) {
+	partitioned, ok := s.VectorStore.(domain.PartitionedVectorStore)
+	if !ok {
+		return 0, false
+	}
+	return partitioned.SearchPartitions(members)
+}
+
 func (s *vectorStore) QueryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
 	return s.query(ctx, topK, func(ctx context.Context) ([]domain.ScoredChunk, error) {
 		return s.filtered.QueryFiltered(ctx, embedding, topK, filter)

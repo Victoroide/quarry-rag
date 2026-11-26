@@ -260,3 +260,21 @@ func TestQueryStreamDoneDecodesStrictBudgetFields(t *testing.T) {
 	require.Equal(t, 60, done.ModelInputTokens)
 	require.Equal(t, 45, done.ContextTokens)
 }
+
+func TestQueryStreamSendsTheDocumentSetReference(t *testing.T) {
+	const set = "20000000-0000-4000-8000-000000000001"
+	c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.JSONEq(t, `"`+set+`"`, string(body["document_set_id"]))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, err := w.Write([]byte(`{"error":"not_found","message":"document set not found"}`))
+		assert.NoError(t, err)
+	})
+	err := c.QueryStream(t.Context(), client.QueryRequest{Query: "archive", DocumentSetID: set}, func(client.Event) error { return nil })
+	var apiErr *client.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, http.StatusNotFound, apiErr.StatusCode)
+	require.Equal(t, "not_found", apiErr.Code)
+}

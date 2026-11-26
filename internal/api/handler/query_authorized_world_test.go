@@ -41,6 +41,12 @@ const (
 	sharedText  = "Archive beta guide shared text."
 )
 
+type grantSet struct {
+	id, revision, owner, tenant string
+	members                     map[string]string
+	expired                     bool
+}
+
 type grantDocument struct {
 	id, incarnation, tenant, collection, docType, text, preview string
 	score                                                       float64
@@ -66,6 +72,10 @@ type grantWorld struct {
 	deriveErr, stateErr, evidenceErr error
 	trustErr                         error
 
+	// sets are the document sets a principal owns. A set is usable only by its
+	// owner, before it expires, and only for the incarnations it names.
+	sets map[string]*grantSet
+
 	derived  []domain.ReadScopeRequest
 	previews [][]string
 	log      []string
@@ -79,6 +89,7 @@ func newGrantWorld() *grantWorld {
 		revision: 7,
 		disabled: map[string]bool{},
 		checks:   map[string]int{},
+		sets:     map[string]*grantSet{},
 		documents: []*grantDocument{
 			{id: docVisible, incarnation: "11111111-1111-4111-8111-111111111111", tenant: tenantA, collection: "archive", docType: "guide",
 				text: visibleText, preview: "Alpha Records office", score: .90, readers: map[string]bool{userA1: true}},
@@ -141,23 +152,33 @@ func (w *grantWorld) logSnapshot() []string {
 func (w *grantWorld) DeriveReadScope(_ context.Context, p domain.Principal, req domain.ReadScopeRequest) (domain.ReadScope, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.derived = append(w.derived, domain.ReadScopeRequest{DocumentIDs: slices.Clone(req.DocumentIDs), Collection: req.Collection, DocType: req.DocType, Membership: req.Membership})
+	w.derived = append(w.derived, domain.ReadScopeRequest{DocumentIDs: slices.Clone(req.DocumentIDs), Collection: req.Collection, DocType: req.DocType, Membership: req.Membership, DocumentSetID: req.DocumentSetID})
 	if w.deriveErr != nil {
 		return domain.ReadScope{}, w.deriveErr
 	}
 	if w.disabled[p.ID] {
 		return domain.ReadScope{}, domain.ErrReadDenied
 	}
+	var set *grantSet
+	if req.DocumentSetID != "" {
+		if set = w.usableSet(p, req.DocumentSetID); set == nil {
+			return domain.ReadScope{}, domain.ErrDocumentSetNotFound
+		}
+	}
 	var docs []domain.ReadableDocument
 	for _, d := range w.documents {
 		if !w.readable(p, d) || (req.DocumentIDs != nil && !slices.Contains(req.DocumentIDs, d.id)) ||
-			(req.Collection != "" && d.collection != req.Collection) || (req.DocType != "" && d.docType != req.DocType) {
+			(req.Collection != "" && d.collection != req.Collection) || (req.DocType != "" && d.docType != req.DocType) ||
+			(set != nil && set.members[d.id] != d.incarnation) {
 			continue
 		}
 		docs = append(docs, domain.ReadableDocument{ID: d.id, Incarnation: d.incarnation})
 	}
 	slices.SortFunc(docs, func(a, b domain.ReadableDocument) int { return strings.Compare(a.ID, b.ID) })
 	scope := domain.ReadScope{Revision: w.revision, Empty: len(docs) == 0, Documents: docs}
+	if set != nil {
+		scope.DocumentSet = &domain.DocumentSetRef{ID: set.id, Revision: set.revision, ExpiresAt: time.Now().Add(time.Hour)}
+	}
 	if req.Membership <= 0 {
 		scope.Documents = nil
 	} else if len(docs) > req.Membership {
@@ -185,14 +206,51 @@ func (w *grantWorld) Evidence(p domain.Principal, collection, docType string) do
 	return domain.SubjectEvidence{Visibility: e, Documents: e, Previews: e}
 }
 
+// usableSet returns the set only for its live owner. The caller holds the lock.
+func (w *grantWorld) usableSet(p domain.Principal, id string) *grantSet {
+	set := w.sets[id]
+	if set == nil || set.expired || set.owner != p.ID || set.tenant != p.TenantID || w.disabled[p.ID] {
+		return nil
+	}
+	return set
+}
+
+func (w *grantWorld) DocumentSetState(_ context.Context, p domain.Principal, ref domain.DocumentSetRef) (domain.ReadState, bool, error) {
+	w.record("state")
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stateErr != nil {
+		return domain.ReadState{}, false, w.stateErr
+	}
+	revision := w.revision
+	if w.stale != 0 {
+		revision = w.stale
+	}
+	set := w.usableSet(p, ref.ID)
+	return domain.ReadState{Active: !w.disabled[p.ID], Revision: revision}, set != nil && set.revision == ref.Revision, nil
+}
+
+func (w *grantWorld) EvidenceInSet(p domain.Principal, ref domain.DocumentSetRef, collection, docType string) domain.SubjectEvidence {
+	e := &grantEvidence{w: w, principal: p, collection: collection, docType: docType, setID: ref.ID}
+	return domain.SubjectEvidence{Visibility: e, Documents: e, Previews: e}
+}
+
 type grantEvidence struct {
 	w                   *grantWorld
 	principal           domain.Principal
 	collection, docType string
+	setID               string
 }
 
 func (e *grantEvidence) inScope(d *grantDocument) bool {
-	return e.w.readable(e.principal, d) && (e.collection == "" || d.collection == e.collection) && (e.docType == "" || d.docType == e.docType)
+	if d == nil || !e.w.readable(e.principal, d) || (e.collection != "" && d.collection != e.collection) || (e.docType != "" && d.docType != e.docType) {
+		return false
+	}
+	if e.setID == "" {
+		return true
+	}
+	set := e.w.usableSet(e.principal, e.setID)
+	return set != nil && set.members[d.id] == d.incarnation
 }
 
 func (e *grantEvidence) VisibleEvidence(ctx context.Context, candidates []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
@@ -266,6 +324,13 @@ type grantStore struct {
 	domain.VectorStore
 	w    *grantWorld
 	kind domain.GrantScopeKind
+	// noSets makes a relation store unable to join a set's membership.
+	noSets bool
+	// partitionSize splits a hosted search into requests of this many members.
+	// Zero keeps one request.
+	partitionSize int
+	// hostedCalls counts the simulated hosted requests of every search.
+	hostedCalls int
 
 	mu      sync.Mutex
 	filters []domain.VectorFilter
@@ -279,6 +344,15 @@ type grantStore struct {
 }
 
 func (s *grantStore) GrantScope() domain.GrantScopeKind { return s.kind }
+
+func (s *grantStore) SupportsDocumentSets() bool { return !s.noSets }
+
+func (s *grantStore) SearchPartitions(members int) (int, bool) {
+	if s.partitionSize <= 0 {
+		return min(members, 1), true
+	}
+	return (members + s.partitionSize - 1) / s.partitionSize, true
+}
 
 func (s *grantStore) QueryAllNamespaces(context.Context, []float32, int, string) ([]domain.ScoredChunk, error) {
 	s.mu.Lock()
@@ -296,7 +370,7 @@ func (d *grantDocument) hit(tagged bool) domain.ScoredChunk {
 	return domain.ScoredChunk{Chunk: c, Score: d.score}
 }
 
-func (s *grantStore) QueryFiltered(_ context.Context, _ []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
+func (s *grantStore) QueryFiltered(ctx context.Context, _ []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
 	s.w.send("search")
 	s.mu.Lock()
 	s.filters = append(s.filters, filter)
@@ -305,6 +379,9 @@ func (s *grantStore) QueryFiltered(_ context.Context, _ []float32, topK int, fil
 	s.mu.Unlock()
 	if failure != nil {
 		return nil, failure
+	}
+	if err := s.simulateHostedRequests(ctx, filter); err != nil {
+		return nil, err
 	}
 	if filter.Authorized == nil {
 		s.mu.Lock()
@@ -340,12 +417,46 @@ func (s *grantStore) QueryFiltered(_ context.Context, _ []float32, topK int, fil
 	return hits, nil
 }
 
+// simulateHostedRequests sends one request per partition of a membership search
+// the way the hosted store does: it checks the authority before each and
+// reserves its attempt from the request budget.
+func (s *grantStore) simulateHostedRequests(ctx context.Context, filter domain.VectorFilter) error {
+	if s.kind != domain.GrantScopeMembership || filter.Authorized == nil || len(filter.DocumentIDs) == 0 {
+		return nil
+	}
+	partitions, _ := s.SearchPartitions(len(filter.DocumentIDs))
+	for range partitions {
+		if gate := filter.Authorized.BeforeSearch; gate != nil {
+			if err := gate(ctx); err != nil {
+				return err
+			}
+		}
+		if budget := filter.Authorized.Budget; budget != nil {
+			allowed, err := budget.Acquire(1)
+			if err != nil {
+				return err
+			}
+			budget.Release(allowed, allowed)
+		}
+		s.mu.Lock()
+		s.hostedCalls++
+		s.mu.Unlock()
+	}
+	return nil
+}
+
 func (s *grantStore) admits(filter domain.VectorFilter, d *grantDocument) bool {
 	if scope := filter.Authorized; scope != nil {
 		switch s.kind {
 		case domain.GrantScopeRelation:
 			if !s.w.readable(domain.Principal{ID: scope.PrincipalID, TenantID: scope.TenantID}, d) {
 				return false
+			}
+			if scope.DocumentSet != nil {
+				set := s.w.sets[scope.DocumentSet.ID]
+				if set == nil || set.expired || set.owner != scope.PrincipalID || set.members[d.id] != d.incarnation {
+					return false
+				}
 			}
 		case domain.GrantScopeMembership:
 			if incarnation, ok := scope.IncarnationOf(d.id); !ok || incarnation != d.incarnation || d.tenant != scope.TenantID {
@@ -449,6 +560,13 @@ type grantRig struct {
 
 func newGrantRig(t *testing.T, kind domain.GrantScopeKind, tune func(*config.Config)) *grantRig {
 	t.Helper()
+	return newGrantRigWith(t, kind, tune, nil, nil)
+}
+
+// newGrantRigWith also lets a test change the store before the handler reads
+// its capabilities, and wrap the authority the handler is given.
+func newGrantRigWith(t *testing.T, kind domain.GrantScopeKind, tune func(*config.Config), prepare func(*grantRig), wrap func(*grantWorld) domain.ReadAuthority) *grantRig {
+	t.Helper()
 	w := newGrantWorld()
 	rig := &grantRig{w: w, store: &grantStore{w: w, kind: kind}, embedder: &grantEmbedder{w: w}, converser: &grantConverser{w: w}}
 	cfg := streamQueryConfig()
@@ -459,6 +577,9 @@ func newGrantRig(t *testing.T, kind domain.GrantScopeKind, tune func(*config.Con
 	rig.cfg = cfg
 	amb := llm.NewAmbassador(cfg)
 	amb.SetClient(rig.converser)
+	if prepare != nil {
+		prepare(rig)
+	}
 	ret := retriever.NewRetriever(rig.store, rig.embedder, .7, 10)
 	reranker := queryReranker(func(_ context.Context, _ string, chunks []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
 		w.send("rerank")
@@ -475,7 +596,11 @@ func newGrantRig(t *testing.T, kind domain.GrantScopeKind, tune func(*config.Con
 		}
 		return chunks, nil
 	})
-	rig.handler = QueryHandler(ret, amb, cfg, nil, WithReranker(reranker), WithAuthorizedRetrieval(w))
+	var authority domain.ReadAuthority = w
+	if wrap != nil {
+		authority = wrap(w)
+	}
+	rig.handler = QueryHandler(ret, amb, cfg, nil, WithReranker(reranker), WithAuthorizedRetrieval(authority))
 	return rig
 }
 

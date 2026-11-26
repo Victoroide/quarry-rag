@@ -231,6 +231,33 @@ func TestWrappedStoresPreserveGrantScope(t *testing.T) {
 	}
 }
 
+// TestWrappedStoresPreserveDocumentSetCapabilities checks that tracing neither
+// grants a store the ability to serve document sets nor hides it.
+func TestWrappedStoresPreserveDocumentSetCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		inner      domain.VectorStore
+		system     string
+		wantSets   bool
+		partitions int
+		wantPriced bool
+	}{
+		{"postgres joins the set", &postgres.VectorStore{}, "postgresql", true, 0, false},
+		{"pinecone receives the intersection", pinecone.NewDriver(nil), "pinecone", true, 3, true},
+		{"memory serves no scope at all", memory.NewFakeVectorStore(), "memory", false, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ret := retriever.NewRetriever(tracing.WrapVectorStore(tc.inner, tc.system), nil, 0.5, 10)
+			require.Equal(t, tc.wantSets, ret.SupportsDocumentSets())
+			partitions, priced := ret.SearchPartitions(tc.partitions*10000 - 5)
+			require.Equal(t, tc.wantPriced, priced)
+			if tc.wantPriced {
+				require.Equal(t, tc.partitions, partitions)
+			}
+		})
+	}
+}
+
 // TestWrappedVectorStoreVariantsPreserveAuthorizedCapabilities exercises every
 // wrapper variant in WrapVectorStore so none drops GrantScope or Authorized.
 func TestWrappedVectorStoreVariantsPreserveAuthorizedCapabilities(t *testing.T) {

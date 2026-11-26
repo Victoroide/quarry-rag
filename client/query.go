@@ -20,6 +20,9 @@ const (
 
 // QueryRequest selects the question, retrieval mode and authorized document scope.
 // A nil allowlist is unrestricted; a non-nil empty allowlist denies all documents.
+// DocumentSetID names a document set owned by the authenticated subject, which
+// the service accepts only when it enabled document sets. The set narrows the
+// scope and grants no access. An empty value sends no reference.
 type QueryRequest struct {
 	Query              string     `json:"query"`
 	Mode               string     `json:"mode,omitempty"`
@@ -31,6 +34,8 @@ type QueryRequest struct {
 	AllowedDocumentIDs []string   `json:"allowed_document_ids,omitzero"`
 
 	Collection string `json:"collection,omitempty"`
+
+	DocumentSetID string `json:"document_set_id,omitempty"`
 }
 
 // MarshalJSON preserves an explicitly empty authorization scope.

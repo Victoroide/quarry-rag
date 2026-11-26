@@ -212,3 +212,104 @@ func TestAuthorizedSearchRefusesEmptyOrUnknownGrantScope(t *testing.T) {
 		})
 	}
 }
+
+// relationStore is a relation-scoped store that may or may not join a set.
+type relationStore struct{ *scopeCounter }
+
+func (relationStore) GrantScope() domain.GrantScopeKind { return domain.GrantScopeRelation }
+
+type joiningRelationStore struct {
+	relationStore
+	joins bool
+}
+
+func (s joiningRelationStore) SupportsDocumentSets() bool { return s.joins }
+
+func setFilter(scope domain.AuthorizedScope) domain.VectorFilter {
+	scope.DocumentSet = &domain.DocumentSetRef{ID: "set"}
+	return domain.VectorFilter{Authorized: &scope}
+}
+
+func TestSetSearchNeverRunsWhereTheStoreCannotConfineItToTheSet(t *testing.T) {
+	scope := domain.AuthorizedScope{TenantID: "tenant", PrincipalID: "principal"}
+	for name, store := range map[string]domain.VectorStore{
+		"relation store with no set capability": relationStore{&scopeCounter{}},
+		"relation store that reports it cannot": joiningRelationStore{relationStore: relationStore{&scopeCounter{}}, joins: false},
+		"hosted store given no member map":      scopedRefillStore{refillStore{&scopeCounter{}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			embeds := 0
+			ret := NewRetriever(store, countingEmbedder{calls: &embeds}, .7, 10)
+			filter := setFilter(scope)
+			filter.DocumentIDs = []string{"doc"}
+			refuseAll(t, map[string]func(context.Context) error{
+				"Retrieve": func(ctx context.Context) error {
+					_, err := ret.Retrieve(ctx, "q", RetrievalModeGlobal, 5, filter)
+					return err
+				},
+				"EmbedQuery": func(ctx context.Context) error {
+					_, _, _, err := ret.EmbedQuery(ctx, "q", filter, 5)
+					return err
+				},
+			})
+			require.Zero(t, embeds, "nothing is embedded for a search that cannot be confined")
+		})
+	}
+}
+
+func TestSetSearchRunsWhereTheStoreConfinesIt(t *testing.T) {
+	scope := domain.AuthorizedScope{TenantID: "tenant", PrincipalID: "principal"}
+	relation := joiningRelationStore{relationStore: relationStore{&scopeCounter{}}, joins: true}
+	embeds := 0
+	ret := NewRetriever(relation, countingEmbedder{calls: &embeds}, .7, 10)
+	require.True(t, ret.SupportsDocumentSets())
+	filter := setFilter(scope)
+	_, err := ret.Retrieve(t.Context(), "q", RetrievalModeGlobal, 5, filter)
+	require.NoError(t, err)
+	require.Equal(t, 1, relation.searches)
+
+	hostedScope := scope
+	hostedScope.Incarnations = map[string]string{"doc": "incarnation"}
+	hosted := scopedRefillStore{refillStore{&scopeCounter{}}}
+	ret = NewRetriever(hosted, countingEmbedder{calls: &embeds}, .7, 10)
+	require.True(t, ret.SupportsDocumentSets(), "a hosted store receives the intersection as its member list")
+	filter = setFilter(hostedScope)
+	filter.DocumentIDs = []string{"doc"}
+	_, err = ret.Retrieve(t.Context(), "q", RetrievalModeGlobal, 5, filter)
+	require.NoError(t, err)
+
+	plain := NewRetriever(&scopeCounter{}, countingEmbedder{calls: &embeds}, .7, 10)
+	require.False(t, plain.SupportsDocumentSets(), "a store with no scope capability never serves sets")
+	_, priced := plain.SearchPartitions(5)
+	require.False(t, priced)
+}
+
+func TestSetSearchOrdersEqualScoresByChunkID(t *testing.T) {
+	store := &tiedStore{}
+	ret := NewRetriever(store, countingEmbedder{calls: new(int)}, .7, 10)
+	filter := setFilter(domain.AuthorizedScope{TenantID: "tenant", PrincipalID: "principal", Incarnations: map[string]string{"doc": "i"}})
+	filter.DocumentIDs = []string{"doc"}
+	result, err := ret.RetrieveWithVisibility(t.Context(), []float32{1}, RetrievalModeGlobal, "", 3, filter,
+		func(_ context.Context, chunks []domain.ScoredChunk) ([]domain.ScoredChunk, error) { return chunks, nil })
+	require.NoError(t, err)
+	ids := []domain.ChunkID{result.Chunks[0].Chunk.ID, result.Chunks[1].Chunk.ID, result.Chunks[2].Chunk.ID}
+	require.Equal(t, []domain.ChunkID{"a", "b", "c"}, ids)
+	require.Len(t, result.Chunks, 3, "truncation follows the merge")
+}
+
+// tiedStore returns hosted candidates in a scrambled order with equal scores.
+type tiedStore struct{ domain.VectorStore }
+
+func (tiedStore) GrantScope() domain.GrantScopeKind { return domain.GrantScopeMembership }
+
+func (tiedStore) QueryFiltered(context.Context, []float32, int, domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	return nil, nil
+}
+
+func (tiedStore) QueryCandidates(context.Context, []float32, int, domain.VectorFilter) ([]domain.ScoredChunk, error) {
+	var out []domain.ScoredChunk
+	for _, id := range []domain.ChunkID{"d", "b", "e", "a", "c", "b"} {
+		out = append(out, domain.ScoredChunk{Chunk: domain.Chunk{ID: id, DocumentID: "doc"}, Score: .5})
+	}
+	return out, nil
+}

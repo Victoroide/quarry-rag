@@ -155,6 +155,11 @@ func (s *RoutingStage) Run(ctx context.Context, qc *QueryContext) error {
 	if strings.EqualFold(qc.RequestedMode, "global") {
 		probeK = 0
 		qc.RouteReason = retriever.RouteReasonExplicitGlobal
+	} else if qc.ForceGlobalRoute {
+		// The request's hosted search budget cannot cover a probe, a local pass
+		// and a top-up, so one global pass over the scope is the whole route.
+		probeK = 0
+		qc.RouteReason = retriever.RouteReasonSearchBudget
 	}
 	searchK := probeK
 	if qc.evidenceAutoRouting() {
@@ -486,7 +491,8 @@ func (qc *QueryContext) vectorFilter() domain.VectorFilter {
 }
 
 func (qc *QueryContext) evidenceAutoRouting() bool {
-	return qc.RoutingPolicy == string(retriever.RoutingPolicyEvidence) &&
+	// A forced global route has no probe to reuse, so it is not evidence routing.
+	return qc.RoutingPolicy == string(retriever.RoutingPolicyEvidence) && !qc.ForceGlobalRoute &&
 		(qc.RequestedMode == "" || strings.EqualFold(qc.RequestedMode, "auto"))
 }
 
@@ -652,7 +658,8 @@ func (qc *QueryContext) authorizeEvidenceError(ctx context.Context, err error) e
 	case errors.Is(err, ErrEvidenceScopeChanged):
 		return ErrReadAuthorityChanged
 	case ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
-		errors.Is(err, ErrReadAuthorityChanged), errors.Is(err, ErrCredentialExpired), errors.Is(err, ErrAuthorizationUnavailable):
+		errors.Is(err, ErrReadAuthorityChanged), errors.Is(err, ErrCredentialExpired), errors.Is(err, ErrAuthorizationUnavailable),
+		errors.Is(err, domain.ErrDocumentSetNotFound):
 		return err
 	}
 	return fmt.Errorf("%w: %w", ErrAuthorizationUnavailable, err)

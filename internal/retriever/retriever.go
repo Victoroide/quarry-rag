@@ -57,6 +57,7 @@ const (
 	RouteReasonScoreThreshold     RouteReason = "score_threshold"
 	RouteReasonStrongLead         RouteReason = "strong_lead"
 	RouteReasonLowScore           RouteReason = "low_score"
+	RouteReasonSearchBudget       RouteReason = "search_budget"
 )
 
 // ValidRouteReason reports whether r belongs to the bounded RouteReason enum.
@@ -66,7 +67,7 @@ func ValidRouteReason(r RouteReason) bool {
 		RouteReasonProbeFailed, RouteReasonEmptyProbe, RouteReasonMissingCalibration,
 		RouteReasonMultiNeed, RouteReasonAmbiguousEntities, RouteReasonNegatedEntity,
 		RouteReasonNamedEntity, RouteReasonAmbiguousMargin, RouteReasonScoreThreshold,
-		RouteReasonStrongLead, RouteReasonLowScore:
+		RouteReasonStrongLead, RouteReasonLowScore, RouteReasonSearchBudget:
 		return true
 	default:
 		return false
@@ -179,7 +180,45 @@ func (r *Retriever) requireGrantScope(filter domain.VectorFilter) error {
 	if _, ok := r.vectorStore.(domain.FilteredVectorStore); !ok {
 		return domain.ErrGrantScopeUnsupported
 	}
+	if filter.Authorized.DocumentSet != nil {
+		// A set confines a search through the store's own membership join, or
+		// through the explicit member list a hosted store receives. A relation
+		// store that cannot join the set would search every readable document.
+		kind, _ := r.GrantScope()
+		if joins, ok := r.vectorStore.(domain.DocumentSetScopedVectorStore); kind == domain.GrantScopeRelation && (!ok || !joins.SupportsDocumentSets()) {
+			return domain.ErrGrantScopeUnsupported
+		}
+		if kind == domain.GrantScopeMembership && filter.Authorized.Incarnations == nil {
+			return domain.ErrGrantScopeUnsupported
+		}
+	}
 	return nil
+}
+
+// SearchPartitions reports how many hosted requests one search over the given
+// number of members needs. It is false when the store does not split members
+// into bounded requests, so a caller cannot price the search.
+func (r *Retriever) SearchPartitions(members int) (int, bool) {
+	store, ok := r.vectorStore.(domain.PartitionedVectorStore)
+	if !ok || members < 0 {
+		return 0, false
+	}
+	return store.SearchPartitions(members)
+}
+
+// SupportsDocumentSets reports whether searches that carry a document set stay
+// confined to it. A relation store must join the membership itself. A hosted
+// store receives the intersection as its member list.
+func (r *Retriever) SupportsDocumentSets() bool {
+	kind, ok := r.GrantScope()
+	if !ok {
+		return false
+	}
+	if kind == domain.GrantScopeMembership {
+		return true
+	}
+	joins, capable := r.vectorStore.(domain.DocumentSetScopedVectorStore)
+	return capable && joins.SupportsDocumentSets()
 }
 
 // Result holds the retrieval output.
@@ -271,7 +310,13 @@ func (r *Retriever) retrieveWithEmbedding(ctx context.Context, embedding []float
 		if toppedUp || visible != nil {
 			chunks = mergeChunks(chunks)
 		}
-		sort.Slice(chunks, func(i, j int) bool { return chunks[i].Score > chunks[j].Score })
+		if filter.Authorized != nil && filter.Authorized.DocumentSet != nil {
+			// A set query merges partitions and orders equal scores by chunk ID,
+			// so the same scope always yields the same ranking.
+			sortVisibilityHits(chunks)
+		} else {
+			sort.Slice(chunks, func(i, j int) bool { return chunks[i].Score > chunks[j].Score })
+		}
 	}
 
 	return retrievalResult(ctx, mode, chunks, topK), nil

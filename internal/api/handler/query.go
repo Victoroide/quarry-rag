@@ -39,6 +39,12 @@ type QueryRequest struct {
 	AllowedDocumentIDs []string            `json:"allowed_document_ids,omitzero"`
 
 	Collection string `json:"collection,omitempty"`
+
+	// DocumentSetID optionally selects documents through an immutable,
+	// expiring set owned by the authenticated subject. A set only narrows the
+	// request: every document must also be readable now. It is accepted only
+	// where the deployment enabled document sets.
+	DocumentSetID documentSetReference `json:"document_set_id,omitempty"`
 }
 
 // ScoredChunkResponse is a single scored chunk in the query response.
@@ -166,6 +172,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			}
 		}
 	}
+	sets := newDocumentSets(cfg, authz, ret)
 	return func(w http.ResponseWriter, r *http.Request) {
 		var subject middleware.VerifiedSubject
 		if authz != nil {
@@ -196,7 +203,12 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
-		if apiErr := validateQueryAllowlist(&req, cfg); apiErr != nil {
+		setID, hasSet, apiErr := requestedDocumentSet(&req, sets != nil)
+		if apiErr != nil {
+			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
+			return
+		}
+		if apiErr = validateQueryAllowlist(&req, cfg, hasSet); apiErr != nil {
 			writeJSONError(w, http.StatusBadRequest, apiErr.Error, apiErr.Message)
 			return
 		}
@@ -218,19 +230,38 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		routing := pipeline.NewRoutingStageWithConfig(ret, nil, nil, routingCfg)
 		var authorization *pipeline.ReadAuthorization
 		var evidence domain.EvidenceVisibility
+		forceGlobal := false
 		if authz != nil {
+			if hasSet && !sets.capable {
+				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "query", "error", "authorization_unavailable", "", "")
+				refuseAuthorizedQuery(w)
+				return
+			}
 			var staged bool
-			if routing, retrieval, evidence, staged = authz.stages(ret, subject.Principal, &req, routingCfg); !staged {
+			if routing, retrieval, evidence, staged = authz.stages(ret, subject.Principal, &req, routingCfg, setID); !staged {
 				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "query", "error", "authorization_unavailable", "", "")
 				refuseAuthorizedQuery(w)
 				return
 			}
 			var err error
-			if authorization, req.AllowedDocumentIDs, err = authz.derive(ctx, subject, &req, cfg); err != nil {
+			if authorization, req.AllowedDocumentIDs, err = authz.derive(ctx, subject, &req, cfg, sets, setID); err != nil {
 				mappedErr := credentialFailure(err, subject)
 				recordQueryFailureAudit(ctx, options.audit, &subject, nil, mappedErr)
 				authorizedFailure(w, r, mappedErr)
 				return
+			}
+			if hasSet {
+				plan, budget, planErr := sets.planSearch(ret, authz.kind, len(authorization.Scope.Incarnations), req.Mode)
+				if planErr != nil {
+					rev := authorization.PolicyRevision()
+					recordQueryFailureAudit(ctx, options.audit, &subject, &rev, planErr)
+					authorizedFailure(w, r, planErr)
+					return
+				}
+				// A hosted search checks the credential, principal and set before each
+				// batch and counts every attempt against one request budget.
+				authorization.Scope.Budget, authorization.Scope.BeforeSearch = budget, authorization.Check
+				forceGlobal = plan.ForceGlobal
 			}
 			rev := authorization.PolicyRevision()
 			if !requireAuditedAllow(ctx, w, options.audit, &subject, &rev, "query", "authorized", "", "") {
@@ -251,6 +282,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			Collection:           req.Collection,
 			RequireCitationScope: req.IncludeCitations && options.citationVerifier != nil,
 			Authorization:        authorization,
+			ForceGlobalRoute:     forceGlobal,
 		}
 
 		var stream *queryStream
@@ -260,7 +292,9 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 
 		if authz != nil {
 			qc.EvidenceVisibility = evidence
-			qc.HostedVisibilityRefill = cfg.HostedVisibilityRefill && ret.SupportsVisibilityRefill()
+			// A set query counts every hosted attempt against its own budget, so the
+			// optional refill searches are not available to it.
+			qc.HostedVisibilityRefill = cfg.HostedVisibilityRefill && ret.SupportsVisibilityRefill() && !hasSet
 			qc.HostedVisibilityExtraRequests = cfg.HostedVisibilityExtraRequests
 		} else if pool != nil {
 			visibility := pgstore.Visibility{Pool: pool, Collection: req.Collection, DocType: req.FilterDocType}
@@ -392,6 +426,8 @@ func recordQueryFailureAudit(ctx context.Context, recorder domain.SecurityAuditR
 		outcome, reason = "deny", "access_denied"
 	case errors.Is(err, pipeline.ErrCredentialExpired):
 		outcome, reason = "deny", "credential_expired"
+	case errors.Is(err, domain.ErrDocumentSetNotFound):
+		outcome, reason = "deny", "document_set_unavailable"
 	case errors.Is(err, pipeline.ErrReadAuthorityChanged), errors.Is(err, pipeline.ErrEvidenceScopeChanged):
 		outcome, reason = "deny", "scope_changed"
 	case errors.Is(err, pipeline.ErrAuthorizationUnavailable):
@@ -409,6 +445,7 @@ func recordQueryFailureAudit(ctx context.Context, recorder domain.SecurityAuditR
 func recordQueryPostAdmissionAudit(ctx context.Context, recorder domain.SecurityAuditRecorder, subject *middleware.VerifiedSubject, rev *int64, err error) {
 	switch {
 	case errors.Is(err, pipeline.ErrCredentialExpired),
+		errors.Is(err, domain.ErrDocumentSetNotFound),
 		errors.Is(err, domain.ErrReadDenied),
 		errors.Is(err, pipeline.ErrReadAuthorityChanged),
 		errors.Is(err, pipeline.ErrEvidenceScopeChanged),

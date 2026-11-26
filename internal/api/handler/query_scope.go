@@ -16,8 +16,11 @@ func maxAllowedDocumentIDs(cfg *config.Config) int {
 	return cfg.MaxAllowedDocumentIDs
 }
 
-func validateQueryAllowlist(req *QueryRequest, cfg *config.Config) *APIError {
-	if cfg.RequireDocumentAllowlist && req.AllowedDocumentIDs == nil {
+// validateQueryAllowlist checks the inline list. A document set reference
+// satisfies REQUIRE_DOCUMENT_ALLOWLIST once it resolves, and an unresolved one
+// is refused before the query runs.
+func validateQueryAllowlist(req *QueryRequest, cfg *config.Config, hasSet bool) *APIError {
+	if cfg.RequireDocumentAllowlist && req.AllowedDocumentIDs == nil && !hasSet {
 		return &APIError{Error: "validation", Message: "allowed_document_ids is required"}
 	}
 	limit := maxAllowedDocumentIDs(cfg)

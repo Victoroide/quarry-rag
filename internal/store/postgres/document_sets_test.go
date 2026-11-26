@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -299,7 +300,8 @@ func TestVectorSearchConfinesRankingToTheSetBeforeTheLimit(t *testing.T) {
 	}
 	f.vectors.exactScopeMax = 0
 	var store domain.DocumentSetScopedVectorStore = f.vectors
-	require.Equal(t, domain.GrantScopeRelation, store.GrantScope())
+	require.True(t, store.SupportsDocumentSets())
+	require.Equal(t, domain.GrantScopeRelation, f.vectors.GrantScope())
 }
 
 func TestVectorSearchWithASetFollowsRevocationAndExpiry(t *testing.T) {
@@ -471,8 +473,8 @@ func TestConcurrentCreationsNeverExceedTheActiveCap(t *testing.T) {
 
 func TestDatabaseEnforcesTheMembershipCeilingAndInputShape(t *testing.T) {
 	f := newRetrievalFixture(t)
-	call := func(ttl int, key *string, docs []string, max int) error {
-		_, err := f.c.Pool.Exec(t.Context(), `SELECT * FROM grant_catalog_create_document_set($1::uuid,$2::uuid,$3,$4,$5::uuid[],$6)`, f.tenant, f.owner.ID, ttl, key, docs, max)
+	call := func(ttl int, key *string, docs []string, ceiling int) error {
+		_, err := f.c.Pool.Exec(t.Context(), `SELECT * FROM grant_catalog_create_document_set($1::uuid,$2::uuid,$3,$4,$5::uuid[],$6)`, f.tenant, f.owner.ID, ttl, key, docs, ceiling)
 		return err
 	}
 	longKey, none := strings.Repeat("k", 129), []string{}
@@ -581,4 +583,87 @@ func TestDocumentSetIdentifiersAreServerGeneratedAndUnique(t *testing.T) {
 		ids = append(ids, id)
 	}
 	require.False(t, slices.Contains(ids, uuid.Nil.String()))
+}
+
+// TestSetSearchEqualsTheExhaustiveAuthorizedResultWithTiedScores builds an
+// owner's documents so that many share one score, then compares every set
+// search with the exhaustive authorized ranking filtered to the set. The three
+// properties it checks are kept apart: the exact scope, the deterministic
+// order of tied scores, and the approximate index.
+func TestSetSearchEqualsTheExhaustiveAuthorizedResultWithTiedScores(t *testing.T) {
+	f := newRetrievalFixture(t)
+	classes := [][]float32{{1, 0, 0}, {.6, .8, 0}, {0, 1, 0}}
+	members := []string{f.own}
+	for i := range 24 {
+		id, _ := f.complete(t, f.owner, fmt.Sprintf("tied document %d", i), classes[i%3])
+		if i%2 == 0 {
+			members = append(members, id)
+		}
+	}
+	set := f.createSet(t, f.owner, "", members...)
+	inSet := map[string]bool{}
+	for _, id := range members {
+		inSet[id] = true
+	}
+	scope := &domain.AuthorizedScope{TenantID: f.tenant, PrincipalID: f.owner.ID}
+	setScope := &domain.AuthorizedScope{TenantID: f.tenant, PrincipalID: f.owner.ID, DocumentSet: f.setRef(set)}
+
+	f.vectors.exactScopeMax = 1000
+	exhaustive, err := f.vectors.QueryFiltered(t.Context(), retrievalQuery, 1000, domain.VectorFilter{Authorized: scope})
+	require.NoError(t, err)
+	require.Greater(t, len(exhaustive), len(members), "the exhaustive result holds readable documents outside the set")
+	var oracle []domain.ScoredChunk
+	for _, sc := range exhaustive {
+		if inSet[string(sc.Chunk.DocumentID)] {
+			oracle = append(oracle, sc)
+		}
+	}
+	require.Len(t, oracle, len(members))
+	for i := 1; i < len(oracle); i++ {
+		require.True(t, oracle[i-1].Score > oracle[i].Score || (oracle[i-1].Score == oracle[i].Score && oracle[i-1].Chunk.ID < oracle[i].Chunk.ID),
+			"the exhaustive ranking orders ties by chunk identifier")
+	}
+	ties := 0
+	for i := 1; i < len(oracle); i++ {
+		if oracle[i-1].Score == oracle[i].Score {
+			ties++
+		}
+	}
+	require.Positive(t, ties, "the corpus contains tied scores")
+
+	chunkIDs := func(chunks []domain.ScoredChunk) []domain.ChunkID {
+		out := make([]domain.ChunkID, len(chunks))
+		for i, sc := range chunks {
+			out[i] = sc.Chunk.ID
+		}
+		return out
+	}
+	for _, topK := range []int{1, 2, 3, 5, 8, 13, 100} {
+		got, searchErr := f.vectors.QueryFiltered(t.Context(), retrievalQuery, topK, domain.VectorFilter{Authorized: setScope})
+		require.NoError(t, searchErr)
+		want := oracle[:min(topK, len(oracle))]
+		require.Equal(t, chunkIDs(want), chunkIDs(got), "exact scope, top %d", topK)
+		for _, sc := range got {
+			require.True(t, inSet[string(sc.Chunk.DocumentID)], "no chunk outside the set is returned")
+		}
+	}
+
+	f.vectors.exactScopeMax = 0
+	for _, topK := range []int{len(members), 100} {
+		got, searchErr := f.vectors.QueryFiltered(t.Context(), retrievalQuery, topK, domain.VectorFilter{Authorized: setScope})
+		require.NoError(t, searchErr)
+		require.ElementsMatch(t, chunkIDs(oracle), chunkIDs(got), "the approximate index returns the same members when asked for all of them")
+	}
+	// Recall is reported on its own. A shared approximate index can miss a
+	// neighbor even when every returned row is authorized.
+	exact := chunkIDs(oracle[:5])
+	approximate, err := f.vectors.QueryFiltered(t.Context(), retrievalQuery, 5, domain.VectorFilter{Authorized: setScope})
+	require.NoError(t, err)
+	found := 0
+	for _, id := range chunkIDs(approximate) {
+		if slices.Contains(exact, id) {
+			found++
+		}
+	}
+	t.Logf("approximate recall@5 on %d tied documents: %d/5", len(oracle), found)
 }

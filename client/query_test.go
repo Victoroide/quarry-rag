@@ -191,3 +191,46 @@ func TestQueryDecodesStrictBudgetFields(t *testing.T) {
 	require.NotContains(t, string(raw), "count_method")
 	require.NotContains(t, string(raw), "model_input_tokens")
 }
+
+func TestQuerySendsTheDocumentSetReferenceOnlyWhenSet(t *testing.T) {
+	const set = "20000000-0000-4000-8000-000000000001"
+	for _, tc := range []struct {
+		name, set string
+		want      bool
+	}{{"with a reference", set, true}, {"without a reference", "", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				if tc.want {
+					assert.JSONEq(t, `"`+set+`"`, string(body["document_set_id"]))
+				} else {
+					assert.NotContains(t, body, "document_set_id")
+				}
+				for _, owned := range []string{"owner", "tenant", "revision", "batches"} {
+					assert.NotContains(t, body, owned, "the caller cannot supply server-owned state")
+				}
+				writeJSON(t, w, client.QueryResponse{})
+			})
+			_, err := c.Query(t.Context(), client.QueryRequest{Query: "archive", DocumentSetID: tc.set, AllowedDocumentIDs: []string{}})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestQueryReportsAnUnusableReferenceAsAnAPIError(t *testing.T) {
+	for _, set := range []string{"20000000-0000-4000-8000-000000000001", "20000000-0000-4000-8000-0000000000ff"} {
+		c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, err := w.Write([]byte(`{"error":"not_found","message":"document set not found"}`))
+			assert.NoError(t, err)
+		})
+		_, err := c.Query(t.Context(), client.QueryRequest{Query: "archive", DocumentSetID: set})
+		var apiErr *client.APIError
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, http.StatusNotFound, apiErr.StatusCode)
+		require.Equal(t, "not_found", apiErr.Code)
+		require.NotContains(t, err.Error(), set)
+	}
+}

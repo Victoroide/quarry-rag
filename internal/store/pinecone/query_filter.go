@@ -56,6 +56,15 @@ func buildScopedFilter(docType string, ids []string, collection, tenant string, 
 	return &structpb.Struct{Fields: fields}
 }
 
+// partitionCount is the number of requests a member list needs when each
+// predicate carries at most maxInValues values.
+func partitionCount(members int) int {
+	if members <= 0 {
+		return 0
+	}
+	return 1 + (members-1)/maxInValues
+}
+
 // QueryFiltered searches the default namespace with document scope predicates.
 func (p *Client) QueryFiltered(ctx context.Context, embedding []float32, topK int, filter domain.VectorFilter) ([]domain.ScoredChunk, error) {
 	if filter.MatchesNothing() {
@@ -115,9 +124,19 @@ func (p *Client) queryPartitions(ctx context.Context, embedding []float32, topK 
 		// name its tenant and its members. Anything else would search globally.
 		return domain.ErrGrantScopeUnsupported
 	}
-	partitions := 1 + max(0, len(filter.DocumentIDs)-1)/maxInValues
+	partitions := max(1, partitionCount(len(filter.DocumentIDs)))
 	if budget != nil && *budget < partitions {
 		return domain.ErrVectorQueryBudget
+	}
+	// A request budget counts every attempt of the whole request, and the
+	// refill budget counts one search. They never apply to the same search.
+	var requestBudget *domain.SearchBudget
+	var beforeSearch func(context.Context) error
+	if filter.Authorized != nil {
+		requestBudget, beforeSearch = filter.Authorized.Budget, filter.Authorized.BeforeSearch
+		if requestBudget != nil && budget != nil {
+			return domain.ErrGrantScopeUnsupported
+		}
 	}
 	for part := range partitions {
 		start := part * maxInValues
@@ -133,17 +152,35 @@ func (p *Client) queryPartitions(ctx context.Context, embedding []float32, topK 
 			metadataFilter = buildScopedFilter(filter.DocType, ids, filter.Collection, filter.Authorized.TenantID, incarnations)
 		}
 		req := &pinecone.QueryByVectorValuesRequest{Vector: embedding, TopK: uint32(topK), IncludeMetadata: true, MetadataFilter: metadataFilter}
+		if beforeSearch != nil {
+			// Each batch re-establishes the credential, principal and set before
+			// it sends the scope to the hosted index.
+			if err := beforeSearch(ctx); err != nil {
+				return err
+			}
+		}
 		var partitionBudget *int
 		limited := false
 		remainingPartitions := partitions - part - 1
-		if budget != nil {
+		reserved := 0
+		switch {
+		case requestBudget != nil:
+			allowed, err := requestBudget.Acquire(p.queryAttempts())
+			if err != nil {
+				return err
+			}
+			reserved, partitionBudget = allowed, &allowed
+		case budget != nil:
 			// Keep one attempt for each later partition before allowing retries.
 			available := *budget - remainingPartitions
 			limited = available < p.queryAttempts()
 			partitionBudget = &available
 		}
 		chunks, err := p.queryNamespace(ctx, "", req, partitionBudget)
-		if partitionBudget != nil {
+		if requestBudget != nil {
+			requestBudget.Release(reserved, reserved-*partitionBudget)
+		}
+		if budget != nil && partitionBudget != nil {
 			*budget = *partitionBudget + remainingPartitions
 			if limited && *partitionBudget == 0 && err != nil && retryable(err) {
 				err = errors.Join(err, domain.ErrVectorQueryBudget)

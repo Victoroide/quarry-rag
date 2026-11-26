@@ -59,6 +59,8 @@ func queryErrorResponse(err error) (code int, retry string, body APIError) {
 		return http.StatusUnauthorized, "", APIError{Error: "unauthorized", Message: "invalid or missing credentials"}
 	case errors.Is(err, pipeline.ErrReadAuthorityChanged), errors.Is(err, domain.ErrReadDenied):
 		return http.StatusForbidden, "", APIError{Error: "forbidden", Message: "access denied"}
+	case errors.Is(err, domain.ErrDocumentSetNotFound):
+		return http.StatusNotFound, "", APIError{Error: "not_found", Message: documentSetNotFoundMessage}
 	case errors.Is(err, pipeline.ErrAuthorizationUnavailable), errors.Is(err, domain.ErrGrantScopeUnsupported):
 		return http.StatusServiceUnavailable, "", APIError{Error: "unavailable", Message: "authorization unavailable"}
 	case errors.Is(err, context.DeadlineExceeded):
