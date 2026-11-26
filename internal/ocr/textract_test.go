@@ -16,8 +16,10 @@ import (
 )
 
 type fakeTextract struct {
-	start func(context.Context, *textract.StartDocumentTextDetectionInput) (*textract.StartDocumentTextDetectionOutput, error)
-	get   func(context.Context, *textract.GetDocumentTextDetectionInput) (*textract.GetDocumentTextDetectionOutput, error)
+	start         func(context.Context, *textract.StartDocumentTextDetectionInput) (*textract.StartDocumentTextDetectionOutput, error)
+	get           func(context.Context, *textract.GetDocumentTextDetectionInput) (*textract.GetDocumentTextDetectionOutput, error)
+	startAnalysis func(context.Context, *textract.StartDocumentAnalysisInput) (*textract.StartDocumentAnalysisOutput, error)
+	getAnalysis   func(context.Context, *textract.GetDocumentAnalysisInput) (*textract.GetDocumentAnalysisOutput, error)
 }
 
 func (f fakeTextract) StartDocumentTextDetection(ctx context.Context, in *textract.StartDocumentTextDetectionInput, _ ...func(*textract.Options)) (*textract.StartDocumentTextDetectionOutput, error) {
@@ -28,6 +30,18 @@ func (f fakeTextract) StartDocumentTextDetection(ctx context.Context, in *textra
 }
 func (f fakeTextract) GetDocumentTextDetection(ctx context.Context, in *textract.GetDocumentTextDetectionInput, _ ...func(*textract.Options)) (*textract.GetDocumentTextDetectionOutput, error) {
 	return f.get(ctx, in)
+}
+func (f fakeTextract) StartDocumentAnalysis(ctx context.Context, in *textract.StartDocumentAnalysisInput, _ ...func(*textract.Options)) (*textract.StartDocumentAnalysisOutput, error) {
+	if f.startAnalysis != nil {
+		return f.startAnalysis(ctx, in)
+	}
+	return &textract.StartDocumentAnalysisOutput{JobId: aws.String("synthetic-analysis-job")}, nil
+}
+func (f fakeTextract) GetDocumentAnalysis(ctx context.Context, in *textract.GetDocumentAnalysisInput, _ ...func(*textract.Options)) (*textract.GetDocumentAnalysisOutput, error) {
+	if f.getAnalysis != nil {
+		return f.getAnalysis(ctx, in)
+	}
+	return &textract.GetDocumentAnalysisOutput{JobStatus: types.JobStatusSucceeded}, nil
 }
 func line(page int32, top, left float32, text string) types.Block {
 	return types.Block{BlockType: types.BlockTypeLine, Page: aws.Int32(page), Text: aws.String(text), Geometry: &types.Geometry{BoundingBox: &types.BoundingBox{Top: top, Left: left}}}

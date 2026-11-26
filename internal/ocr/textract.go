@@ -31,6 +31,8 @@ var (
 type textractAPI interface {
 	StartDocumentTextDetection(context.Context, *textract.StartDocumentTextDetectionInput, ...func(*textract.Options)) (*textract.StartDocumentTextDetectionOutput, error)
 	GetDocumentTextDetection(context.Context, *textract.GetDocumentTextDetectionInput, ...func(*textract.Options)) (*textract.GetDocumentTextDetectionOutput, error)
+	StartDocumentAnalysis(context.Context, *textract.StartDocumentAnalysisInput, ...func(*textract.Options)) (*textract.StartDocumentAnalysisOutput, error)
+	GetDocumentAnalysis(context.Context, *textract.GetDocumentAnalysisInput, ...func(*textract.Options)) (*textract.GetDocumentAnalysisOutput, error)
 }
 
 // Client performs asynchronous document text detection.
@@ -114,20 +116,24 @@ func (c *Client) ExtractPages(ctx context.Context, key, profile, window string, 
 	return result.pages, nil
 }
 
+func (c *Client) requestToken(key, profile, window string) string {
+	// Originals have immutable keys. Mixed and layout retries also reuse their persisted window.
+	identity := c.bucket + "\x00" + key
+	if profile != "" {
+		identity += "\x00" + profile + "\x00" + window
+	}
+	digest := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("%x", digest)
+}
+
 func (c *Client) extract(parent context.Context, key, profile, window string, pageCount int, accepted func(context.Context) error) (detection, error) {
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return detection{}, err
 	}
-	// Originals have immutable keys. Mixed retries also reuse their persisted window.
-	identity := c.bucket + "\x00" + key
-	if profile != "" {
-		identity += "\x00" + profile + "\x00" + window
-	}
-	digest := sha256.Sum256([]byte(identity))
 	started, err := c.api.StartDocumentTextDetection(ctx, &textract.StartDocumentTextDetectionInput{
-		ClientRequestToken: aws.String(fmt.Sprintf("%x", digest)),
+		ClientRequestToken: aws.String(c.requestToken(key, profile, window)),
 		DocumentLocation:   &types.DocumentLocation{S3Object: &types.S3Object{Bucket: aws.String(c.bucket), Name: aws.String(key)}},
 	})
 	if err != nil {
@@ -182,12 +188,8 @@ func (c *Client) results(ctx context.Context, jobID *string, pageCount int) (det
 			return detection{}, domain.Permanent(ErrDetectionFailed)
 		}
 		if out.JobStatus == types.JobStatusInProgress {
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return detection{}, ctx.Err()
-			case <-timer.C:
+			if delayErr := sleepPollDelay(ctx, delay); delayErr != nil {
+				return detection{}, delayErr
 			}
 			delay = min(2*delay, 10*time.Second)
 			continue
@@ -198,15 +200,13 @@ func (c *Client) results(ctx context.Context, jobID *string, pageCount int) (det
 		if err = result.collect(out, pageCount, blockIDs); err != nil {
 			return detection{}, domain.Permanent(err)
 		}
-		if aws.ToString(out.NextToken) == "" {
+		next, err = advanceNextToken(out.NextToken, seen, pageCount > 0)
+		if err != nil {
+			return detection{}, domain.Permanent(err)
+		}
+		if next == nil {
 			break
 		}
-		token := *out.NextToken
-		if seen[token] || pageCount > 0 && len(token) > 1024 {
-			return detection{}, domain.Permanent(ErrDetectionFailed)
-		}
-		seen[token] = true
-		next = out.NextToken
 	}
 	slices.SortStableFunc(result.lines, func(a, b detectedLine) int {
 		if n := cmp.Compare(a.page, b.page); n != 0 {
@@ -285,6 +285,29 @@ func (d *detection) collect(out *textract.GetDocumentTextDetectionOutput, pageCo
 		d.lines = append(d.lines, line)
 	}
 	return nil
+}
+
+func sleepPollDelay(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func advanceNextToken(nextToken *string, seen map[string]bool, bounded bool) (*string, error) {
+	if aws.ToString(nextToken) == "" {
+		return nil, nil
+	}
+	token := *nextToken
+	if seen[token] || (bounded && len(token) > 1024) {
+		return nil, ErrDetectionFailed
+	}
+	seen[token] = true
+	return nextToken, nil
 }
 
 func detectionError(err error, pageAware bool) error {
