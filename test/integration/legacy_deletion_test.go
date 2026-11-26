@@ -1,0 +1,485 @@
+package integration
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/Victoroide/quarry-rag/internal/api"
+	"github.com/Victoroide/quarry-rag/internal/api/handler"
+	"github.com/Victoroide/quarry-rag/internal/chunker"
+	"github.com/Victoroide/quarry-rag/internal/cleanup"
+	"github.com/Victoroide/quarry-rag/internal/config"
+	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/embedder"
+	"github.com/Victoroide/quarry-rag/internal/llm"
+	"github.com/Victoroide/quarry-rag/internal/retriever"
+	"github.com/Victoroide/quarry-rag/internal/store/memory"
+	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	"github.com/Victoroide/quarry-rag/internal/worker"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// legacyRoutes composes the production handlers with the reservation guard that the
+// server entry point leaves disabled until the deployment can also activate.
+func legacyRoutes(stores *deletionStores) deletionRoutes {
+	routes := fullRoutes(stores)
+	routes.options = []handler.DeleteOption{
+		handler.WithLegacyReservations(),
+		handler.WithCleanupTargets(cleanup.Targets{SourceBucket: "originals", VectorIndex: "index"}),
+	}
+	return routes
+}
+
+type legacyReceiptRow struct {
+	kind      string
+	held      bool
+	finalized bool
+	claimLive bool
+}
+
+func legacyReceiptOf(ctx context.Context, t *testing.T, c *pgstore.Client, id string) legacyReceiptRow {
+	t.Helper()
+	var r legacyReceiptRow
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT kind,held,finalized,COALESCE(claim_until>clock_timestamp(),FALSE)
+		FROM document_deletions WHERE document_id=$1`, id).Scan(&r.kind, &r.held, &r.finalized, &r.claimLive))
+	return r
+}
+
+func admission(t *testing.T, c *pgstore.Client, id, content string) domain.AcceptOutcome {
+	t.Helper()
+	result, err := c.AcceptDocument(t.Context(), domain.AcceptRequest{
+		Document: domain.Document{ID: domain.DocumentID(id), Content: content}, CallerSupplied: true,
+		Fingerprint: chunker.ScopedFingerprint("", content), MaxPending: 100,
+	})
+	require.NoError(t, err)
+	return result.Outcome
+}
+
+// terminateActivationHolders ends only the SQL sessions that hold the shared
+// activation lock, as a lost connection would.
+func terminateActivationHolders(t *testing.T, c *pgstore.Client) int {
+	t.Helper()
+	rows, err := c.Pool.Query(t.Context(), `SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND mode='ShareLock'
+		AND classid::bigint=$1 AND objid::bigint=$2 AND objsubid=1`,
+		(pgstore.DeletionActivationLockID>>32)&0xffffffff, pgstore.DeletionActivationLockID&0xffffffff)
+	require.NoError(t, err)
+	var pids []int32
+	for rows.Next() {
+		var pid int32
+		require.NoError(t, rows.Scan(&pid))
+		pids = append(pids, pid)
+	}
+	require.NoError(t, rows.Err())
+	for _, pid := range pids {
+		var ended bool
+		require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT pg_terminate_backend($1)`, pid).Scan(&ended))
+		require.True(t, ended)
+	}
+	return len(pids)
+}
+
+func TestBareDeleteBeforeActivationReservesFirstAndRepeatReportsAbsence(t *testing.T) {
+	c := durableDatabase(t)
+	stores := newDeletionStores()
+	id := uuid.NewString()
+	key := "source/" + id + "/original"
+	acceptDeletable(t, c, id, "legacy document", false, key)
+	var atFirstCall legacyReceiptRow
+	stores.hook("namespace", func(ctx context.Context) error {
+		atFirstCall = legacyReceiptOf(ctx, t, c, id)
+		return nil
+	})
+	server := deletionServer(t, c, "token", legacyRoutes(stores))
+
+	require.Equal(t, http.StatusOK, sendDelete(t, server, "token", id, "").code)
+
+	require.Equal(t, legacyReceiptRow{kind: "legacy_reservation", held: true, finalized: false, claimLive: true}, atFirstCall,
+		"the reservation is durable before the first external call")
+	require.Equal(t, []string{"namespace:" + id, "vectors:" + id, "source:" + key, "vectors:" + id}, stores.all())
+	final := legacyReceiptOf(t.Context(), t, c, id)
+	require.True(t, final.finalized)
+	require.True(t, final.held, "historical document-wide hosted effects stay held")
+	require.Equal(t, http.StatusNotFound, sendDelete(t, server, "token", id, "").code, "a repeat reports absence")
+	require.Equal(t, domain.AcceptDeletionConflict, admission(t, c, id, "replacement"))
+}
+
+func TestIDOnlyDeleteAcrossActivationFollowsTheActivatedContract(t *testing.T) {
+	c := durableDatabase(t)
+	stale := deletionServer(t, c, "token", legacyRoutes(newDeletionStores()))
+	stores := newDeletionStores()
+	id := uuid.NewString()
+	incarnation := acceptDeletable(t, c, id, "live document", false, "")
+	activateDeletion(t, c)
+	restarted := deletionServer(t, otherDatabaseClient(t, c), "token", legacyRoutes(stores))
+
+	for name, server := range map[string]*httptest.Server{"stale replica": stale, "restarted replica": restarted} {
+		reply := sendDelete(t, server, "token", id, "")
+		require.Equal(t, http.StatusPreconditionRequired, reply.code, name+": "+reply.body)
+	}
+	require.Empty(t, stores.all())
+	require.Equal(t, http.StatusPreconditionFailed, sendDelete(t, restarted, "token", id, uuid.NewString()).code, "a wrong token")
+	require.Empty(t, stores.all())
+	require.Equal(t, http.StatusOK, sendDelete(t, restarted, "token", id, incarnation).code, "the original token")
+	require.Equal(t, http.StatusNotFound, sendDelete(t, stale, "token", id, "").code)
+}
+
+func TestQualifiedDeleteBeforeActivationFailsClosed(t *testing.T) {
+	c := durableDatabase(t)
+	stores := newDeletionStores()
+	id := uuid.NewString()
+	incarnation := acceptDeletable(t, c, id, "live document", false, "")
+	server := deletionServer(t, c, "token", legacyRoutes(stores))
+	for _, value := range []string{incarnation, "", "latest"} {
+		require.Equal(t, http.StatusPreconditionFailed, doRequest(t, server, http.MethodDelete, "/documents/"+id, "token",
+			map[string]string{"X-Document-Incarnation": value}, "").code)
+	}
+	require.Empty(t, stores.all(), "a qualifier never becomes an ID-only deletion")
+	require.Equal(t, "processing", documentState(t, c, id))
+}
+
+func TestPreMigrationBareRetryCannotRemoveAReplacement(t *testing.T) {
+	c := durableDatabase(t)
+	stores := newDeletionStores()
+	id := uuid.NewString()
+	acceptDeletable(t, c, id, "first lifetime", false, "source/"+id+"/old")
+	// An executable that predates receipts removed the first lifetime and recorded nothing.
+	_, err := c.Pool.Exec(t.Context(), `DELETE FROM documents WHERE id=$1`, id)
+	require.NoError(t, err)
+	activateDeletion(t, c)
+	newKey := "source/" + id + "/new"
+	replacement := acceptDeletable(t, c, id, "multipart replacement", true, newKey)
+	server := deletionServer(t, c, "token", legacyRoutes(stores))
+
+	require.Equal(t, http.StatusPreconditionRequired, sendDelete(t, server, "token", id, "").code, "the delayed bare request")
+	require.Empty(t, stores.all(), "no vector or object call reaches the replacement")
+	stored, err := c.GetDocumentS3Key(t.Context(), domain.DocumentID(id))
+	require.NoError(t, err)
+	require.Equal(t, newKey, *stored)
+	require.Equal(t, replacement, storedIncarnation(t, c, id))
+	require.Zero(t, receiptCount(t, c), "there was no receipt and the request created none")
+}
+
+func TestFirstHostedFailureKeepsTheLiveRowVisibleUntilTheQualifiedIntentCommits(t *testing.T) {
+	c := durableDatabase(t)
+	stores := newDeletionStores()
+	stores.hook("namespace", failOnce("provider unavailable"))
+	id := uuid.NewString()
+	key := "source/" + id + "/original"
+	const content = "document whose first hosted call fails"
+	req := domain.AcceptRequest{
+		Document: domain.Document{ID: domain.DocumentID(id), Content: content, S3Key: &key}, CallerSupplied: true,
+		Fingerprint: chunker.ScopedFingerprint("", content), MaxPending: 100, ContentDedup: domain.ContentDedupCollection,
+	}
+	accepted, err := c.AcceptDocument(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, accepted.Outcome)
+	incarnation := storedIncarnation(t, c, id)
+	require.NoError(t, c.UpdateDocumentStatus(t.Context(), domain.DocumentID(id), "completed"))
+	server := deletionServer(t, c, "token", legacyRoutes(stores))
+	duplicate := func() domain.AcceptOutcome {
+		// Content matching applies to an upload that supplies no document_id.
+		other := req
+		other.CallerSupplied = false
+		other.Document = domain.Document{ID: domain.DocumentID(uuid.NewString()), Content: content}
+		result, dupErr := c.AcceptDocument(t.Context(), other)
+		require.NoError(t, dupErr)
+		return result.Outcome
+	}
+	live := func(phase string) {
+		require.Equal(t, http.StatusOK, doRequest(t, server, http.MethodGet, "/documents/"+id, "token", nil, "").code, phase+" status")
+		require.Equal(t, http.StatusOK, doRequest(t, server, http.MethodGet, "/documents/"+id+"/file", "token", nil, "").code, phase+" signer")
+		require.Equal(t, domain.AcceptDuplicate, duplicate(), phase+" duplicate")
+	}
+
+	require.Equal(t, http.StatusInternalServerError, sendDelete(t, server, "token", id, "").code)
+	require.Equal(t, "legacy_reservation", legacyReceiptOf(t.Context(), t, c, id).kind)
+	require.False(t, legacyReceiptOf(t.Context(), t, c, id).claimLive)
+	live("before activation")
+	activateDeletion(t, c)
+	live("after activation, before the qualified retry")
+
+	// The retry converts the reservation and commits the visibility fence, then fails at a later step.
+	stores.hook("vectors", failOnce("provider unavailable"))
+	require.Equal(t, http.StatusInternalServerError, sendDelete(t, server, "token", id, incarnation).code)
+	require.Equal(t, "qualified_intent", legacyReceiptOf(t.Context(), t, c, id).kind)
+	require.Equal(t, "deleting", documentState(t, c, id))
+	require.Equal(t, http.StatusNotFound, doRequest(t, server, http.MethodGet, "/documents/"+id, "token", nil, "").code, "status after the fence")
+	require.Equal(t, http.StatusNotFound, doRequest(t, server, http.MethodGet, "/documents/"+id+"/file", "token", nil, "").code, "the signer is silent")
+	require.NotEqual(t, domain.AcceptDuplicate, duplicate(), "a retiring document is no duplicate source")
+	require.Equal(t, domain.AcceptDeletionConflict, admission(t, c, id, "conflicting admission"))
+	require.Equal(t, http.StatusOK, sendDelete(t, server, "token", id, incarnation).code)
+}
+
+func TestHostedFinalCallOutcomesKeepTheIdentityReserved(t *testing.T) {
+	uncertain := status.Error(codes.DeadlineExceeded, "final call timed out")
+	rejected := domain.RejectedVectorMutation(status.Error(codes.InvalidArgument, "answered before any effect"))
+	hidden := func(attempt error) func(context.Context) error {
+		return func(ctx context.Context) error {
+			domain.NoteVectorAttempt(ctx, attempt)
+			return nil
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		scoped bool
+		final  func(context.Context) error
+		status int
+		held   bool
+	}{
+		// Untagged hosted vectors are held whatever happens, so these cases cannot show a note.
+		{name: "untagged timeout", final: func(context.Context) error { return uncertain }, status: http.StatusInternalServerError, held: true},
+		{name: "untagged retry succeeds after a hidden timeout", final: hidden(uncertain), status: http.StatusOK, held: true},
+		// A scoped document is held only when an attempt may have reached the provider.
+		{name: "scoped timeout", scoped: true, final: func(context.Context) error { return uncertain }, status: http.StatusInternalServerError, held: true},
+		{name: "scoped retry succeeds after a hidden timeout", scoped: true, final: hidden(uncertain), status: http.StatusOK, held: true},
+		{name: "scoped retry after a definite rejection", scoped: true, final: hidden(rejected), status: http.StatusOK, held: false},
+		{name: "scoped clean final call", scoped: true, final: func(context.Context) error { return nil }, status: http.StatusOK, held: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := durableDatabase(t)
+			stores := newDeletionStores()
+			id := uuid.NewString()
+			acceptDeletable(t, c, id, "hosted legacy document", false, "")
+			kind := "vectors"
+			if tc.scoped {
+				// Admission selects the tagged format only after activation, which ID-only deletion no longer serves.
+				markTagged(t, c, id)
+				kind = "revision"
+			}
+			var mu sync.Mutex
+			calls := 0
+			stores.hook(kind, func(ctx context.Context) error {
+				mu.Lock()
+				calls++
+				call := calls
+				mu.Unlock()
+				if call == 2 {
+					return tc.final(ctx)
+				}
+				return nil
+			})
+			server := deletionServer(t, c, "token", legacyRoutes(stores))
+
+			require.Equal(t, tc.status, sendDelete(t, server, "token", id, "").code)
+
+			receipt := legacyReceiptOf(t.Context(), t, c, id)
+			require.Equal(t, tc.held, receipt.held)
+			require.Equal(t, tc.status == http.StatusOK, receipt.finalized)
+			if tc.held || !receipt.finalized {
+				require.Equal(t, domain.AcceptDeletionConflict, admission(t, c, id, "replacement"), "the identity stays reserved")
+			} else {
+				require.Equal(t, domain.AcceptAccepted, admission(t, c, id, "replacement"), "a clean scoped cleanup releases normally")
+			}
+		})
+	}
+}
+
+func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
+	c := durableDatabase(t)
+	activator := otherDatabaseClient(t, c)
+	stores := newDeletionStores()
+	id := uuid.NewString()
+	acceptDeletable(t, c, id, "hosted legacy document", false, "")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	calls := 0
+	stores.hook("vectors", func(context.Context) error {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+		if call == 2 {
+			close(entered)
+			<-release
+		}
+		return nil
+	})
+	server := deletionServer(t, c, "token", legacyRoutes(stores))
+	reply := make(chan httpReply, 1)
+	go func() { reply <- sendDelete(t, server, "token", id, "") }()
+	<-entered
+
+	// The row is retired and the last call has not been sent.
+	require.Empty(t, documentState(t, c, id))
+	activated := make(chan struct{})
+	go func() {
+		defer close(activated)
+		tx, err := activator.Pool.Begin(t.Context())
+		if !assertNoError(t, err) {
+			return
+		}
+		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+		_, err = tx.Exec(t.Context(), `SELECT pg_advisory_xact_lock($1)`, pgstore.DeletionActivationLockID)
+		if !assertNoError(t, err) {
+			return
+		}
+		_, err = tx.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+		if assertNoError(t, err) {
+			assertNoError(t, tx.Commit(t.Context()))
+		}
+	}()
+	select {
+	case <-activated:
+		t.Fatal("a healthy activation committed under the cleanup")
+	case <-time.After(500 * time.Millisecond):
+	}
+	require.Equal(t, 1, terminateActivationHolders(t, activator), "only the guarding session ends")
+	select {
+	case <-activated:
+	case <-time.After(10 * time.Second):
+		t.Fatal("activation did not proceed after the lock disappeared")
+	}
+	require.Equal(t, domain.AcceptDeletionConflict, admission(t, activator, id, "replacement"), "the durable hold still blocks the identity")
+
+	close(release)
+	require.Equal(t, http.StatusOK, (<-reply).code)
+	receipt := legacyReceiptOf(t.Context(), t, c, id)
+	require.True(t, receipt.finalized)
+	require.True(t, receipt.held)
+	require.Equal(t, domain.AcceptDeletionConflict, admission(t, c, id, "replacement"))
+}
+
+func assertNoError(t *testing.T, err error) bool {
+	t.Helper()
+	if err != nil {
+		t.Error(err)
+		return false
+	}
+	return true
+}
+
+// pausedMemory pauses the second document-wide delete, the one sent after the
+// metadata removal, and leaves every other call to the real in-memory index.
+type pausedMemory struct {
+	*memory.FakeVectorStore
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (v *pausedMemory) DeleteByDocID(ctx context.Context, id string) error {
+	v.mu.Lock()
+	v.calls++
+	call := v.calls
+	v.mu.Unlock()
+	if call == 2 {
+		close(v.entered)
+		<-v.release
+	}
+	return v.FakeVectorStore.DeleteByDocID(ctx, id)
+}
+
+func offlineAPI(t *testing.T, c *pgstore.Client, w *worker.Worker, vectors *pausedMemory) *httptest.Server {
+	t.Helper()
+	cfg := &config.Config{
+		FakeMode: true, ServiceToken: "offline", BedrockFallbackModel: "offline",
+		MaxUploadBytes: 1 << 20, MaxChunksPerQuery: 10, WorkerQueueSize: 10, ExtractConcurrency: 1,
+	}
+	amb := llm.NewAmbassador(cfg)
+	amb.SetClient(llm.NewFakeConverser())
+	embeddings := embedder.NewFakeEmbedder(256)
+	server := httptest.NewServer(api.NewRouter(&api.RouterDeps{
+		Config: cfg, Worker: w, ChunkStore: c, VectorStore: vectors, PineconeDriver: vectors, PGPool: c.Pool,
+		Retriever: retriever.NewRetriever(vectors, embeddings, 0, 10), Ambassador: amb, LegacyDeletionReservations: true,
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestPausedMemoryDeleteHoldsTheIdentityUntilItsOwnerFinishes(t *testing.T) {
+	c := durableDatabase(t)
+	second := otherDatabaseClient(t, c)
+	index := memory.NewFakeVectorStore()
+	e := embedder.NewFakeEmbedder(256)
+	w := durableWorker(c, index, e)
+	w.Start(t.Context())
+	t.Cleanup(w.Shutdown)
+	vectors := &pausedMemory{FakeVectorStore: index, entered: make(chan struct{}), release: make(chan struct{})}
+	stale := offlineAPI(t, c, w, vectors)
+	// Another API shares the database and the original worker but owns no index.
+	other := offlineAPI(t, second, w, &pausedMemory{FakeVectorStore: memory.NewFakeVectorStore(), entered: make(chan struct{}), release: make(chan struct{})})
+	id := uuid.NewString()
+	submit := func(server *httptest.Server, text string) httpReply {
+		return doRequest(t, server, http.MethodPost, "/ingest", "offline", nil, `{"document_id":"`+id+`","content":"`+text+`"}`)
+	}
+	reply := submit(stale, "The old policy says blue folders.")
+	require.Equal(t, http.StatusAccepted, reply.code, reply.body)
+	durableStatus(t, c, id, "completed")
+
+	deleted := make(chan httpReply, 1)
+	go func() { deleted <- sendDelete(t, stale, "offline", id, "") }()
+	<-vectors.entered
+	require.Empty(t, documentState(t, c, id), "metadata is gone while the local delete is outstanding")
+	receipt := legacyReceiptOf(t.Context(), t, c, id)
+	require.False(t, receipt.finalized)
+	require.False(t, receipt.held, "a clean memory cleanup needs no permanent hold")
+
+	// A concurrent bare caller neither starts a second mutation nor clears the hold.
+	require.Equal(t, http.StatusServiceUnavailable, sendDelete(t, stale, "offline", id, "").code)
+	require.False(t, legacyReceiptOf(t.Context(), t, c, id).finalized)
+
+	// The guarding session is lost and an operator activates from a second pool.
+	require.Equal(t, 1, terminateActivationHolders(t, second))
+	require.Eventually(t, func() bool {
+		_, err := second.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+		return err == nil
+	}, 10*time.Second, 25*time.Millisecond)
+
+	require.Equal(t, http.StatusConflict, submit(stale, "The stale policy says red folders.").code, "the stale service")
+	require.Equal(t, http.StatusConflict, submit(other, "The other policy says red folders.").code, "another API")
+	require.False(t, legacyReceiptOf(t.Context(), t, c, id).finalized)
+
+	close(vectors.release)
+	require.Equal(t, http.StatusOK, (<-deleted).code)
+	final := legacyReceiptOf(t.Context(), t, c, id)
+	require.True(t, final.finalized, "the owner recorded the end of its last effect on a fresh connection")
+	require.False(t, final.held)
+
+	const newText = "The new policy says green folders."
+	reuse := submit(stale, newText)
+	require.Equal(t, http.StatusAccepted, reuse.code, "reuse succeeds immediately after a normal completion: "+reuse.body)
+	durableStatus(t, c, id, "completed")
+	hits, err := index.QueryAllNamespaces(t.Context(), make([]float32, 256), 10, "")
+	require.NoError(t, err)
+	require.Len(t, hits, 1, "the newly indexed vector survives")
+	require.Equal(t, newText, hits[0].Chunk.Text)
+	var chunks int
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM chunks WHERE document_id=$1`, id).Scan(&chunks))
+	require.Positive(t, chunks)
+}
+
+func TestMemoryOwnerCompletesOnlyItsOwnReservation(t *testing.T) {
+	c := durableDatabase(t)
+	index := memory.NewFakeVectorStore()
+	vectors := &pausedMemory{FakeVectorStore: index, entered: make(chan struct{}), release: make(chan struct{})}
+	id := uuid.NewString()
+	acceptDeletable(t, c, id, "offline document", false, "")
+	routes := deletionRoutes{vectors: vectors, options: []handler.DeleteOption{
+		handler.WithLegacyReservations(), handler.WithCleanupTargets(cleanup.Targets{InMemory: true, Memory: index}),
+	}}
+	owner := deletionServer(t, c, "token", routes)
+	// Another process sees an empty local index. It cannot release the reservation.
+	foreignIndex := memory.NewFakeVectorStore()
+	foreign := deletionServer(t, otherDatabaseClient(t, c), "token", deletionRoutes{vectors: foreignIndex, options: []handler.DeleteOption{
+		handler.WithLegacyReservations(), handler.WithCleanupTargets(cleanup.Targets{InMemory: true, Memory: foreignIndex}),
+	}})
+	deleted := make(chan httpReply, 1)
+	go func() { deleted <- sendDelete(t, owner, "token", id, "") }()
+	<-vectors.entered
+
+	require.Equal(t, http.StatusNotFound, sendDelete(t, foreign, "token", id, "").code, "the row is gone, and an empty index elsewhere proves nothing")
+	require.False(t, legacyReceiptOf(t.Context(), t, c, id).finalized)
+	require.Equal(t, domain.AcceptDeletionConflict, admission(t, c, id, "replacement"))
+
+	close(vectors.release)
+	require.Equal(t, http.StatusOK, (<-deleted).code)
+	require.True(t, legacyReceiptOf(t.Context(), t, c, id).finalized)
+}

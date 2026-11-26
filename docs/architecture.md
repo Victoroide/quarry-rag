@@ -398,6 +398,8 @@ Failure-status updates use a separate five-second context after task cancellatio
 
 Checkpointed deletion commits its intent before any external call. The `document_deletions` receipt records the incarnation, source key, vector target and the last acknowledged step, and a claim with a database-clock expiry serializes the steps. The `deleting` status hides the document from reads, signing, retrieval and job completion, and removing its fingerprints stops shared content from matching it. The final transaction deletes the document and completes the receipt together. Workers and readers already compare the stored incarnation, so a replacement under the same UUID keeps its own source and vectors.
 
+Where [legacy deletion reservations](deployment.md#legacy-deletion-reservations) are enabled, an ID-only cleanup holds a shared PostgreSQL advisory lock that orders it against activation and commits a `legacy_reservation` receipt before its first external mutation. The receipt, not the session lock, protects the UUID after a connection is lost, and it is completed only after the last external call returns.
+
 ### Metrics Collection
 
 The middleware order is `RequestID(Metrics(Tracing(Logging(Recovery(mux)))))`, so

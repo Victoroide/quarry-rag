@@ -159,7 +159,19 @@ func acceptDeletable(t *testing.T, c *pgstore.Client, id, content string, scoped
 	result, err := c.AcceptDocument(t.Context(), req)
 	require.NoError(t, err)
 	require.Equal(t, domain.AcceptAccepted, result.Outcome)
+	var stored bool
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT scoped_vectors FROM documents WHERE id=$1`, id).Scan(&stored))
+	require.Equal(t, scoped, stored, "the tagged format is recorded only once the database is activated; use markTagged before activation")
 	return storedIncarnation(t, c, id)
+}
+
+// markTagged records the tagged vector format on a live document of a database
+// that has not been activated, where admission never selects it.
+func markTagged(t *testing.T, c *pgstore.Client, id string) {
+	t.Helper()
+	tag, err := c.Pool.Exec(t.Context(), `UPDATE documents SET scoped_vectors=TRUE WHERE id=$1`, id)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, tag.RowsAffected())
 }
 
 type deletionReceiptRow struct {

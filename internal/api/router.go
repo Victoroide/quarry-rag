@@ -44,6 +44,10 @@ type RouterDeps struct {
 	Reranker              retriever.Reranker
 	NoEvidenceCatalog     *pipeline.NoEvidenceCatalog
 	CitationVerifier      *citationsupport.Verifier
+	// LegacyDeletionReservations makes ID-only deletion reserve its targets under
+	// the activation lock. The server entry point leaves it off until the
+	// deployment can also quarantine, release and activate.
+	LegacyDeletionReservations bool
 }
 
 // NewRouter wires all HTTP routes, handlers, and middleware.
@@ -118,8 +122,11 @@ func NewRouter(deps *RouterDeps) http.Handler {
 		signer = deps.S3Client
 	}
 	mux.HandleFunc("GET /documents/{doc_id}/file", middleware.RequireServiceTokens(tokens, handler.FileHandler(deps.ChunkStore, signer)))
-	mux.HandleFunc("DELETE /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DeleteHandler(deps.ChunkStore, deps.PineconeDriver, objects,
-		handler.WithCleanupTargets(deletionTargets(deps.Config)))))
+	deleteOpts := []handler.DeleteOption{handler.WithCleanupTargets(deletionTargets(deps.Config, deps.VectorStore))}
+	if deps.LegacyDeletionReservations {
+		deleteOpts = append(deleteOpts, handler.WithLegacyReservations())
+	}
+	mux.HandleFunc("DELETE /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DeleteHandler(deps.ChunkStore, deps.PineconeDriver, objects, deleteOpts...)))
 	// Offline fake mode keeps vectors in process memory. A receipt bound to a
 	// store that disappears on restart could never be proved clean again.
 	fixtureStore := deps.FixtureVectorIdentity
@@ -162,8 +169,11 @@ func (unavailableJournal) RecordSourceUploadResult(context.Context, string, doma
 }
 
 // deletionTargets names the stores checkpointed deletion acts on.
-func deletionTargets(cfg *config.Config) cleanup.Targets {
+func deletionTargets(cfg *config.Config, vectors domain.VectorStore) cleanup.Targets {
 	targets := cleanup.Targets{SourceBucket: cfg.S3Bucket, InMemory: cfg.FakeMode}
+	if index, ok := vectors.(domain.InMemoryIndex); ok && cfg.FakeMode {
+		targets.Memory = index
+	}
 	if !cfg.FakeMode && cfg.VectorStore != "postgres" {
 		targets.VectorIndex = cfg.PineconeIndexName
 	}
