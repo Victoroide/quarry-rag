@@ -126,6 +126,33 @@ func TestPDFPageAcceptsJPEGScans(t *testing.T) {
 		require.Equal(t, domain.PDFPartial, pages.CoverageBeforeOCR())
 		require.False(t, pages.NeedsOCR())
 	})
+
+	t.Run("stray bytes after DQT", func(t *testing.T) {
+		gray16 := testGrayJPEG(t, 16, 16)
+		dqtIdx := bytes.Index(gray16, []byte{0xFF, 0xDB})
+		require.NotEqual(t, -1, dqtIdx)
+		segLen := int(gray16[dqtIdx+2])<<8 | int(gray16[dqtIdx+3])
+		insertAt := dqtIdx + 2 + segLen
+		withStray := make([]byte, 0, len(gray16)+1)
+		withStray = append(withStray, gray16[:insertAt]...)
+		withStray = append(withStray, 0x00)
+		withStray = append(withStray, gray16[insertAt:]...)
+
+		_, err := jpeg.DecodeConfig(bytes.NewReader(withStray))
+		require.NoError(t, err)
+
+		obj := testImageObject("/Type /XObject /Subtype /Image /Width 16 /Height 16 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /DCTDecode", withStray)
+		data := testutil.PDFWithPageResources([]string{"q 100 0 0 100 0 0 cm /Photo Do Q"}, "/Photo 5 0 R", [][]byte{obj})
+		pages, err := extractor.ExtractPDFPages(t.Context(), bytes.NewReader(data))
+		require.NoError(t, err)
+		require.Equal(t, domain.PDFPages{{Number: 1, Evidence: domain.PDFImage}}, pages)
+
+		badObj := testImageObject("/Type /XObject /Subtype /Image /Width 17 /Height 16 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /DCTDecode", withStray)
+		badData := testutil.PDFWithPageResources([]string{"q 100 0 0 100 0 0 cm /Photo Do Q"}, "/Photo 5 0 R", [][]byte{badObj})
+		badPages, badErr := extractor.ExtractPDFPages(t.Context(), bytes.NewReader(badData))
+		require.ErrorContains(t, badErr, "JPEG frame does not match its image dictionary")
+		require.Empty(t, badPages)
+	})
 }
 
 func TestPDFPageRejectsUnverifiableJPEG(t *testing.T) {

@@ -99,8 +99,47 @@ func sosPayload(comps [][2]byte, ss, se, ahAl byte) []byte {
 	return payload
 }
 
+func insertJPEGStrayAfterMarker(t testing.TB, data []byte, targetCode byte, stray []byte) []byte {
+	t.Helper()
+	require.GreaterOrEqual(t, len(data), 2)
+	require.Equal(t, byte(0xFF), data[0])
+	require.Equal(t, byte(0xD8), data[1])
+
+	pos := 2
+	for pos < len(data) {
+		for pos < len(data) && data[pos] != 0xFF {
+			pos++
+		}
+		for pos < len(data) && data[pos] == 0xFF {
+			pos++
+		}
+		require.Less(t, pos, len(data))
+		code := data[pos]
+		pos++
+		if code == 0xD9 || code == 0x00 || (code >= 0xD0 && code <= 0xD7) || code == 0x01 {
+			continue
+		}
+		require.LessOrEqual(t, pos+2, len(data))
+		segLen := int(data[pos])<<8 | int(data[pos+1])
+		require.GreaterOrEqual(t, segLen, 2)
+		end := pos + segLen
+		require.LessOrEqual(t, end, len(data))
+		if code == targetCode {
+			out := make([]byte, 0, len(data)+len(stray))
+			out = append(out, data[:end]...)
+			out = append(out, stray...)
+			out = append(out, data[end:]...)
+			return out
+		}
+		pos = end
+	}
+	t.Fatalf("marker 0x%02X not found", targetCode)
+	return nil
+}
+
 func TestReadPDFJPEGFrame(t *testing.T) {
 	gray := encodeTestJPEG(t, image.NewGray(image.Rect(0, 0, 17, 29)))
+	gray16 := encodeTestJPEG(t, image.NewGray(image.Rect(0, 0, 16, 16)))
 	colorImg := image.NewRGBA(image.Rect(0, 0, 23, 31))
 	colorImg.Set(0, 0, color.RGBA{R: 120, G: 45, B: 200, A: 255})
 	rgb := encodeTestJPEG(t, colorImg)
@@ -182,6 +221,63 @@ func TestReadPDFJPEGFrame(t *testing.T) {
 		[]byte{0xDE, 0xAD, 0xBE, 0xEF},                   // trailing bytes after EOI
 	)
 
+	gray16AfterDQT := insertJPEGStrayAfterMarker(t, gray16, 0xDB, []byte{0x00})
+	gray16AfterDHT := insertJPEGStrayAfterMarker(t, gray16, 0xC4, []byte{0x00})
+	gray16AfterAPP0 := makeJPEGStream(
+		[]byte{0xFF, 0xD8},
+		jpegMarkerSegment(0xE0, []byte("JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")),
+		[]byte{0x00},
+		gray16[2:],
+	)
+	stray1 := []byte{0x00}
+	stray64 := bytes.Repeat([]byte{0x42}, 64)
+	validStrayBetweenSegments := makeJPEGStream(
+		[]byte{0xFF, 0xD8},
+		stray1, // after SOI (1 byte)
+		dqtSegment(0, 0),
+		stray64, // after DQT (exact 64 bytes)
+		jpegMarkerSegment(0xE0, []byte("JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")),
+		stray64, // after APP0 (exact 64 bytes)
+		jpegMarkerSegment(0xC0, sofPayload(8, 16, 16, [][3]byte{{1, 0x11, 0}})),
+		stray1, // after SOF0 (1 byte)
+		jpegMarkerSegment(0xDD, []byte{0x00, 0x01}),
+		stray64, // after DRI (exact 64 bytes)
+		dhtSegment(0, 0, minimalDHTCounts()),
+		dhtSegment(1, 0, minimalDHTCounts()),
+		stray1, // after DHT (1 byte; total = 195 <= 256)
+		jpegMarkerSegment(0xDA, sosPayload([][2]byte{{1, 0x00}}, 0, 63, 0)),
+		[]byte{0x00},
+		[]byte{0xFF, 0xD9},
+	)
+	validStrayMaxTotal := makeJPEGStream(
+		[]byte{0xFF, 0xD8},
+		stray64,
+		jpegMarkerSegment(0xE0, []byte{0x01}),
+		stray64,
+		dqtSegment(0, 0),
+		stray64,
+		jpegMarkerSegment(0xC0, sofPayload(8, 8, 8, [][3]byte{{1, 0x11, 0}})),
+		stray64, // 4 * 64 = 256 exact total
+		dhtSegment(0, 0, minimalDHTCounts()),
+		dhtSegment(1, 0, minimalDHTCounts()),
+		jpegMarkerSegment(0xDA, sosPayload([][2]byte{{1, 0x00}}, 0, 63, 0)),
+		[]byte{0x00},
+		[]byte{0xFF, 0xD9},
+	)
+	progStrayBeforeSOS := makeJPEGStream(
+		[]byte{0xFF, 0xD8},
+		dqtSegment(0, 0),
+		jpegMarkerSegment(0xC2, sofPayload(8, 32, 48, [][3]byte{{1, 0x11, 0}})),
+		dhtSegment(0, 0, minimalDHTCounts()),
+		jpegMarkerSegment(0xDA, sosPayload([][2]byte{{1, 0x00}}, 0, 0, 0x01)),
+		[]byte{0x12, 0x34},
+		dhtSegment(1, 2, minimalDHTCounts()),
+		stray1, // stray byte between DHT and next SOS inside progressive stream
+		jpegMarkerSegment(0xDA, sosPayload([][2]byte{{1, 0x02}}, 1, 63, 0x00)),
+		[]byte{0x9A, 0xBC},
+		[]byte{0xFF, 0xD9},
+	)
+
 	t.Run("valid", func(t *testing.T) {
 		for _, tc := range []struct {
 			name string
@@ -190,17 +286,27 @@ func TestReadPDFJPEGFrame(t *testing.T) {
 		}{
 			{"go gray baseline", gray, pdfJPEGFrame{width: 17, height: 29, components: 1}},
 			{"go color baseline", rgb, pdfJPEGFrame{width: 23, height: 31, components: 3}},
+			{"go gray 16x16 stray after DQT", gray16AfterDQT, pdfJPEGFrame{width: 16, height: 16, components: 1}},
+			{"go gray 16x16 stray after DHT", gray16AfterDHT, pdfJPEGFrame{width: 16, height: 16, components: 1}},
+			{"go gray 16x16 stray after APP0", gray16AfterAPP0, pdfJPEGFrame{width: 16, height: 16, components: 1}},
 			{"1x1", validBaseline1x1, pdfJPEGFrame{width: 1, height: 1, components: 1}},
 			{"10000x10000", valid10000, pdfJPEGFrame{width: 10000, height: 10000, components: 1}},
 			{"extended sof1 16bit dqt", validExtendedSOF1, pdfJPEGFrame{width: 27, height: 19, components: 1}},
 			{"4-component baseline", cmykJPEG, pdfJPEGFrame{width: 16, height: 12, components: 4}},
 			{"progressive multi-scan", progJPEG, pdfJPEGFrame{width: 48, height: 32, components: 1}},
+			{"progressive stray bytes before sos", progStrayBeforeSOS, pdfJPEGFrame{width: 48, height: 32, components: 1}},
 			{"fill bytes stuffing rst tem dnl app1 thumbnail trailing", validTricky, pdfJPEGFrame{width: 50, height: 40, components: 1}},
+			{"stray bytes between segments", validStrayBetweenSegments, pdfJPEGFrame{width: 16, height: 16, components: 1}},
+			{"stray bytes at total limit", validStrayMaxTotal, pdfJPEGFrame{width: 8, height: 8, components: 1}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				got, err := readPDFJPEGFrame(bytes.NewReader(tc.data))
 				require.NoError(t, err)
 				require.Equal(t, tc.want, got)
+				if cfg, cfgErr := jpeg.DecodeConfig(bytes.NewReader(tc.data)); cfgErr == nil {
+					require.Equal(t, int64(cfg.Width), got.width)
+					require.Equal(t, int64(cfg.Height), got.height)
+				}
 			})
 		}
 	})
@@ -227,7 +333,26 @@ func TestReadPDFJPEGFrame(t *testing.T) {
 			{"missing EOI", validBaseline1x1[:len(validBaseline1x1)-1], "truncated JPEG data"},
 			{"segment length below 2", []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01, 0xFF, 0xD9}, "invalid segment length"},
 			{"segment length past end", []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x01, 0x00, 0x00, 0x00}, "truncated JPEG data"},
-			{"non-FF marker byte", []byte{0xFF, 0xD8, 0x12, 0x34}, "invalid marker"},
+			{"stray bytes before eof", []byte{0xFF, 0xD8, 0x12, 0x34}, "truncated JPEG data"},
+			{"stray gap over limit", makeJPEGStream([]byte{0xFF, 0xD8}, bytes.Repeat([]byte{0x00}, 65), []byte{0xFF, 0xD9}), "invalid marker"},
+			{"stray total over limit", makeJPEGStream(
+				[]byte{0xFF, 0xD8},
+				stray64,
+				jpegMarkerSegment(0xE0, []byte{0x01}),
+				stray64,
+				dqtSegment(0, 0),
+				stray64,
+				jpegMarkerSegment(0xC0, sofPayload(8, 8, 8, [][3]byte{{1, 0x11, 0}})),
+				stray64,
+				dhtSegment(0, 0, minimalDHTCounts()),
+				stray1, // 257th stray byte
+				[]byte{0xFF, 0xD9},
+			), "invalid marker"},
+			{"escaped zero between segments", makeJPEGStream([]byte{0xFF, 0xD8, 0xFF, 0x00}, validBaseline1x1[2:]), "invalid marker"},
+			{"stray inside DQT not skipped", makeJPEGStream([]byte{0xFF, 0xD8}, jpegMarkerSegment(0xDB, append(dqtSegment(0, 0)[4:], 0x00)), []byte{0xFF, 0xD9}), "invalid quantization table length"},
+			{"stray inside DHT not skipped", makeJPEGStream([]byte{0xFF, 0xD8}, jpegMarkerSegment(0xC4, append(dhtPayload(0, 0, minimalDHTCounts()), 0x00)), []byte{0xFF, 0xD9}), "invalid Huffman table length"},
+			{"stray inside SOF not skipped", makeJPEGStream([]byte{0xFF, 0xD8}, jpegMarkerSegment(0xC0, append(sofPayload(8, 1, 1, [][3]byte{{1, 0x11, 0}}), 0x00)), []byte{0xFF, 0xD9}), "invalid frame header"},
+			{"stray inside SOS not skipped", makeJPEGStream([]byte{0xFF, 0xD8}, dqtSegment(0, 0), jpegMarkerSegment(0xC0, sofPayload(8, 1, 1, [][3]byte{{1, 0x11, 0}})), jpegMarkerSegment(0xDA, append(sosPayload([][2]byte{{1, 0x00}}, 0, 63, 0), 0x00)), []byte{0xFF, 0xD9}), "invalid scan header"},
 			{"SOF3 lossless", makeJPEGStream([]byte{0xFF, 0xD8}, jpegMarkerSegment(0xC3, sofPayload(8, 1, 1, [][3]byte{{1, 0x11, 0}}))), "unsupported JPEG coding process"},
 			{"SOF5 differential sequential", makeJPEGStream([]byte{0xFF, 0xD8}, jpegMarkerSegment(0xC5, sofPayload(8, 1, 1, [][3]byte{{1, 0x11, 0}}))), "unsupported JPEG coding process"},
 			{"SOF9 arithmetic sequential", makeJPEGStream([]byte{0xFF, 0xD8}, jpegMarkerSegment(0xC9, sofPayload(8, 1, 1, [][3]byte{{1, 0x11, 0}}))), "unsupported JPEG coding process"},
@@ -283,6 +408,7 @@ func FuzzPDFJPEGFrame(f *testing.F) {
 		[]byte{0x56},
 		[]byte{0xFF, 0xD9},
 	))
+	f.Add(insertJPEGStrayAfterMarker(f, encodeTestJPEG(f, image.NewGray(image.Rect(0, 0, 16, 16))), 0xDB, []byte{0x00}))
 	f.Add([]byte{0xFF, 0xD8, 0xFF, 0xD9})
 	f.Add([]byte{})
 
