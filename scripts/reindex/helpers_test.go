@@ -140,6 +140,7 @@ func sourceChunks(d docSpec, chunks []domain.Chunk, model string) []domain.Chunk
 			if revision == "" {
 				revision = d.ID
 			}
+			c.VectorIncarnation = revision
 			c.Metadata[domain.VectorRevisionKey] = revision
 			if d.Attempt != "" {
 				c.Metadata[domain.VectorAttemptKey] = d.Attempt

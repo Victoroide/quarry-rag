@@ -53,6 +53,29 @@ func TestVerifyTaggedSnapshotUnit(t *testing.T) {
 	require.Equal(t, 1.0, rep.Coverage.ProfileCoverage)
 	require.Equal(t, 2, rep.Sample.Queries)
 
+	// A relational projection has the same chunks under their bare keys.
+	relational, _ := memoryPinecone()
+	plain := doc
+	plain.Tagged = false
+	require.NoError(t, relational.Upsert(t.Context(), "", sourceChunks(plain, chunks, sourceModel)))
+	for _, pair := range []struct {
+		source, target             vectorReader
+		sourceTagged, targetTagged bool
+	}{
+		{src, relational, true, false},
+		{relational, dst, false, true},
+	} {
+		cross := v
+		cross.source, cross.target = pair.source, pair.target
+		cross.sourceTagged, cross.taggedTarget = pair.sourceTagged, pair.targetTagged
+		rep, err = cross.run(t.Context())
+		require.NoError(t, err)
+		require.True(t, rep.Passed, "%v", rep.Failures)
+		require.Equal(t, 1.0, rep.Sample.MeanRecall)
+		require.Equal(t, 1.0, rep.Sample.HitRate)
+		require.Zero(t, rep.Sample.ForbiddenHits)
+	}
+
 	// A wrong attempt tag at the right physical key counts as Mismatched.
 	badAttempt := v
 	badAttempt.target = scriptedReader{vectorReader: dst, records: func(ids []string) map[string]domain.Chunk {
@@ -445,14 +468,14 @@ func TestStageAndVerifyMixedKeyForms(t *testing.T) {
 	require.False(t, vrep.Passed)
 	require.Equal(t, 1, vrep.Unexpected.Records)
 
-	// A PostgreSQL target refuses the tagged and the manifested documents, never the plain one.
+	// A PostgreSQL target stages the plain and tagged documents under bare keys.
 	pgDst, _ := memoryPinecone()
 	pgStage := &stager{corpus: corpus, ledger: newMemoryManifestLedger(), target: pineconeStore{pgDst}, generation: "g3", taggedTarget: false,
-		profile: testProfile(sourceModel), opts: opts, copyFrom: src}
+		profile: testProfile(sourceModel), opts: opts, copyFrom: src, copyFromTagged: true}
 	pgRep, err := pgStage.run(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, 1, pgRep.Staged)
-	require.ElementsMatch(t, []string{tagged.ID, manifestedDoc.ID, bothDoc.ID}, pgRep.Unsupported)
+	require.Equal(t, 2, pgRep.Staged)
+	require.ElementsMatch(t, []string{manifestedDoc.ID, bothDoc.ID}, pgRep.Unsupported)
 }
 
 func TestMixedKeyFormsSurviveCutover(t *testing.T) {
@@ -554,4 +577,323 @@ func TestStageIgnoresNewerAttemptRecordsUnit(t *testing.T) {
 	require.Zero(t, rep.Copied)
 	require.Equal(t, 1, rep.Embedded)
 	require.Equal(t, []string{doc.ID + "/" + doc.Incarnation + "/" + doc.Attempt + "/" + string(chunks[0].ID)}, targetIdx.IDs())
+}
+
+func TestTaggedDocumentRoundTripsThroughPostgres(t *testing.T) {
+	doc := newTaggedDoc("alpha", "report", "An owned tagged chunk in both stores.")
+	distractor := newDoc("beta", "report", "Another collection is outside the authorized query.")
+	f := newTaggedFixture(t, doc, distractor)
+	ctx := t.Context()
+	tenant, principal := uuid.NewString(), uuid.NewString()
+	assignDocTenant(t, f.pg, doc, tenant, principal)
+	h := newHarness(t, f, "pinecone")
+	original := pcstore.NewClientForIndex(h.stores.index("quarry"), testConfig(), "")
+	source := sourceChunks(doc, f.chunks[doc.ID], sourceModel)
+	source[0].VectorIncarnation = ""
+	source[0].Metadata[domain.VectorTenantKey] = tenant
+	require.NoError(t, original.Upsert(ctx, "", source))
+	candidates, err := f.pg.BackfillCandidates(ctx, "", 2)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.Equal(t, doc.ID, candidates[0].DocumentID)
+	require.Equal(t, doc.Attempt, candidates[0].Attempt)
+	published, err := f.pg.PublishVerifiedDocument(ctx, candidates[0])
+	require.NoError(t, err)
+	require.True(t, published)
+	originalRevision, err := f.pg.LoadDocumentSnapshotBounded(ctx, doc.ID, 2, 4096)
+	require.NoError(t, err)
+	require.False(t, originalRevision.VectorIncarnationRequired)
+
+	serving := useRestrictedTaggedRoundTripRoles(t, h, "g2")
+	h.attestSource()
+	profile := h.profileFile("same.json", testProfile(sourceModel))
+	toPG := options{Generation: "g2", Profile: profile, TargetStore: "postgres", Apply: true}
+	report, err := h.run(toPG)
+	require.NoError(t, err, "%v", report)
+	require.EqualValues(t, 2, report["copied_chunks"])
+	require.Zero(t, h.embedCalls())
+
+	verifyTaggedCutover(t, h, "g2", 2)
+	target, err := pgstore.OpenGenerationVectorStore(ctx, serving, testDims, "g2", pgstore.WithExactScopeMax(10))
+	require.NoError(t, err)
+	key := string(f.chunks[doc.ID][0].ID)
+	cp, err := f.pg.GenerationCheckpoints(ctx, "g2", []string{doc.ID})
+	require.NoError(t, err)
+	require.Equal(t, []string{key}, cp[doc.ID].ChunkIDs)
+	records, err := target.Fetch(ctx, []string{key})
+	require.NoError(t, err)
+	require.Contains(t, records, key)
+	require.NotContains(t, records[key].Metadata, domain.VectorRevisionKey)
+	require.NotContains(t, records[key].Metadata, domain.VectorAttemptKey)
+
+	subject := domain.Principal{ID: principal, TenantID: tenant}
+	hits, err := target.QueryFiltered(ctx, source[0].Embedding, 2, domain.VectorFilter{
+		Collection: doc.Collection, Authorized: &domain.AuthorizedScope{TenantID: tenant, PrincipalID: principal},
+	})
+	require.NoError(t, err)
+	vis := pgstore.Visibility{Pool: serving.Pool, Subject: &subject}
+	visible, err := vis.VisibleEvidence(ctx, hits)
+	require.NoError(t, err)
+	require.Len(t, visible, 1)
+	require.Equal(t, doc.Attempt, visible[0].Chunk.Metadata[domain.VectorAttemptKey])
+	require.Equal(t, doc.Incarnation, visible[0].Chunk.VectorIncarnation)
+
+	h.deps.cfg.VectorStore, h.deps.cfg.VectorGeneration = "postgres", "g2"
+	require.EqualValues(t, 2, h.stagePinecone("g3", "quarry-g3", sourceModel, 0)["copied_chunks"])
+	require.Zero(t, h.embedCalls())
+	verifyTaggedCutover(t, h, "g3", 2)
+	hostedKey, err := pcstore.TaggedVectorID(doc.ID, doc.Incarnation, doc.Attempt, key)
+	require.NoError(t, err)
+	hosted := pcstore.NewClientForIndex(h.stores.index("quarry-g3"), testConfig(), "")
+	hostedRecords, err := hosted.Fetch(ctx, []string{hostedKey})
+	require.NoError(t, err)
+	got := hostedRecords[hostedKey]
+	require.Equal(t, doc.Incarnation, got.VectorIncarnation)
+	require.Equal(t, doc.Incarnation, got.Metadata[domain.VectorRevisionKey])
+	require.Equal(t, doc.Attempt, got.Metadata[domain.VectorAttemptKey])
+	require.Equal(t, tenant, got.Metadata[domain.VectorTenantKey])
+	after, err := f.pg.LoadDocumentSnapshotBounded(ctx, doc.ID, 2, 4096)
+	require.NoError(t, err)
+	require.Equal(t, originalRevision, after)
+}
+
+func verifyTaggedCutover(t *testing.T, h *harness, generation string, chunks int) {
+	t.Helper()
+	_, err := h.run(options{Generation: generation, Freeze: true, Apply: true})
+	require.NoError(t, err)
+	verify := verifyOptions(generation)
+	verify.SampleSize, verify.Apply, verify.MinRecall = chunks, true, 1
+	report, err := h.run(verify)
+	require.NoError(t, err, "%v", report["failures"])
+	coverage := report["coverage"].(map[string]any)
+	require.EqualValues(t, 1, coverage["key_coverage"])
+	require.EqualValues(t, 1, coverage["profile_coverage"])
+	require.EqualValues(t, 0, report["sample"].(map[string]any)["forbidden_hits"])
+	switched, err := h.run(options{Generation: generation, Activate: true, Apply: true})
+	require.NoError(t, err, "%v", switched)
+	require.Equal(t, generation, switched["active_generation"])
+	_, err = h.run(options{Thaw: true, Apply: true})
+	require.NoError(t, err)
+}
+
+func TestRollbackTaggedDocumentAfterPostgresRepublication(t *testing.T) {
+	doc := newTaggedDoc("alpha", "report", "Same document body and key after publication.")
+	plain := newDoc("beta", "note", "The untagged source revision stays the same.")
+	f := newTaggedFixture(t, doc, plain)
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	ctx := t.Context()
+	profile := h.profileFile("same.json", testProfile(sourceModel))
+	_, err := h.run(options{Generation: "g2", Profile: profile, TargetStore: "postgres", Apply: true})
+	require.NoError(t, err)
+	verifyTaggedCutover(t, h, "g2", 2)
+	h.deps.cfg.VectorStore, h.deps.cfg.VectorGeneration = "postgres", "g2"
+	require.NoError(t, f.pg.PinVectorGeneration(ctx, "g2", "postgres", pgstore.VectorTable("g2"), "", testProfile(sourceModel)))
+	target, err := pgstore.OpenGenerationVectorStore(ctx, f.pg, testDims, "g2")
+	require.NoError(t, err)
+	target.RouteCompletion()
+	before, err := f.pg.LoadDocumentSnapshotBounded(ctx, plain.ID, 2, 4096)
+	require.NoError(t, err)
+
+	_, err = f.pg.Pool.Exec(ctx, `UPDATE documents SET status='processing' WHERE id=$1`, doc.ID)
+	require.NoError(t, err)
+	_, err = f.pg.Pool.Exec(ctx, `INSERT INTO ingest_jobs(document_id,state) VALUES($1,'pending')`, doc.ID)
+	require.NoError(t, err)
+	job, err := f.pg.ClaimJob(ctx, "worker", time.Minute, 5)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.True(t, job.ScopedVectors)
+	require.NotEqual(t, doc.Attempt, job.LeaseToken)
+	done, err := f.pg.CompleteJob(ctx, *job, sourceChunks(doc, f.chunks[doc.ID], sourceModel), domain.IndexObservation{})
+	require.NoError(t, err)
+	require.True(t, done)
+
+	_, err = h.run(options{Generation: "legacy", Freeze: true, Apply: true})
+	require.NoError(t, err)
+	old := verifyOptions("legacy")
+	old.SampleSize, old.Apply = 2, true
+	_, err = h.run(old)
+	require.ErrorIs(t, err, errNotVerified)
+	report, err := h.run(options{Generation: "legacy", Profile: profile, TargetStore: "pinecone", TargetIndex: "quarry", Apply: true})
+	require.NoError(t, err, "%v", report)
+	require.EqualValues(t, 2, report["copied_chunks"])
+	require.EqualValues(t, 1, report["pruned_keys"])
+	report, err = h.run(old)
+	require.NoError(t, err, "%v", report["failures"])
+	_, err = h.run(options{Generation: "legacy", Activate: true, Apply: true})
+	require.NoError(t, err)
+	_, err = h.run(options{Thaw: true, Apply: true})
+	require.NoError(t, err)
+	key, err := pcstore.TaggedVectorID(doc.ID, doc.Incarnation, job.LeaseToken, string(f.chunks[doc.ID][0].ID))
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{key, string(f.chunks[plain.ID][0].ID)}, h.stores.index("quarry").IDs())
+	after, err := f.pg.LoadDocumentSnapshotBounded(ctx, plain.ID, 2, 4096)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
+func TestRetiredPostgresPrunesNonRelationalKeys(t *testing.T) {
+	doc := newTaggedDoc("alpha", "report", "A tagged document under a bare relational key.")
+	f := newTaggedFixture(t, doc)
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	ctx := t.Context()
+	profile := h.profileFile("same.json", testProfile(sourceModel))
+	stage := options{Generation: "g2", Profile: profile, TargetStore: "postgres", Apply: true}
+	_, err := h.run(stage)
+	require.NoError(t, err)
+	_, err = f.pg.Pool.Exec(ctx, `UPDATE vector_generations SET state='retired', ever_active=TRUE WHERE name='g2'`)
+	require.NoError(t, err)
+	target, err := pgstore.OpenGenerationVectorStore(ctx, f.pg, testDims, "g2")
+	require.NoError(t, err)
+	current := f.chunks[doc.ID][0]
+	tagged, err := vectorKey(true, pgstore.DocumentRevision{ID: doc.ID, Incarnation: doc.Incarnation, VectorAttempt: doc.Attempt, ScopedVectors: true}, current)
+	require.NoError(t, err)
+	for _, wrong := range []string{tagged, doc.ID + "#" + uuid.NewString() + "#0", "malformed"} {
+		chunk := sourceChunks(doc, []domain.Chunk{current}, sourceModel)[0]
+		chunk.ID = domain.ChunkID(wrong)
+		require.NoError(t, target.Upsert(ctx, "", []domain.Chunk{chunk}))
+	}
+	require.NoError(t, f.pg.FreezeWriters(ctx, "g2"))
+	report, err := h.run(stage)
+	require.NoError(t, err, "%v", report)
+	require.EqualValues(t, 3, report["pruned_keys"])
+	keys, next, err := target.ListIDs(ctx, "", 10)
+	require.NoError(t, err)
+	require.Empty(t, next)
+	require.Equal(t, []string{string(current.ID)}, keys)
+}
+
+type betweenTaggedBatches struct {
+	vectorTarget
+	afterFirstWrite func()
+	failNext        error
+	firstWritten    bool
+}
+
+func (t *betweenTaggedBatches) Upsert(ctx context.Context, namespace string, chunks []domain.Chunk) error {
+	if t.firstWritten && t.failNext != nil {
+		return t.failNext
+	}
+	if err := t.vectorTarget.Upsert(ctx, namespace, chunks); err != nil {
+		return err
+	}
+	if !t.firstWritten {
+		t.firstWritten = true
+		if t.afterFirstWrite != nil {
+			t.afterFirstWrite()
+		}
+	}
+	return nil
+}
+
+func TestPostgresTaggedStageResumesWithoutLosingCheckpoint(t *testing.T) {
+	for _, reason := range []error{errInjected, context.Canceled} {
+		t.Run(reason.Error(), func(t *testing.T) {
+			doc := newTaggedDoc("alpha", "report", "First checkpointed record.", "Second checkpointed record.")
+			f := newTaggedFixture(t, doc)
+			target := pgTarget(t, f.pg, "g2")
+			s := f.stager(t, "g2", &betweenTaggedBatches{vectorTarget: target, failNext: reason}, sourceModel, f.legacy, nil)
+			s.opts.Batch = 1
+			_, err := s.run(t.Context())
+			require.ErrorIs(t, err, reason)
+			cps, err := f.pg.GenerationCheckpoints(t.Context(), "g2", []string{doc.ID})
+			require.NoError(t, err)
+			require.Contains(t, cps, doc.ID)
+			require.False(t, cps[doc.ID].Complete)
+			var want []string
+			for _, chunk := range f.chunks[doc.ID] {
+				want = append(want, string(chunk.ID))
+			}
+			require.ElementsMatch(t, want, cps[doc.ID].ChunkIDs)
+			partialKeys, _, err := target.ListIDs(t.Context(), "", 10)
+			require.NoError(t, err)
+			require.Equal(t, want[:1], partialKeys)
+
+			s.target = target
+			s.opts.MaxChunks = 1
+			_, err = s.run(t.Context())
+			require.ErrorContains(t, err, "alone exceeds")
+			s.opts.MaxChunks = 2
+			report, err := s.run(t.Context())
+			require.NoError(t, err)
+			require.True(t, report.Complete)
+			require.Equal(t, 2, report.Copied)
+			cps, err = f.pg.GenerationCheckpoints(t.Context(), "g2", []string{doc.ID})
+			require.NoError(t, err)
+			require.True(t, cps[doc.ID].Complete)
+			require.ElementsMatch(t, want, cps[doc.ID].ChunkIDs)
+		})
+	}
+}
+
+func TestPostgresStageRejectsStaleCheckpointAfterTaggedPublication(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		name := "same incarnation new attempt"
+		if replace {
+			name = "deleted and recreated UUID"
+		}
+		t.Run(name, func(t *testing.T) {
+			doc := newTaggedDoc("alpha", "report", "Same body and physical key.", "Same second body and key.")
+			f := newTaggedFixture(t, doc)
+			h := newHarness(t, f, "postgres")
+			h.attestSource()
+			ctx := t.Context()
+			target := pgTarget(t, f.pg, "g2")
+			before, err := f.pg.LoadDocumentSnapshotBounded(ctx, doc.ID, 2, 4096)
+			require.NoError(t, err)
+			change := func() {
+				writeCtx := t.Context()
+				if replace {
+					_, deleteErr := f.pg.Pool.Exec(writeCtx, `DELETE FROM documents WHERE id=$1`, doc.ID)
+					require.NoError(t, deleteErr)
+					replacement := doc
+					replacement.Incarnation, replacement.Attempt = uuid.NewString(), uuid.NewString()
+					f.add(t, replacement)
+					return
+				}
+				f.legacy.RouteCompletion()
+				_, queueErr := f.pg.Pool.Exec(writeCtx, `UPDATE documents SET status='processing' WHERE id=$1`, doc.ID)
+				require.NoError(t, queueErr)
+				_, queueErr = f.pg.Pool.Exec(writeCtx, `INSERT INTO ingest_jobs(document_id,state) VALUES($1,'pending')`, doc.ID)
+				require.NoError(t, queueErr)
+				job, claimErr := f.pg.ClaimJob(writeCtx, "worker", time.Minute, 5)
+				require.NoError(t, claimErr)
+				require.NotNil(t, job)
+				done, completeErr := f.pg.CompleteJob(writeCtx, *job, sourceChunks(doc, f.chunks[doc.ID], sourceModel), domain.IndexObservation{})
+				require.NoError(t, completeErr)
+				require.True(t, done)
+			}
+			s := f.stager(t, "g2", &betweenTaggedBatches{vectorTarget: target, afterFirstWrite: change}, sourceModel, f.legacy, nil)
+			s.opts.Batch = 1
+			report, err := s.run(ctx)
+			require.NoError(t, err)
+			require.True(t, report.Complete)
+			current, err := f.pg.LoadDocumentSnapshotBounded(ctx, doc.ID, 2, 4096)
+			require.NoError(t, err)
+			require.NotEqual(t, before.Revision, current.Revision)
+			require.Equal(t, before.Chunks, current.Chunks)
+			_, err = h.run(options{Generation: "g2", Freeze: true, Apply: true})
+			require.NoError(t, err)
+			verify := verifyOptions("g2")
+			verify.SampleSize, verify.Apply = 2, true
+			bad, err := h.run(verify)
+			require.ErrorIs(t, err, errNotVerified)
+			require.EqualValues(t, 1, bad["coverage"].(map[string]any)["documents_with_stale_checkpoint"])
+			_, err = h.run(options{Generation: "g2", Activate: true, Apply: true})
+			require.Error(t, err)
+			stage := options{Generation: "g2", Profile: h.profileFile("same.json", testProfile(sourceModel)), TargetStore: "postgres", Apply: true}
+			restaged, err := h.run(stage)
+			require.NoError(t, err)
+			require.EqualValues(t, 2, restaged["copied_chunks"])
+			good, err := h.run(verify)
+			require.NoError(t, err, "%v", good["failures"])
+			cps, err := f.pg.GenerationCheckpoints(ctx, "g2", []string{doc.ID})
+			require.NoError(t, err)
+			require.Equal(t, current.Revision, cps[doc.ID].SourceRevision)
+			require.Equal(t, current.Incarnation, cps[doc.ID].Incarnation)
+			_, err = h.run(options{Generation: "g2", Activate: true, Apply: true})
+			require.NoError(t, err)
+		})
+	}
 }

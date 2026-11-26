@@ -332,6 +332,14 @@ func (v *verifier) matchedQueries(ctx context.Context, seed string, chunks []sam
 	for _, d := range docs {
 		byCollection[d.collection] = append(byCollection[d.collection], d.id)
 	}
+	// Recall compares equal chunks across stores even when their physical keys differ.
+	var targetBySourceKey map[string]string
+	if v.sourceTagged != v.taggedTarget {
+		targetBySourceKey = make(map[string]string, len(chunks))
+		for _, chunk := range chunks {
+			targetBySourceKey[chunk.sourceKey] = chunk.id
+		}
+	}
 	var latencies []time.Duration
 	var recallSum float64
 	hits := 0
@@ -362,24 +370,23 @@ func (v *verifier) matchedQueries(ctx context.Context, seed string, chunks []sam
 		for _, id := range allow {
 			allowed[id] = struct{}{}
 		}
-		expectedHit := func(chunk domain.Chunk) (string, bool) {
+		expectedHit := func(chunk domain.Chunk, key string) bool {
 			hitCollection, _ := chunk.Metadata["collection"].(string)
-			key := hitKey(chunk)
 			want, ok := expected[key]
 			if !ok {
-				return key, false
+				return false
 			}
 			_, inScope := allowed[want.id]
 			if !inScope || want.id != string(chunk.DocumentID) || want.collection != hitCollection ||
 				want.chunkID != string(chunk.ID) || (v.taggedTarget && want.revisionID != chunk.RevisionID) {
-				return key, false
+				return false
 			}
-			return key, true
+			return true
 		}
 		inTarget := map[string]struct{}{}
 		for _, h := range targetHits {
-			key, ok := expectedHit(h.Chunk)
-			if !ok {
+			key := hitKey(h.Chunk)
+			if !expectedHit(h.Chunk, key) {
 				rep.Sample.ForbiddenHits++
 				continue
 			}
@@ -387,8 +394,12 @@ func (v *verifier) matchedQueries(ctx context.Context, seed string, chunks []sam
 		}
 		baseline := make(map[string]struct{}, len(sourceHits))
 		for _, h := range sourceHits {
-			if id, ok := expectedHit(h.Chunk); ok {
-				baseline[id] = struct{}{}
+			key := hitKey(h.Chunk)
+			if targetBySourceKey != nil {
+				key = targetBySourceKey[key]
+			}
+			if expectedHit(h.Chunk, key) {
+				baseline[key] = struct{}{}
 			}
 		}
 		if len(baseline) == 0 {
@@ -459,7 +470,7 @@ func (v *verifier) judge(rep *verifyReport) {
 		v.fail(rep, "%d documents declare a chunk count that differs from their stored chunks", c.Inconsistent)
 	}
 	if c.TaggedVectors > 0 {
-		v.fail(rep, "%d tagged documents cannot be verified on this target or have no determinable published attempt", c.TaggedVectors)
+		v.fail(rep, "%d tagged documents have no determinable published vector attempt", c.TaggedVectors)
 	}
 	if c.ManifestedVectors > 0 {
 		v.fail(rep, "%d documents own hosted vector revisions, which this target does not store", c.ManifestedVectors)

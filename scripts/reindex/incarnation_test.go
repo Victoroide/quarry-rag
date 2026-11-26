@@ -254,7 +254,7 @@ func TestVerificationFailsForTaggedVectorDocuments(t *testing.T) {
 	rep := verifyIncarnation(t, snapshot, true, doc.ID, "")
 	require.False(t, rep.Passed)
 	require.Equal(t, 1, rep.Coverage.TaggedVectors)
-	require.Contains(t, rep.Failures, "1 tagged documents cannot be verified on this target or have no determinable published attempt")
+	require.Contains(t, rep.Failures, "1 tagged documents have no determinable published vector attempt")
 }
 
 func TestStagedRecordsPreserveLayoutProvenance(t *testing.T) {
@@ -360,7 +360,7 @@ func TestTaggedVectorDocumentsBlockStagingAndAreCounted(t *testing.T) {
 
 	report, err := h.run(options{Generation: "g2", Profile: profile, TargetStore: "postgres"})
 	require.NoError(t, err)
-	require.Contains(t, fmt.Sprint(report["blockers"]), "1 completed documents store tagged vectors")
+	require.Contains(t, fmt.Sprint(report["blockers"]), "1 tagged documents have no determinable published vector attempt")
 	require.EqualValues(t, 1, report["documents"].(map[string]any)["tagged_vectors"])
 	require.EqualValues(t, 3, report["plan"].(map[string]any)["documents_to_stage"], "the tagged document is not planned")
 

@@ -40,6 +40,9 @@ type DocumentRevision struct {
 	ActiveRevisionID string
 	// VectorAttempt is the published vector attempt of a tagged document.
 	VectorAttempt string
+	// VectorIncarnationRequired marks a document whose vectors must carry the
+	// separate incarnation tag in addition to any revision-qualified identity.
+	VectorIncarnationRequired bool
 	// MutationPending marks a document whose vector write has not settled.
 	MutationPending bool
 }
@@ -61,7 +64,7 @@ const revisionSQL = `SELECT d.id::text, COALESCE(d.incarnation, d.id)::text, d.d
  encode(sha256(convert_to((CASE WHEN d.scoped_vectors AND r.active_revision_id IS NULL
   THEN jsonb_build_array('v4', COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, '', c.n, c.fingerprint, 'tagged', COALESCE(d.vector_attempt::text, ''))
   ELSE jsonb_build_array('v4', COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, COALESCE(r.active_revision_id::text, ''), c.n, c.fingerprint) END)::text, 'UTF8')), 'hex'),
- d.scoped_vectors, COALESCE(r.active_revision_id::text, ''), COALESCE(d.vector_attempt::text, ''), d.vector_mutation_pending
+ d.scoped_vectors, COALESCE(r.active_revision_id::text, ''), COALESCE(d.vector_attempt::text, ''), d.vector_incarnation_required, d.vector_mutation_pending
  FROM eligible d
  LEFT JOIN hosted_vector_revisions r ON r.document_id = d.id
  CROSS JOIN LATERAL (
@@ -72,7 +75,7 @@ const revisionSQL = `SELECT d.id::text, COALESCE(d.incarnation, d.id)::text, d.d
  ) c`
 
 func scanRevision(rows pgx.Row, r *DocumentRevision) error {
-	return rows.Scan(&r.ID, &r.Incarnation, &r.DocType, &r.Collection, &r.TenantID, &r.DeclaredChunks, &r.Chunks, &r.TextBytes, &r.Revision, &r.ScopedVectors, &r.ActiveRevisionID, &r.VectorAttempt, &r.MutationPending)
+	return rows.Scan(&r.ID, &r.Incarnation, &r.DocType, &r.Collection, &r.TenantID, &r.DeclaredChunks, &r.Chunks, &r.TextBytes, &r.Revision, &r.ScopedVectors, &r.ActiveRevisionID, &r.VectorAttempt, &r.VectorIncarnationRequired, &r.MutationPending)
 }
 
 // DocumentRevisions lists completed documents after a document ID in ascending order.
@@ -192,10 +195,12 @@ func (c *Client) UnexpectedChunkKeys(ctx context.Context, keys []string, hostedT
 			ids = append(ids, id.String())
 			continue
 		}
-		if docID, revID, idx, ok := parseManifestVectorID(key); ok {
-			manifestDocs = append(manifestDocs, docID)
-			manifestRevs = append(manifestRevs, revID)
-			manifestIndices = append(manifestIndices, idx)
+		if hostedTagged {
+			if docID, revID, idx, ok := parseManifestVectorID(key); ok {
+				manifestDocs = append(manifestDocs, docID)
+				manifestRevs = append(manifestRevs, revID)
+				manifestIndices = append(manifestIndices, idx)
+			}
 		}
 	}
 	eligible := make(map[string]bool, len(keys))

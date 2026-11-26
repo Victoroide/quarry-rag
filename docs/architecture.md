@@ -321,6 +321,12 @@ An HNSW index uses `vector_cosine_ops`. B-tree indexes cover `document_id` and
 `collection`. Preparing or enabling exact search adds indexes on
 `(collection, doc_type, document_id)` and `(doc_type, document_id)`. Searches join
 completed documents and return similarity as one minus cosine distance.
+The ranking statement also reads the document incarnation and, for a tagged
+document with a published attempt and no pending mutation, returns the revision
+and attempt from that same snapshot. Evidence validation compares those values
+with the current publication. Checkpointed deletion on a transactional target
+uses local mode, with vector rows cascading when source cleanup has completed
+and the document is removed.
 
 At [`PGVECTOR_EXACT_SCOPE_MAX=0`](configuration.md#environment-variables), search
 preserves its existing ranking and applies supplied labels to `chunk_vectors`.

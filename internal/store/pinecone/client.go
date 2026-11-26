@@ -951,10 +951,15 @@ func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
 		}
 	}
 	chunk.Metadata = make(map[string]any)
-	for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey} {
+	for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorRevisionKey, domain.VectorAttemptKey} {
 		if v, ok := fields[key]; ok {
 			chunk.Metadata[key] = v.GetStringValue()
 		}
+	}
+	if tenant, present := fields[domain.VectorTenantKey]; present {
+		// Retain the type of a supplied label so it cannot decode as an
+		// empty string and match a document with no tenant.
+		chunk.Metadata[domain.VectorTenantKey] = tenant.AsInterface()
 	}
 	if value, tagged := fields[domain.VectorRevisionKey]; tagged {
 		target := vectorTarget{document: string(chunk.DocumentID), revision: value.GetStringValue()}

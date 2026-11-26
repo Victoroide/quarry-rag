@@ -25,8 +25,6 @@ func taggedRefusal(tagged bool, rev pgstore.DocumentRevision) string {
 	case !rev.ScopedVectors:
 	case rev.VectorAttempt == "" || rev.MutationPending:
 		return "its published vector attempt cannot be determined"
-	case !tagged:
-		return "a PostgreSQL target cannot hold tagged vectors"
 	}
 	return ""
 }

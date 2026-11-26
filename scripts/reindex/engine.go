@@ -342,14 +342,18 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 		}
 		src, ok := reusable[sourceKey]
 		srcTenant, _ := src.Metadata[domain.VectorTenantKey].(string)
-		srcRev, revPresent := src.Metadata[domain.VectorRevisionKey]
-		srcAtt, attPresent := src.Metadata[domain.VectorAttemptKey]
-		revStr, revOK := srcRev.(string)
-		attStr, attOK := srcAtt.(string)
 		identityMatches := ok && src.DocumentID == c.DocumentID && src.ID == c.ID && src.Text == c.Text && src.Index == c.Index &&
 			(src.VectorIncarnation == "" || src.VectorIncarnation == snap.Incarnation) &&
-			(srcTenant == "" || srcTenant == snap.TenantID) && src.RevisionID == c.RevisionID &&
-			(!isTagged(snap.DocumentRevision) || ((!revPresent || revOK && revStr == snap.Incarnation) && (!attPresent || attOK && attStr == snap.VectorAttempt)))
+			(srcTenant == "" || srcTenant == snap.TenantID) && src.RevisionID == c.RevisionID
+		if identityMatches && s.copyFromTagged && isTagged(snap.DocumentRevision) {
+			tenant, tenantPresent := src.Metadata[domain.VectorTenantKey]
+			// A matching tagged key and revision identify the incarnation.
+			// The separate incarnation tag is mandatory only when the row requires it.
+			identityMatches = (!snap.VectorIncarnationRequired || src.VectorIncarnation == snap.Incarnation) &&
+				src.Metadata[domain.VectorRevisionKey] == snap.Incarnation &&
+				src.Metadata[domain.VectorAttemptKey] == snap.VectorAttempt &&
+				(tenant == snap.TenantID || !tenantPresent && snap.TenantID == "")
+		}
 		if identityMatches {
 			copyLayoutMetadata(chunks[i].Metadata, src.Metadata)
 		}
@@ -469,17 +473,19 @@ func (s *stager) pruneRetired(ctx context.Context, rep *stageReport) error {
 		var untagged []string
 		var tagged []pgstore.TaggedVectorKey
 		for _, key := range keys {
-			if doc, rev, att, chunk, ok := pcstore.ParseTaggedVectorID(key); ok {
-				tagged = append(tagged, pgstore.TaggedVectorKey{
-					Key:        key,
-					DocumentID: doc,
-					Revision:   rev,
-					Attempt:    att,
-					ChunkID:    chunk,
-				})
-			} else {
-				untagged = append(untagged, key)
+			if s.taggedTarget {
+				if doc, rev, att, chunk, ok := pcstore.ParseTaggedVectorID(key); ok {
+					tagged = append(tagged, pgstore.TaggedVectorKey{
+						Key:        key,
+						DocumentID: doc,
+						Revision:   rev,
+						Attempt:    att,
+						ChunkID:    chunk,
+					})
+					continue
+				}
 			}
+			untagged = append(untagged, key)
 		}
 		var extra []string
 		if len(untagged) > 0 {
