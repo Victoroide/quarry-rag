@@ -37,6 +37,7 @@ type ownedStore struct {
 	storedKey    *string
 	sharedReads  int
 	keyLookupErr error
+	onKeyLookup  func()
 }
 
 func (s *ownedStore) AuthorizeOwnedIngest(_ context.Context, _ domain.Principal, _ string, supplied domain.DocumentID) (domain.OwnedTarget, error) {
@@ -76,6 +77,9 @@ func (s *ownedStore) GetDocument(context.Context, domain.DocumentID) (*domain.Do
 }
 
 func (s *ownedStore) GetDocumentS3Key(context.Context, domain.DocumentID) (*string, error) {
+	if s.onKeyLookup != nil {
+		s.onKeyLookup()
+	}
 	return s.storedKey, s.keyLookupErr
 }
 
@@ -426,7 +430,7 @@ func TestOwnedExistingRetryWritesNoObject(t *testing.T) {
 	}
 }
 
-func TestOwnedRefusedAcceptanceReleasesOnlyTheAttemptObject(t *testing.T) {
+func TestOwnedJournalIsOffByDefaultAndStillRemovesRefusedAttempts(t *testing.T) {
 	other := "object/replacement"
 	for _, tc := range []struct {
 		name    string
@@ -434,13 +438,12 @@ func TestOwnedRefusedAcceptanceReleasesOnlyTheAttemptObject(t *testing.T) {
 		err     error
 		stored  *string
 		status  int
-		deleted bool
 	}{
-		{"permission revoked", domain.AcceptForbidden, nil, nil, http.StatusForbidden, true},
-		{"identity retired", domain.AcceptNotFound, nil, nil, http.StatusNotFound, true},
-		{"queue full", domain.AcceptQueueFull, nil, nil, http.StatusServiceUnavailable, true},
-		{"uncertain with a replacement's key", domain.AcceptConflict, errors.New("connection lost"), &other, http.StatusServiceUnavailable, true},
-		{"uncertain without a stored key", domain.AcceptConflict, errors.New("connection lost"), nil, http.StatusServiceUnavailable, true},
+		{"permission revoked", domain.AcceptForbidden, nil, nil, http.StatusForbidden},
+		{"identity retired", domain.AcceptNotFound, nil, nil, http.StatusNotFound},
+		{"queue full", domain.AcceptQueueFull, nil, nil, http.StatusServiceUnavailable},
+		{"uncertain with a replacement's key", domain.AcceptConflict, errors.New("connection lost"), &other, http.StatusServiceUnavailable},
+		{"uncertain without a stored key", domain.AcceptConflict, errors.New("connection lost"), nil, http.StatusServiceUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newOwnedHarness(t)
@@ -451,6 +454,8 @@ func TestOwnedRefusedAcceptanceReleasesOnlyTheAttemptObject(t *testing.T) {
 			require.Len(t, h.objects.uploads, 1)
 			require.Equal(t, []string{h.objects.uploads[0]}, h.objects.deleted)
 			require.NotContains(t, h.objects.deleted, other)
+			require.Len(t, h.store.accepted, 1)
+			require.Nil(t, h.store.accepted[0].SourceUpload)
 		})
 	}
 	t.Run("uncertain acceptance that did commit keeps its object", func(t *testing.T) {
@@ -794,4 +799,147 @@ func TestOwnedUnresolvedOutcomeIsUnavailable(t *testing.T) {
 			require.Equal(t, h.objects.uploads, h.objects.deleted)
 		})
 	}
+}
+
+func newOwnedJournalHarness(t *testing.T) (*ownedHarness, *fakeJournal, *journaledObjects) {
+	t.Helper()
+	h := newOwnedHarness(t)
+	trace := &journalTrace{}
+	journal := &fakeJournal{trace: trace}
+	objects := &journaledObjects{trace: trace, bucket: "owned-bucket", version: "version-1"}
+	h.store.onAccept = func(int) { trace.add("accept") }
+	h.store.onKeyLookup = func() { trace.add("lookup") }
+	h.handler = IngestHandler(nil, h.store, objects, 1<<20,
+		WithOwnedIngestion(), WithContentDedup(domain.ContentDedupOff), WithSourceUploadJournal(journal), textExtractor(h))
+	return h, journal, objects
+}
+
+func TestOwnedJournalStagesBeforeWriteAndPinsIncarnation(t *testing.T) {
+	h, journal, objects := newOwnedJournalHarness(t)
+	reserved, incarnation := uuid.NewString(), uuid.NewString()
+	h.store.targets[reserved] = domain.OwnedTarget{Decision: domain.OwnedReserved, Incarnation: incarnation}
+	requests := [][]uploadPart{
+		nil,
+		{{"document_id", strings.ToUpper(reserved)}, {"collection", "team"}, {"doc_type", "note"}},
+		{{"document_id", reserved}, {"collection", "team"}, {"doc_type", "note"}},
+	}
+	for i, fields := range requests {
+		rec := h.serve(ownedUpload(t, false, []byte(ownedBody), fields...))
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		require.Len(t, journal.staged, i+1)
+		require.Len(t, h.store.accepted, i+1)
+
+		staged, accepted := journal.staged[i], h.store.accepted[i]
+		docType := domain.DefaultDocType
+		if i > 0 {
+			docType = "note"
+			require.Equal(t, reserved, string(accepted.Document.ID))
+			require.Equal(t, incarnation, accepted.Owner.Incarnation)
+		}
+		require.Equal(t, accepted.Document.ID, staged.DocumentID)
+		require.Equal(t, accepted.Collection, staged.Collection)
+		require.Equal(t, objects.bucket, staged.Bucket)
+		uploadID, err := uuid.Parse(staged.ID)
+		require.NoError(t, err)
+		require.Equal(t, uploadID.String(), staged.ID)
+		wantKey := strings.Join([]string{"documents", docType, string(accepted.Document.ID), accepted.Owner.Incarnation, staged.ID, "notes.txt"}, "/")
+		require.Equal(t, wantKey, staged.Key)
+		require.Equal(t, []byte(ownedBody), objects.written[wantKey])
+		require.Equal(t, &wantKey, accepted.Document.S3Key)
+		require.Equal(t, &domain.SourceUploadLink{ID: staged.ID, VersionID: objects.version}, accepted.SourceUpload)
+		require.Equal(t, objects.version, journal.acked[staged.ID])
+	}
+	require.Len(t, objects.written, len(requests), "retries get distinct per-attempt keys")
+	require.Equal(t, []string{
+		"stage", "begin", "put", "ack", "accept",
+		"stage", "begin", "put", "ack", "accept",
+		"stage", "begin", "put", "ack", "accept",
+	}, journal.trace.names())
+}
+
+func TestOwnedExistingRetryWithJournalWritesNothing(t *testing.T) {
+	h, journal, objects := newOwnedJournalHarness(t)
+	id := uuid.NewString()
+	h.store.targets[id] = domain.OwnedTarget{Decision: domain.OwnedExisting, Incarnation: uuid.NewString()}
+	h.store.result = domain.AcceptRequeued
+	rec := h.serve(ownedUpload(t, false, []byte(ownedBody), uploadPart{"document_id", id}))
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	require.Empty(t, journal.staged)
+	require.Empty(t, objects.written)
+	require.Equal(t, []string{"accept"}, journal.trace.names())
+	require.Nil(t, h.store.accepted[0].SourceUpload)
+}
+
+func TestOwnedJournalStopsBeforeWritingWhenAuthorizationRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		forbidden bool
+		status    int
+	}{
+		{"forbidden", true, http.StatusForbidden},
+		{"missing", false, http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, journal, objects := newOwnedJournalHarness(t)
+			h.store.forbidden = tc.forbidden
+			rec := h.serve(ownedUpload(t, false, []byte(ownedBody), uploadPart{"document_id", uuid.NewString()}))
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			require.Zero(t, h.extracted)
+			require.Empty(t, journal.trace.names())
+			require.Empty(t, journal.staged)
+			require.Empty(t, objects.written)
+			require.Empty(t, h.store.accepted)
+		})
+	}
+}
+
+func TestOwnedJournalRefusedAcceptanceLeavesUploadForReclamation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		outcome domain.AcceptOutcome
+		err     error
+		status  int
+	}{
+		{"permission revoked", domain.AcceptForbidden, nil, http.StatusForbidden},
+		{"identity retired", domain.AcceptNotFound, nil, http.StatusNotFound},
+		{"credential expired", domain.AcceptUnauthorized, nil, http.StatusUnauthorized},
+		{"upload reclaimed", domain.AcceptUploadExpired, nil, http.StatusServiceUnavailable},
+		{"uncertain", domain.AcceptAccepted, errors.New("connection lost"), http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, journal, objects := newOwnedJournalHarness(t)
+			h.store.result, h.store.acceptErr = tc.outcome, tc.err
+			rec := h.serve(ownedUpload(t, false, []byte(ownedBody)))
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			require.Equal(t, []string{"stage", "begin", "put", "ack", "accept"}, journal.trace.names())
+			require.Len(t, journal.staged, 1)
+			require.Contains(t, objects.written, journal.staged[0].Key)
+			require.Len(t, h.store.accepted, 1)
+			require.NotNil(t, h.store.accepted[0].SourceUpload)
+		})
+	}
+}
+
+func TestOwnedJournalFailsClosedWithoutSourceStoreSupport(t *testing.T) {
+	t.Run("missing source store capability", func(t *testing.T) {
+		h, journal, _ := newOwnedJournalHarness(t)
+		h.rebuild(1<<20, WithSourceUploadJournal(journal))
+		rec := h.serve(ownedUpload(t, false, []byte(ownedBody)))
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		require.Equal(t, "30", rec.Header().Get("Retry-After"))
+		require.Contains(t, rec.Body.String(), "source file storage is unavailable")
+		require.Empty(t, h.objects.uploads)
+		require.Empty(t, h.store.accepted)
+		require.Empty(t, journal.trace.names())
+	})
+	t.Run("journal unavailable", func(t *testing.T) {
+		h, journal, objects := newOwnedJournalHarness(t)
+		journal.stageErr = errors.New("journal unavailable")
+		rec := h.serve(ownedUpload(t, false, []byte(ownedBody)))
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		require.Equal(t, "30", rec.Header().Get("Retry-After"))
+		require.Equal(t, []string{"stage"}, journal.trace.names())
+		require.Empty(t, objects.written)
+		require.Empty(t, h.store.accepted)
+	})
 }

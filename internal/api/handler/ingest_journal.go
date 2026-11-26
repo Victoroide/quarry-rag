@@ -19,6 +19,7 @@ type SourceObjectStore interface {
 	ObjectStore
 	Bucket() string
 	NewKey(documentID, uploadID, docType, fileName string) string
+	NewOwnedKey(documentID, incarnation, uploadID, docType, fileName string) string
 	PutSource(context.Context, string, extractor.FileType, io.Reader) (domain.SourceUploadResult, error)
 }
 
@@ -44,10 +45,15 @@ var errSourceJournalUnsupported = errors.New("object store cannot write journale
 // write stores one attempt's original under its own object key. With a journal
 // the owner is durable before the object write; without one the write is a
 // single unrecorded upload.
-func (w sourceWriter) write(ctx context.Context, documentID, collection, docType, fileName string, ft extractor.FileType, data []byte) (sourceWrite, error) {
+func (w sourceWriter) write(ctx context.Context, documentID, collection, docType, fileName string, ft extractor.FileType, incarnation string, data []byte) (sourceWrite, error) {
 	if w.journal == nil {
 		// Each attempt owns a distinct object so rollback cannot delete another acceptance's file.
-		key, err := w.objects.Upload(ctx, documentID+"/"+uuid.NewString(), docType, fileName, ft, bytes.NewReader(data))
+		attemptTarget := documentID
+		if incarnation != "" {
+			attemptTarget += "/" + incarnation
+		}
+		attemptTarget += "/" + uuid.NewString()
+		key, err := w.objects.Upload(ctx, attemptTarget, docType, fileName, ft, bytes.NewReader(data))
 		return sourceWrite{key: key}, err
 	}
 	objects, ok := w.objects.(SourceObjectStore)
@@ -55,7 +61,12 @@ func (w sourceWriter) write(ctx context.Context, documentID, collection, docType
 		return sourceWrite{}, errSourceJournalUnsupported
 	}
 	uploadID := uuid.NewString()
-	key := objects.NewKey(documentID, uploadID, docType, fileName)
+	var key string
+	if incarnation == "" {
+		key = objects.NewKey(documentID, uploadID, docType, fileName)
+	} else {
+		key = objects.NewOwnedKey(documentID, incarnation, uploadID, docType, fileName)
+	}
 	// Staging and all PUT attempts share the same deadline. A delayed staging
 	// response must never start a new write after reclamation can settle the key.
 	writeCtx, cancel := context.WithTimeout(ctx, domain.SourceUploadPutTimeout)

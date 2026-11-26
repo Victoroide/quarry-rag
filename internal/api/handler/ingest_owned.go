@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -361,14 +360,15 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 		writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 		return
 	}
-	var s3Key *string
+	var written sourceWrite
 	if o.s3 != nil {
 		docType := fields.docType
 		if docType == "" {
 			docType = domain.DefaultDocType
 		}
-		// The object is named for the intended incarnation and this attempt alone.
-		key, uploadErr := o.s3.Upload(r.Context(), docID+"/"+owner.Incarnation+"/"+uuid.NewString(), docType, fileName, ft, bytes.NewReader(fileData))
+		writer := sourceWriter{objects: o.s3, journal: o.opts.journal}
+		var uploadErr error
+		written, uploadErr = writer.write(r.Context(), docID, fields.collection, docType, fileName, ft, owner.Incarnation, fileData)
 		if uploadErr != nil {
 			slog.ErrorContext(r.Context(), "upload source file", "error", uploadErr)
 			recordSecurityAuditBestEffort(r.Context(), o.opts.audit, o.auditSubject(), nil, "ingest", "error", "storage_unavailable", docID, owner.Incarnation)
@@ -376,14 +376,14 @@ func (o ownedIngest) file(rw http.ResponseWriter, r *http.Request) {
 			writeJSONError(rw, http.StatusServiceUnavailable, "storage", "source file storage is unavailable")
 			return
 		}
-		s3Key = &key
-		acceptReq.Document.S3Key = s3Key
+		acceptReq.Document.S3Key = &written.key
+		acceptReq.SourceUpload = written.link
 	}
 	outcome, acceptErr := acceptIngest(rw, r, o.wk, o.cs, acceptReq)
 	ownedOutcomeUnresolved(rw, r, outcome)
 	o.recordAcceptFailure(r.Context(), outcome, acceptErr, docID)
-	if s3Key != nil && outcome != domain.AcceptAccepted {
-		releaseAttemptObject(r.Context(), o.cs, o.s3, docID, *s3Key, acceptErr)
+	if acceptReq.Document.S3Key != nil && written.link == nil && outcome != domain.AcceptAccepted {
+		releaseAttemptObject(r.Context(), o.cs, o.s3, docID, written.key, acceptErr)
 	}
 }
 
