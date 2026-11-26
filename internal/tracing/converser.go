@@ -71,7 +71,7 @@ func (c *tracedCounter) CountTokensWithMaxAttempts(ctx context.Context, model, s
 		attribute.String("quarry.synthesis.count_provider", c.provider))
 	defer span.End()
 	res, err := c.counter.CountTokensWithMaxAttempts(ctx, model, system, messages, maxAttempts)
-	recordInputCount(span, res, err)
+	recordInputCount(ctx, span, res, err)
 	return res, err
 }
 
@@ -114,7 +114,7 @@ func (c *converser) call(ctx context.Context, model, system string, messages []b
 		}
 	}
 	output, err := call(ctx)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	if output != nil && span.IsRecording() {
 		span.SetAttributes(attribute.StringSlice("gen_ai.response.finish_reasons", []string{string(output.StopReason)}))
 		if output.Usage != nil {

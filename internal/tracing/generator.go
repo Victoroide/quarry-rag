@@ -47,12 +47,12 @@ func (g *countingGenerator) CountRequestInput(ctx context.Context, r llm.Request
 		attribute.String("quarry.synthesis.count_provider", g.provider))
 	defer span.End()
 	res, err := g.counter.CountRequestInput(ctx, r)
-	recordInputCount(span, res, err)
+	recordInputCount(ctx, span, res, err)
 	return res, err
 }
 
-func recordInputCount(span trace.Span, res llm.CountResult, err error) {
-	RecordError(span, err)
+func recordInputCount(ctx context.Context, span trace.Span, res llm.CountResult, err error) {
+	RecordError(ctx, span, err)
 	if span.IsRecording() {
 		span.SetAttributes(attribute.Int("quarry.synthesis.count_attempts", res.Attempts))
 		if err == nil {
@@ -101,7 +101,7 @@ func (g *generator) call(ctx context.Context, r llm.Request, stream bool, call f
 		}
 	}
 	out, err := call(ctx)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	if out != nil && span.IsRecording() {
 		span.SetAttributes(attribute.StringSlice("gen_ai.response.finish_reasons", []string{string(out.StopReason)}))
 		if out.Usage != nil {

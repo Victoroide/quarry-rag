@@ -99,6 +99,10 @@ func (w *Worker) Start(ctx context.Context) {
 		return
 	}
 	w.started = true
+	if w.opts.RedactTelemetry {
+		ctx = tracing.WithRedactIdentifiers(ctx, true)
+		ctx = tracing.WithContentCapture(ctx, false)
+	}
 	jobCtx, cancel := context.WithCancelCause(ctx)
 	w.cancel = cancel
 	for range w.opts.Workers {
@@ -119,7 +123,7 @@ func (w *Worker) loop(ctx context.Context) {
 			}
 			job, err := w.claim(ctx)
 			if err != nil {
-				slog.ErrorContext(ctx, "claim ingestion job", "error", err)
+				slog.ErrorContext(ctx, "claim ingestion job", "error", tracing.ErrorForTelemetry(ctx, err))
 				break
 			}
 			if job == nil {
@@ -232,12 +236,13 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 	if w.hostedManifestEnabled() {
 		job.RevisionID = revisionIDForAttempt(job, w.opts.Owner)
 	}
-	redact := w.opts.RedactTelemetry || job.Tenant != ""
+	redact := tracing.RedactIdentifiers(parent) || w.opts.RedactTelemetry || job.Tenant != ""
 	attrs := []attribute.KeyValue{attribute.String(tracing.LangSmithKind, "chain"), attribute.Int("quarry.job.attempt", job.Attempts)}
 	if !redact {
 		attrs = append(tracing.DocumentAttributes(string(job.Document.ID)), attrs...)
 	} else {
 		parent = tracing.WithRedactIdentifiers(parent, true)
+		parent = tracing.WithContentCapture(parent, false)
 	}
 	parent, span := otel.Tracer("github.com/Victoroide/quarry-rag/internal/worker").Start(parent, "ingest.job", trace.WithNewRoot(), trace.WithAttributes(attrs...))
 	defer span.End()
@@ -263,7 +268,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 				ok, err := w.store.HeartbeatJob(leaseCtx, job, w.opts.Lease)
 				if err != nil {
 					if redact {
-						slog.ErrorContext(leaseCtx, "renew ingestion lease", "error", err)
+						slog.ErrorContext(leaseCtx, "renew ingestion lease", "error", tracing.ErrorForTelemetry(leaseCtx, err))
 					} else {
 						slog.ErrorContext(leaseCtx, "renew ingestion lease", "document_id", job.Document.ID, "error", err)
 					}
@@ -303,7 +308,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		}
 	}
 	err := w.run(ctx, job, ic)
-	tracing.RecordError(span, err)
+	tracing.RecordError(ctx, span, err)
 	if parent.Err() != nil {
 		w.release(parent, job)
 		return
@@ -325,7 +330,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		owned, confirmErr := w.store.HeartbeatJob(confirmCtx, job, w.opts.Lease)
 		confirmCancel()
 		if confirmErr != nil || !owned {
-			w.logStateError(redact, job, confirmErr)
+			w.logStateError(confirmCtx, job, confirmErr)
 			if w.hostedManifestEnabled() {
 				w.compensateDeleted(parent, job, ic.Chunks)
 			}
@@ -352,7 +357,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 			message = domain.ErrPDFOCRExpired.Error()
 		}
 		failErr := w.store.FailJob(stateCtx, job, message)
-		w.recordOutcome(parent, job, "failed", failErr)
+		w.recordOutcome(stateCtx, job, "failed", failErr)
 		if w.hostedManifestEnabled() && errors.Is(failErr, domain.ErrJobNotOwned) {
 			w.compensateDeleted(parent, job, ic.Chunks)
 		}
@@ -365,13 +370,13 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 		delay *= 2
 	}
 	delay = min(delay, 5*time.Minute) + time.Duration(rand.Int64N(int64(time.Second)+1)) // #nosec G404 -- Retry jitter does not require cryptographic randomness.
-	w.recordOutcome(parent, job, "retried", w.store.RetryJob(stateCtx, job, delay, err.Error()))
+	w.recordOutcome(stateCtx, job, "retried", w.store.RetryJob(stateCtx, job, delay, err.Error()))
 }
 
 func (w *Worker) release(ctx context.Context, job domain.Job) {
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	w.recordOutcome(ctx, job, "released", w.store.ReleaseJob(releaseCtx, job))
+	w.recordOutcome(releaseCtx, job, "released", w.store.ReleaseJob(releaseCtx, job))
 }
 
 func (w *Worker) run(ctx context.Context, job domain.Job, ic *pipeline.IngestContext) (err error) {
@@ -474,7 +479,7 @@ func (w *Worker) compensateDeleted(ctx context.Context, job domain.Job, chunks [
 	defer cancel()
 	exists, err := ds.DocumentExists(checkCtx, job.Document.ID)
 	if err != nil {
-		w.logStateError(w.opts.RedactTelemetry || job.Tenant != "", job, err)
+		w.logStateError(checkCtx, job, err)
 		return
 	}
 	if !exists {
@@ -487,12 +492,11 @@ func (w *Worker) deleteVectors(ctx context.Context, job domain.Job, chunks []dom
 	}
 	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	redact := w.opts.RedactTelemetry || job.Tenant != ""
 	if w.hostedManifestEnabled() {
-		w.logStateError(redact, job, w.deleteAttemptVectors(cleanupCtx, job, chunks))
+		w.logStateError(cleanupCtx, job, w.deleteAttemptVectors(cleanupCtx, job, chunks))
 		return
 	}
-	w.logStateError(redact, job, w.removeJobVectors(cleanupCtx, job))
+	w.logStateError(cleanupCtx, job, w.removeJobVectors(cleanupCtx, job))
 }
 
 func (w *Worker) removeJobVectors(ctx context.Context, job domain.Job) error {
@@ -545,19 +549,19 @@ func (w *Worker) deleteAttemptVectors(ctx context.Context, job domain.Job, chunk
 	return revDeleter.DeleteByManifestRevision(ctx, string(job.Document.ID), job.RevisionID, knownIDs)
 }
 
-func (w *Worker) logStateError(redact bool, job domain.Job, err error) {
+func (w *Worker) logStateError(ctx context.Context, job domain.Job, err error) {
 	if err != nil {
-		if redact {
-			slog.Error("update ingestion state", "error", err)
+		if tracing.RedactIdentifiers(ctx) {
+			slog.ErrorContext(ctx, "update ingestion state", "error", tracing.ErrorForTelemetry(ctx, err))
 			return
 		}
-		slog.Error("update ingestion state", "document_id", job.Document.ID, "error", err)
+		slog.ErrorContext(ctx, "update ingestion state", "document_id", job.Document.ID, "error", err)
 	}
 }
 
 func (w *Worker) recordOutcome(ctx context.Context, job domain.Job, result string, err error) {
-	w.logStateError(w.opts.RedactTelemetry || job.Tenant != "", job, err)
-	tracing.RecordError(trace.SpanFromContext(ctx), err)
+	w.logStateError(ctx, job, err)
+	tracing.RecordError(ctx, trace.SpanFromContext(ctx), err)
 	if err == nil {
 		w.opts.Metrics.IngestJobs.WithLabelValues(result).Inc()
 		trace.SpanFromContext(ctx).SetAttributes(attribute.String("quarry.job.result", result))

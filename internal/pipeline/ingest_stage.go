@@ -357,7 +357,7 @@ func (s *PersistStage) waitForVisibility(ctx context.Context, ic *IngestContext,
 	}
 	attrs = append(attrs, "waited_ms", time.Since(start).Milliseconds())
 	if probeErr != nil {
-		attrs = append(attrs, "error", probeErr)
+		attrs = append(attrs, "error", tracing.ErrorForTelemetry(ctx, probeErr))
 	}
 	slog.WarnContext(ctx, "document vectors not yet searchable", attrs...)
 	return nil

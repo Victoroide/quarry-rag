@@ -21,6 +21,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/llm"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/retriever"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/aws/smithy-go"
 	"github.com/google/uuid"
 	"golang.org/x/text/unicode/norm"
@@ -953,11 +954,15 @@ func (s *RerankStage) Run(ctx context.Context, qc *QueryContext) error {
 		if rerankCtx.Err() != nil {
 			attrs[1] = "timeout"
 		}
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
-			attrs = append(attrs, "error_code", apiErr.ErrorCode())
+		if tracing.RedactIdentifiers(rerankCtx) {
+			attrs = append(attrs, "error", tracing.ErrorForTelemetry(rerankCtx, err))
+		} else {
+			var apiErr smithy.APIError
+			if errors.As(err, &apiErr) {
+				attrs = append(attrs, "error_code", apiErr.ErrorCode())
+			}
 		}
-		slog.WarnContext(ctx, "reranking failed; retaining vector order", attrs...)
+		slog.WarnContext(rerankCtx, "reranking failed; retaining vector order", attrs...)
 		metrics.FromContext(ctx).Rerank.WithLabelValues("fallback").Inc()
 		return nil
 	}

@@ -16,12 +16,12 @@ func ContentCapture(ctx context.Context) bool {
 	return enabled
 }
 
-// WithRedactIdentifiers selects whether telemetry should omit document and object identifiers.
+// WithRedactIdentifiers selects whether telemetry should omit document and object identifiers and bound error details.
 func WithRedactIdentifiers(ctx context.Context, enabled bool) context.Context {
 	return context.WithValue(ctx, redactIdentifiersKey{}, enabled)
 }
 
-// RedactIdentifiers reports whether document and object identifiers must be omitted from telemetry.
+// RedactIdentifiers reports whether telemetry must omit identifiers and bound error details.
 func RedactIdentifiers(ctx context.Context) bool {
 	enabled, _ := ctx.Value(redactIdentifiersKey{}).(bool)
 	return enabled

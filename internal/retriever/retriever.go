@@ -13,6 +13,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 )
 
 const (
@@ -571,7 +572,7 @@ func (r *Retriever) embedQuery(ctx context.Context, query string, filter domain.
 	}
 	candidates, err = search(ctx, embedding, probeK, filter)
 	if err != nil {
-		slog.WarnContext(ctx, "routing probe failed", "mode", RetrievalModeGlobal, "error", err)
+		slog.WarnContext(ctx, "routing probe failed", "mode", RetrievalModeGlobal, "error", tracing.ErrorForTelemetry(ctx, err))
 		return embedding, nil, true, nil
 	}
 	return embedding, candidates, false, nil

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 )
 
 // SweepOptions bounds leased sweeping of retired hosted vector revisions.
@@ -134,7 +135,7 @@ func (s *Sweeper) loop(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		if _, err := s.SweepOnce(ctx); err != nil && ctx.Err() == nil {
-			slog.ErrorContext(ctx, "sweep retired hosted vectors", "error", err)
+			slog.ErrorContext(ctx, "sweep retired hosted vectors", "error", tracing.ErrorForTelemetry(ctx, err))
 		}
 		select {
 		case <-s.stop:
@@ -197,7 +198,7 @@ func (s *Sweeper) runTask(parent context.Context, task domain.VectorCleanupTask,
 			case <-ticker.C:
 				ok, err := s.store.RenewVectorCleanup(leaseCtx, task, s.opts.Lease)
 				if err != nil {
-					slog.ErrorContext(leaseCtx, "renew vector cleanup lease", "revision_id", task.RevisionID, "error", err)
+					logCleanupError(leaseCtx, "renew vector cleanup lease", task, err)
 				}
 				if err != nil || !ok {
 					cancelLease(errLeaseLost)
@@ -308,8 +309,11 @@ func (s *Sweeper) runTask(parent context.Context, task domain.VectorCleanupTask,
 			s.recordCleanupMetric("lease_lost")
 			return false, nil
 		}
-		slog.WarnContext(parent, "hosted vector cleanup residue detected",
-			"document_id", task.DocumentID, "revision_id", task.RevisionID, "residue_vectors", len(present))
+		attrs := []any{"residue_vectors", len(present)}
+		if !tracing.RedactIdentifiers(parent) {
+			attrs = append(attrs, "document_id", task.DocumentID, "revision_id", task.RevisionID)
+		}
+		slog.WarnContext(parent, "hosted vector cleanup residue detected", attrs...)
 		report.TasksUnresolved++
 		report.UnresolvedVectors += len(present)
 		report.LastError = msg
@@ -410,7 +414,7 @@ func (s *Sweeper) releaseTask(parent context.Context, task domain.VectorCleanupT
 	relCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	defer cancel()
 	if err := s.store.ReleaseVectorCleanup(relCtx, task); err != nil {
-		slog.ErrorContext(relCtx, "release vector cleanup lease", "revision_id", task.RevisionID, "error", err)
+		logCleanupError(relCtx, "release vector cleanup lease", task, err)
 	}
 }
 
@@ -420,7 +424,7 @@ func (s *Sweeper) deferOnError(parent context.Context, task domain.VectorCleanup
 	defer cancel()
 	ok, err := s.store.DeferVectorCleanup(deferCtx, task, state, delay, 0, message)
 	if err != nil {
-		slog.ErrorContext(deferCtx, "defer vector cleanup", "revision_id", task.RevisionID, "error", err)
+		logCleanupError(deferCtx, "defer vector cleanup", task, err)
 		return
 	}
 	if !ok {
@@ -445,4 +449,12 @@ func sweepBackoff(attempts int, base, maxDelay time.Duration) time.Duration {
 	}
 	delay = min(delay, maxDelay)
 	return delay + time.Duration(rand.Int64N(int64(time.Second)+1)) // #nosec G404 -- Retry jitter does not require cryptographic randomness.
+}
+
+func logCleanupError(ctx context.Context, message string, task domain.VectorCleanupTask, err error) {
+	if tracing.RedactIdentifiers(ctx) {
+		slog.ErrorContext(ctx, message, "error", tracing.ErrorForTelemetry(ctx, err))
+		return
+	}
+	slog.ErrorContext(ctx, message, "revision_id", task.RevisionID, "error", err)
 }

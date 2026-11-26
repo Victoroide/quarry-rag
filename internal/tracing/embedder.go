@@ -25,6 +25,6 @@ func (e *embeddingProvider) Embed(ctx context.Context, text string) ([]float32, 
 		span.SetAttributes(attribute.String("input.value", text))
 	}
 	vector, err := e.inner.Embed(ctx, text)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return vector, err
 }

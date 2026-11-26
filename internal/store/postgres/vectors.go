@@ -11,6 +11,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -719,7 +720,7 @@ func recordSearchTelemetry(ctx context.Context, report SearchReport, results int
 		span.SetAttributes(attrs...)
 	}
 	if err != nil {
-		slog.DebugContext(ctx, "pgvector query failed", "strategy", report.Strategy, "status", report.Status, "error", err)
+		slog.DebugContext(ctx, "pgvector query failed", "strategy", report.Strategy, "status", report.Status, "error", tracing.ErrorForTelemetry(ctx, err))
 		return
 	}
 	slog.DebugContext(ctx, "pgvector query completed", "strategy", report.Strategy, "status", report.Status, "results", results)
