@@ -230,3 +230,32 @@ func TestLockDocumentWorksOnAZeroValueStore(t *testing.T) {
 	require.True(t, ok)
 	unlock()
 }
+
+func TestOfflineStoreRoundTripsLayoutProvenance(t *testing.T) {
+	s := NewFakeVectorStore()
+	pages := []int{1, 2}
+	tables := []string{"p1-t1"}
+	rows := []string{"p1-t1-r1"}
+	require.NoError(t, s.Upsert(t.Context(), "", []domain.Chunk{{
+		ID:         "c1",
+		DocumentID: "doc-1",
+		Text:       "Key: Alpha | Val: 1",
+		Embedding:  []float32{1, 0},
+		Metadata: map[string]any{
+			"doc_type":  "report",
+			"pages":     pages,
+			"table_ids": tables,
+			"row_ids":   rows,
+		},
+	}}))
+	pages[0] = 99
+	tables[0] = "mutated"
+	rows[0] = "mutated"
+
+	got, err := s.QueryFiltered(t.Context(), []float32{1, 0}, 1, domain.VectorFilter{})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, []int{1, 2}, got[0].Chunk.Metadata["pages"])
+	require.Equal(t, []string{"p1-t1"}, got[0].Chunk.Metadata["table_ids"])
+	require.Equal(t, []string{"p1-t1-r1"}, got[0].Chunk.Metadata["row_ids"])
+}

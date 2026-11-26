@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -227,9 +228,9 @@ func (p *Client) UpsertWithVisibility(ctx context.Context, namespace string, chu
 		if c.VectorIncarnation != "" {
 			mdMap[domain.VectorIncarnationKey] = c.VectorIncarnation
 		}
-		for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey} {
+		for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey, "pages", "table_ids", "row_ids"} {
 			if value, ok := c.Metadata[key]; ok {
-				mdMap[key] = value
+				mdMap[key] = pineconeMetadataValue(value)
 			}
 		}
 		encoded, err := json.Marshal(mdMap)
@@ -759,6 +760,30 @@ func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
 	} else if _, hasAttempt := fields[domain.VectorAttemptKey]; hasAttempt {
 		return chunk, false
 	}
+	if v, ok := fields["pages"]; ok && v.GetListValue() != nil {
+		pages := make([]int, 0, len(v.GetListValue().GetValues()))
+		for _, item := range v.GetListValue().GetValues() {
+			if p, err := strconv.Atoi(item.GetStringValue()); err == nil {
+				pages = append(pages, p)
+			}
+		}
+		if len(pages) > 0 {
+			chunk.Metadata["pages"] = pages
+		}
+	}
+	for _, key := range []string{"table_ids", "row_ids"} {
+		if v, ok := fields[key]; ok && v.GetListValue() != nil {
+			items := make([]string, 0, len(v.GetListValue().GetValues()))
+			for _, item := range v.GetListValue().GetValues() {
+				if s := item.GetStringValue(); s != "" {
+					items = append(items, s)
+				}
+			}
+			if len(items) > 0 {
+				chunk.Metadata[key] = items
+			}
+		}
+	}
 	return chunk, true
 }
 
@@ -779,6 +804,25 @@ func matchesToScoredChunks(matches []*pinecone.ScoredVector, namespace string) [
 		})
 	}
 	return scored
+}
+
+func pineconeMetadataValue(v any) any {
+	switch list := v.(type) {
+	case []int:
+		out := make([]any, len(list))
+		for i, n := range list {
+			out[i] = strconv.Itoa(n)
+		}
+		return out
+	case []string:
+		out := make([]any, len(list))
+		for i, s := range list {
+			out[i] = s
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // Close releases the shared default connection.

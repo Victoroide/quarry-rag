@@ -36,10 +36,14 @@ func NewChunkStageWithEmbeddingProfile(c *chunker.Chunker, p *embeddinginput.Pro
 // ID returns the stage identifier.
 func (s *ChunkStage) ID() StageID { return StageChunk }
 
-// Run splits the raw text into chunks.
+// Run splits the raw text or ordered layout sections into chunks.
 func (s *ChunkStage) Run(ctx context.Context, ic *IngestContext) error {
 	var err error
-	ic.Chunks, err = s.chunker.ChunkForEmbedding(ctx, ic.DocumentID, ic.RawText, s.profile)
+	if len(ic.LayoutSections) > 0 {
+		ic.Chunks, err = s.chunker.ChunkLayout(ctx, ic.DocumentID, ic.LayoutSections, s.profile)
+	} else {
+		ic.Chunks, err = s.chunker.ChunkForEmbedding(ctx, ic.DocumentID, ic.RawText, s.profile)
+	}
 	if err != nil {
 		return fmt.Errorf("chunk_stage: document %s: %w", ic.DocumentID, err)
 	}

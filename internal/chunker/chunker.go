@@ -40,6 +40,8 @@ type textUnit struct {
 	text      string
 	separator string
 	estimate  tokenEstimate
+	byteStart int
+	byteEnd   int
 }
 
 // Chunk splits normalized text at paragraph, sentence, word and rune boundaries.
@@ -57,19 +59,30 @@ func (c *Chunker) ChunkForEmbedding(ctx context.Context, docID domain.DocumentID
 		return nil, err
 	}
 	cleaned := textutil.NormalizeForIngest(stripHTML(text))
+	chunks, _, err := c.chunkNormalized(ctx, docID, cleaned, profile, "")
+	return chunks, err
+}
+
+type chunkSpan struct {
+	start int
+	end   int
+}
+
+func (c *Chunker) chunkNormalized(ctx context.Context, docID domain.DocumentID, cleaned string, profile *embeddinginput.Profile, baseVersion string) ([]domain.Chunk, []chunkSpan, error) {
 	if profile != nil {
-		return c.chunkProfiled(ctx, docID, cleaned, profile)
+		return c.chunkProfiled(ctx, docID, cleaned, profile, baseVersion)
 	}
 	units, err := c.textUnits(ctx, cleaned)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var chunks []domain.Chunk
+	var spans []chunkSpan
 	start, nextNew := 0, 0
 	for nextNew < len(units) {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		end, size, estimate := c.window(units, start)
 		if end <= nextNew {
@@ -77,10 +90,11 @@ func (c *Chunker) ChunkForEmbedding(ctx context.Context, docID domain.DocumentID
 				start = nextNew
 				continue
 			}
-			return nil, errEmbeddingChunkBoundary
+			return nil, nil, errEmbeddingChunkBoundary
 		}
 		window := joinUnits(units[start:end], size)
-		chunks = append(chunks, makeChunk(docID, len(chunks), window, ""))
+		chunks = append(chunks, makeChunk(docID, len(chunks), window, baseVersion))
+		spans = append(spans, chunkSpan{start: units[start].byteStart, end: units[end-1].byteEnd})
 		nextNew = end
 		if end == len(units) {
 			break
@@ -88,14 +102,16 @@ func (c *Chunker) ChunkForEmbedding(ctx context.Context, docID domain.DocumentID
 		start = c.overlapStart(units, start, end, size, estimate)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return chunks, nil
+	return chunks, spans, nil
 }
 
 func (c *Chunker) textUnits(ctx context.Context, cleaned string) ([]textUnit, error) {
 	var units []textUnit
+	paragraphOffset := 0
 	for i, paragraph := range textutil.SplitParagraphs(cleaned) {
+		paragraphStart := paragraphOffset + strings.Index(cleaned[paragraphOffset:], paragraph)
 		offset := 0
 		for j, sentence := range textutil.SplitSentences(paragraph) {
 			if err := ctx.Err(); err != nil {
@@ -106,9 +122,10 @@ func (c *Chunker) textUnits(ctx context.Context, cleaned string) ([]textUnit, er
 			if i > 0 && j == 0 {
 				separator = "\n\n"
 			}
-			units = c.appendSentence(units, sentence, separator)
+			units = c.appendSentence(units, sentence, separator, paragraphStart+sentenceStart)
 			offset = sentenceStart + len(sentence)
 		}
+		paragraphOffset = paragraphStart + len(paragraph)
 	}
 	return units, nil
 }
@@ -168,26 +185,30 @@ func (c *Chunker) overlapStart(units []textUnit, start, end, size int, estimate 
 	return overlapStart
 }
 
-func (c *Chunker) appendSentence(units []textUnit, sentence, separator string) []textUnit {
+func (c *Chunker) appendSentence(units []textUnit, sentence, separator string, baseOffset int) []textUnit {
 	estimate := measureTokens(sentence)
 	if estimate.count() <= c.chunkSize && len(sentence) <= MaxChunkBytes {
-		return append(units, textUnit{sentence, separator, estimate})
+		return append(units, textUnit{text: sentence, separator: separator, estimate: estimate, byteStart: baseOffset, byteEnd: baseOffset + len(sentence)})
 	}
+	wordOffset := 0
 	for i, word := range strings.Fields(sentence) {
 		if i > 0 {
 			separator = " "
 		}
+		rel := strings.Index(sentence[wordOffset:], word)
+		wordStart := wordOffset + rel
+		wordOffset = wordStart + len(word)
 		estimate = measureTokens(word)
 		if estimate.count() <= c.chunkSize && len(word) <= MaxChunkBytes {
-			units = append(units, textUnit{word, separator, estimate})
+			units = append(units, textUnit{text: word, separator: separator, estimate: estimate, byteStart: baseOffset + wordStart, byteEnd: baseOffset + wordOffset})
 			continue
 		}
-		units = c.appendWord(units, word, separator)
+		units = c.appendWord(units, word, separator, baseOffset+wordStart)
 	}
 	return units
 }
 
-func (c *Chunker) appendWord(units []textUnit, word, separator string) []textUnit {
+func (c *Chunker) appendWord(units []textUnit, word, separator string, baseOffset int) []textUnit {
 	// Smaller fragments let successive windows share part of a long word.
 	fragmentSize := c.chunkSize
 	if c.overlap > 0 {
@@ -199,14 +220,14 @@ func (c *Chunker) appendWord(units []textUnit, word, separator string) []textUni
 		next := estimate
 		next.addRune(r)
 		if offset > start && (next.count() > fragmentSize || offset-start+len(string(r)) > MaxChunkBytes) {
-			units = append(units, textUnit{word[start:offset], separator, estimate})
+			units = append(units, textUnit{text: word[start:offset], separator: separator, estimate: estimate, byteStart: baseOffset + start, byteEnd: baseOffset + offset})
 			start, separator, estimate = offset, "", tokenEstimate{}
 			estimate.addRune(r)
 		} else {
 			estimate = next
 		}
 	}
-	return append(units, textUnit{word[start:], separator, estimate})
+	return append(units, textUnit{text: word[start:], separator: separator, estimate: estimate, byteStart: baseOffset + start, byteEnd: baseOffset + len(word)})
 }
 
 func makeChunk(docID domain.DocumentID, index int, text, version string) domain.Chunk {
