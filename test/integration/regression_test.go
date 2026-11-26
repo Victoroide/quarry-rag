@@ -80,9 +80,6 @@ func TestDeleteDoesNotHideStoreFailure(t *testing.T) {
 }
 
 func TestPostgresDocumentLifecycle(t *testing.T) {
-	if testing.Short() {
-		t.Skip("needs a Docker daemon")
-	}
 	cs, err := pgstore.NewClient(t.Context(), startPostgres(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, cs.Close(context.Background())) })

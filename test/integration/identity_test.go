@@ -11,9 +11,6 @@ import (
 )
 
 func TestInsertDocumentNeverOverwrites(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	ctx := t.Context()
 	client, err := postgres.NewClient(ctx, startPostgres(t))
 	require.NoError(t, err)

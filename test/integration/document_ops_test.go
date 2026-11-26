@@ -32,9 +32,6 @@ import (
 )
 
 func TestScopedDocumentOperationsEndToEnd(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	ctx := t.Context()
 	store, err := pgstore.NewClient(ctx, startPostgres(t))
 	require.NoError(t, err)

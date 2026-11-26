@@ -37,9 +37,6 @@ func visibilityClientAt(t *testing.T, dsn string) *pgstore.Client {
 }
 
 func TestVisibilityRules(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	client := visibilityClient(t)
 	completed, legacy, processing, failed, missing := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
 	for _, row := range []struct{ id, status string }{
@@ -74,9 +71,6 @@ func (visibilityLaggingVectors) DeleteAllVectorsInNamespace(context.Context, str
 func (visibilityLaggingVectors) DeleteByDocID(context.Context, string) error { return nil }
 
 func TestOrphanVectorsAreNotCited(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	client := visibilityClient(t)
 	completed, failed, processing, missing := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
 	for _, row := range []struct{ id, status string }{{completed, "completed"}, {failed, "failed"}, {processing, "processing"}} {
@@ -132,9 +126,6 @@ func TestOrphanVectorsAreNotCited(t *testing.T) {
 }
 
 func TestEvidenceRoutingVisibilityAndPreviewWithPostgres(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	client := visibilityClientAt(t, pgtest.StartVector(t))
 	vs, err := pgstore.NewVectorStore(t.Context(), client, 4)
 	require.NoError(t, err)

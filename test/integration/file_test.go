@@ -19,9 +19,6 @@ import (
 )
 
 func TestDocumentFileDownload(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	store, err := pgstore.NewClient(t.Context(), startPostgres(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close(context.Background())) })

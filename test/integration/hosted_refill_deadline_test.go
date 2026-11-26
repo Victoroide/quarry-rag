@@ -26,9 +26,6 @@ func (f deadlineRefillReranker) Rerank(ctx context.Context, text string, hits []
 }
 
 func TestHostedRefillRerankDeadlineDistinguishesVisibilityAndProvider(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db := visibilityClient(t)
 	for _, tc := range []struct {
 		name            string

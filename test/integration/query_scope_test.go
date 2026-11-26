@@ -41,9 +41,6 @@ func (c *visibilityCountingConverser) ConverseStreamWithModelAndSystem(ctx conte
 }
 
 func TestStrictSynthesisRevalidatesOriginalEvidenceBeforeRecountAndGeneration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db := visibilityClient(t)
 	for _, tc := range []struct {
 		name       string
@@ -194,9 +191,6 @@ func TestAllowlistLimitAndCanonicalUUIDs(t *testing.T) {
 }
 
 func TestDocumentPreviewsAreRestrictedToCandidates(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	client := visibilityClient(t)
 	allowed, private, noPreview := uuid.NewString(), uuid.NewString(), uuid.NewString()
 	for _, row := range []struct{ id, preview string }{{allowed, "Cedar Archive stores records."}, {private, "Falcon Station stores records."}} {
@@ -232,9 +226,6 @@ func TestDocumentPreviewsAreRestrictedToCandidates(t *testing.T) {
 }
 
 func TestEvidenceRoutingScopeIsolationWithPostgres(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	client := visibilityClient(t)
 	vs := memory.NewFakeVectorStore()
 
