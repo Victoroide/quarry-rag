@@ -37,7 +37,7 @@ Quarry (`quarry-rag`) is a domain-agnostic retrieval-augmented generation (RAG) 
 
 ## Installation
 
-- **Container image:** `docker pull ghcr.io/victoroide/quarry-rag:<version>`, where `<version>` is a release number such as `0.1.0`, for `linux/amd64` and `linux/arm64`.
+- **Container image:** `docker pull ghcr.io/victoroide/quarry-rag:<version>`, where `<version>` is a release number such as `0.2.0`, for `linux/amd64` and `linux/arm64`.
 - **Release archives:** `quarry-server` for Linux and macOS, and `quarry-mcp` for Linux, macOS and Windows, each for `amd64` and `arm64`. [Releases](docs/deployment.md#releases) describes checksum and provenance verification.
 - **MCP server:** install `quarry-mcp` with `go install` or from a release archive; see [Local MCP Server](docs/mcp.md#build-and-install).
 - **From source:** `go build -o bin/server ./cmd/server` with the Go version in [go.mod](go.mod).

@@ -118,7 +118,7 @@ attested and stored in the container registry.
 Download and verify a release, setting `tag` to its tag:
 
 ```sh
-tag=v0.1.0
+tag=v0.2.0
 version=${tag#v}
 dir=$(mktemp -d)
 gh release download "$tag" --repo Victoroide/quarry-rag --dir "$dir"
