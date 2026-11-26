@@ -317,7 +317,7 @@ paths:
             format: uuid
         - name: release_held
           in: query
-          description: 'Reserved; see [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
+          description: 'Replay and release a matching held deletion on the offline service (`true`), or select ordinary deletion (`false` or omitted); see [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
           schema:
             type: boolean
       responses:

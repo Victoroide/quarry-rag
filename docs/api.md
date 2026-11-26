@@ -918,7 +918,7 @@ Deletion continues after the caller disconnects, with a separate 60-second deadl
 - **Parameters**: `doc_id` (path parameter, must be a valid UUID)
 - **Request Body**: None
 
-`release_held` is reserved: an upgraded endpoint returns `412 Precondition Failed` when it is present in a well-formed request, including an empty value and `release_held=false`. `X-Document-Incarnation` is reserved in the same way, including empty values, until the database activates [checkpointed deletion](#checkpointed-deletion). During a mixed rollout, older endpoints may ignore these selectors. Keep the originally observed incarnation on every attempt of an incarnation-qualified operation and send it only to an endpoint that enforces the qualifier. An ID-only DELETE addresses the document currently stored under `doc_id`.
+`release_held` accepts zero or one literal `true` or `false` query value. `release_held=true` selects verified hold release on the offline service that owns the in-memory index (requires a canonical `X-Document-Incarnation`, never removes a live document, and works in either activation mode without activating the database); `release_held=false` or omission selects ordinary deletion under its usual preconditions. Malformed query encoding, empty values, noncanonical spellings and duplicate `release_held` parameters return `400 Bad Request` without touching storage. `X-Document-Incarnation` is reserved, including empty values, until the database activates [checkpointed deletion](#checkpointed-deletion). During a mixed rollout, older endpoints may ignore these selectors. Keep the originally observed incarnation on every attempt of an incarnation-qualified operation and send it only to an endpoint that enforces the qualifier. An ID-only DELETE addresses the document currently stored under `doc_id`.
 
 An active [evaluation fixture](development.md#evidence-evaluation) returns
 `412 Precondition Failed` before removing any data. Use the receipt-qualified
@@ -951,11 +951,11 @@ Error Status Codes:
 
 | Status | Error Category | Condition |
 |---|---|---|
-| `400 Bad Request` | `validation` | Invalid `doc_id`, malformed query string, or an empty, repeated or non-canonical `X-Document-Incarnation` on an activated database |
+| `400 Bad Request` | `validation` | Invalid `doc_id`, malformed query string, invalid `release_held` value or duplicate, or an empty, repeated or non-canonical `X-Document-Incarnation` on hold release or an activated database |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
 | `404 Not Found` | `not_found` | Document does not exist in PostgreSQL, or no matching deletion receipt covers the qualified request |
-| `412 Precondition Failed` | `precondition` | Incarnation-qualified deletion or hold release was requested before activation, the supplied incarnation is not the stored one, or the document is an evaluation fixture |
-| `428 Precondition Required` | `precondition` | A live document was addressed without `X-Document-Incarnation` on an activated database |
+| `412 Precondition Failed` | `precondition` | Incarnation-qualified deletion was requested before activation, the supplied incarnation does not match, `release_held=true` targeted a live document, non-offline store, wrong owner or unmatched receipt, or the document is an evaluation fixture |
+| `428 Precondition Required` | `precondition` | A live document was addressed without `X-Document-Incarnation` on an activated database, or `release_held=true` omitted `X-Document-Incarnation` |
 | `500 Internal Server Error` | `internal` | Database query failure or external deletion error in Pinecone or S3. Repeat the same request |
 | `503 Service Unavailable` | `storage` | A stored file or the document's vectors need a store that is not configured; no data is deleted |
 | `503 Service Unavailable` | `busy` | Another request holds the cleanup claim; repeat the same request after `Retry-After` |

@@ -13,6 +13,7 @@ Notable changes are grouped by release.
 - Restricted PostgreSQL security audit table `grant_catalog_security_audit` (`SELECT`-only for `quarry_auditor`), mirroring policy catalog audit events and failing closed on missing trust audit or query/list/status audit writes.
 - Benchmarks comparing `service` and `grants` authorization paths across scopes `0`, `1`, `10,000`, and `25,000` (`BenchmarkQueryHandlerAuthzModes`, `BenchmarkPGVectorAuthzModes`, and opt-in live `BenchmarkPineconeAuthzModes`).
 
+- `make cleanup` lists held deletion receipts, quarantines absent UUIDs and releases verified holds, and `Client.ReleaseHeldOfflineDeletion` releases a hold on the offline service; see [quarantine and hold release](docs/deployment.md#quarantine-and-hold-release).
 - Qualified document deletion for callers: `Client.DeleteDocumentIncarnation`, `UUID@incarnation` arguments for `make cleanup` and an optional `incarnation` for `quarry_delete_document`. An empty or malformed incarnation is rejected and never becomes an ID-only request.
 - Opt-in legacy deletion reservations commit a durable receipt before ID-only cleanup mutates a vector store, so activating checkpointed deletion or losing a database session cannot let a replacement overtake the last call. Document and administrative deletion enable them only in the activation release.
 - Queries with `include_citations` can set `preserve_code` to keep Markdown code unchanged and exclude bracketed numbers in code from citations, including through the Go client and MCP query tool.
@@ -58,6 +59,7 @@ Notable changes are grouped by release.
 
 - `make reindex` freeze, activation and inventory reports now include up to 20 document IDs of open deletion receipts blocking quiescence, and the [deployment guide](docs/deployment.md#changing-models-or-vector-stores) documents how to thaw, complete qualified retries and re-freeze.
 - Deployment and grant-catalog documentation specifies the PostgreSQL privileges required by a non-owner `make reindex` maintenance login, including `EXECUTE` on `grant_catalog_document_tenant`, `ingest_jobs`, `evaluation_fixtures`, `document_pdf_extractions`, and pre-created or self-created generation vector tables.
+- `DELETE /documents/{doc_id}` accepts `release_held=true` for offline hold release and rejects empty, repeated, malformed or non-literal values with `400`; see [document deletion](docs/api.md#delete-documentsdoc_id).
 - Release archives are checked for platform coverage and package contents before publication. See [release packaging](docs/development.md#releases).
 - PostgreSQL vector queries handle server query timeouts consistently across locales.
 - `make cleanup` with `GO_RAG_FAKE_MODE` forwards each deletion once to the running service on `SERVER_PORT`, because that service owns the in-memory vectors.
