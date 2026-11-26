@@ -7,6 +7,12 @@ type DocumentVisibility interface {
 	VisibleDocumentIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
 }
 
+// RevisionVisibility filters scored chunks against completed documents and
+// their active hosted vector revisions when present.
+type RevisionVisibility interface {
+	VisibleRevisionChunks(ctx context.Context, candidates []ScoredChunk) ([]ScoredChunk, error)
+}
+
 // EvidenceVisibility identifies current chunks within the requested scope.
 // It returns a subset of the candidates in their original order with the
 // current document category.

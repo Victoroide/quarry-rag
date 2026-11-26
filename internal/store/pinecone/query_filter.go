@@ -62,16 +62,17 @@ func (p *Client) QueryFiltered(ctx context.Context, embedding []float32, topK in
 		return []domain.ScoredChunk{}, nil
 	}
 	type hitKey struct {
-		id       domain.ChunkID
-		revision string
-		attempt  string
+		id          domain.ChunkID
+		revision    string
+		attempt     string
+		manifestRev string
 	}
 	merged := make(map[hitKey]domain.ScoredChunk)
 	if err := p.queryPartitions(ctx, embedding, topK, filter, nil, func(chunks []domain.ScoredChunk) {
 		for _, sc := range chunks {
 			revision, _ := sc.Chunk.Metadata[domain.VectorRevisionKey].(string)
 			attempt, _ := sc.Chunk.Metadata[domain.VectorAttemptKey].(string)
-			key := hitKey{id: sc.Chunk.ID, revision: revision, attempt: attempt}
+			key := hitKey{id: sc.Chunk.ID, revision: revision, attempt: attempt, manifestRev: sc.Chunk.RevisionID}
 			if prev, ok := merged[key]; !ok || sc.Score > prev.Score {
 				merged[key] = sc
 			}

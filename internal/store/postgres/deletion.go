@@ -16,6 +16,7 @@ const (
 	localVectors    = "local"
 	legacyVectors   = "legacy"
 	revisionVectors = "revision"
+	manifestVectors = "manifest"
 	memoryVectors   = "memory"
 	memoryRevision  = "memory_revision"
 )
@@ -111,8 +112,13 @@ func canonicalIncarnation(value string) (string, error) {
 	return parsed.String(), nil
 }
 
-func vectorMode(scoped bool, ops domain.DeleteOperations) (string, error) {
+func vectorMode(scoped, manifested bool, ops domain.DeleteOperations) (string, error) {
 	switch {
+	case manifested:
+		if ops.ManifestVectors == nil {
+			return "", domain.ErrVectorStorageUnavailable
+		}
+		return manifestVectors, nil
 	case scoped:
 		if ops.RevisionVectors == nil {
 			return "", domain.ErrVectorStorageUnavailable
@@ -134,7 +140,9 @@ func vectorMode(scoped bool, ops domain.DeleteOperations) (string, error) {
 	}
 }
 
-func hostedVectors(mode string) bool { return mode == legacyVectors || mode == revisionVectors }
+func hostedVectors(mode string) bool {
+	return mode == legacyVectors || mode == revisionVectors || mode == manifestVectors
+}
 
 func nullable(value string) *string {
 	if value == "" {
@@ -209,7 +217,11 @@ func (c *Client) beginDeletion(ctx context.Context, id domain.DocumentID, ops do
 	if source != nil && ops.Source == nil {
 		return "", false, domain.ErrFileStorageUnavailable
 	}
-	mode, err := vectorMode(scoped, ops)
+	manifested, err := c.ownsManifests(ctx, tx, id, ops)
+	if err != nil {
+		return "", false, err
+	}
+	mode, err := vectorMode(scoped, manifested, ops)
 	if err != nil {
 		return "", false, err
 	}
@@ -283,6 +295,38 @@ func insertDeletionIntentTx(ctx context.Context, tx pgx.Tx, id domain.DocumentID
 	return nil
 }
 
+// ownsManifests reports whether the document owns unretired manifested
+// revisions. Only a node that enabled manifests and can delete by revision asks,
+// so no other login reads the manifest tables.
+func (c *Client) ownsManifests(ctx context.Context, tx pgx.Tx, id domain.DocumentID, ops domain.DeleteOperations) (bool, error) {
+	if !c.hostedManifests.Load() || ops.ManifestVectors == nil {
+		return false, nil
+	}
+	var owns bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM hosted_vector_manifests WHERE document_id=$1 AND state<>'retired')`, string(id)).Scan(&owns)
+	if err != nil {
+		return false, fmt.Errorf("postgres: read document manifests: %w", err)
+	}
+	return owns, nil
+}
+
+// deleteManifestVectors removes every unretired revision of the document by its
+// recorded IDs. The document is already hidden and cannot gain a revision, so
+// the list is stable across resumptions. Revisions that retire later reach the
+// sweeper through the deletion trigger.
+func (c *Client) deleteManifestVectors(ctx context.Context, id domain.DocumentID, ops domain.DeleteOperations) error {
+	manifests, err := c.listManifests(ctx, id, "", true)
+	if err != nil {
+		return err
+	}
+	for _, m := range manifests {
+		if err = ops.ManifestVectors(ctx, string(id), m.RevisionID, m.VectorIDs); err != nil {
+			return fmt.Errorf("delete revision %s vectors: %w", m.RevisionID, err)
+		}
+	}
+	return nil
+}
+
 // deletionDeadline returns the context bound and the time its claim may last.
 func deletionDeadline(ctx context.Context) (context.Context, context.CancelFunc, time.Time) {
 	if deadline, ok := ctx.Deadline(); ok {
@@ -328,7 +372,7 @@ func (c *Client) resumeDeletion(ctx context.Context, id domain.DocumentID, incar
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if stepErr := deleteArtifact(domain.TrackVectorMutation(ctx), string(id), incarnation, mode, source, step, ops); stepErr != nil {
+		if stepErr := c.deleteArtifact(domain.TrackVectorMutation(ctx), string(id), incarnation, mode, source, step, ops); stepErr != nil {
 			return stepErr
 		}
 		if checkpointErr := c.checkpointDeletion(ctx, id, incarnation, claim, step); checkpointErr != nil {
@@ -372,6 +416,10 @@ func checkDeletionTarget(mode string, source, bucket, index *string, ops domain.
 		if ops.RevisionVectors == nil {
 			return domain.ErrVectorStorageUnavailable
 		}
+	case manifestVectors:
+		if ops.ManifestVectors == nil {
+			return domain.ErrVectorStorageUnavailable
+		}
 	}
 	if source != nil {
 		if ops.Source == nil {
@@ -394,7 +442,7 @@ func deref(value *string) string {
 	return *value
 }
 
-func deleteArtifact(ctx context.Context, id, incarnation, mode string, source *string, step int, ops domain.DeleteOperations) error {
+func (c *Client) deleteArtifact(ctx context.Context, id, incarnation, mode string, source *string, step int, ops domain.DeleteOperations) error {
 	switch step {
 	case stepNamespace:
 		if mode == legacyVectors || mode == memoryVectors {
@@ -406,6 +454,15 @@ func deleteArtifact(ctx context.Context, id, incarnation, mode string, source *s
 			return ops.LegacyVectors(ctx, id)
 		case revisionVectors, memoryRevision:
 			return ops.RevisionVectors(ctx, id, incarnation)
+		case manifestVectors:
+			if !c.hostedManifests.Load() {
+				// The metadata step's DELETE FROM documents fires
+				// documents_retire_hosted_vectors, which hands every unretired
+				// revision to the drained cleanup queue. A flag-enabled
+				// replica, or scripts/reconcile -apply, then removes them.
+				return nil
+			}
+			return c.deleteManifestVectors(ctx, domain.DocumentID(id), ops)
 		}
 	case stepSource:
 		if source != nil {
@@ -615,7 +672,11 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 	if source != nil && ops.Source == nil {
 		return "", false, domain.ErrFileStorageUnavailable
 	}
-	mode, err := vectorMode(scoped, ops)
+	manifested, err := c.ownsManifests(ctx, tx, id, ops)
+	if err != nil {
+		return "", false, err
+	}
+	mode, err := vectorMode(scoped, manifested, ops)
 	if err != nil {
 		return "", false, err
 	}

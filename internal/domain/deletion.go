@@ -48,6 +48,10 @@ type DeleteOperations struct {
 	LegacyVectors   func(ctx context.Context, documentID string) error
 	// RevisionVectors removes the vectors of one incarnation.
 	RevisionVectors func(ctx context.Context, documentID, incarnation string) error
+	// ManifestVectors removes the vectors one hosted manifest revision wrote, by
+	// the exact IDs its manifest recorded. A document that owns manifested
+	// revisions is deleted this way and never by document or namespace.
+	ManifestVectors func(ctx context.Context, documentID, revisionID string, vectorIDs []string) error
 	// Source removes the exact original object.
 	Source func(ctx context.Context, key string) error
 }

@@ -628,6 +628,11 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
         WHERE id=$1`, j.Document.ID, len(chunks), observation.Visibility, observation.ObservedAt, j.LeaseToken, vectorIncarnationRequired); err != nil {
 		return false, err
 	}
+	if j.RevisionID != "" {
+		if actErr := activateVectorManifest(ctx, tx, j); actErr != nil {
+			return false, actErr
+		}
+	}
 	if assigned {
 		if _, err = tx.Exec(ctx, `SELECT grant_catalog_publish_accepted_document($1::uuid,$2::uuid)`, string(j.Document.ID), j.Incarnation); err != nil {
 			return false, fmt.Errorf("postgres: publish accepted document: %w", err)
@@ -691,7 +696,97 @@ func (c *Client) changeJob(ctx context.Context, j domain.Job, query string, args
 			return err
 		}
 	}
+	// A failure retires every manifest of the document through the status
+	// trigger. An attempt that is only retried or released abandons its own.
+	if j.RevisionID != "" && (args != nil || message == nil) {
+		if retErr := abandonAttemptManifest(ctx, tx, string(j.Document.ID), j.RevisionID); retErr != nil {
+			return retErr
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+// activateVectorManifest publishes the attempt's revision. Every other
+// unretired manifest of the document is retired first, because at most one
+// manifest may be active, and the superseded revisions wait for the sweeper.
+func activateVectorManifest(ctx context.Context, tx pgx.Tx, j domain.Job) error {
+	if _, err := tx.Exec(ctx, `
+		WITH retired AS (
+			UPDATE hosted_vector_manifests
+			   SET state = 'retired',
+			       retired_at = COALESCE(retired_at, statement_timestamp())
+			 WHERE document_id = $1
+			   AND revision_id <> $2
+			   AND state IN ('writing', 'active')
+			RETURNING revision_id, document_id, incarnation, collection, vector_namespace, id_prefix, vector_ids, retired_at
+		)
+		INSERT INTO hosted_vector_cleanups (
+			revision_id, document_id, incarnation, collection, vector_namespace, id_prefix, vector_ids,
+			next_attempt_at, retired_at, reason
+		)
+		SELECT revision_id, document_id, incarnation, collection, vector_namespace, id_prefix, vector_ids,
+		       statement_timestamp(), retired_at, 'superseded'
+		FROM retired
+		ON CONFLICT (revision_id) DO NOTHING`,
+		string(j.Document.ID), j.RevisionID); err != nil {
+		return fmt.Errorf("postgres: retire superseded vector manifests: %w", err)
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE hosted_vector_manifests
+		   SET state = 'active',
+		       activated_at = statement_timestamp()
+		 WHERE revision_id = $1
+		   AND document_id = $2
+		   AND incarnation = $3
+		   AND attempt = $4
+		   AND lease_token IS NOT DISTINCT FROM NULLIF($5, '')::uuid
+		   AND state = 'writing'`,
+		j.RevisionID, string(j.Document.ID), j.Incarnation, j.Attempts, j.LeaseToken)
+	if err != nil {
+		return fmt.Errorf("postgres: activate vector manifest: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("postgres: vector manifest %s is not active for this attempt", j.RevisionID)
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO hosted_vector_revisions (document_id, incarnation, active_revision_id, updated_at)
+		VALUES ($1, $2, $3, statement_timestamp())
+		ON CONFLICT (document_id) DO UPDATE
+		  SET incarnation = EXCLUDED.incarnation,
+		      active_revision_id = EXCLUDED.active_revision_id,
+		      updated_at = EXCLUDED.updated_at`,
+		string(j.Document.ID), j.Incarnation, j.RevisionID); err != nil {
+		return fmt.Errorf("postgres: set active vector revision: %w", err)
+	}
+	return nil
+}
+
+// abandonAttemptManifest retires the revision of an attempt that stops without
+// completing, so the sweeper removes whatever it wrote.
+func abandonAttemptManifest(ctx context.Context, tx pgx.Tx, docID, revisionID string) error {
+	_, err := tx.Exec(ctx, `
+		WITH retired AS (
+			UPDATE hosted_vector_manifests
+			   SET state = 'retired',
+			       retired_at = COALESCE(retired_at, statement_timestamp())
+			 WHERE document_id = $1
+			   AND revision_id = $2
+			   AND state = 'writing'
+			RETURNING revision_id, document_id, incarnation, collection, vector_namespace, id_prefix, vector_ids, retired_at
+		)
+		INSERT INTO hosted_vector_cleanups (
+			revision_id, document_id, incarnation, collection, vector_namespace, id_prefix, vector_ids,
+			next_attempt_at, retired_at, reason
+		)
+		SELECT revision_id, document_id, incarnation, collection, vector_namespace, id_prefix, vector_ids,
+		       statement_timestamp(), retired_at, 'abandoned'
+		FROM retired
+		ON CONFLICT (revision_id) DO NOTHING`,
+		docID, revisionID)
+	if err != nil {
+		return fmt.Errorf("postgres: retire attempt vector manifest: %w", err)
+	}
+	return nil
 }
 
 // RetryJob reschedules an owned attempt and records its latest failure.

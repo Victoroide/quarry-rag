@@ -215,13 +215,14 @@ func baseValidConfig() *Config {
 		PineconeIndexName: "quarry-rag",
 		WorkerQueueSize:   1000,
 		IngestWorkers:     2, IngestMaxAttempts: 5, IngestLease: 2 * time.Minute, IngestJobTimeout: 15 * time.Minute, IngestPollInterval: time.Second,
-		EmbedConcurrency:        10,
-		ServiceToken:            "a-strong-service-token",
-		FakeMode:                false,
-		PineconeUpsertBatchSize: 100,
-		PineconeTimeout:         10 * time.Second,
-		PineconeMaxAttempts:     5,
-		ExtractIsolation:        true, ExtractTimeout: 30 * time.Second, ExtractConcurrency: 2, ExtractMemoryLimitMB: 512, ExtractQueueTimeout: 5 * time.Second,
+		EmbedConcurrency:          10,
+		ServiceToken:              "a-strong-service-token",
+		FakeMode:                  false,
+		PineconeUpsertBatchSize:   100,
+		PineconeTimeout:           10 * time.Second,
+		PineconeMaxAttempts:       5,
+		HostedVectorSweepInterval: 10 * time.Second, HostedVectorSweepPageSize: 100, HostedVectorSweepBudget: 1000, HostedVectorDrainDelay: 30 * time.Second, HostedVectorConvergenceDelay: 5 * time.Second,
+		ExtractIsolation: true, ExtractTimeout: 30 * time.Second, ExtractConcurrency: 2, ExtractMemoryLimitMB: 512, ExtractQueueTimeout: 5 * time.Second,
 		MaxAllowedDocumentIDs: 25000,
 		AWSMaxAttempts:        4, EmbedTimeout: 15 * time.Second,
 		ShutdownDrainDelay: 5 * time.Second, HealthCacheTTL: 10 * time.Second,
@@ -445,6 +446,61 @@ func TestLoadPGVectorExactScopeMax(t *testing.T) {
 			t.Setenv("PGVECTOR_EXACT_SCOPE_MAX", tc.value)
 			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PGVECTOR_EXACT_SCOPE_MAX") {
 				t.Fatalf("expected PGVECTOR_EXACT_SCOPE_MAX error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadHostedVectorManifestConfig(t *testing.T) {
+	awsConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HostedVectorManifest {
+		t.Fatal("HOSTED_VECTOR_MANIFEST must default to false")
+	}
+	if cfg.HostedVectorSweepInterval != 10*time.Second || cfg.HostedVectorSweepPageSize != 100 ||
+		cfg.HostedVectorSweepBudget != 1000 || cfg.HostedVectorDrainDelay != 30*time.Second ||
+		cfg.HostedVectorConvergenceDelay != 5*time.Second {
+		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+
+	t.Setenv("HOSTED_VECTOR_MANIFEST", "true")
+	t.Setenv("HOSTED_VECTOR_SWEEP_INTERVAL", "0s")
+	t.Setenv("HOSTED_VECTOR_SWEEP_PAGE_SIZE", "250")
+	t.Setenv("HOSTED_VECTOR_SWEEP_BUDGET", "5000")
+	t.Setenv("HOSTED_VECTOR_DRAIN_DELAY", "45s")
+	t.Setenv("HOSTED_VECTOR_CONVERGENCE_DELAY", "2s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HostedVectorManifest || cfg.HostedVectorSweepInterval != 0 || cfg.HostedVectorSweepPageSize != 250 ||
+		cfg.HostedVectorSweepBudget != 5000 || cfg.HostedVectorDrainDelay != 45*time.Second ||
+		cfg.HostedVectorConvergenceDelay != 2*time.Second {
+		t.Fatalf("unexpected overrides: %+v", cfg)
+	}
+
+	for _, tc := range []struct{ key, val string }{
+		{"HOSTED_VECTOR_MANIFEST", "maybe"},
+		{"HOSTED_VECTOR_SWEEP_INTERVAL", "50ms"},
+		{"HOSTED_VECTOR_SWEEP_INTERVAL", "-1s"},
+		{"HOSTED_VECTOR_SWEEP_INTERVAL", "2h"},
+		{"HOSTED_VECTOR_SWEEP_PAGE_SIZE", "0"},
+		{"HOSTED_VECTOR_SWEEP_PAGE_SIZE", "1001"},
+		{"HOSTED_VECTOR_SWEEP_BUDGET", "0"},
+		{"HOSTED_VECTOR_SWEEP_BUDGET", "100001"},
+		{"HOSTED_VECTOR_DRAIN_DELAY", "-1s"},
+		{"HOSTED_VECTOR_DRAIN_DELAY", "2h"},
+		{"HOSTED_VECTOR_CONVERGENCE_DELAY", "-1s"},
+		{"HOSTED_VECTOR_CONVERGENCE_DELAY", "2h"},
+	} {
+		t.Run("invalid/"+tc.key+"/"+tc.val, func(t *testing.T) {
+			awsConfigEnvironment(t)
+			t.Setenv(tc.key, tc.val)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("expected %s error, got %v", tc.key, err)
 			}
 		})
 	}

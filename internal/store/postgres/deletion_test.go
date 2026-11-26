@@ -133,6 +133,9 @@ func (r *deletionRecorder) ops(incarnation string) domain.DeleteOperations {
 		RevisionVectors: func(ctx context.Context, id, revision string) error {
 			return r.do(ctx, "revision", id+"/"+revision)
 		},
+		ManifestVectors: func(ctx context.Context, id, revision string, ids []string) error {
+			return r.do(ctx, "manifest", id+"/"+revision+"/"+strings.Join(ids, ","))
+		},
 		Source: func(ctx context.Context, key string) error { return r.do(ctx, "source", key) },
 	}
 }

@@ -97,7 +97,8 @@ type Job struct {
 	LeaseToken  string
 	Incarnation string
 	// Tenant is the owner's tenant for documents assigned in the grant catalog.
-	Tenant string
+	Tenant     string
+	RevisionID string
 
 	Collection    string
 	PDF           *PDFExtraction

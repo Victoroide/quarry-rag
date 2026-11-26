@@ -580,3 +580,114 @@ func TestRoundTripsLayoutProvenanceMetadata(t *testing.T) {
 	require.Equal(t, []int{1, 4}, fetchedMalformed["c2"].Metadata["pages"])
 	require.Equal(t, []string{"p1-t1"}, fetchedMalformed["c2"].Metadata["table_ids"])
 }
+
+func TestRevisionedUpsertAndMatchRestoration(t *testing.T) {
+	var sent []*pinecone.Vector
+	conn := &fakeIndexConn{
+		upsert: func(_ context.Context, vectors []*pinecone.Vector) (uint32, error) {
+			sent = append(sent, vectors...)
+			return uint32(len(vectors)), nil // #nosec G115 -- test batch length is small.
+		},
+		query: func(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+			matches := make([]*pinecone.ScoredVector, 0, len(sent))
+			for _, v := range sent {
+				matches = append(matches, &pinecone.ScoredVector{Vector: v, Score: 0.9})
+			}
+			return &pinecone.QueryVectorsResponse{Matches: matches}, nil
+		},
+	}
+	client := testClient(conn)
+	chunks := []domain.Chunk{{
+		ID: "public-chunk-id", DocumentID: "doc-1", Index: 0, Text: "body",
+		Embedding: []float32{1, 0}, RevisionID: "rev-1", VectorID: "doc-1#rev-1#0",
+	}}
+	if err := client.Upsert(t.Context(), "", chunks); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || sent[0].Id != "doc-1#rev-1#0" {
+		t.Fatalf("unexpected upserted vector ID: %+v", sent)
+	}
+	fields := sent[0].Metadata.GetFields()
+	if fields["revision_id"].GetStringValue() != "rev-1" || fields["chunk_id"].GetStringValue() != "public-chunk-id" {
+		t.Fatalf("missing revision metadata: %+v", fields)
+	}
+	results, err := client.Query(t.Context(), "", []float32{1, 0}, 5, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Chunk.ID != "public-chunk-id" || results[0].Chunk.RevisionID != "rev-1" || results[0].Chunk.VectorID != "doc-1#rev-1#0" {
+		t.Fatalf("unexpected restored chunk: %+v", results)
+	}
+}
+
+func TestQueryFilteredKeepsBothRevisionsOfSamePublicChunk(t *testing.T) {
+	staleMD, err := structpb.NewStruct(map[string]any{"doc_id": "doc-1", "chunk_id": "public-1", "revision_id": "rev-1", "text": "old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeMD, err := structpb.NewStruct(map[string]any{"doc_id": "doc-1", "chunk_id": "public-1", "revision_id": "rev-2", "text": "new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := &fakeIndexConn{
+		query: func(context.Context, *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+			return &pinecone.QueryVectorsResponse{Matches: []*pinecone.ScoredVector{
+				{Vector: &pinecone.Vector{Id: "doc-1#rev-1#0", Metadata: staleMD}, Score: 0.99},
+				{Vector: &pinecone.Vector{Id: "doc-1#rev-2#0", Metadata: activeMD}, Score: 0.90},
+			}}, nil
+		},
+	}
+	got, err := testClient(conn).QueryFiltered(t.Context(), []float32{1, 0}, 5, domain.VectorFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected both revisions before visibility check, got %d", len(got))
+	}
+}
+
+func TestDeleteByRevisionAndPresenceChecks(t *testing.T) {
+	var deleted [][]string
+	var usedFilter bool
+	conn := &fakeIndexConn{
+		filterDelete: func(_ context.Context, filter *structpb.Struct) error {
+			usedFilter = true
+			if filter.GetFields()["revision_id"].GetStructValue().GetFields()["$eq"].GetStringValue() != "rev-1" {
+				t.Fatalf("unexpected filter: %v", filter)
+			}
+			return status.Error(codes.Unimplemented, "filter delete unsupported")
+		},
+		list: func(_ context.Context, req *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error) {
+			if req.Prefix == nil || *req.Prefix != "doc-1#rev-1#" {
+				return nil, status.Error(codes.InvalidArgument, "list is not supported on pod-based indexes")
+			}
+			id := "doc-1#rev-1#0"
+			return &pinecone.ListVectorsResponse{VectorIds: []*string{&id}}, nil
+		},
+		deleteIDs: func(_ context.Context, ids []string) error {
+			deleted = append(deleted, ids)
+			return nil
+		},
+		fetch: func(_ context.Context, ids []string) (*pinecone.FetchVectorsResponse, error) {
+			return &pinecone.FetchVectorsResponse{Vectors: map[string]*pinecone.Vector{
+				ids[0]: {Id: ids[0]},
+			}}, nil
+		},
+	}
+	client := testClient(conn)
+	if err := client.DeleteByManifestRevision(t.Context(), "doc-1", "rev-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !usedFilter || len(deleted) != 1 || deleted[0][0] != "doc-1#rev-1#0" {
+		t.Fatalf("unexpected revision delete fallback: filter=%v deleted=%v", usedFilter, deleted)
+	}
+	// Pod-style unsupported list must report supported=false without error.
+	_, _, supported, err := client.ListPrefixVectorIDs(t.Context(), "", "other#", 10, "")
+	if err != nil || supported {
+		t.Fatalf("expected unsupported list, supported=%v err=%v", supported, err)
+	}
+	present, err := client.FetchPresentVectorIDs(t.Context(), "", []string{"doc-1#rev-1#0", "doc-1#rev-1#1"})
+	if err != nil || len(present) != 1 || present[0] != "doc-1#rev-1#0" {
+		t.Fatalf("unexpected present IDs: %v err=%v", present, err)
+	}
+}

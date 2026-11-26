@@ -14,6 +14,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -37,10 +38,11 @@ type FakeVectorStore struct {
 var _ domain.InMemoryIndex = (*FakeVectorStore)(nil)
 
 type vectorKey struct {
-	chunkID    domain.ChunkID
-	documentID domain.DocumentID
-	revision   string
-	attempt    string
+	chunkID          domain.ChunkID
+	documentID       domain.DocumentID
+	revision         string
+	attempt          string
+	manifestRevision string
 }
 
 // NewFakeVectorStore creates an empty in-memory store.
@@ -83,7 +85,11 @@ func (s *FakeVectorStore) Upsert(ctx context.Context, namespace string, chunks [
 		if len(c.Embedding) == 0 {
 			continue
 		}
-		if len(c.ID) > 512 {
+		vectorID := string(c.ID)
+		if c.VectorID != "" {
+			vectorID = c.VectorID
+		}
+		if len(vectorID) > 512 {
 			return domain.RejectedVectorMutation(fmt.Errorf("memory: chunk ID exceeds 512 bytes"))
 		}
 		if err := validateMetadata(c); err != nil {
@@ -112,11 +118,13 @@ func (s *FakeVectorStore) Upsert(ctx context.Context, namespace string, chunks [
 		cp := c
 		cp.Embedding = emb
 		cp.Metadata = cloneMetadata(c.Metadata)
-		key := vectorKey{chunkID: c.ID}
+		key := vectorKey{chunkID: c.ID, manifestRevision: c.RevisionID}
 		if revision, _ := c.Metadata[domain.VectorRevisionKey].(string); revision != "" {
 			key.documentID = c.DocumentID
 			key.revision = revision
 			key.attempt, _ = c.Metadata[domain.VectorAttemptKey].(string)
+		} else if c.RevisionID != "" {
+			key.documentID = c.DocumentID
 		}
 		m[key] = cp
 		stored++
@@ -169,6 +177,10 @@ func validateMetadata(c domain.Chunk) error {
 	}
 	if c.VectorIncarnation != "" {
 		metadata[domain.VectorIncarnationKey] = c.VectorIncarnation
+	}
+	if c.RevisionID != "" {
+		metadata["revision_id"] = c.RevisionID
+		metadata["chunk_id"] = string(c.ID)
 	}
 	for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey, "pages", "table_ids", "row_ids"} {
 		if value, ok := c.Metadata[key]; ok {
@@ -251,14 +263,15 @@ func (s *FakeVectorStore) query(namespace string, embedding []float32, topK int,
 			}
 		}
 		out := domain.Chunk{
-			ID:         c.ID,
-			DocumentID: c.DocumentID,
-			Index:      c.Index,
-			Text:       c.Text,
-			TokenCount: c.TokenCount,
-			Metadata:   cloneMetadata(c.Metadata),
-
+			ID:                c.ID,
+			DocumentID:        c.DocumentID,
+			Index:             c.Index,
+			Text:              c.Text,
+			TokenCount:        c.TokenCount,
+			Metadata:          cloneMetadata(c.Metadata),
 			VectorIncarnation: c.VectorIncarnation,
+			RevisionID:        c.RevisionID,
+			VectorID:          c.VectorID,
 		}
 		scored = append(scored, domain.ScoredChunk{
 			Chunk:     out,
@@ -318,6 +331,104 @@ func (s *FakeVectorStore) deleteDocumentVectors(docID, revision, attempt string)
 		}
 	}
 	return nil
+}
+
+func storedExternalID(key vectorKey, ch domain.Chunk) string {
+	if ch.VectorID != "" {
+		return ch.VectorID
+	}
+	return string(key.chunkID)
+}
+
+// DeleteByManifestRevision removes only vectors belonging to (docID, revisionID).
+func (s *FakeVectorStore) DeleteByManifestRevision(_ context.Context, docID, revisionID string, knownIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(knownIDs) > 0 {
+		drop := make(map[string]struct{}, len(knownIDs))
+		for _, id := range knownIDs {
+			drop[id] = struct{}{}
+		}
+		if m := s.ns[""]; m != nil {
+			for k, c := range m {
+				if _, ok := drop[storedExternalID(k, c)]; ok {
+					delete(m, k)
+				}
+			}
+		}
+		return nil
+	}
+	for _, m := range s.ns {
+		for k, c := range m {
+			if string(c.DocumentID) == docID && c.RevisionID == revisionID {
+				delete(m, k)
+			}
+		}
+	}
+	return nil
+}
+
+// DeleteVectorIDs removes exact vector IDs from namespace.
+func (s *FakeVectorStore) DeleteVectorIDs(_ context.Context, namespace string, ids []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.ns[namespace]
+	if m == nil {
+		return nil
+	}
+	drop := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		drop[id] = struct{}{}
+	}
+	for k, c := range m {
+		if _, ok := drop[storedExternalID(k, c)]; ok {
+			delete(m, k)
+		}
+	}
+	return nil
+}
+
+// FetchPresentVectorIDs returns the subset of ids currently stored in namespace.
+func (s *FakeVectorStore) FetchPresentVectorIDs(_ context.Context, namespace string, ids []string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m := s.ns[namespace]
+	if m == nil {
+		return nil, nil
+	}
+	presentSet := make(map[string]struct{}, len(m))
+	for k, c := range m {
+		presentSet[storedExternalID(k, c)] = struct{}{}
+	}
+	var present []string
+	for _, id := range ids {
+		if _, ok := presentSet[id]; ok {
+			present = append(present, id)
+		}
+	}
+	return present, nil
+}
+
+// ListPrefixVectorIDs lists stored vector IDs matching prefix in namespace.
+func (s *FakeVectorStore) ListPrefixVectorIDs(_ context.Context, namespace, prefix string, limit int, _ string) (ids []string, nextToken string, supported bool, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m := s.ns[namespace]
+	if m == nil {
+		return nil, "", true, nil
+	}
+	var out []string
+	for k, c := range m {
+		id := storedExternalID(k, c)
+		if strings.HasPrefix(id, prefix) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, "", true, nil
 }
 
 // Ping always succeeds for the in-memory store.

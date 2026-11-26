@@ -29,9 +29,10 @@ type Chunk struct {
 	TokenCount int            `json:"token_count"`
 	Embedding  []float32      `json:"embedding,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
-
 	// VectorIncarnation binds an untagged vector to its write-time document identity.
 	VectorIncarnation string `json:"-"`
+	RevisionID        string `json:"-"`
+	VectorID          string `json:"-"`
 }
 
 // Document represents an ingested document with metadata.

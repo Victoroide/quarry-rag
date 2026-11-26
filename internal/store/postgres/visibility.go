@@ -71,6 +71,12 @@ WHERE NOT d.scoped_vectors AND NOT d.vector_incarnation_required
 	return incarnations, nil
 }
 
+var (
+	_ domain.DocumentVisibility = Visibility{}
+	_ domain.RevisionVisibility = Visibility{}
+	_ domain.EvidenceVisibility = Visibility{}
+)
+
 // VisibleEvidence checks that vector hits match current completed chunks and
 // reads the current document category.
 // Chunk IDs are deterministic and can recur when a document ID is reused.
@@ -101,6 +107,7 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 	observed := make([]string, 0, len(candidates))
 	attempts := make([]string, 0, len(candidates))
 	vectorIncarnations := make([]string, 0, len(candidates))
+	revIDs := make([]*string, 0, len(candidates))
 	input := make([]domain.ScoredChunk, 0, len(candidates))
 	for _, candidate := range candidates {
 		ch := candidate.Chunk
@@ -125,6 +132,15 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 				continue
 			}
 		}
+		var revPtr *string
+		if ch.RevisionID != "" {
+			revID, revErr := uuid.Parse(ch.RevisionID)
+			if revErr != nil {
+				continue
+			}
+			canonicalRev := revID.String()
+			revPtr = &canonicalRev
+		}
 		digest := sha256.Sum256([]byte(ch.Text))
 		chunkIDs, docIDs = append(chunkIDs, chunkID.String()), append(docIDs, docID.String())
 		indices, digests = append(indices, int64(ch.Index)), append(digests, hex.EncodeToString(digest[:]))
@@ -132,6 +148,7 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 		observed = append(observed, candidate.ObservedIncarnation)
 		attempts = append(attempts, attempt)
 		vectorIncarnations = append(vectorIncarnations, ch.VectorIncarnation)
+		revIDs = append(revIDs, revPtr)
 		input = append(input, candidate)
 	}
 	var previews map[string]string
@@ -155,12 +172,12 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 		return input, previews, nil
 	}
 
-	join, args := readableJoin(v.Subject, []any{chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs})
+	join, args := readableJoin(v.Subject, []any{chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs, revIDs})
 	rows, err := source.Query(ctx, `
 SELECT hit.ord, d.doc_type, COALESCE(d.incarnation,d.id)::text,
        CASE WHEN d.id=ANY($11::uuid[]) THEN d.content_preview END
-FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[])
-	WITH ORDINALITY AS hit(chunk_id, doc_id, idx, hash, revision, incarnation, attempt, vector_incarnation, ord)
+FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $12::uuid[])
+	WITH ORDINALITY AS hit(chunk_id, doc_id, idx, hash, revision, incarnation, attempt, vector_incarnation, rev_id, ord)
 JOIN chunks c ON c.id=hit.chunk_id AND c.document_id=hit.doc_id AND c.chunk_index=hit.idx
 JOIN documents d ON d.id=c.document_id AND d.status='completed'`+join+`
 WHERE ($9='' OR d.collection=$9) AND ($10='' OR d.doc_type=$10)
@@ -169,6 +186,7 @@ WHERE ($9='' OR d.collection=$9) AND ($10='' OR d.doc_type=$10)
        OR hit.vector_incarnation=COALESCE(d.incarnation,d.id)::text)
   AND (CASE WHEN d.scoped_vectors THEN COALESCE(d.incarnation,d.id)::text ELSE '' END)=hit.revision
   AND COALESCE(d.vector_attempt::text,'')=hit.attempt
+  AND hosted_vector_revision_visible(d.id, hit.rev_id)
   AND encode(digest(convert_to(c.text, 'UTF8'), 'sha256'), 'hex')=hit.hash
 ORDER BY hit.ord`, args...)
 	if err != nil {
@@ -252,6 +270,62 @@ func (v Visibility) VisibleDocumentIDs(ctx context.Context, ids []string) (map[s
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: visible documents: %w", err)
+	}
+	return visible, nil
+}
+
+// VisibleRevisionChunks filters vector hits to completed documents whose active
+// hosted revision matches each candidate's revision identity.
+func (v Visibility) VisibleRevisionChunks(ctx context.Context, candidates []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+	if len(candidates) == 0 {
+		return candidates, nil
+	}
+	docIDs := make([]string, 0, len(candidates))
+	revIDs := make([]*string, 0, len(candidates))
+	input := make([]domain.ScoredChunk, 0, len(candidates))
+	for _, candidate := range candidates {
+		docID, docErr := uuid.Parse(string(candidate.Chunk.DocumentID))
+		if docErr != nil {
+			continue
+		}
+		var revPtr *string
+		if candidate.Chunk.RevisionID != "" {
+			revID, revErr := uuid.Parse(candidate.Chunk.RevisionID)
+			if revErr != nil {
+				continue
+			}
+			canonicalRev := revID.String()
+			revPtr = &canonicalRev
+		}
+		docIDs = append(docIDs, docID.String())
+		revIDs = append(revIDs, revPtr)
+		input = append(input, candidate)
+	}
+	if len(input) == 0 {
+		return []domain.ScoredChunk{}, nil
+	}
+	join, args := readableJoin(v.Subject, []any{docIDs, revIDs, v.Collection})
+	rows, err := v.Pool.Query(ctx, `
+SELECT hit.ord
+FROM unnest($1::uuid[], $2::uuid[]) WITH ORDINALITY AS hit(doc_id, rev_id, ord)
+JOIN documents d ON d.id=hit.doc_id AND d.status='completed'`+join+`
+WHERE ($3='' OR d.collection=$3)
+  AND hosted_vector_revision_visible(d.id, hit.rev_id)
+ORDER BY hit.ord`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: visible revision chunks: %w", err)
+	}
+	defer rows.Close()
+	visible := make([]domain.ScoredChunk, 0, len(input))
+	for rows.Next() {
+		var ord int
+		if err := rows.Scan(&ord); err != nil {
+			return nil, fmt.Errorf("postgres: scan visible revision chunk: %w", err)
+		}
+		visible = append(visible, input[ord-1])
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: visible revision chunks: %w", err)
 	}
 	return visible, nil
 }

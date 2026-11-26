@@ -130,6 +130,12 @@ type Config struct {
 	PineconeMaxAttempts           int
 	HostedVisibilityRefill        bool
 	HostedVisibilityExtraRequests int
+	HostedVectorManifest          bool
+	HostedVectorSweepInterval     time.Duration
+	HostedVectorSweepPageSize     int
+	HostedVectorSweepBudget       int
+	HostedVectorDrainDelay        time.Duration
+	HostedVectorConvergenceDelay  time.Duration
 
 	ExtractIsolation         bool
 	ExtractTimeout           time.Duration
@@ -257,6 +263,8 @@ func Load() (*Config, error) {
 		{"PINECONE_UPSERT_BATCH_SIZE", &cfg.PineconeUpsertBatchSize, 100},
 		{"PINECONE_MAX_ATTEMPTS", &cfg.PineconeMaxAttempts, 5},
 		{"HOSTED_VISIBILITY_EXTRA_REQUESTS", &cfg.HostedVisibilityExtraRequests, 1},
+		{"HOSTED_VECTOR_SWEEP_PAGE_SIZE", &cfg.HostedVectorSweepPageSize, 100},
+		{"HOSTED_VECTOR_SWEEP_BUDGET", &cfg.HostedVectorSweepBudget, 1000},
 		{"INGEST_WORKERS", &cfg.IngestWorkers, 2}, {"INGEST_MAX_ATTEMPTS", &cfg.IngestMaxAttempts, 5},
 		{"EXTRACT_CONCURRENCY", &cfg.ExtractConcurrency, 2}, {"EXTRACT_MEMORY_LIMIT_MB", &cfg.ExtractMemoryLimitMB, 512},
 		{"MAX_ALLOWED_DOCUMENT_IDS", &cfg.MaxAllowedDocumentIDs, 25000},
@@ -293,6 +301,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.HostedVisibilityRefill, err = envBoolOrDefault("HOSTED_VISIBILITY_REFILL", false); err != nil {
+		return nil, err
+	}
+	if cfg.HostedVectorManifest, err = envBoolOrDefault("HOSTED_VECTOR_MANIFEST", false); err != nil {
 		return nil, err
 	}
 	if cfg.LocalRetrievalThreshold, err = envFloat64OrDefault("LOCAL_RETRIEVAL_THRESHOLD", 0.70); err != nil {
@@ -336,6 +347,9 @@ func Load() (*Config, error) {
 		fallback time.Duration
 	}{
 		{"INDEX_VISIBILITY_TIMEOUT", &cfg.IndexVisibilityTimeout, 30 * time.Second},
+		{"HOSTED_VECTOR_SWEEP_INTERVAL", &cfg.HostedVectorSweepInterval, 10 * time.Second},
+		{"HOSTED_VECTOR_DRAIN_DELAY", &cfg.HostedVectorDrainDelay, 30 * time.Second},
+		{"HOSTED_VECTOR_CONVERGENCE_DELAY", &cfg.HostedVectorConvergenceDelay, 5 * time.Second},
 		{"INGEST_LEASE", &cfg.IngestLease, 2 * time.Minute},
 		{"INGEST_JOB_TIMEOUT", &cfg.IngestJobTimeout, 15 * time.Minute},
 		{"INGEST_POLL_INTERVAL", &cfg.IngestPollInterval, time.Second},
@@ -526,6 +540,21 @@ func (c *Config) validate() error {
 	}
 	if c.HostedVisibilityExtraRequests < 0 {
 		return fmt.Errorf("config: HOSTED_VISIBILITY_EXTRA_REQUESTS must be non-negative")
+	}
+	if c.HostedVectorSweepInterval < 0 || (c.HostedVectorSweepInterval > 0 && c.HostedVectorSweepInterval < 100*time.Millisecond) || c.HostedVectorSweepInterval > time.Hour {
+		return fmt.Errorf("config: HOSTED_VECTOR_SWEEP_INTERVAL must be 0s or between 100ms and 1h")
+	}
+	if c.HostedVectorSweepPageSize < 1 || c.HostedVectorSweepPageSize > 1000 {
+		return fmt.Errorf("config: HOSTED_VECTOR_SWEEP_PAGE_SIZE must be between 1 and 1000")
+	}
+	if c.HostedVectorSweepBudget < 1 || c.HostedVectorSweepBudget > 100000 {
+		return fmt.Errorf("config: HOSTED_VECTOR_SWEEP_BUDGET must be between 1 and 100000")
+	}
+	if c.HostedVectorDrainDelay < 0 || c.HostedVectorDrainDelay > time.Hour {
+		return fmt.Errorf("config: HOSTED_VECTOR_DRAIN_DELAY must be between 0s and 1h")
+	}
+	if c.HostedVectorConvergenceDelay < 0 || c.HostedVectorConvergenceDelay > time.Hour {
+		return fmt.Errorf("config: HOSTED_VECTOR_CONVERGENCE_DELAY must be between 0s and 1h")
 	}
 	switch c.SynthesisModel {
 	case "primary", "fallback", "hybrid":
