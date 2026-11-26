@@ -138,6 +138,35 @@ func TestQueryCitationContract(t *testing.T) {
 	}
 }
 
+func TestQueryPreserveCodeEncoding(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		request client.QueryRequest
+		want    string // empty when the field must be omitted
+	}{
+		{"enabled", client.QueryRequest{Query: "archive", IncludeCitations: true, PreserveCode: true}, "true"},
+		{"disabled", client.QueryRequest{Query: "archive", IncludeCitations: true}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				if tc.want == "" {
+					assert.NotContains(t, body, "preserve_code")
+				} else {
+					assert.Equal(t, tc.want, string(body["preserve_code"]))
+				}
+				writeJSON(t, w, client.QueryResponse{})
+			})
+			_, err := c.Query(t.Context(), tc.request)
+			require.NoError(t, err)
+		})
+	}
+	var decoded client.QueryRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"query":"archive","include_citations":true,"preserve_code":true}`), &decoded))
+	require.True(t, decoded.PreserveCode)
+}
+
 func TestQueryCollectionEncoding(t *testing.T) {
 	encoded, err := json.Marshal(client.QueryRequest{Query: "archive", Collection: "café"})
 	require.NoError(t, err)

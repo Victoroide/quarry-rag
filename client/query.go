@@ -27,6 +27,7 @@ type QueryRequest struct {
 	FilterDocType      string     `json:"filter_doc_type,omitempty"`
 	MaxChunks          int        `json:"max_chunks,omitempty"`
 	IncludeCitations   bool       `json:"include_citations,omitempty"`
+	PreserveCode       bool       `json:"preserve_code,omitempty"`
 	AllowedDocumentIDs []string   `json:"allowed_document_ids,omitzero"`
 
 	Collection string `json:"collection,omitempty"`

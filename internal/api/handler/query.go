@@ -33,6 +33,7 @@ type QueryRequest struct {
 	FilterDocType      string              `json:"filter_doc_type,omitempty"`
 	MaxChunks          int                 `json:"max_chunks,omitempty"`
 	IncludeCitations   bool                `json:"include_citations,omitempty"`
+	PreserveCode       bool                `json:"preserve_code,omitempty"`
 	AllowedDocumentIDs []string            `json:"allowed_document_ids,omitzero"`
 
 	Collection string `json:"collection,omitempty"`
@@ -113,6 +114,9 @@ func validateQueryRequest(req *QueryRequest) *APIError {
 	if len(req.Query) > 10000 {
 		return &APIError{Error: "validation", Message: "query exceeds maximum length of 10000 bytes"}
 	}
+	if req.PreserveCode && !req.IncludeCitations {
+		return &APIError{Error: "validation", Message: "preserve_code requires include_citations"}
+	}
 	switch strings.ToLower(req.Mode) {
 	case "", "auto", "local", "global":
 	default:
@@ -185,6 +189,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			AnswerMode:           answerMode,
 			FilterDocType:        req.FilterDocType,
 			IncludeCitations:     req.IncludeCitations,
+			PreserveCode:         req.PreserveCode,
 			AllowedDocumentIDs:   req.AllowedDocumentIDs,
 			AcceptLanguage:       strings.Join(r.Header.Values("Accept-Language"), ","),
 			Collection:           req.Collection,
