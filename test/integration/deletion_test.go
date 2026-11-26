@@ -124,9 +124,11 @@ func failOnce(message string) func(context.Context) error {
 	}
 }
 
+// activateDeletion activates the database through the administrative
+// operation, the one writer of the marker.
 func activateDeletion(t *testing.T, c *pgstore.Client) {
 	t.Helper()
-	_, err := c.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	_, err := c.ActivateDeletion(t.Context())
 	require.NoError(t, err)
 }
 
@@ -631,7 +633,7 @@ func TestDeleteWithdrawsRetiredEvidenceFromJSONAndSSE(t *testing.T) {
 	require.NotContains(t, current.Answer, oldText)
 }
 
-// pendingDeletionVectors fails a document-wide delete before it removes anything.
+// pendingDeletionVectors fails a vector delete before it removes anything.
 type pendingDeletionVectors struct {
 	*memory.FakeVectorStore
 	fail *atomic.Bool
@@ -642,6 +644,15 @@ func (v *pendingDeletionVectors) DeleteByDocID(ctx context.Context, id string) e
 		return errors.New("provider unavailable")
 	}
 	return v.FakeVectorStore.DeleteByDocID(ctx, id)
+}
+
+// DeleteByRevision fails the same way, because a document admitted after
+// activation stores tagged vectors that only a revision deletion removes.
+func (v *pendingDeletionVectors) DeleteByRevision(ctx context.Context, id, revision string) error {
+	if v.fail.Load() {
+		return errors.New("provider unavailable")
+	}
+	return v.FakeVectorStore.DeleteByRevision(ctx, id, revision)
 }
 
 type sourceObjects struct {

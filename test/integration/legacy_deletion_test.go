@@ -31,8 +31,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// legacyRoutes composes the production handlers with the reservation guard that the
-// server entry point leaves disabled until the deployment can also activate.
+// legacyRoutes composes the production handlers with the reservation guard that
+// the server entry point enables.
 func legacyRoutes(stores *deletionStores) deletionRoutes {
 	routes := fullRoutes(stores)
 	routes.options = []handler.DeleteOption{
@@ -333,19 +333,8 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	activated := make(chan struct{})
 	go func() {
 		defer close(activated)
-		tx, err := activator.Pool.Begin(t.Context())
-		if !assertNoError(t, err) {
-			return
-		}
-		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
-		_, err = tx.Exec(t.Context(), `SELECT pg_advisory_xact_lock($1)`, pgstore.DeletionActivationLockID)
-		if !assertNoError(t, err) {
-			return
-		}
-		_, err = tx.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
-		if assertNoError(t, err) {
-			assertNoError(t, tx.Commit(t.Context()))
-		}
+		_, err := activator.ActivateDeletion(t.Context())
+		assertNoError(t, err)
 	}()
 	select {
 	case <-activated:
@@ -594,7 +583,7 @@ func TestPausedMemoryDeleteHoldsTheIdentityUntilItsOwnerFinishes(t *testing.T) {
 	// The guarding session is lost and an operator activates from a second pool.
 	require.Equal(t, 1, terminateActivationHolders(t, second))
 	require.Eventually(t, func() bool {
-		_, err := second.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+		_, err := second.ActivateDeletion(t.Context())
 		return err == nil
 	}, 10*time.Second, 25*time.Millisecond)
 

@@ -66,9 +66,8 @@ func repoRoot(t *testing.T) string {
 	return strings.TrimSpace(string(out))
 }
 
-// buildPreUpgradeRouter checks out the pinned pre-upgrade revision into a
-// temporary directory and compiles its real HTTP router and Pinecone adapter.
-func buildPreUpgradeRouter(t *testing.T) string {
+// extractPreUpgradeSource prepares a temporary build tree at the pinned revision.
+func extractPreUpgradeSource(t *testing.T) string {
 	t.Helper()
 	root := repoRoot(t)
 	check := exec.CommandContext(t.Context(), "git", "-C", root, "cat-file", "-e", preUpgradeCommit+"^{commit}") // #nosec G204 -- pinned commit hash
@@ -89,7 +88,13 @@ func buildPreUpgradeRouter(t *testing.T) string {
 	extractCmd.Stdin = &tarBuf
 	out, err := extractCmd.CombinedOutput()
 	require.NoError(t, err, string(out))
+	return srcDir
+}
 
+// buildPreUpgradeRouter compiles the old HTTP router and Pinecone adapter.
+func buildPreUpgradeRouter(t *testing.T) string {
+	t.Helper()
+	srcDir := extractPreUpgradeSource(t)
 	exportSrc := `package pinecone
 
 import (
@@ -175,6 +180,16 @@ func TestPreUpgradeRouterProcess(t *testing.T) {
 	buildOut, err := buildCmd.CombinedOutput()
 	require.NoError(t, err, string(buildOut))
 	return binPath
+}
+
+func buildPreUpgradeCleanup(t *testing.T) string {
+	t.Helper()
+	srcDir := extractPreUpgradeSource(t)
+	cmd := exec.CommandContext(t.Context(), "go", "build", "-o", "preupgrade-cleanup", "./scripts/cleanup")
+	cmd.Dir = srcDir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return filepath.Join(srcDir, "preupgrade-cleanup")
 }
 
 func buildCleanupBinary(t *testing.T) string {
