@@ -77,25 +77,28 @@ type CollectionDocumentLister interface {
 	ListDocumentsPageInCollection(ctx context.Context, after string, limit int, collection string) ([]DocumentSummary, error)
 }
 
-// ScopedPolicyState captures whether a principal is active and the catalog
-// policy revision observed in the same snapshot.
+// ScopedPolicyState captures the principal's activity and inventory revision
+// together with the catalog revision used for audit provenance.
 type ScopedPolicyState struct {
-	Active   bool
-	Revision int64
+	Active          bool
+	Revision        int64
+	CatalogRevision int64
 }
 
 // ScopedDocumentPage contains one page of summaries visible to a verified principal.
 type ScopedDocumentPage struct {
-	Active    bool
-	Revision  int64
-	Documents []DocumentSummary
+	Active          bool
+	Revision        int64
+	CatalogRevision int64
+	Documents       []DocumentSummary
 }
 
 // ScopedDocumentSummary contains one summary visible to a verified principal.
 type ScopedDocumentSummary struct {
-	Active   bool
-	Revision int64
-	Document *DocumentSummary
+	Active          bool
+	Revision        int64
+	CatalogRevision int64
+	Document        *DocumentSummary
 }
 
 // ScopedDocumentLister enforces tenant and read grants inside inventory and status lookups.
