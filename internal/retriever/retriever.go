@@ -150,6 +150,38 @@ func (r *Retriever) ObservesVectorIncarnation() bool {
 	return ok && store.ObservesVectorIncarnation()
 }
 
+// GrantScope reports how the store enforces an authorized read scope. It is
+// absent when the store cannot, and a grants-mode caller must then refuse to search.
+func (r *Retriever) GrantScope() (domain.GrantScopeKind, bool) {
+	store, ok := r.vectorStore.(domain.GrantScopedVectorStore)
+	if !ok {
+		return "", false
+	}
+	kind := store.GrantScope()
+	switch kind {
+	case domain.GrantScopeRelation, domain.GrantScopeMembership:
+		return kind, true
+	default:
+		return "", false
+	}
+}
+
+// requireGrantScope refuses an authorized search that the store could not
+// confine. The check runs before any provider call, so a scoped request can
+// never be served by an unscoped code path.
+func (r *Retriever) requireGrantScope(filter domain.VectorFilter) error {
+	if filter.Authorized == nil {
+		return nil
+	}
+	if _, ok := r.GrantScope(); !ok {
+		return domain.ErrGrantScopeUnsupported
+	}
+	if _, ok := r.vectorStore.(domain.FilteredVectorStore); !ok {
+		return domain.ErrGrantScopeUnsupported
+	}
+	return nil
+}
+
 // Result holds the retrieval output.
 type Result struct {
 	Chunks   []domain.ScoredChunk
@@ -165,6 +197,9 @@ type Result struct {
 func (r *Retriever) Retrieve(ctx context.Context, query string, mode RetrievalMode, topK int, filter domain.VectorFilter) (*Result, error) {
 	if filter.MatchesNothing() {
 		return &Result{Mode: mode}, nil
+	}
+	if err := r.requireGrantScope(filter); err != nil {
+		return nil, fmt.Errorf("retriever: %w", err)
 	}
 	embedding, err := r.embed(ctx, query)
 	if err != nil {
@@ -473,6 +508,9 @@ func (r *Retriever) embedQuery(ctx context.Context, query string, filter domain.
 	if filter.MatchesNothing() {
 		return nil, nil, false, nil
 	}
+	if err = r.requireGrantScope(filter); err != nil {
+		return nil, nil, false, fmt.Errorf("retriever: %w", err)
+	}
 	embedding, err = r.embed(ctx, query)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("retriever: embed query: %w", err)
@@ -499,6 +537,9 @@ func (r *Retriever) queryFiltered(ctx context.Context, embedding []float32, topK
 	if filter.MatchesNothing() {
 		return []domain.ScoredChunk{}, false, nil
 	}
+	if err := r.requireGrantScope(filter); err != nil {
+		return nil, false, err
+	}
 	if store, ok := r.vectorStore.(domain.FilteredVectorStoreWithExactness); ok {
 		return store.QueryFilteredWithExactness(ctx, embedding, topK, filter)
 	}
@@ -512,6 +553,9 @@ func (r *Retriever) queryFiltered(ctx context.Context, embedding []float32, topK
 	}
 	if filter.Collection != "" {
 		return nil, false, fmt.Errorf("retriever: vector store does not support collection filtering")
+	}
+	if filter.Authorized != nil {
+		return nil, false, domain.ErrGrantScopeUnsupported
 	}
 	chunks, err := r.vectorStore.QueryAllNamespaces(ctx, embedding, topK, filter.DocType)
 	if err != nil {

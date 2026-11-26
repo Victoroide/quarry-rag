@@ -61,6 +61,9 @@ func (d *Driver) QueryFiltered(ctx context.Context, embedding []float32, topK in
 	return d.client.QueryFiltered(ctx, embedding, topK, filter)
 }
 
+// GrantScope reports that every search sends its tenant and allowed incarnations.
+func (*Driver) GrantScope() domain.GrantScopeKind { return domain.GrantScopeMembership }
+
 // VisibilityRefillLimit caps metadata-bearing refill responses with values omitted.
 func (*Driver) VisibilityRefillLimit() int { return maxRefillTopK }
 

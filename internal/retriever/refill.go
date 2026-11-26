@@ -46,6 +46,9 @@ func (r *Retriever) RetrieveVisibleWithEmbedding(ctx context.Context, embedding 
 	if filter.MatchesNothing() {
 		return &Result{Mode: mode}, nil
 	}
+	if err := r.requireGrantScope(filter); err != nil {
+		return nil, fmt.Errorf("retriever: %w", err)
+	}
 	if topK <= 0 {
 		topK = r.topK
 	}
@@ -94,6 +97,9 @@ func (r *Retriever) RetrieveVisibleFromProbe(ctx context.Context, embedding []fl
 	store, ok := r.vectorStore.(domain.VisibilityRefillStore)
 	if !ok {
 		return nil, errors.New("retriever: vector store does not support visibility refill")
+	}
+	if err := r.requireGrantScope(filter); err != nil {
+		return nil, fmt.Errorf("retriever: %w", err)
 	}
 	topK = r.ChunkLimit(topK)
 	search := visibilitySearch{store: store, embedding: embedding, verify: verify, topK: topK, budget: budget}
