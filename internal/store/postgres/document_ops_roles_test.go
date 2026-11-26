@@ -47,6 +47,7 @@ func TestScopedDocumentOperationsNeedOnlyDocumentedFunctionPrivileges(t *testing
 	require.NoError(t, service.RunMigrations(t.Context()))
 
 	req := ownedRequest(f.owner, "team", "restricted role document")
+	req.SupportsScopedVectors = true
 	key := "documents/document/" + string(req.Document.ID) + "/orig.pdf"
 	req.Document.S3Key = &key
 	res, err := service.AcceptDocument(t.Context(), req)

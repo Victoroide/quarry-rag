@@ -57,6 +57,7 @@ func TestOwnedAcceptanceNeedsOnlyTheDocumentedFunctionPrivileges(t *testing.T) {
 	require.False(t, found)
 
 	req := ownedRequest(f.owner, "", "service login text")
+	req.SupportsScopedVectors = true
 	target, err := service.AuthorizeOwnedIngest(t.Context(), f.owner, "", "")
 	require.NoError(t, err)
 	require.Equal(t, domain.OwnedNew, target.Decision)
