@@ -208,14 +208,14 @@ func testManifestQueryCorpus(t *testing.T, backend, mode string) {
 		require.NoError(t, err)
 	}
 
+	_, deletionErr := c.ActivateDeletion(ctx)
+	require.NoError(t, deletionErr)
 	var subject *domain.Principal
 	if mode == "grants" {
 		f := provisionOwnedFixture(t, c)
 		_, err := c.ActivateGrants(ctx, false)
 		require.NoError(t, err)
 		subject = &f.owner
-	} else {
-		grantExec(t, c, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
 	}
 	c.SetAuthzMode(mode)
 

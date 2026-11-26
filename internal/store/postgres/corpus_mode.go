@@ -102,6 +102,8 @@ func grantActivationError(err error) error {
 	var postgresErr *pgconn.PgError
 	if errors.As(err, &postgresErr) {
 		switch postgresErr.Code {
+		case "QG006":
+			return errors.New("grants activation: checkpointed document deletion must be activated first")
 		case "QG001", "QG004", "QG005":
 			return fmt.Errorf("grants activation: %s", postgresErr.Message)
 		default:

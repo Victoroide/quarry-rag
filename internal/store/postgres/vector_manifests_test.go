@@ -702,7 +702,9 @@ func grantsManifestFixture(t *testing.T, c *Client) *ownedFixture {
 	t.Helper()
 	c.EnableHostedVectorManifests(true)
 	f := provisionOwnedFixture(t, c)
-	_, err := c.ActivateGrants(t.Context(), false)
+	_, err := c.ActivateDeletion(t.Context())
+	require.NoError(t, err)
+	_, err = c.ActivateGrants(t.Context(), false)
 	require.NoError(t, err)
 	c.SetAuthzMode("grants")
 	return f

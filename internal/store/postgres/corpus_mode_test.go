@@ -30,7 +30,7 @@ func TestPublishedServingUpgradeRestoresServiceMode(t *testing.T) {
 	require.Equal(t, domain.AcceptAccepted, result.Outcome)
 }
 
-func TestCorpusModeDefaultsToServiceAndActivatesIdempotently(t *testing.T) {
+func TestGrantsActivationRequiresCheckpointedDeletion(t *testing.T) {
 	databaseURL := startTestDatabase(t)
 	c := migrationTestClient(t, databaseURL)
 	ctx := t.Context()
@@ -48,27 +48,70 @@ func TestCorpusModeDefaultsToServiceAndActivatesIdempotently(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, domain.AcceptAccepted, res.Outcome)
 
+	assertServiceUnchanged := func() {
+		t.Helper()
+		var currentMode string
+		var revision, auditCount int
+		require.NoError(t, c.Pool.QueryRow(ctx, `SELECT authz_mode, revision,
+			(SELECT count(*) FROM grant_catalog_security_audit WHERE action='corpus_cutover')
+			FROM grant_catalog_corpus_mode CROSS JOIN grant_catalog_policy_revision`).Scan(&currentMode, &revision, &auditCount))
+		require.Equal(t, "service", currentMode)
+		require.Zero(t, revision)
+		require.Zero(t, auditCount)
+	}
+	assertActivationRefused := func() {
+		t.Helper()
+		for _, preview := range []bool{true, false} {
+			_, activationErr := c.ActivateGrants(ctx, preview)
+			require.EqualError(t, activationErr, "grants activation: checkpointed document deletion must be activated first")
+			assertServiceUnchanged()
+		}
+	}
+	assertActivationRefused()
+	grantExec(t, c, `DELETE FROM document_deletion_activation WHERE singleton`)
+	assertActivationRefused()
+	grantExec(t, c, `INSERT INTO document_deletion_activation DEFAULT VALUES`)
+
+	// Preview and activation see only a committed deletion marker.
+	tx, err := c.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	_, err = tx.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp() WHERE singleton`)
+	require.NoError(t, err)
+	assertActivationRefused()
+	require.NoError(t, tx.Rollback(ctx))
+	assertActivationRefused()
+	// The real cutover waits for the corpus row. It must read the deletion
+	// marker after acquiring that lock, then roll back if the audit fails.
+	grantExec(t, c, `CREATE FUNCTION refuse_security_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'synthetic security audit interruption'; END; $$;
+		CREATE TRIGGER refuse_security_audit BEFORE INSERT ON grant_catalog_security_audit
+		FOR EACH ROW EXECUTE FUNCTION refuse_security_audit()`)
+	cutoverLock, err := c.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = cutoverLock.Rollback(context.WithoutCancel(ctx)) }()
+	_, err = cutoverLock.Exec(ctx, `SELECT 1 FROM grant_catalog_corpus_mode WHERE singleton FOR UPDATE`)
+	require.NoError(t, err)
+	cutoverErr := make(chan error, 1)
+	go func() {
+		_, activationErr := c.ActivateGrants(ctx, false)
+		cutoverErr <- activationErr
+	}()
+	waitForLockWaiter(t, c, "SELECT resulting_revision, already_active")
+	_, err = c.ActivateDeletion(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cutoverLock.Commit(ctx))
+	require.EqualError(t, <-cutoverErr, "grants activation failed (SQLSTATE P0001)")
+	assertServiceUnchanged()
+	grantExec(t, c, `DROP TRIGGER refuse_security_audit ON grant_catalog_security_audit; DROP FUNCTION refuse_security_audit()`)
+
 	// Dry-run cutover previews without changing corpus mode or policy revision.
 	dry, err := c.ActivateGrants(ctx, true)
 	require.NoError(t, err)
 	require.True(t, dry.DryRun)
 	require.False(t, dry.AlreadyActive)
 	require.EqualValues(t, 0, dry.Revision)
-	mode, err = c.CorpusAuthzMode(ctx)
-	require.NoError(t, err)
-	require.Equal(t, "service", mode)
-
-	// Interrupted cutover (audit insert trigger fails) rolls back atomically.
-	grantExec(t, c, `CREATE FUNCTION refuse_security_audit() RETURNS trigger LANGUAGE plpgsql AS $$
-		BEGIN RAISE EXCEPTION 'synthetic security audit interruption'; END; $$;
-		CREATE TRIGGER refuse_security_audit BEFORE INSERT ON grant_catalog_security_audit
-		FOR EACH ROW EXECUTE FUNCTION refuse_security_audit()`)
-	_, err = c.ActivateGrants(ctx, false)
-	require.Error(t, err)
-	mode, err = c.CorpusAuthzMode(ctx)
-	require.NoError(t, err)
-	require.Equal(t, "service", mode)
-	grantExec(t, c, `DROP TRIGGER refuse_security_audit ON grant_catalog_security_audit; DROP FUNCTION refuse_security_audit()`)
+	assertServiceUnchanged()
 
 	// Cutover succeeds atomically and advances revision + writes audit.
 	activated, err := c.ActivateGrants(ctx, false)
@@ -79,6 +122,11 @@ func TestCorpusModeDefaultsToServiceAndActivatesIdempotently(t *testing.T) {
 	mode, err = c.CorpusAuthzMode(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "grants", mode)
+
+	preview, err := c.ActivateGrants(ctx, true)
+	require.NoError(t, err)
+	require.True(t, preview.AlreadyActive)
+	require.EqualValues(t, 1, preview.Revision)
 
 	// Retrying cutover after an uncertain response is idempotent.
 	replayed, err := c.ActivateGrants(ctx, false)
@@ -94,6 +142,9 @@ func TestCorpusModeDefaultsToServiceAndActivatesIdempotently(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrAuthzModeMismatch)
 
 	var auditAction, auditOutcome, auditReason string
+	var auditCount int
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT count(*) FROM grant_catalog_security_audit WHERE action='corpus_cutover'`).Scan(&auditCount))
+	require.Equal(t, 1, auditCount)
 	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT action, outcome, reason FROM grant_catalog_security_audit WHERE action='corpus_cutover'`).
 		Scan(&auditAction, &auditOutcome, &auditReason))
 	require.Equal(t, "corpus_cutover", auditAction)
@@ -136,6 +187,8 @@ func TestUpgradeWithUnownedDocumentsAndExistingJobsQuarantinesLegacy(t *testing.
 
 	// Provision tenant/principal and activate grants mode.
 	f := provisionOwnedFixture(t, c)
+	_, err = c.ActivateDeletion(ctx)
+	require.NoError(t, err)
 	_, err = c.ActivateGrants(ctx, false)
 	require.NoError(t, err)
 	c.SetAuthzMode("grants")
@@ -193,6 +246,7 @@ func TestCorpusModeAndSecurityAuditPrivilegesAndBlocking(t *testing.T) {
 		"grant_catalog_corpus_authz_mode()",
 		"grant_catalog_record_security_audit(text,uuid,uuid,bigint,text,text,text,uuid,uuid)",
 		"grant_catalog_activate_grants(boolean)",
+		"grant_catalog_activate_grants_impl(boolean)",
 	} {
 		var inherited bool
 		require.NoError(t, admin.Pool.QueryRow(t.Context(), roles.sql(`SELECT has_function_privilege('{quarry_service}',$1,'execute')
@@ -224,6 +278,12 @@ func TestCorpusModeAndSecurityAuditPrivilegesAndBlocking(t *testing.T) {
 	_, err = auditor.ActivateGrants(t.Context(), false)
 	require.Error(t, err)
 
+	// Only the schema owner can activate deletion, even before grants cutover.
+	_, err = operator.ActivateDeletion(t.Context())
+	require.Error(t, err)
+	_, err = admin.ActivateDeletion(t.Context())
+	require.NoError(t, err)
+
 	// Operator activates grants, service ingests, signs, and deletes with transactional audit.
 	_, err = operator.ActivateGrants(t.Context(), false)
 	require.NoError(t, err)
@@ -253,8 +313,10 @@ func TestCorpusModeAndSecurityAuditPrivilegesAndBlocking(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.True(t, signed) // Returned error before commit, so handler refuses to deliver signed URL.
-	_, _, err = service.BeginScopedDeletion(reqCtx, f.owner, time.Now().Add(time.Minute), req.Document.ID, domain.DeleteOperations{})
-	require.Error(t, err)
+	ops := newDeletionRecorder().ops(req.Owner.Incarnation)
+	ops.SourceBucket, ops.VectorIndex = "originals", "vectors"
+	_, _, err = service.BeginScopedDeletion(reqCtx, f.owner, time.Now().Add(time.Minute), req.Document.ID, ops)
+	requireSQLState(t, err, "P0001")
 	var deletingCount int
 	require.NoError(t, admin.Pool.QueryRow(t.Context(), `SELECT count(*) FROM document_deletions WHERE document_id=$1`, string(req.Document.ID)).Scan(&deletingCount))
 	require.Zero(t, deletingCount, "failed audit must roll back deletion intent")
