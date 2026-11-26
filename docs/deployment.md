@@ -381,9 +381,11 @@ worker. Earlier releases ignore the writer freeze and the active-generation pin,
 so finish that rollout first. Start a replica with the actual live configuration
 to bind the physical legacy target before invoking reindex. Provision the target:
 for Pinecone, a ready cosine index of the new
-dimension; for PostgreSQL, nothing, because the command creates
-`chunk_vectors_<generation>` and the database role needs the permissions
-described in [PostgreSQL vectors](#postgresql-vectors).
+dimension; for PostgreSQL, let a maintenance login with schema creation and
+table reference privileges create `chunk_vectors_<generation>`, or pre-create
+the table and its indexes as the metadata owner. See
+[vector reindex database privileges](#vector-reindex-database-privileges) for
+the login and privilege requirements.
 
 1. Write the profile of the target: provider, model, exact revision,
    dimensions, `cosine` and the extraction and chunk version of the stored
@@ -432,7 +434,7 @@ described in [PostgreSQL vectors](#postgresql-vectors).
    spaces or an unattested legacy target, [prepare matched query fixtures](development.md#vector-reindex-scriptsreindex).
 6. Deploy every replica sharing the queue with `VECTOR_GENERATION` set to the new
    generation, the matching embedding deployment and extraction settings, and
-   `PINECONE_INDEX_NAME` for a Pinecone target. Apply any [serving grants](grant-catalog.md)
+   `PINECONE_INDEX_NAME` for a Pinecone target. Apply any [serving grants](grant-catalog.md#database-roles)
    for the promoted table before starting those replicas. A replica on any other
    generation, or with settings that differ from the recorded ones, cannot start
    or cannot write.
@@ -446,6 +448,111 @@ to remove stale records written during its earlier active period.
 For an unattested legacy source, keep the original target intact and prepare a
 separate rollback generation with a known profile if you need to return to the
 previous serving encoder.
+
+#### Vector reindex database privileges
+
+Run `make reindex` as the metadata schema owner, or provision a dedicated
+maintenance login (`quarry_reindex` in the examples) with `CONNECT` on the
+metadata database and the metadata schema first in `search_path`. Substitute
+your metadata schema for `public` and your maintenance login name for
+`quarry_reindex`.
+
+Every `make reindex` mode (inventory, staging, freeze, verification, activation,
+thaw and source attestation) requires these grants:
+
+```sql
+GRANT USAGE ON SCHEMA public TO quarry_reindex;
+GRANT SELECT ON public.documents, public.chunks, public.document_deletions,
+  public.ingest_jobs, public.evaluation_fixtures, public.document_pdf_extractions TO quarry_reindex;
+GRANT SELECT, INSERT, UPDATE ON public.vector_generations TO quarry_reindex;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.vector_generation_documents TO quarry_reindex;
+GRANT SELECT, UPDATE ON public.vector_state TO quarry_reindex;
+GRANT EXECUTE ON FUNCTION public.grant_catalog_document_tenant(uuid, uuid) TO quarry_reindex;
+```
+
+PostgreSQL checks `EXECUTE` privilege on `grant_catalog_document_tenant(uuid, uuid)`
+when initializing every revision query used by inventory, staging, verification
+and activation, even when no document is assigned in the grant catalog or
+`documents` is empty.
+
+When `VECTOR_STORE=postgres` is the source or target, also grant vector table
+access:
+
+- **Legacy source or rollback target (`chunk_vectors`):** Grant `SELECT` to read
+  source vectors or verify against the legacy PostgreSQL store, or
+  `SELECT, INSERT, UPDATE, DELETE` when staging a rollback into `legacy` (omit
+  `INSERT, UPDATE, DELETE` if never rolling back to `legacy`). Before rollback,
+  the table owner must prepare its base indexes and, when exact search is
+  enabled, the [exact-scope indexes](#postgresql-vectors), because staging
+  validates them and creates any missing indexes:
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.chunk_vectors TO quarry_reindex;
+```
+
+- **Generation tables (`chunk_vectors_<generation>`):** Grant `SELECT` on a
+  promoted generation when it is the source of a later reindex; retain the
+  maintenance login's access after cutover or have the table owner grant it
+  again. For a staging or rollback target, grant `SELECT, INSERT, UPDATE, DELETE`.
+  Ensure pgvector
+  0.8 or later is already installed by a database administrator or schema owner
+  if the maintenance login lacks extension creation privileges. Choose one of
+  two provisioning patterns:
+  - **Pre-created by the metadata owner (recommended when non-owner roles lack
+    schema `CREATE` per [grant catalog database roles](grant-catalog.md#database-roles)):**
+    Have the metadata owner create `chunk_vectors_<generation>` with the
+    [vector schema](architecture.md#postgresql-vector-schema) columns and its
+    HNSW (`vector_cosine_ops`), `document_id` and `collection` indexes (plus
+    the two exact-scope indexes from [PostgreSQL vectors](#postgresql-vectors)
+    when `PGVECTOR_EXACT_SCOPE_MAX` is positive), then grant table access to
+    the maintenance login (and to `quarry_service` before cutover). When the
+    table and matching indexes already exist, `make reindex` verifies and skips
+    creation, so the maintenance login needs neither `CREATE` on the schema nor
+    `REFERENCES` on `documents`:
+
+```sql
+CREATE TABLE public.chunk_vectors_<generation> (
+  chunk_id TEXT PRIMARY KEY,
+  document_id UUID NOT NULL REFERENCES public.documents(id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL,
+  doc_type TEXT NOT NULL,
+  collection TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL,
+  kind TEXT,
+  quality TEXT,
+  token_count INTEGER NOT NULL,
+  embedding vector(<dimensions>) NOT NULL
+);
+CREATE INDEX idx_chunk_vectors_<generation>_embedding ON public.chunk_vectors_<generation> USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_chunk_vectors_<generation>_document_id ON public.chunk_vectors_<generation> (document_id);
+CREATE INDEX idx_chunk_vectors_<generation>_collection ON public.chunk_vectors_<generation> (collection);
+CREATE INDEX idx_chunk_vectors_<generation>_collection_doc_type ON public.chunk_vectors_<generation> (collection, doc_type, document_id);
+CREATE INDEX idx_chunk_vectors_<generation>_doc_type_document_id ON public.chunk_vectors_<generation> (doc_type, document_id);
+```
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.chunk_vectors_<generation> TO quarry_reindex;
+```
+
+  - **Created by the maintenance login itself:** When the maintenance login
+    creates `chunk_vectors_<generation>` and its indexes directly during
+    staging, also grant schema creation and foreign-key reference privileges:
+
+```sql
+GRANT CREATE ON SCHEMA public TO quarry_reindex;
+GRANT REFERENCES ON public.documents TO quarry_reindex;
+```
+
+The maintenance login owns a self-created table and its indexes. Before cutover,
+it must build any exact-scope indexes and grant serving access:
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.chunk_vectors_<generation> TO quarry_service;
+```
+
+This pattern grants schema `CREATE` to a non-owner role, which the grant catalog
+role provisioning forbids. Deployments following that provisioning must use the
+pre-created pattern.
 
 ### AWS Credentials
 

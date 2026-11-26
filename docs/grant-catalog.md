@@ -133,12 +133,15 @@ target and binds its identity through the owner-installed initialization
 function. Subsequent startups validate the recorded binding. The writer-state
 function lets serving transactions participate in the freeze. Restrict direct
 generation table access, freezes, verification approval and activation to the
-maintenance login.
+maintenance login. A non-owner maintenance login running `make reindex` also
+requires `EXECUTE` on `grant_catalog_document_tenant(uuid, uuid)` along with
+the schema, metadata, generation and vector table privileges listed in
+[vector reindex database privileges](deployment.md#vector-reindex-database-privileges).
 
 Before starting serving replicas for a promoted pgvector generation, the
-metadata owner grants the same table privileges on that generation's
+table owner grants the same table privileges on that generation's
 `chunk_vectors_<generation>` table. If exact-scope search is enabled, prepare
-its indexes with the owner login before switching replicas. The serving
+its indexes with the table owner login before switching replicas. The serving
 process validates the provisioned dimension and indexes without requiring
 ownership or schema creation privileges.
 
