@@ -202,6 +202,8 @@ func TestCoordinatorOnANodeWithoutManifestsLeavesRevisionsToTheSweeper(t *testin
 func TestBeginScopedDeletionUsesManifestModeForManifestedDocuments(t *testing.T) {
 	c := manifestDatabase(t)
 	ctx := t.Context()
+	_, err := c.ActivateDeletion(ctx)
+	require.NoError(t, err)
 	f := provisionOwnedFixture(t, c)
 	req := ownedRequest(f.owner, "", "scoped manifested doc")
 	require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)

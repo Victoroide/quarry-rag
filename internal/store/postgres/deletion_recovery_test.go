@@ -442,7 +442,7 @@ func TestScopedPrincipalDeletionRecordsTheMemoryOwner(t *testing.T) {
 	docID := f.acceptOwned(t, f.owner, "", "documents/doc/memory-owner/original.pdf")
 	owner := uuid.NewString()
 
-	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), memoryOps("", owner))
+	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), memoryOps(storedIncarnation(t, f.c, domain.DocumentID(docID)), owner))
 	require.NoError(t, err)
 	require.Equal(t, memoryRevision, readReceipt(t, f.c, domain.DocumentID(docID)).mode)
 	require.Equal(t, owner, deref(receiptOwner(t, f.c, domain.DocumentID(docID))))
@@ -462,7 +462,7 @@ func TestMemoryReceiptWithoutAnOwnerIsRefused(t *testing.T) {
 	_, err := f.c.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
 	require.NoError(t, err)
 	docID := domain.DocumentID(f.acceptOwned(t, f.owner, "", "documents/doc/ownerless/original.pdf"))
-	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), docID, memoryOps("", ""))
+	_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), docID, memoryOps(storedIncarnation(t, f.c, docID), ""))
 	require.ErrorIs(t, err, domain.ErrVectorStorageUnavailable)
 	require.Equal(t, 0, receiptCount(t.Context(), t, f.c, docID))
 	require.NotEqual(t, "deleting", documentStatus(t, f.c, docID))

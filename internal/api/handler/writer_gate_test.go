@@ -211,7 +211,7 @@ func TestScopedDeletionHonorsTheWriterGate(t *testing.T) {
 				summary: domain.DocumentSummary{ID: docID, Incarnation: uuid.NewString(), Status: "completed"},
 			}
 			h := DeleteHandler(store, nil, nil, WithScopedDeletion())
-			rec := serveScoped(h, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute))
+			rec := serveScoped(h, http.MethodDelete, "/documents/"+docID, &owner, time.Now().Add(time.Minute), store.docs[docID].summary.Incarnation)
 			require.Equal(t, tc.status, rec.Code, rec.Body.String())
 			require.Equal(t, tc.wantEvents, store.events)
 			if tc.body != "" {

@@ -311,7 +311,7 @@ func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, ob
 			return
 		}
 		incarnation, _, valid := deletionIncarnation(r.Header)
-		if !valid {
+		if !valid || incarnation == uuid.Nil.String() {
 			writeJSONError(ctx, w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
 			return
 		}
@@ -366,6 +366,8 @@ func auditDeleteFailure(ctx context.Context, recorder domain.SecurityAuditRecord
 		errors.Is(err, domain.ErrDeletionPreconditionFailed),
 		errors.Is(err, domain.ErrFixtureDeletionRequired):
 		outcome, reason = "deny", "precondition_failed"
+	case errors.Is(err, domain.ErrDeletionInactive):
+		outcome, reason = "deny", "deletion_inactive"
 	case errors.Is(err, domain.ErrAuthzModeMismatch):
 		reason = "authz_mode_mismatch"
 	case errors.Is(err, domain.ErrDeletionBusy):

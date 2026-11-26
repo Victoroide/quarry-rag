@@ -326,7 +326,7 @@ func TestServiceDeleteTimeoutReturnsInternalWithRetryContract(t *testing.T) {
 
 func FuzzDeletionIncarnation(f *testing.F) {
 	valid := uuid.NewString()
-	for _, seed := range []string{valid, strings.ToUpper(valid), "", "x", "{" + valid + "}", valid + " ", "urn:uuid:" + valid} {
+	for _, seed := range []string{valid, strings.ToUpper(valid), "", uuid.Nil.String(), strings.Repeat("a", 4096), "x", "{" + valid + "}", valid + " ", "urn:uuid:" + valid} {
 		f.Add("X-Document-Incarnation", seed, "")
 	}
 	f.Add("x-document-incarnation", valid, valid)

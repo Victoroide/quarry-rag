@@ -31,6 +31,15 @@ Notable changes are grouped by release.
 
 - Bound operational error logs and trace errors in grants mode to prevent disclosure of document identifiers and input excerpts.
 
+### Changed
+
+- Grants cutover preview and activation require checkpointed deletion to be
+  activated first. Existing grants corpora retain their mode when upgraded.
+- Grants-mode deletion of a live or deleting document requires its original
+  incarnation and an active checkpointed-deletion marker. Inaccessible or
+  absent documents retain private `404` responses unless an active owner
+  retries with a matching finalized receipt.
+
 ## [0.2.0] - 2026-11-26
 
 ### Upgrade from 0.1.0
