@@ -109,6 +109,7 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_authorize_ingest(uuid, uuid, text
   public.grant_catalog_publish_accepted_document(uuid, uuid),
   public.grant_catalog_document_tenant(uuid, uuid),
   public.grant_catalog_policy_state(uuid, uuid),
+  public.grant_catalog_inventory_policy_state(uuid, uuid),
   public.grant_catalog_list_documents(uuid, uuid, uuid, integer, text, boolean),
   public.grant_catalog_get_document(uuid, uuid, uuid, boolean),
   public.grant_catalog_authorize_file(uuid, uuid, uuid),
@@ -277,6 +278,15 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_create_document_set(uuid, uuid, i
   public.grant_catalog_purge_document_sets(integer) TO quarry_operator;
 ```
 
+After applying `037_inventory_policy_revisions.sql`, grant the serving login
+execution of the new inventory state function before starting upgraded
+processes. Keep execution of `grant_catalog_policy_state` for older replicas
+and binary rollback. Both inventory revision tables are private.
+
+```sql
+GRANT EXECUTE ON FUNCTION public.grant_catalog_inventory_policy_state(uuid, uuid) TO quarry_service;
+```
+
 ## Owned ingestion
 
 In `AUTHZ_MODE=grants`, `POST /ingest` uses owned ingestion for a verified
@@ -340,9 +350,8 @@ for accepted documents in the same transaction that completes them.
 
 ## Scoped document operations
 
-Scoped document handlers authorize inventory, status, original-file signing and
-deletion for a verified principal. No public route enables them yet, so the
-service-mode HTTP contracts stay unchanged. Every scoped response and error sets
+In grants mode, scoped document handlers authorize inventory, status,
+original-file signing and deletion for a verified principal. Every scoped response and error sets
 `Cache-Control: private, no-store`, and handlers refuse to fall back to
 unscoped stores (`503`).
 
@@ -352,9 +361,14 @@ unscoped stores (`503`).
   `completed` states and verified historical assignments while excluding
   unverified legacy rows and documents in `deleting` state. An omitted or empty
   `collection` filters across the caller's tenant without granting default
-  collection access, and `after` acts only as an exclusive UUID cursor. Policy
-  revision, principal status and token expiry are rechecked before releasing
-  each page or bounded streaming batch. Raw `s3_key` values are omitted and
+  collection access, and `after` acts only as an exclusive UUID cursor. Each
+  tenant and principal has an inventory revision that starts at zero and
+  advances in the transaction that changes their identity, activity, effective
+  create rights, grants, ownership or document visibility. The primary
+  database recheck compares this revision and principal activity before
+  releasing a page, status lookup or streaming batch. Imports, query
+  authorization and audit continue to use the catalog-wide revision. Raw
+  `s3_key` values are omitted and
   internal `last_error` messages on failed rows are mapped to a bounded public
   category (`no_text`, `ocr_result_expired`, `ocr_text_too_large`,
   `embedding_limit`, `no_chunks`, `ocr_failed` or `processing_failed`).

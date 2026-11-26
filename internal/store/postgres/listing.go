@@ -144,14 +144,9 @@ func (c documentLister) GetDocumentSummary(ctx context.Context, id domain.Docume
 	return doc, nil
 }
 
-// ScopedPolicyState reports whether the principal is active and the current policy revision.
+// ScopedPolicyState reads the principal inventory state on the primary.
 func (c *Client) ScopedPolicyState(ctx context.Context, principal domain.Principal) (domain.ScopedPolicyState, error) {
-	var state domain.ScopedPolicyState
-	if err := c.Pool.QueryRow(ctx, `SELECT active, policy_revision FROM grant_catalog_policy_state($1::uuid,$2::uuid)`,
-		principal.TenantID, principal.ID).Scan(&state.Active, &state.Revision); err != nil {
-		return domain.ScopedPolicyState{}, fmt.Errorf("postgres: read scoped policy state: %w", err)
-	}
-	return state, nil
+	return readScopedPolicyState(ctx, c.Pool, principal)
 }
 
 // ListScopedDocumentsPage returns one page of summaries visible to the verified
@@ -162,12 +157,12 @@ func (c *Client) ListScopedDocumentsPage(ctx context.Context, principal domain.P
 		return domain.ScopedDocumentPage{}, fmt.Errorf("postgres: begin scoped listing: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	state, err := readScopedPolicyStateTx(ctx, tx, principal)
+	state, err := readScopedPolicyState(ctx, tx, principal)
 	if err != nil {
 		return domain.ScopedDocumentPage{}, err
 	}
 	if !state.Active {
-		return domain.ScopedDocumentPage{Active: false, Revision: state.Revision}, nil
+		return domain.ScopedDocumentPage{Active: false, Revision: state.Revision, CatalogRevision: state.CatalogRevision}, nil
 	}
 	var cursor any
 	if after != "" {
@@ -192,7 +187,7 @@ func (c *Client) ListScopedDocumentsPage(ctx context.Context, principal domain.P
 	if err := rows.Err(); err != nil {
 		return domain.ScopedDocumentPage{}, fmt.Errorf("postgres: list scoped documents: %w", err)
 	}
-	return domain.ScopedDocumentPage{Active: true, Revision: state.Revision, Documents: docs}, tx.Commit(ctx)
+	return domain.ScopedDocumentPage{Active: true, Revision: state.Revision, CatalogRevision: state.CatalogRevision, Documents: docs}, tx.Commit(ctx)
 }
 
 // GetScopedDocumentSummary returns one readable summary for the verified principal,
@@ -203,12 +198,12 @@ func (c *Client) GetScopedDocumentSummary(ctx context.Context, principal domain.
 		return domain.ScopedDocumentSummary{}, fmt.Errorf("postgres: begin scoped status: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	state, err := readScopedPolicyStateTx(ctx, tx, principal)
+	state, err := readScopedPolicyState(ctx, tx, principal)
 	if err != nil {
 		return domain.ScopedDocumentSummary{}, err
 	}
 	if !state.Active {
-		return domain.ScopedDocumentSummary{Active: false, Revision: state.Revision}, nil
+		return domain.ScopedDocumentSummary{Active: false, Revision: state.Revision, CatalogRevision: state.CatalogRevision}, nil
 	}
 	row := tx.QueryRow(ctx, `SELECT id, doc_type, collection, status, chunk_count, file_name, file_type,
 		created_at, updated_at, completed_at, last_error, index_visibility, index_visibility_observed_at, pdf_coverage, incarnation
@@ -216,18 +211,20 @@ func (c *Client) GetScopedDocumentSummary(ctx context.Context, principal domain.
 		principal.TenantID, principal.ID, string(id), includeIncarnation)
 	doc, err := scanScopedDocumentSummary(row, includeIncarnation)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.ScopedDocumentSummary{Active: true, Revision: state.Revision}, tx.Commit(ctx)
+		return domain.ScopedDocumentSummary{Active: true, Revision: state.Revision, CatalogRevision: state.CatalogRevision}, tx.Commit(ctx)
 	}
 	if err != nil {
 		return domain.ScopedDocumentSummary{}, fmt.Errorf("postgres: get scoped document summary: %w", err)
 	}
-	return domain.ScopedDocumentSummary{Active: true, Revision: state.Revision, Document: doc}, tx.Commit(ctx)
+	return domain.ScopedDocumentSummary{Active: true, Revision: state.Revision, CatalogRevision: state.CatalogRevision, Document: doc}, tx.Commit(ctx)
 }
 
-func readScopedPolicyStateTx(ctx context.Context, tx pgx.Tx, principal domain.Principal) (domain.ScopedPolicyState, error) {
+func readScopedPolicyState(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, principal domain.Principal) (domain.ScopedPolicyState, error) {
 	var state domain.ScopedPolicyState
-	if err := tx.QueryRow(ctx, `SELECT active, policy_revision FROM grant_catalog_policy_state($1::uuid,$2::uuid)`,
-		principal.TenantID, principal.ID).Scan(&state.Active, &state.Revision); err != nil {
+	if err := db.QueryRow(ctx, `SELECT active, policy_revision, catalog_revision FROM grant_catalog_inventory_policy_state($1::uuid,$2::uuid)`,
+		principal.TenantID, principal.ID).Scan(&state.Active, &state.Revision, &state.CatalogRevision); err != nil {
 		return domain.ScopedPolicyState{}, fmt.Errorf("postgres: read scoped policy state: %w", err)
 	}
 	return state, nil
