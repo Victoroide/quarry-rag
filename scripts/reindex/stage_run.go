@@ -115,7 +115,7 @@ func (d deps) stage(ctx context.Context, opts options, p targetPlan, profile dom
 		return fmt.Errorf("%d documents declare a chunk count that differs from their stored chunks", len(rep.Inconsistent))
 	}
 	if len(rep.Unsupported) > 0 {
-		return fmt.Errorf("%d documents store tagged vectors that this target cannot hold or whose published attempt cannot be determined", len(rep.Unsupported))
+		return fmt.Errorf("%d documents require a hosted vector target or have no determinable published vector attempt", len(rep.Unsupported))
 	}
 	return nil
 }

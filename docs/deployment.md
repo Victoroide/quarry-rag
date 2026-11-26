@@ -411,6 +411,12 @@ the table and its indexes as the metadata owner. See
 [vector reindex database privileges](#vector-reindex-database-privileges) for
 the login and privilege requirements.
 
+Before cutting a tagged corpus over to PostgreSQL, upgrade every serving,
+worker and cleanup binary to a release that supports tagged documents on
+pgvector. Finish catch-up and verification under the freeze before routing
+traffic to the new generation. Apply the pgvector deletion grant to restricted
+serving and cleanup logins as part of the [serving role setup](grant-catalog.md#database-roles).
+
 1. Write the profile of the target: provider, model, exact revision,
    dimensions, `cosine` and the extraction and chunk version of the stored
    chunks. Use the extraction and chunk settings that produced the stored text.
@@ -490,6 +496,9 @@ in the new target, so catch the old target up before switching back: freeze for
 the old generation, stage into it, verify, activate it and redeploy the old
 settings. Frozen catch-up also compares every retired target key with PostgreSQL
 to remove stale records written during its earlier active period.
+For a tagged corpus, keep the upgraded binaries and current metadata throughout
+rollback so that readers can check the current published attempt and cleanup
+can resume recorded receipts.
 For an unattested legacy source, keep the original target intact and prepare a
 separate rollback generation with a known profile if you need to return to the
 previous serving encoder.

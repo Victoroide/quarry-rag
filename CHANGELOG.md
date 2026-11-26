@@ -4,6 +4,10 @@ Notable changes are grouped by release.
 
 ## [Unreleased]
 
+### Added
+
+- Vector reindex supports tagged documents in both directions between Pinecone and PostgreSQL, including retrieval and checkpointed deletion after PostgreSQL cutover.
+
 ## [0.2.0] - 2026-11-26
 
 ### Upgrade from 0.1.0

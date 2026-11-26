@@ -1232,5 +1232,5 @@ func TestUnexpectedChunkKeysFollowsDocumentFormat(t *testing.T) {
 
 	relational, err := c.UnexpectedChunkKeys(ctx, keys, false)
 	require.NoError(t, err)
-	require.Equal(t, []string{orphanKey, "not-a-chunk-key", manifestedBare}, relational, "a PostgreSQL target holds tagged documents under the bare key")
+	require.Equal(t, []string{orphanKey, "not-a-chunk-key", manifestedBare, manifestedKey}, relational, "a PostgreSQL target holds tagged documents under the bare key")
 }

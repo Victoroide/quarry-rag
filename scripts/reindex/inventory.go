@@ -145,14 +145,11 @@ func (d deps) blockers(ctx context.Context, p targetPlan, profile domain.Embeddi
 	} else if reason != "" {
 		out = append(out, "the target is protected from writes: "+reason)
 	}
-	totalTagged, unresolvedTagged, err := d.pg.TaggedVectorDocuments(ctx)
+	_, unresolvedTagged, err := d.pg.TaggedVectorDocuments(ctx)
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case p.store != "pinecone" && totalTagged > 0:
-		out = append(out, fmt.Sprintf("%d completed documents store tagged vectors, which a PostgreSQL target cannot hold", totalTagged))
-	case p.store == "pinecone" && unresolvedTagged > 0:
+	if unresolvedTagged > 0 {
 		out = append(out, fmt.Sprintf("%d tagged documents have no determinable published vector attempt", unresolvedTagged))
 	}
 	if p.store != "pinecone" {

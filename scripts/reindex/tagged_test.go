@@ -11,7 +11,9 @@ import (
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/google/uuid"
+	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func assignDocTenant(t *testing.T, pg *pgstore.Client, d docSpec, tenant, principal string) {
@@ -64,7 +66,7 @@ func TestTaggedRefusalAndVectorKey(t *testing.T) {
 	tagged := pgstore.DocumentRevision{ID: docID, Incarnation: incID, ScopedVectors: true, VectorAttempt: attID}
 	require.True(t, isTagged(tagged))
 	require.Empty(t, taggedRefusal(true, tagged))
-	require.Contains(t, taggedRefusal(false, tagged), "PostgreSQL")
+	require.Empty(t, taggedRefusal(false, tagged))
 	require.Contains(t, taggedRefusal(true, pgstore.DocumentRevision{ID: docID, Incarnation: incID, ScopedVectors: true}), "attempt")
 	require.Contains(t, taggedRefusal(true, pgstore.DocumentRevision{ID: docID, Incarnation: incID, ScopedVectors: true, VectorAttempt: attID, MutationPending: true}), "attempt")
 
@@ -99,12 +101,30 @@ func TestStageTaggedSnapshotUnit(t *testing.T) {
 		{ID: domain.ChunkID(hexChunkID(doc.ID, 0)), DocumentID: domain.DocumentID(doc.ID), Index: 0, Text: doc.Texts[0], TokenCount: 3},
 		{ID: domain.ChunkID(hexChunkID(doc.ID, 1)), DocumentID: domain.DocumentID(doc.ID), Index: 1, Text: doc.Texts[1], TokenCount: 3},
 	}
-	src, _ := memoryPinecone()
-	require.NoError(t, src.Upsert(t.Context(), "", sourceChunks(doc, chunks, sourceModel)))
+	src, sourceIndex := memoryPinecone()
+	tenant := uuid.NewString()
+	source := sourceChunks(doc, chunks, sourceModel)
+	for i := range source {
+		source[i].VectorIncarnation = ""
+		source[i].Metadata[domain.VectorTenantKey] = tenant
+	}
+	require.NoError(t, src.Upsert(t.Context(), "", source))
+	// The serving worker sets the revision, attempt and tenant on tagged writes.
+	// The separate incarnation field is omitted by the Pinecone writer.
+	raw, err := sourceIndex.FetchVectors(t.Context(), sourceIndex.IDs())
+	require.NoError(t, err)
+	require.Len(t, raw.Vectors, len(chunks))
+	for _, vector := range raw.Vectors {
+		fields := vector.Metadata.GetFields()
+		require.NotContains(t, fields, domain.VectorIncarnationKey)
+		require.Equal(t, doc.Incarnation, fields[domain.VectorRevisionKey].GetStringValue())
+		require.Equal(t, doc.Attempt, fields[domain.VectorAttemptKey].GetStringValue())
+		require.Equal(t, tenant, fields[domain.VectorTenantKey].GetStringValue())
+	}
 
 	snapshot := pgstore.DocumentSnapshot{
 		DocumentRevision: pgstore.DocumentRevision{
-			ID: doc.ID, Incarnation: doc.Incarnation, DocType: doc.DocType, Collection: doc.Collection,
+			ID: doc.ID, Incarnation: doc.Incarnation, DocType: doc.DocType, Collection: doc.Collection, TenantID: tenant,
 			DeclaredChunks: len(chunks), Chunks: len(chunks), TextBytes: int64(len(doc.Texts[0]) + len(doc.Texts[1])),
 			Revision: "tagged-rev-1", ScopedVectors: true, VectorAttempt: doc.Attempt,
 		},
@@ -311,7 +331,7 @@ func TestTaggedDocumentWithoutAttemptIsRefused(t *testing.T) {
 
 	vRep, err := h.run(verifyOptions("g2"))
 	require.ErrorIs(t, err, errNotVerified)
-	require.Contains(t, fmt.Sprint(vRep["failures"]), "cannot be verified on this target or have no determinable published attempt")
+	require.Contains(t, vRep["failures"], "1 tagged documents have no determinable published vector attempt")
 }
 
 func TestTaggedDocumentWithPendingMutationIsRefused(t *testing.T) {
@@ -341,7 +361,7 @@ func TestTaggedDocumentWithPendingMutationIsRefused(t *testing.T) {
 
 	vRep, err := h.run(verifyOptions("g2"))
 	require.ErrorIs(t, err, errNotVerified)
-	require.Contains(t, fmt.Sprint(vRep["failures"]), "cannot be verified on this target or have no determinable published attempt")
+	require.Contains(t, vRep["failures"], "1 tagged documents have no determinable published vector attempt")
 }
 
 func TestUncertainTaggedDocumentIsStaged(t *testing.T) {
@@ -496,16 +516,18 @@ func TestRollbackKeepsCurrentTaggedKeys(t *testing.T) {
 	require.ElementsMatch(t, []string{currentKey, untaggedKey}, g2Idx.IDs())
 }
 
-func TestPostgresTargetRefusesTaggedDocuments(t *testing.T) {
+func TestPostgresTargetRefusesUnresolvedTaggedDocuments(t *testing.T) {
 	doc := newTaggedDoc("alpha", "report", "Tagged document.")
 	f := newTaggedFixture(t, doc)
 	h := newHarness(t, f, "pinecone")
 	h.attestSource()
+	_, err := f.pg.Pool.Exec(t.Context(), `UPDATE documents SET vector_mutation_pending=TRUE WHERE id=$1`, doc.ID)
+	require.NoError(t, err)
 	profile := h.profileFile("same.json", testProfile(sourceModel))
 
 	inv, err := h.run(options{Generation: "g2", Profile: profile, TargetStore: "postgres"})
 	require.NoError(t, err)
-	require.Contains(t, fmt.Sprint(inv["blockers"]), "PostgreSQL target cannot hold")
+	require.Contains(t, fmt.Sprint(inv["blockers"]), "no determinable published vector attempt")
 	require.EqualValues(t, 1, inv["documents"].(map[string]any)["tagged_vectors"])
 
 	_, err = h.run(options{Generation: "g2", Profile: profile, TargetStore: "postgres", Apply: true})
@@ -514,7 +536,7 @@ func TestPostgresTargetRefusesTaggedDocuments(t *testing.T) {
 	pgTarget(t, f.pg, "g2")
 	vRep, err := h.run(verifyOptions("g2"))
 	require.ErrorIs(t, err, errNotVerified)
-	require.Contains(t, fmt.Sprint(vRep["failures"]), "cannot be verified on this target or have no determinable published attempt")
+	require.Contains(t, vRep["failures"], "1 tagged documents have no determinable published vector attempt")
 }
 
 func TestTaggedDocumentRespectsBudgets(t *testing.T) {
@@ -550,4 +572,101 @@ func TestTaggedDocumentRespectsBudgets(t *testing.T) {
 	opts2.MaxBytes = 5
 	_, err = h2.run(opts2)
 	require.ErrorContains(t, err, "alone exceeds")
+}
+
+func TestTaggedHostedSourceMustMatchPublishedIdentity(t *testing.T) {
+	doc := newTaggedDoc("alpha", "report", "Source data to copy only with trusted ownership.")
+	snap := incarnationSnapshot(doc)
+	snap.Incarnation, snap.VectorAttempt, snap.ScopedVectors, snap.TenantID = doc.Incarnation, doc.Attempt, true, uuid.NewString()
+	key, err := vectorKey(true, snap.DocumentRevision, snap.Chunks[0])
+	require.NoError(t, err)
+	otherID := func() *structpb.Value { return structpb.NewStringValue(uuid.NewString()) }
+	for _, tc := range []struct {
+		name, field string
+		value       *structpb.Value
+		required    bool
+		unowned     bool
+		copy        bool
+	}{
+		{name: "valid", copy: true},
+		{name: "missing revision", field: domain.VectorRevisionKey},
+		{name: "wrong revision", field: domain.VectorRevisionKey, value: otherID()},
+		{name: "missing attempt", field: domain.VectorAttemptKey},
+		{name: "wrong attempt", field: domain.VectorAttemptKey, value: otherID()},
+		{name: "missing optional incarnation", field: domain.VectorIncarnationKey, copy: true},
+		{name: "missing required incarnation", field: domain.VectorIncarnationKey, required: true},
+		{name: "valid required incarnation", required: true, copy: true},
+		{name: "wrong incarnation", field: domain.VectorIncarnationKey, value: otherID()},
+		{name: "empty incarnation", field: domain.VectorIncarnationKey, value: structpb.NewStringValue("")},
+		{name: "malformed incarnation", field: domain.VectorIncarnationKey, value: structpb.NewNumberValue(1)},
+		{name: "missing required tenant", field: domain.VectorTenantKey},
+		{name: "wrong tenant", field: domain.VectorTenantKey, value: otherID()},
+		{name: "malformed tenant", field: domain.VectorTenantKey, value: structpb.NewBoolValue(true)},
+		{name: "missing tenant on unowned document", unowned: true, copy: true},
+		{name: "malformed tenant on unowned document", field: domain.VectorTenantKey, value: structpb.NewNullValue(), unowned: true},
+		{name: "wrong document", field: "doc_id", value: otherID()},
+		{name: "wrong text", field: "text", value: structpb.NewStringValue("different text")},
+		{name: "wrong position", field: "chunk_index", value: structpb.NewNumberValue(1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := snap
+			snapshot.VectorIncarnationRequired = tc.required
+			if tc.unowned {
+				snapshot.TenantID = ""
+			}
+			chunk := sourceChunks(doc, snap.Chunks, sourceModel)[0]
+			if snapshot.TenantID != "" {
+				chunk.Metadata[domain.VectorTenantKey] = snapshot.TenantID
+			}
+			src, index := memoryPinecone()
+			require.NoError(t, src.Upsert(t.Context(), "", []domain.Chunk{chunk}))
+			if tc.field != "" {
+				raw, err := index.FetchVectors(t.Context(), []string{key})
+				require.NoError(t, err)
+				vector := raw.Vectors[key]
+				require.NotNil(t, vector)
+				if tc.value == nil {
+					delete(vector.Metadata.Fields, tc.field)
+				} else {
+					vector.Metadata.Fields[tc.field] = tc.value
+				}
+				_, err = index.UpsertVectors(t.Context(), []*pinecone.Vector{vector})
+				require.NoError(t, err)
+			}
+
+			s := stager{copyFrom: src, copyFromTagged: true, profile: testProfile(sourceModel), opts: defaultOptions()}
+			_, copied, embedded, err := s.vectors(t.Context(), &snapshot)
+			if tc.copy {
+				require.NoError(t, err)
+				require.Equal(t, 1, copied)
+				require.Zero(t, embedded)
+				return
+			}
+			require.ErrorContains(t, err, "embedding call budget")
+			s.embed, s.opts.MaxEmbedCalls = &countingEmbedder{model: sourceModel}, 1
+			_, copied, embedded, err = s.vectors(t.Context(), &snapshot)
+			require.NoError(t, err)
+			require.Zero(t, copied)
+			require.Equal(t, 1, embedded)
+		})
+	}
+}
+
+func TestPostgresTaggedTargetRecomputesOnProfileChange(t *testing.T) {
+	doc := newTaggedDoc("alpha", "report", "Recomputed after changing the embedding model.")
+	f := newTaggedFixture(t, doc)
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	const model = "model-b"
+	report, err := h.run(options{Generation: "g2", Profile: h.profileFile("changed.json", testProfile(model)), TargetStore: "postgres", Apply: true, MaxEmbedCalls: 1})
+	require.NoError(t, err, "%v", report)
+	require.EqualValues(t, 1, report["embedded_chunks"])
+	require.Zero(t, report["copied_chunks"].(float64))
+	require.Equal(t, 1, h.embedCalls())
+	store, err := pgstore.OpenGenerationVectorStore(t.Context(), f.pg, testDims, "g2")
+	require.NoError(t, err)
+	key := string(f.chunks[doc.ID][0].ID)
+	records, err := store.Fetch(t.Context(), []string{key})
+	require.NoError(t, err)
+	require.Equal(t, embedWith(model, doc.Texts[0]), records[key].Embedding)
 }

@@ -328,3 +328,42 @@ func TestReindexManifestWithDocumentedGrants(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, true, verified["passed"])
 }
+
+func useRestrictedTaggedRoundTripRoles(t *testing.T, h *harness, generation string) *pgstore.Client {
+	t.Helper()
+	owner := h.f.pg
+	ctx := t.Context()
+	dsn := owner.Pool.Config().ConnString()
+	login := func(prefix string) (string, *pgstore.Client) {
+		t.Helper()
+		name := pgtest.Role(t, dsn, prefix)
+		ident := pgx.Identifier{name}.Sanitize()
+		_, err := owner.Pool.Exec(ctx, `CREATE ROLE `+ident+` LOGIN PASSWORD 'fixture-password'`)
+		require.NoError(t, err)
+		client, err := pgstore.NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
+			cfg.ConnConfig.User, cfg.ConnConfig.Password = name, "fixture-password"
+		})
+		require.NoError(t, err)
+		return name, client
+	}
+	maintenance, reindex := login("quarry_reindex")
+	serving, service := login("quarry_service")
+	t.Cleanup(func() { require.NoError(t, reindex.Close(context.Background())) })
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+	_, err := pgstore.CreateGenerationVectorStore(ctx, owner, testDims, generation)
+	require.NoError(t, err)
+	for _, marker := range []string{"GRANT USAGE ON SCHEMA public TO quarry_reindex", "ON public.chunk_vectors_<generation> TO quarry_reindex"} {
+		_, err = owner.Pool.Exec(ctx, replaceReindexRoleSQL(publishedDeploymentSQL(t, marker), maintenance, generation))
+		require.NoError(t, err)
+	}
+	servingIdent := pgx.Identifier{serving}.Sanitize()
+	_, err = owner.Pool.Exec(ctx, `GRANT USAGE ON SCHEMA public TO `+servingIdent+`;
+   GRANT SELECT ON documents, chunks, grant_catalog_readable_documents TO `+servingIdent+`;
+   GRANT EXECUTE ON FUNCTION hosted_vector_revision_visible(uuid,uuid) TO `+servingIdent)
+	require.NoError(t, err)
+	servingSQL := publishedDeploymentSQL(t, "ON public.chunk_vectors_<generation> TO quarry_service")
+	_, err = owner.Pool.Exec(ctx, strings.NewReplacer("<generation>", generation, "quarry_service", servingIdent).Replace(servingSQL))
+	require.NoError(t, err)
+	h.deps.pg, h.stores.pg = reindex, reindex
+	return service
+}
