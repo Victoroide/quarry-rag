@@ -91,7 +91,7 @@ func TestOCRTextRejectsLeaseExpiredWhileWaitingForDocument(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var waiting bool
 		queryErr := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
-			WHERE $1=ANY(pg_blocking_pids(pid)))`, blocker).Scan(&waiting)
+			WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))`, blocker).Scan(&waiting)
 		return queryErr == nil && waiting
 	}, time.Second, time.Millisecond)
 	require.Eventually(t, func() bool {

@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"net/url"
 	"strconv"
 	"testing"
 	"time"
@@ -21,18 +20,13 @@ func sessionTestClient(t *testing.T) (*Client, *pgx.Conn) {
 // maxConns connections, with an independent observer of the server's sessions.
 func sessionTestClientWithPool(t *testing.T, maxConns int) (*Client, *pgx.Conn) {
 	t.Helper()
-	u, err := url.Parse(pgtest.Start(t))
-	require.NoError(t, err)
-	q := u.Query()
-	q.Set("pool_max_conns", strconv.Itoa(maxConns))
-	u.RawQuery = q.Encode()
-	c, err := NewClient(t.Context(), u.String())
+	address := withFixtureOptions(t, pgtest.Start(t), "application_name=quarry-writer-session-test")
+	poolAddress := withFixtureOptions(t, address, "pool_max_conns="+strconv.Itoa(maxConns))
+	c, err := NewClient(t.Context(), poolAddress)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
 	require.NoError(t, c.RunMigrations(t.Context()))
-	q.Del("pool_max_conns")
-	u.RawQuery = q.Encode()
-	observer, err := pgx.Connect(t.Context(), u.String())
+	observer, err := pgx.Connect(t.Context(), address)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, observer.Close(context.Background())) })
 	return c, observer
@@ -42,7 +36,8 @@ func requireDedicatedSessions(t *testing.T, c *Client, observer *pgx.Conn, want 
 	t.Helper()
 	require.Eventually(t, func() bool {
 		var count int
-		err := observer.QueryRow(t.Context(), `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`).Scan(&count)
+		err := observer.QueryRow(t.Context(), `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+			AND application_name = current_setting('application_name') AND backend_type = 'client backend'`).Scan(&count)
 		return err == nil && count-1-int(c.Pool.Stat().TotalConns()) == want
 	}, 5*time.Second, 10*time.Millisecond)
 }

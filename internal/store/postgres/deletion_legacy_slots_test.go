@@ -159,9 +159,14 @@ func TestGuardedDeletionProbesIgnoreUnrelatedSessions(t *testing.T) {
 	c, observer := sessionTestClient(t)
 	ctx := t.Context()
 	connect := func(config *pgx.ConnConfig) *pgx.Conn {
+		t.Helper()
 		conn, err := pgx.ConnectConfig(ctx, config)
 		require.NoError(t, err)
-		t.Cleanup(func() { require.NoError(t, conn.Close(context.Background())) })
+		t.Cleanup(func() {
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			require.NoError(t, conn.Close(cleanup))
+		})
 		return conn
 	}
 

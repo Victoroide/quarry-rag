@@ -229,7 +229,7 @@ func TestFreezeWaitsForABlockedJobClaim(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var waiting bool
 		queryErr := c.Pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
- WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%UPDATE ingest_jobs j SET state=%')`, holder).Scan(&waiting)
+ WHERE datname=current_database() AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%UPDATE ingest_jobs j SET state=%')`, holder).Scan(&waiting)
 		return queryErr == nil && waiting
 	}, 5*time.Second, 10*time.Millisecond)
 	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
