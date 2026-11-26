@@ -119,9 +119,8 @@ If serving replicas will enable the source upload journal, also apply the
 
 Replicas that set `HOSTED_VECTOR_MANIFEST=true` also record and sweep hosted
 vector revisions, so they need access to the three tables that hold them. Apply
-this block only for those replicas. A replica that leaves the flag off needs no
-privilege on these tables: retirement runs in owner-defined triggers, and
-readers consult revisions through `hosted_vector_revision_visible`.
+this block only for those replicas. Retirement runs in owner-defined triggers,
+and readers consult revisions through `hosted_vector_revision_visible`.
 
 ```sql
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.hosted_vector_manifests,
@@ -139,6 +138,15 @@ go run ./scripts/grant-catalog -migrate -vector-dimensions 256
 
 ```sql
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.chunk_vectors TO quarry_service;
+```
+
+Before deploying binaries that support tagged documents on pgvector, apply the
+following grant to restricted pgvector serving and qualified cleanup logins.
+They check for active and in-progress hosted revisions before recording a local
+deletion receipt for a tagged document.
+
+```sql
+GRANT SELECT (document_id, incarnation, state) ON public.hosted_vector_manifests TO quarry_service;
 ```
 
 The metadata owner applies the vector function grants after migrating a new or
@@ -194,8 +202,8 @@ names as needed.
   and needs no privilege on the marker table.
 - Migration `025_hosted_vector_manifest.sql` adds the predicate that readers use
   to match a hit with the document's active hosted revision. Every query uses
-  it, even when `HOSTED_VECTOR_MANIFEST` is disabled. Only replicas that enable
-  the flag also need the table grants shown above.
+  it, even when `HOSTED_VECTOR_MANIFEST` is disabled. Replicas that enable the
+  flag also need the full manifest write and sweep grants shown above.
 
 ```sql
 -- Serving role upgrade for migrations 019, 023 and 025

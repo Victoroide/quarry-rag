@@ -245,6 +245,15 @@ func TestManifestOperationDeletesExactIDsAndTreatsMissingVectorsAsDeleted(t *tes
 }
 
 func TestPostgresCleanupOnAnActiveDatabaseUsesTheCoordinator(t *testing.T) {
+	testQualifiedPostgresCleanup(t, false)
+}
+
+func TestCleanupQualifiedTaggedDeletionUsesPinnedPostgres(t *testing.T) {
+	testQualifiedPostgresCleanup(t, true)
+}
+
+func testQualifiedPostgresCleanup(t *testing.T, tagged bool) {
+	t.Helper()
 	databaseURL := pgtest.StartVector(t)
 	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
 	require.NoError(t, err)
@@ -258,6 +267,10 @@ func TestPostgresCleanupOnAnActiveDatabaseUsesTheCoordinator(t *testing.T) {
 	seed := func() (domain.DocumentID, string) {
 		id := domain.DocumentID(uuid.NewString())
 		require.NoError(t, metadata.InsertDocument(t.Context(), domain.Document{ID: id}))
+		if tagged {
+			_, updateErr := metadata.Pool.Exec(t.Context(), `UPDATE documents SET scoped_vectors=TRUE WHERE id=$1`, string(id))
+			require.NoError(t, updateErr)
+		}
 		require.NoError(t, vectors.Upsert(t.Context(), "", []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: id, Embedding: []float32{1, 0, 0}}}))
 		var incarnation string
 		require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, string(id)).Scan(&incarnation))
@@ -273,6 +286,30 @@ func TestPostgresCleanupOnAnActiveDatabaseUsesTheCoordinator(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorIs(t, cleaner.Delete(t.Context(), string(id)), domain.ErrDeletionPreconditionRequired)
 	require.ErrorIs(t, cleaner.DeleteIncarnation(t.Context(), string(id), uuid.NewString()), domain.ErrDeletionPreconditionFailed)
+	if tagged {
+		direct, directErr := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL}, WithDirectRecovery(false))
+		require.NoError(t, directErr)
+		t.Cleanup(func() { require.NoError(t, direct.Close(context.Background())) })
+		require.ErrorIs(t, direct.DeleteIncarnation(t.Context(), string(id), incarnation), domain.ErrVectorStorageUnavailable)
+		// A persisted hosted write intent can survive a cutover even without
+		// an active revision pointer. The pinned cleaner has no hosted client.
+		revision := uuid.NewString()
+		_, err := metadata.Pool.Exec(t.Context(), `INSERT INTO hosted_vector_manifests
+			(revision_id,document_id,incarnation,attempt,id_prefix,vector_ids,chunk_ids)
+			VALUES($1,$2,$3,1,$4,ARRAY[$5]::text[],ARRAY[$6]::uuid[])`,
+			revision, id, incarnation, domain.RevisionVectorPrefix(id, revision),
+			domain.FormatRevisionVectorID(id, revision, 0), uuid.NewString())
+		require.NoError(t, err)
+		require.ErrorIs(t, cleaner.DeleteIncarnation(t.Context(), string(id), incarnation), domain.ErrVectorStorageUnavailable)
+		var intents int
+		require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT count(*) FROM document_deletions WHERE document_id=$1`, id).Scan(&intents))
+		require.Zero(t, intents)
+		exists, err := metadata.DocumentExists(t.Context(), id)
+		require.NoError(t, err)
+		require.True(t, exists)
+		_, err = metadata.Pool.Exec(t.Context(), `UPDATE hosted_vector_manifests SET state='retired' WHERE revision_id=$1`, revision)
+		require.NoError(t, err)
+	}
 	require.NoError(t, cleaner.DeleteIncarnation(t.Context(), string(id), incarnation))
 	var remaining int
 	require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT count(*) FROM chunk_vectors WHERE document_id=$1`, string(id)).Scan(&remaining))

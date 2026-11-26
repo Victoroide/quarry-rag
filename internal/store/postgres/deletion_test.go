@@ -1431,3 +1431,93 @@ func TestIntentKeyIsIndependentOfTheFixtureKey(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, doc.key, signedKey)
 }
+
+func TestTaggedDeletionWithoutVectorStoreStillFails(t *testing.T) {
+	_, err := vectorMode(true, false, domain.DeleteOperations{})
+	require.ErrorIs(t, err, domain.ErrVectorStorageUnavailable)
+
+	ops := domain.DeleteOperations{TransactionalVectors: true}
+	mode, err := vectorMode(true, false, ops)
+	require.NoError(t, err)
+	require.Equal(t, localVectors, mode)
+	_, err = vectorMode(true, true, ops)
+	require.ErrorIs(t, err, domain.ErrVectorStorageUnavailable)
+	require.ErrorIs(t, checkDeletionTarget(revisionVectors, nil, nil, nil, ops), domain.ErrVectorStorageUnavailable)
+	require.ErrorIs(t, checkDeletionTarget(manifestVectors, nil, nil, nil, ops), domain.ErrVectorStorageUnavailable)
+}
+
+func TestTransactionalStoreDeletesTaggedDocuments(t *testing.T) {
+	c, live := vectorDatabase(t)
+	f := provisionOwnedFixture(t, c)
+	ctx := t.Context()
+	_, err := c.Pool.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	require.NoError(t, err)
+	retired, err := CreateGenerationVectorStore(ctx, c, 3, "retired")
+	require.NoError(t, err)
+
+	for _, mode := range []string{"service", "scoped"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			req := ownedRequest(f.owner, "", "Tagged deletion in "+mode)
+			id, incarnation := req.Document.ID, req.Owner.Incarnation
+			sourceKey := "source/" + string(id) + "/" + incarnation
+			req.Document.S3Key = &sourceKey
+			require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)
+			_, err := c.Pool.Exec(ctx, `UPDATE documents SET scoped_vectors=TRUE, vector_attempt=$2, vector_incarnation_required=TRUE WHERE id=$1`, string(id), uuid.NewString())
+			require.NoError(t, err)
+			chunk := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: id, Embedding: retrievalQuery}
+			for _, target := range []*VectorStore{live, retired} {
+				require.NoError(t, target.Upsert(ctx, "", []domain.Chunk{chunk}))
+			}
+			requireRows := func(ctx context.Context, want int) {
+				t.Helper()
+				for _, target := range []*VectorStore{live, retired} {
+					got, err := target.Fetch(ctx, []string{string(chunk.ID)})
+					require.NoError(t, err)
+					require.Len(t, got, want)
+				}
+			}
+			recorder := newDeletionRecorder()
+			ops := recorder.ops(incarnation)
+			ops.TransactionalVectors = true
+			recorder.hook("source", func(ctx context.Context) error {
+				requireRows(ctx, 1)
+				return errors.New("source unavailable")
+			})
+			remove := func(ops domain.DeleteOperations) error {
+				if mode == "service" {
+					return c.DeleteWithCleanup(ctx, id, ops)
+				}
+				inc, complete, err := c.BeginScopedDeletion(ctx, f.owner, time.Now().Add(time.Minute), id, ops)
+				if err != nil || complete {
+					return err
+				}
+				require.Equal(t, incarnation, inc)
+				return c.ResumeScopedDeletion(ctx, id, inc, ops)
+			}
+			wrong := ops
+			wrong.ExpectedIncarnation = uuid.NewString()
+			require.ErrorIs(t, remove(wrong), domain.ErrDeletionPreconditionFailed)
+			missing := ops
+			missing.Source = nil
+			require.ErrorIs(t, remove(missing), domain.ErrFileStorageUnavailable)
+			require.Empty(t, recorder.all())
+			require.ErrorContains(t, remove(ops), "source unavailable")
+			require.Equal(t, "deleting", documentStatus(t, c, id))
+			intent := readReceipt(t, c, id)
+			require.Equal(t, localVectors, intent.mode)
+			require.Equal(t, sourceKey, *intent.source)
+			require.False(t, intent.finalized)
+			requireRows(ctx, 1)
+			recorder.hook("source", func(ctx context.Context) error { requireRows(ctx, 1); return nil })
+			require.NoError(t, remove(ops))
+			requireRows(ctx, 0)
+			require.NoError(t, remove(ops))
+			require.Equal(t, []string{"source:" + sourceKey, "source:" + sourceKey}, recorder.all())
+			require.True(t, readReceipt(t, c, id).finalized)
+			var recordedIncarnation string
+			require.NoError(t, c.Pool.QueryRow(ctx, `SELECT incarnation::text FROM document_deletions WHERE document_id=$1`, string(id)).Scan(&recordedIncarnation))
+			require.Equal(t, incarnation, recordedIncarnation)
+		})
+	}
+}

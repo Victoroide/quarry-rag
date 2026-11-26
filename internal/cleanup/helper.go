@@ -135,6 +135,8 @@ var ErrScopedDeletionCanceled = errors.New("scoped deletion canceled before comm
 // coordinator records them with the cleanup target and refuses to resume
 // against different stores.
 type Targets struct {
+	// pinnedPostgres is set by the cleaner after pinning a relational target.
+	pinnedPostgres bool
 	// SourceBucket is the object bucket that holds original files.
 	SourceBucket string
 	// VectorIndex is the hosted index that holds vectors.
@@ -150,11 +152,15 @@ type Targets struct {
 // A transactional vector store has no external step: the metadata removal
 // cascades to its rows.
 func operations(vectors domain.VectorDeleter, objects ObjectDeleter, targets Targets) domain.DeleteOperations {
-	ops := domain.DeleteOperations{InMemory: targets.InMemory, SourceBucket: targets.SourceBucket, VectorIndex: targets.VectorIndex}
+	_, transactional := vectors.(domain.TransactionalVectorStore)
+	ops := domain.DeleteOperations{
+		InMemory: targets.InMemory, SourceBucket: targets.SourceBucket, VectorIndex: targets.VectorIndex,
+		TransactionalVectors: transactional || targets.pinnedPostgres,
+	}
 	if targets.Memory != nil {
 		ops.MemoryOwner = targets.Memory.MemoryOwner()
 	}
-	if _, transactional := vectors.(domain.TransactionalVectorStore); vectors != nil && !transactional {
+	if vectors != nil && !transactional {
 		ops.LegacyNamespace = func(ctx context.Context, id string) error {
 			return ignoreMissing(vectors.DeleteAllVectorsInNamespace(ctx, id))
 		}
@@ -251,6 +257,7 @@ type Cleaner struct {
 	vectors         *pcstore.Client
 	objects         ObjectDeleter
 	targets         Targets
+	pinnedPostgres  bool
 	quarantineMode  string
 	directRecovery  bool
 	recoveryObjects bool
@@ -360,6 +367,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Cleaner, err
 		if err != nil {
 			return nil, errors.Join(fmt.Errorf("pin the cleanup target: %w", err), cleaner.Close(ctx))
 		}
+		cleaner.pinnedPostgres = store == "postgres"
 	}
 	if (!cleaner.directRecovery || cleaner.recoveryObjects) && cfg.S3Bucket != "" {
 		cleaner.objects, err = s3store.New(ctx, cfg)
@@ -427,7 +435,9 @@ func (c *Cleaner) delete(ctx context.Context, docID, incarnation string, qualifi
 		return err
 	}
 	if active {
-		return RemoveIncarnation(ctx, c.metadata, vectors, c.objects, c.targets, id, incarnation)
+		targets := c.targets
+		targets.pinnedPostgres = c.pinnedPostgres
+		return RemoveIncarnation(ctx, c.metadata, vectors, c.objects, targets, id, incarnation)
 	}
 	if qualified {
 		return domain.ErrDeletionInactive
