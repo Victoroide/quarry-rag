@@ -40,7 +40,12 @@ func startManifestAttempt(t *testing.T, c *Client, docID domain.DocumentID, owne
 // persistManifestAttempt records the write intent of a revision for a leased job.
 func persistManifestAttempt(t *testing.T, c *Client, docID domain.DocumentID, job domain.Job) manifestAttempt {
 	t.Helper()
-	a := manifestAttempt{job: job, revision: uuid.NewString(), chunkID: uuid.NewString()}
+	return persistManifestAttemptWithChunk(t, c, docID, job, uuid.NewString())
+}
+
+func persistManifestAttemptWithChunk(t *testing.T, c *Client, docID domain.DocumentID, job domain.Job, chunkID string) manifestAttempt {
+	t.Helper()
+	a := manifestAttempt{job: job, revision: uuid.NewString(), chunkID: chunkID}
 	a.job.RevisionID = a.revision
 	a.vectorID = domain.FormatRevisionVectorID(docID, a.revision, 0)
 	require.NoError(t, c.PersistVectorManifest(t.Context(), a.job, domain.VectorManifest{
@@ -494,4 +499,221 @@ func TestVisibleEvidenceScopedManifestPublication(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, evidence)
 	require.Equal(t, map[string]string{string(id): body}, previews)
+}
+
+func TestVisibleEvidenceManifestScopeAndEvidenceFences(t *testing.T) {
+	c, serving, _ := restrictedDatabase(t)
+	f := grantsManifestFixture(t, c)
+	ctx := t.Context()
+	const body = "identical private passage in both tenants"
+	admit := func(p domain.Principal) domain.DocumentID {
+		req := ownedRequest(p, "", body)
+		title := "quarterly summary"
+		req.Document.FileName = &title
+		req.SupportsScopedVectors = true
+		require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)
+		return req.Document.ID
+	}
+	ownerID := admit(f.owner)
+	ownerAttempt := startManifestAttempt(t, c, ownerID, "owner")
+	valid := completeManifestHit(t, c, ownerAttempt, 0.8)
+	outsiderID := admit(f.outsider)
+	outsider := completeManifestHit(t, c, startManifestAttempt(t, c, outsiderID, "outsider"), 0.9)
+	var directAccess bool
+	require.NoError(t, serving.Pool.QueryRow(ctx, `SELECT has_table_privilege('hosted_vector_revisions', 'SELECT')`).Scan(&directAccess))
+	require.False(t, directAccess)
+	vis := Visibility{Pool: serving.Pool, Subject: &f.owner, DocType: domain.DefaultDocType}
+	candidates := []domain.ScoredChunk{outsider}
+	for _, mutate := range []func(*domain.ScoredChunk){
+		func(h *domain.ScoredChunk) { h.Chunk.ID = outsider.Chunk.ID },
+		func(h *domain.ScoredChunk) { h.Chunk.Index++ },
+		func(h *domain.ScoredChunk) { h.Chunk.Text += " modified" },
+		func(h *domain.ScoredChunk) { h.ObservedIncarnation = uuid.NewString() },
+		func(h *domain.ScoredChunk) { h.Chunk.VectorIncarnation = uuid.NewString() },
+		func(h *domain.ScoredChunk) {
+			h.Chunk.Metadata = map[string]any{domain.VectorRevisionKey: ownerAttempt.job.Incarnation}
+		},
+		func(h *domain.ScoredChunk) {
+			h.Chunk.Metadata = map[string]any{
+				domain.VectorRevisionKey: ownerAttempt.job.Incarnation,
+				domain.VectorAttemptKey:  ownerAttempt.job.LeaseToken,
+			}
+		},
+		func(h *domain.ScoredChunk) {
+			h.Chunk.Metadata = map[string]any{domain.VectorAttemptKey: ownerAttempt.job.LeaseToken}
+		},
+	} {
+		rejected := valid
+		mutate(&rejected)
+		candidates = append(candidates, rejected)
+	}
+	candidates = append(candidates, valid)
+	probes := []string{string(ownerID), string(outsiderID)}
+	got, previews, err := vis.VisibleEvidenceWithPreviews(ctx, candidates, probes)
+	require.NoError(t, err)
+	require.Equal(t, []domain.ScoredChunk{expectedManifestEvidence(valid, ownerAttempt.job.Incarnation)}, got)
+	require.Equal(t, map[string]string{string(ownerID): body}, previews)
+	revisions, err := vis.VisibleRevisionChunks(ctx, []domain.ScoredChunk{outsider, valid})
+	require.NoError(t, err)
+	require.Equal(t, []domain.ScoredChunk{valid}, revisions)
+
+	for _, tc := range []struct {
+		name string
+		vis  Visibility
+	}{
+		{"wrong principal", Visibility{Pool: serving.Pool, Subject: &f.peer}},
+		{"wrong tenant", Visibility{Pool: serving.Pool, Subject: &f.outsider}},
+		{"wrong collection", Visibility{Pool: serving.Pool, Subject: &f.owner, Collection: "team"}},
+		{"wrong type", Visibility{Pool: serving.Pool, Subject: &f.owner, DocType: "other-type"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evidence, previews, err := tc.vis.VisibleEvidenceWithPreviews(t.Context(), []domain.ScoredChunk{valid}, probes)
+			require.NoError(t, err)
+			require.Empty(t, evidence)
+			require.Empty(t, previews)
+		})
+	}
+	for _, status := range []string{"processing", "deleting"} {
+		t.Run(status, func(t *testing.T) {
+			grantExec(t, c, `UPDATE documents SET status=$2 WHERE id=$1`, ownerID, status)
+			// Exercise the reader's status guard without the grants view's status filter.
+			unscoped := Visibility{Pool: serving.Pool}
+			evidence, previews, err := unscoped.VisibleEvidenceWithPreviews(t.Context(), []domain.ScoredChunk{valid}, probes)
+			require.NoError(t, err)
+			require.Empty(t, evidence)
+			require.Empty(t, previews)
+			revisions, err := unscoped.VisibleRevisionChunks(t.Context(), []domain.ScoredChunk{valid})
+			require.NoError(t, err)
+			require.Empty(t, revisions)
+		})
+	}
+}
+
+func completeUnrevisionedHit(t *testing.T, c *Client, job domain.Job, chunkID domain.ChunkID) domain.ScoredChunk {
+	t.Helper()
+	chunk := domain.Chunk{ID: chunkID, DocumentID: job.Document.ID, Text: job.Document.Content, TokenCount: 3}
+	ok, err := c.CompleteJob(t.Context(), job, []domain.Chunk{chunk}, domain.IndexObservation{})
+	require.NoError(t, err)
+	require.True(t, ok)
+	if job.ScopedVectors {
+		chunk.Metadata = map[string]any{domain.VectorRevisionKey: job.Incarnation, domain.VectorAttemptKey: job.LeaseToken}
+	}
+	return domain.ScoredChunk{Chunk: chunk, Score: 0.9}
+}
+
+func TestVisibleEvidenceTaggedAndPlainRegression(t *testing.T) {
+	c := jobsDatabase(t)
+	f := grantsManifestFixture(t, c)
+	ctx := t.Context()
+	const body = "body shared across document lifetimes"
+	req := ownedRequest(f.owner, "", body)
+	req.SupportsScopedVectors = true
+	require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)
+	first := f.claim(t)
+	expireJobLease(t, c, req.Document.ID)
+	current := f.claim(t)
+	require.True(t, current.ScopedVectors)
+	require.NotEqual(t, first.LeaseToken, current.LeaseToken)
+	tagged := completeUnrevisionedHit(t, c, *current, domain.ChunkID(uuid.NewString()))
+	manifestID := admitHostedOwned(t, f, f.owner, "manifest without scoped vectors", false)
+	manifest := startManifestAttempt(t, c, manifestID, "manifest")
+	require.False(t, manifest.job.ScopedVectors)
+	manifestHit := completeManifestHit(t, c, manifest, 0.7)
+	plainID := admitHostedOwned(t, f, f.owner, "plain unrevisioned content", false)
+	plain := f.claim(t)
+	require.Equal(t, plainID, plain.Document.ID)
+	require.False(t, plain.ScopedVectors)
+	plainHit := completeUnrevisionedHit(t, c, *plain, domain.ChunkID(uuid.NewString()))
+
+	stale := tagged
+	stale.Chunk.Metadata = map[string]any{domain.VectorRevisionKey: current.Incarnation, domain.VectorAttemptKey: first.LeaseToken}
+	missing := tagged
+	missing.Chunk.Metadata = map[string]any{domain.VectorRevisionKey: current.Incarnation}
+	badAttempt := tagged
+	badAttempt.Chunk.Metadata = map[string]any{domain.VectorRevisionKey: current.Incarnation, domain.VectorAttemptKey: "not-a-uuid"}
+	badRevision := plainHit
+	badRevision.Chunk.RevisionID = "not-a-uuid"
+	unpublishedRevision := plainHit
+	unpublishedRevision.Chunk.RevisionID = uuid.NewString()
+	vis := Visibility{Pool: c.Pool, Subject: &f.owner}
+	got, err := vis.VisibleEvidence(ctx, []domain.ScoredChunk{stale, missing, manifestHit, badAttempt, tagged, badRevision, unpublishedRevision, plainHit})
+	require.NoError(t, err)
+	require.Equal(t, []domain.ScoredChunk{
+		expectedManifestEvidence(manifestHit, manifest.job.Incarnation),
+		expectedManifestEvidence(tagged, current.Incarnation),
+		expectedManifestEvidence(plainHit, plain.Incarnation),
+	}, got)
+
+	require.NoError(t, c.DeleteDocument(ctx, req.Document.ID))
+	req.Owner.Incarnation = uuid.NewString()
+	require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)
+	replacement := f.claim(t)
+	require.NotEqual(t, current.Incarnation, replacement.Incarnation)
+	currentHit := completeUnrevisionedHit(t, c, *replacement, tagged.Chunk.ID)
+	got, err = vis.VisibleEvidence(ctx, []domain.ScoredChunk{tagged, currentHit})
+	require.NoError(t, err)
+	require.Equal(t, []domain.ScoredChunk{expectedManifestEvidence(currentHit, replacement.Incarnation)}, got)
+}
+
+func TestVisibleEvidenceManifestAfterPublicationRace(t *testing.T) {
+	c := jobsDatabase(t)
+	f := grantsManifestFixture(t, c)
+	ctx := t.Context()
+	id := admitHostedOwned(t, f, f.owner, "same chunk before and after publication", true)
+	first := startManifestAttempt(t, c, id, "first")
+	saved := completeManifestHit(t, c, first, 0.9)
+	vis := Visibility{Pool: c.Pool, Subject: &f.owner}
+	ev, err := vis.VisibleEvidence(ctx, []domain.ScoredChunk{saved})
+	require.NoError(t, err)
+	require.Equal(t, []domain.ScoredChunk{expectedManifestEvidence(saved, first.job.Incarnation)}, ev)
+
+	// Reopen the fixture while preserving its active pointer, chunk identity and incarnation.
+	grantExec(t, c, `WITH reopened AS (UPDATE documents SET status='processing' WHERE id=$1 RETURNING id)
+		INSERT INTO ingest_jobs (document_id) SELECT id FROM reopened`, id)
+	next := persistManifestAttemptWithChunk(t, c, id, *f.claim(t), first.chunkID)
+	require.NotEqual(t, first.job.LeaseToken, next.job.LeaseToken)
+	current := completeManifestHit(t, c, next, 0.8)
+	require.Equal(t, "retired", manifestState(t, c, first.revision))
+	candidates := []domain.ScoredChunk{saved, current}
+	ev, err = vis.VisibleEvidence(ctx, candidates)
+	require.NoError(t, err)
+	require.Equal(t, []domain.ScoredChunk{expectedManifestEvidence(current, next.job.Incarnation)}, ev)
+	revisions, err := vis.VisibleRevisionChunks(ctx, candidates)
+	require.NoError(t, err)
+	require.Equal(t, []domain.ScoredChunk{current}, revisions)
+
+	lock, err := c.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = lock.Rollback(context.WithoutCancel(ctx)) }()
+	_, err = lock.Exec(ctx, `LOCK TABLE chunks IN ACCESS EXCLUSIVE MODE`)
+	require.NoError(t, err)
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		hits     []domain.ScoredChunk
+		previews map[string]string
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		hits, previews, err := vis.VisibleEvidenceWithPreviews(waitCtx, candidates, []string{string(id)})
+		done <- result{hits, previews, err}
+	}()
+	require.Eventually(t, func() bool {
+		var waiting bool
+		err := c.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_locks
+			WHERE relation='chunks'::regclass AND mode='AccessShareLock' AND NOT granted
+			AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))`).Scan(&waiting)
+		return err == nil && waiting
+	}, 5*time.Second, 10*time.Millisecond)
+	cancel()
+	select {
+	case out := <-done:
+		require.ErrorIs(t, out.err, context.Canceled)
+		require.Nil(t, out.hits)
+		require.Nil(t, out.previews)
+	case <-time.After(5 * time.Second):
+		t.Fatal("evidence query did not return after cancellation")
+	}
+	require.NoError(t, lock.Rollback(ctx))
 }

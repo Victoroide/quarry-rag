@@ -8,6 +8,10 @@ Notable changes are grouped by release.
 
 - Vector reindex supports tagged documents in both directions between Pinecone and PostgreSQL, including retrieval and checkpointed deletion after PostgreSQL cutover.
 
+### Fixed
+
+- Pinecone queries in grants and service mode can retrieve scoped documents with an active hosted vector revision without reindexing.
+
 ## [0.2.0] - 2026-11-26
 
 ### Upgrade from 0.1.0
