@@ -1,0 +1,2405 @@
+{
+  "version": "meaning-bearing-pairs-v1",
+  "pairs": [
+    {
+      "id": "legacy-negation-forward",
+      "category": "legacy",
+      "candidate": "Remote work is not approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+      "excerpt": "Remote work is approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-negation-reverse",
+      "category": "legacy",
+      "candidate": "Remote work is approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+      "excerpt": "Remote work is not approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-deleted-negation-forward",
+      "category": "legacy",
+      "candidate": "Remote work is approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+      "excerpt": "Remote work is not approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-deleted-negation-reverse",
+      "category": "legacy",
+      "candidate": "Remote work is not approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+      "excerpt": "Remote work is approved for engineering staff with written manager sign-off and a signed equipment agreement on file.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-number-forward",
+      "category": "legacy",
+      "candidate": "Domestic travel is reimbursed up to 1500 dollars per trip for staff with a receipt submitted within thirty days.",
+      "excerpt": "Domestic travel is reimbursed up to 500 dollars per trip for staff with a receipt submitted within thirty days.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-number-reverse",
+      "category": "legacy",
+      "candidate": "Domestic travel is reimbursed up to 500 dollars per trip for staff with a receipt submitted within thirty days.",
+      "excerpt": "Domestic travel is reimbursed up to 1500 dollars per trip for staff with a receipt submitted within thirty days.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-fullwidth-number-forward",
+      "category": "legacy",
+      "candidate": "請求書は１５００円まで承認されます。経理部門の事前確認と領収書の添付が必要です。",
+      "excerpt": "請求書は５００円まで承認されます。経理部門の事前確認と領収書の添付が必要です。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-fullwidth-number-reverse",
+      "category": "legacy",
+      "candidate": "請求書は５００円まで承認されます。経理部門の事前確認と領収書の添付が必要です。",
+      "excerpt": "請求書は１５００円まで承認されます。経理部門の事前確認と領収書の添付が必要です。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-qualifier-forward",
+      "category": "legacy",
+      "candidate": "Badge replacement is free only for employees who report the loss to the security office within one business day.",
+      "excerpt": "Badge replacement is free for employees who report the loss to the security office within one business day.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-qualifier-reverse",
+      "category": "legacy",
+      "candidate": "Badge replacement is free for employees who report the loss to the security office within one business day.",
+      "excerpt": "Badge replacement is free only for employees who report the loss to the security office within one business day.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-spanish-negation-forward",
+      "category": "legacy",
+      "candidate": "El acceso remoto no está aprobado para el personal de ingeniería con autorización escrita de la gerencia.",
+      "excerpt": "El acceso remoto está aprobado para el personal de ingeniería con autorización escrita de la gerencia.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-spanish-negation-reverse",
+      "category": "legacy",
+      "candidate": "El acceso remoto está aprobado para el personal de ingeniería con autorización escrita de la gerencia.",
+      "excerpt": "El acceso remoto no está aprobado para el personal de ingeniería con autorización escrita de la gerencia.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-portuguese-negation-forward",
+      "category": "legacy",
+      "candidate": "O acesso remoto não está aprovado para a equipe de engenharia com autorização por escrito da gerência.",
+      "excerpt": "O acesso remoto está aprovado para a equipe de engenharia com autorização por escrito da gerência.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-portuguese-negation-reverse",
+      "category": "legacy",
+      "candidate": "O acesso remoto está aprovado para a equipe de engenharia com autorização por escrito da gerência.",
+      "excerpt": "O acesso remoto não está aprovado para a equipe de engenharia com autorização por escrito da gerência.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-french-qualifier-forward",
+      "category": "legacy",
+      "candidate": "Le remplacement du badge est gratuit uniquement pour les employés qui déclarent la perte au bureau de sécurité.",
+      "excerpt": "Le remplacement du badge est gratuit pour les employés qui déclarent la perte au bureau de sécurité.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-french-qualifier-reverse",
+      "category": "legacy",
+      "candidate": "Le remplacement du badge est gratuit pour les employés qui déclarent la perte au bureau de sécurité.",
+      "excerpt": "Le remplacement du badge est gratuit uniquement pour les employés qui déclarent la perte au bureau de sécurité.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-german-negation-forward",
+      "category": "legacy",
+      "candidate": "Die Fernarbeit ist für Ingenieure mit schriftlicher Genehmigung der Abteilungsleitung nicht gestattet.",
+      "excerpt": "Die Fernarbeit ist für Ingenieure mit schriftlicher Genehmigung der Abteilungsleitung ausdrücklich gestattet.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-german-negation-reverse",
+      "category": "legacy",
+      "candidate": "Die Fernarbeit ist für Ingenieure mit schriftlicher Genehmigung der Abteilungsleitung ausdrücklich gestattet.",
+      "excerpt": "Die Fernarbeit ist für Ingenieure mit schriftlicher Genehmigung der Abteilungsleitung nicht gestattet.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-italian-exception-forward",
+      "category": "legacy",
+      "candidate": "Il rimborso delle spese di viaggio è consentito eccetto per le trasferte non autorizzate dalla direzione generale.",
+      "excerpt": "Il rimborso delle spese di viaggio è consentito per le trasferte autorizzate dalla direzione generale.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-italian-exception-reverse",
+      "category": "legacy",
+      "candidate": "Il rimborso delle spese di viaggio è consentito per le trasferte autorizzate dalla direzione generale.",
+      "excerpt": "Il rimborso delle spese di viaggio è consentito eccetto per le trasferte non autorizzate dalla direzione generale.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-chinese-negation-forward",
+      "category": "legacy",
+      "candidate": "经主管书面批准且已提交设备协议的工程人员不获准进行远程办公安排。",
+      "excerpt": "经主管书面批准且已提交设备协议的工程人员获准进行远程办公安排。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-chinese-negation-reverse",
+      "category": "legacy",
+      "candidate": "经主管书面批准且已提交设备协议的工程人员获准进行远程办公安排。",
+      "excerpt": "经主管书面批准且已提交设备协议的工程人员不获准进行远程办公安排。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-japanese-negation-forward",
+      "category": "legacy",
+      "candidate": "上長の書面承認および機器管理同意書を提出した開発担当者の在宅勤務は承認されません。",
+      "excerpt": "上長の書面承認および機器管理同意書を提出した開発担当者の在宅勤務は承認されます。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-japanese-negation-reverse",
+      "category": "legacy",
+      "candidate": "上長の書面承認および機器管理同意書を提出した開発担当者の在宅勤務は承認されます。",
+      "excerpt": "上長の書面承認および機器管理同意書を提出した開発担当者の在宅勤務は承認されません。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-korean-negation-forward",
+      "category": "legacy",
+      "candidate": "부서장의 서면 승인과 장비 관리 서약서를 제출한 엔지니어의 원격 근무는 승인되지 않습니다.",
+      "excerpt": "부서장의 서면 승인과 장비 관리 서약서를 제출한 엔지니어의 원격 근무는 승인됩니다.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-korean-negation-reverse",
+      "category": "legacy",
+      "candidate": "부서장의 서면 승인과 장비 관리 서약서를 제출한 엔지니어의 원격 근무는 승인됩니다.",
+      "excerpt": "부서장의 서면 승인과 장비 관리 서약서를 제출한 엔지니어의 원격 근무는 승인되지 않습니다.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-thai-negation-forward",
+      "category": "legacy",
+      "candidate": "พนักงานวิศวกรรมที่ได้รับอนุมัติเป็นลายลักษณ์อักษรจากผู้จัดการไม่ได้รับอนุญาตให้ทำงานทางไกลได้",
+      "excerpt": "พนักงานวิศวกรรมที่ได้รับอนุมัติเป็นลายลักษณ์อักษรจากผู้จัดการได้รับอนุญาตให้ทำงานทางไกลได้",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "legacy-thai-negation-reverse",
+      "category": "legacy",
+      "candidate": "พนักงานวิศวกรรมที่ได้รับอนุมัติเป็นลายลักษณ์อักษรจากผู้จัดการได้รับอนุญาตให้ทำงานทางไกลได้",
+      "excerpt": "พนักงานวิศวกรรมที่ได้รับอนุมัติเป็นลายลักษณ์อักษรจากผู้จัดการไม่ได้รับอนุญาตให้ทำงานทางไกลได้",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "cut-new-number",
+      "category": "legacy",
+      "candidate": "Domestic travel is reimbursed up to 1500 dollars per trip for staff with a receipt submitted within thirty days. Additional appendix detail. Additional appendix detail. Additional appendix detail. Additional appendix detail. Additional appendix detail. Additional appendix detail. ",
+      "excerpt": "Domestic travel is reimbursed up to 500 dollars per trip for staff with a receipt submitted within thirty days. Standard policy details apply. Standard policy details apply. Standard policy details apply. Standard policy details apply. Standard policy details apply. Standard policy details apply. ",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "cut-paraphrase",
+      "category": "legacy",
+      "candidate": "Domestic travel is reimbursed up to 500 dollars per trip for staff with a receipt submitted within thirty days. Standard policy details apply! Standard policy details apply! Standard policy details ap",
+      "excerpt": "Domestic travel is reimbursed up to 500 dollars per trip for staff with a receipt submitted within thirty days. Standard policy details apply. Standard policy details apply. Standard policy details apply. Standard policy details apply. Standard policy details apply. Standard policy details apply. ",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "deleted-negation-cut",
+      "category": "legacy",
+      "candidate": "Remote work is approved for engineering staff.",
+      "excerpt": "Remote work is not approved for engineering staff.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "deleted-negation-complete",
+      "category": "legacy",
+      "candidate": "Remote work is approved for engineering staff.",
+      "excerpt": "Remote work is not approved for engineering staff.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "plural-paraphrase",
+      "category": "legacy",
+      "candidate": "This node accepts another request from engineering.",
+      "excerpt": "This node accepts other requests from engineering.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "apostrophe-fold",
+      "category": "legacy",
+      "candidate": "Managers can’t approve travel.",
+      "excerpt": "Managers canʼt approve travel.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "compound-안전",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 별첨 주제는 안전입니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 다음 회의 일정은 별도로 공유됩니다.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "compound-제안",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 별첨 주제는 제안입니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 다음 회의 일정은 별도로 공유됩니다.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "compound-안내",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 별첨 주제는 안내입니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 다음 회의 일정은 별도로 공유됩니다.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "compound-방안",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 별첨 주제는 방안입니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 다음 회의 일정은 별도로 공유됩니다.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "compound-보안",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 별첨 주제는 보안입니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 다음 회의 일정은 별도로 공유됩니다.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "compound-잘못",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 별첨 주제는 잘못입니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 다음 회의 일정은 별도로 공유됩니다.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "short-an",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 업무를 안 합니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 업무를 합니다.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "short-mot",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 업무를 못 합니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 업무를 합니다.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "long-mot",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 사업장이 문을 열지 못합니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 사업장이 문을 엽니다.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "long-anh",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 사업장이 문을 열지 않습니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 사업장이 문을 엽니다.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "eops",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 파일에 승인 기록이 없습니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 파일에 승인 기록이 있습니다.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "an-without-predicate",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 안",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "an-with-punctuation",
+      "category": "ko",
+      "candidate": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다. 안, 다음 장에 계속됩니다.",
+      "excerpt": "위원회는 등록된 직원의 원격 근무 요청을 검토합니다.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "phrase-非常",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。补充专题为非常事项，请翻阅附录。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。周五举行工作会议，地点另行通知。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "phrase-无论",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。补充专题为无论事项，请翻阅附录。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。周五举行工作会议，地点另行通知。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "phrase-不断",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。补充专题为不断事项，请翻阅附录。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。周五举行工作会议，地点另行通知。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "phrase-不过",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。补充专题为不过事项，请翻阅附录。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。周五举行工作会议，地点另行通知。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "phrase-未来",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。补充专题为未来事项，请翻阅附录。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。周五举行工作会议，地点另行通知。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "bu-insert",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。注册人员不获准携带设备。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。注册人员获准携带设备。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "mei-delete",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。项目组有足够时间完成核查。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。项目组没有足够时间完成核查。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "wei-insert",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。表单未经授权禁止转交。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。表单经授权禁止转交。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "bu-delete",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。登记范围含不动产转让。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。登记范围含动产转让。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "shared-bu",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。注册人员不获准携带设备。附录已寄出。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。注册人员不获准携带设备。另附材料清单。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "shared-mei",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。项目组没有足够时间完成核查。会议结束。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。项目组没有足够时间完成核查。主管已签字。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "second-bu-insert",
+      "category": "zh",
+      "candidate": "总务部门每周核查工程人员的登记表和培训记录。项目人员不得外借设备。注册人员不获准携带设备。",
+      "excerpt": "总务部门每周核查工程人员的登记表和培训记录。项目人员不得外借设备。注册人员获准携带设备。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "stem-無料",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「無料」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-未来",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「未来」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-不動産",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「不動産」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-非常",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「非常」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-少ない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「少ない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-すくない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「すくない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-危ない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「危ない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-切ない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「切ない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-あぶない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「あぶない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-せつない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「せつない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-おさない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「おさない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-きたない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「きたない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-つたない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「つたない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "stem-はかない",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。追加の講座は「はかない」をご覧ください。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。研修日程は別紙に掲載します。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "polite-negative",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。備品は貸し出しません。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。備品は貸し出します。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "nai-after-hiragana",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。この書類は署名がそろうまで提出できない。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。この書類は署名がそろうまで提出できる。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "nai-after-han",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。無線端末が必要ない期間は交換手続を行います。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。無線端末が必要な期間は交換手続を行います。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "nai-after-digit",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。対象は3ないし5の項目です。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。対象は3から5の項目です。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "wei-ja",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。書類は未承認の状態です。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。書類は承認の状態です。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "mu-replace",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。初回申請は無料で受け付けます。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。初回申請は有料で受け付けます。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "kana-width",
+      "category": "ja",
+      "candidate": "総務部は申請書と機器管理同意書を毎週確認します。備品は貸出しません。ｶﾀﾛｸﾞを参照。",
+      "excerpt": "総務部は申請書と機器管理同意書を毎週確認します。備品は貸出しません。カタログを参照。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "en-page",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\nPage 3 of 12",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\nPage 4 of 12",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "es-page",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\nPágina 3 de 12",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\nPágina 4 de 12",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "de-page",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\nSeite 3 von 12",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\nSeite 4 von 12",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "zh-page",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\n第3页",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\n第4页",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "ja-page",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\n3ページ",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\n4ページ",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "short-page",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\np. 3",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\np. 4",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "dash-page",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\n— 3 —",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\n— 4 —",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-year",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\n© 2025 Records Office",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\n© 2024 Records Office",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-range",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\nCopyright 2019–2025 Records Office",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\nCopyright 2019–2024 Records Office",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-total",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session.\nPage 3 of 12",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session.\nPage 3 of 15",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "unshared-number",
+      "category": "numbers",
+      "candidate": "The records office posts the meeting minutes before the next scheduled session. East garage houses 75 bicycles.",
+      "excerpt": "The records office posts the meeting minutes before the next scheduled session. Updated projection slides are available online.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "substitution",
+      "category": "numbers",
+      "candidate": "The facility stocks 75 batteries in the locked cabinet.",
+      "excerpt": "The facility stocks 70 batteries in the locked cabinet.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "date",
+      "category": "numbers",
+      "candidate": "Contract expires on 2026-03-15 with 15% retention fee.",
+      "excerpt": "Contract expires on 2026-04-15 with 15% retention fee.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "percent",
+      "category": "numbers",
+      "candidate": "Contract expires on 2026-03-15 with 20% retention fee.",
+      "excerpt": "Contract expires on 2026-03-15 with 15% retention fee.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "comma",
+      "category": "numbers",
+      "candidate": "The fund reimburses 1,500 dollars for approved equipment purchases.",
+      "excerpt": "The fund reimburses 1,250 dollars for approved equipment purchases.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "unit",
+      "category": "numbers",
+      "candidate": "The facility stores up to 50 liters of water in the locked cabinet.",
+      "excerpt": "The facility stores up to 45 gallons of water in the locked cabinet.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "start",
+      "category": "numbers",
+      "candidate": "50 staff attended the annual budget briefing.",
+      "excerpt": "45 staff attended the annual budget briefing.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "end",
+      "category": "numbers",
+      "candidate": "The booking limit for each visitor is 20",
+      "excerpt": "The booking limit for each visitor is 10",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "section",
+      "category": "numbers",
+      "candidate": "Section 4.2 requires a signed original for this expense.",
+      "excerpt": "Section 5.1 requires a signed original for this expense.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "article",
+      "category": "numbers",
+      "candidate": "Article 7 governs equipment procurement for regional offices.",
+      "excerpt": "Article 8 governs equipment procurement for regional offices.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "version",
+      "category": "numbers",
+      "candidate": "Version v3.1 remains supported by the equipment registry.",
+      "excerpt": "Version v3.2 remains supported by the equipment registry.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "year",
+      "category": "numbers",
+      "candidate": "In 2024 the city certified the west reservoir for public use.",
+      "excerpt": "In 2025 the city certified the west reservoir for public use.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "unicode-digits",
+      "category": "numbers",
+      "candidate": "The board retained ٣٠ records for the annual policy audit.",
+      "excerpt": "The board retained ٢٠ records for the annual policy audit.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-range-spaced",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019 – 2024 Example Company",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019 – 2025 Example Company",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-range-left-space",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019 -2024 Example Company",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019 -2025 Example Company",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-range-right-space",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. (C) 2019— 2024 Example Company",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. (C) 2019— 2025 Example Company",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-range-unicode-space",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019 – 2024 Example Company",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019 – 2025 Example Company",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-spaced",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 - 24 of the field manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 - 25 of the field manual",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-left-space",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 —24 of the field manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 —25 of the field manual",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-right-space",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20– 24 of the field manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20– 25 of the field manual",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-unicode-space",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. ＰＡＧＥＳ ２０　－ 24 of the field manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. ＰＡＧＥＳ ２０　－ 25 of the field manual",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-paired-markers",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 20 - 24 页。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 21 - 25 页。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-suffix-marker",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 倉庫の安全手順は 20 – 24 ページを参照。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 倉庫の安全手順は 21 – 25 ページを参照。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "simplified-page-compact",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第3页。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第4页。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "simplified-page-spaced",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 3 页。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 4 页。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "simplified-page-width-folded",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第　３ 页。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第　４ 页。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "slash-page-total-compact",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10 — operations manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/11 — operations manual",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "slash-page-total-spaced",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10 — operations manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 11 — operations manual",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "slash-page-total-left-space",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 /10 — operations manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 /11 — operations manual",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "slash-page-total-right-space",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/ 10 — operations manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/ 11 — operations manual",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "slash-page-total-width-folded",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. ＰＡＧＥ ３　／ １０ — operations manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. ＰＡＧＥ ３　／ １１ — operations manual",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "slash-page-total-after-paired-markers",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 3 页 / 10。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 3 页 / 11。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "prose-year-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. From 2019 – 2024 the city certified the west reservoir for public use.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. From 2019 – 2025 the city certified the west reservoir for public use.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "section-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Sections 20 - 24 require a signed original for this expense.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Sections 20 - 25 require a signed original for this expense.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "article-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Articles 20 — 24 govern procurement for regional offices.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Articles 20 — 25 govern procurement for regional offices.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "ordinary-fraction",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The required share is 3 / 10 of the planned delivery.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The required share is 3 / 11 of the planned delivery.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "ordinary-division",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The rounding rule applies to 144 ／　１２ before calculating the charge.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The rounding rule applies to 144 ／　１６ before calculating the charge.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "number-after-page-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 - 24 of the field manual describe 48 pallet positions.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 - 24 of the field manual describe 49 pallet positions.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "number-after-page-total",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10 — 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10 — 49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "number-after-compact-page-total",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10 — 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10 — 49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "slash-after-copyright",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024 / 6 claims were processed by the regional office.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024 / 8 claims were processed by the regional office.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "unpaired-simplified-page-marker",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程共有 3 页。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程共有 4 页。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-range-spaced-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019 – 2024 Example Company",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019 – 2025 Example Company Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-range-spaced-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019 – 2025 Example Company",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019 – 2024 Example Company Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-spaced-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 - 24 of the field manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 - 25 of the field manual Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-spaced-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 - 25 of the field manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 - 24 of the field manual Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "simplified-page-spaced-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 3 页。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 4 页。 Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "simplified-page-spaced-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 4 页。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 使用手册和仓库安全操作规程详见第 3 页。 Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "slash-page-total-spaced-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10 — operations manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 11 — operations manual Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "slash-page-total-spaced-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 11 — operations manual",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10 — operations manual Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-across-line-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\n— 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\n— 49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-across-line-dash-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\n— 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\n— 49 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-across-line-dash-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\n— 49 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\n— 48 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-across-line-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\n— 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\n— 49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-across-line-dash-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\n— 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\n— 49 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-across-line-dash-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\n— 49 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\n— 48 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "singular-page-prose-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "singular-page-prose-dash-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "singular-page-prose-dash-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "slash-page-total-attached-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "slash-page-total-attached-dash-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10—49 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "slash-page-total-attached-dash-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10—49 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10—48 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-range-attached-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-range-attached-dash-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24—49 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-range-attached-dash-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24—49 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24—48 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "slash-page-total-next-line-of",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10\nOf 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10\nOf 49 pallet positions marked, six remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "slash-page-total-next-line-of-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10\nOf 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10\nOf 49 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "slash-page-total-next-line-of-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10\nOf 49 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10\nOf 48 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-range-next-line-of",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24\nOf 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24\nOf 49 pallet positions marked, six remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-range-next-line-of-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24\nOf 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24\nOf 49 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-range-next-line-of-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24\nOf 49 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24\nOf 48 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "localized-total-next-line-of",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10\nOf 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10\nOf 49 pallet positions marked, six remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "localized-total-next-line-of-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10\nOf 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10\nOf 49 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "localized-total-next-line-of-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10\nOf 49 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10\nOf 48 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-across-crlf-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\r\n—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\r\n—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-across-crlf-dash-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\r\n—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\r\n—49 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-across-crlf-dash-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\r\n—49 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\r\n—48 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-across-unicode-line",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u2028—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u2028—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-across-unicode-line-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u2028—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u2028—49 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-across-unicode-line-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u2028—49 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u2028—48 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "paired-page-across-unicode-paragraph",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第 3 页\u2029Of 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第 3 页\u2029Of 49 pallet positions marked, six remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "paired-page-across-unicode-paragraph-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第 3 页\u2029Of 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第 3 页\u2029Of 49 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "paired-page-across-unicode-paragraph-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第 3 页\u2029Of 49 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第 3 页\u2029Of 48 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "localized-prefix-across-crlf",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Seite 3\r\nvon 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Seite 3\r\nvon 49 pallet positions marked, six remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "localized-prefix-across-crlf-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Seite 3\r\nvon 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Seite 3\r\nvon 49 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "localized-prefix-across-crlf-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Seite 3\r\nvon 49 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Seite 3\r\nvon 48 pallet positions marked, six remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-across-unicode-next-line",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u0085—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u0085—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-across-unicode-next-line-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u0085—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u0085—49 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-across-unicode-next-line-cut-reverse",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u0085—49 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024\u0085—48 pallet positions have been marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "localized-suffix-across-crlf",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 3ページ\r\n/48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 3ページ\r\n/49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-label-across-crlf",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page\r\n48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page\r\n49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-at-end-of-line-before-suffix",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. There are 48\r\nページ番号を記載。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. There are 49\r\nページ番号を記載。",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-across-unicode-line-slash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\u2028/ 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3\u2028/ 49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-short-prose-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024 — 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024 — 49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-attached-prose-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-range-attached-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2024—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2024—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "compact-page-range-attached-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20–24—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20–24—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "compact-slash-page-total-attached-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "localized-total-attached-dash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pagina 3 di 10—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pagina 3 di 10—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "suffix-total-attached-colon",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第3頁/10:48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第3頁/10:49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-total-attached-period",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10.48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 / 10.49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-range-attached-comma",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20–24,48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20–24,49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-number-attached-colon",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3:48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3:49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-number-attached-slash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024/48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024/49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-total-second-slash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10/48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10/49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-total-second-of",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10 of 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10 of 49 pallet positions marked, six remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-total-connector-after-slash",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10 of 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10 of 49 pallet positions marked, six remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-total-slash-after-connector",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10/48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 10/49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-total-after-suffix-second-connector",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第3頁 de 10 de 48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第3頁 de 10 de 49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-cannot-own-total",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024 of 48 pallet positions marked, six remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024 of 49 pallet positions marked, six remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "following-count-with-unit",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20–24—48kg was the measured weight.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20–24—49kg was the measured weight.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "following-count-with-next-punctuation",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10—48; measurements were then recorded.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10—49; measurements were then recorded.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "page-spaced-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See Page 3 for the complete entry.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See Page 4 for the complete entry.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-compact-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See page3 for the complete entry.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See page4 for the complete entry.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-framed-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Operations manual\n— 3 —",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Operations manual\n— 4 —",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-hyphen-singular-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to page 20 - 24 for instructions.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to page 20 - 25 for instructions.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-en-dash-singular-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to page 20 – 24 for instructions.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to page 20 – 25 for instructions.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-em-dash-compact-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to page 20—24 for instructions.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to page 20—25 for instructions.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-hyphen-plural-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to pages 20 - 24 for instructions.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to pages 20 - 25 for instructions.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-em-dash-plural-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to pages 20 — 24 for instructions.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to pages 20 — 25 for instructions.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-with-one-total",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20–24 of 100—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20–24 of 101—48 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-slash-total-with-fact",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/10—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3/11—48 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-with-fact",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 24—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 20 – 25—48 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-suffix-total",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第 3 頁 de 10—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第 3 頁 de 11—48 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-total-before-paired-suffix",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 参照箇所は第3/10頁。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 参照箇所は第3/11頁。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-total-before-unpaired-suffix",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 全案内は3 / 10 ページに記載。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 全案内は3 / 11 ページに記載。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-range-total-before-paired-suffix",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 参照箇所は第3–4/10頁。",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 参照箇所は第3–4/11頁。",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "fact-after-page-total-before-suffix",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第3/10頁—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. 第3/10頁—49 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "first-range-endpoint",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to Pages 20–24 for instructions.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Refer to Pages 21–24 for instructions.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "page-horizontal-space",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Ｐａｇｅ　３ / １０ — results summary.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Ｐａｇｅ　３ / １１ — results summary.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-spaced-year",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2024 Regional Records Office",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2025 Regional Records Office",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-compact-year",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright2024 Regional Records Office",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright2025 Regional Records Office",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-short-compact-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–24 Regional Records Office",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–25 Regional Records Office",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-em-dash-spaced-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019 — 2024 Regional Records Office",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019 — 2025 Regional Records Office",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-range-with-fact",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2024—48 pallet positions have been marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2025—48 pallet positions have been marked.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "section-spaced-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Section 4.2 governs the inspections.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Section 5.1 governs the inspections.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "section-compact-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Section4.2 governs the inspections.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Section5.1 governs the inspections.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "figure-spaced-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Figure 3 documents all affected locations.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Figure 4 documents all affected locations.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "figure-compact-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Figure3 documents all affected locations.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Figure4 documents all affected locations.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "table-spaced-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Table 3 lists all affected locations.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Table 4 lists all affected locations.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "table-compact-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Table3 lists all affected locations.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Table4 lists all affected locations.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "version-spaced-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Version 3.5 supports the new measurements.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Version 4.6 supports the new measurements.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "version-compact-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Version3.5 supports the new measurements.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Version4.6 supports the new measurements.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "year-spaced-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Year 2024 had the heaviest rainfall.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Year 2025 had the heaviest rainfall.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "year-compact-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Year2024 had the heaviest rainfall.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Year2025 had the heaviest rainfall.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "signed-negative",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The minimum operating temperature is -48 °C at this elevation.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The minimum operating temperature is -49 °C at this elevation.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "signed-compact-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The operating temperature is -48-24 °C at this elevation.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The operating temperature is -49-24 °C at this elevation.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "unit-spaced",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The parcel weighs 48 kg and is marked on the manifest.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The parcel weighs 49 kg and is marked on the manifest.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "unit-compact",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The parcel weighs 48kg and is marked on the manifest.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The parcel weighs 49kg and is marked on the manifest.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "ordinal-spaced",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The 48 th position is marked for intake.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The 49 th position is marked for intake.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "ordinal-compact",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The 48th position is marked for intake.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The 49th position is marked for intake.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "decimal-number",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The pressure was measured at 24.6 during inspection.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The pressure was measured at 24.7 during inspection.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "compact-date",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The agreement expires on 2026-03-15 at midnight local time.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The agreement expires on 2026-04-16 at midnight local time.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "spaced-date",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The agreement expires on 15 March 2026 at midnight local time.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The agreement expires on 16 March 2026 at midnight local time.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "compact-fraction",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The sample filled 3/10 of the container during testing.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The sample filled 3/11 of the container during testing.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "spaced-fraction",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The sample filled 3 / 10 of the container during testing.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The sample filled 3 / 11 of the container during testing.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "time-with-colon",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The depot received the shipment at 12:48 as planned.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. The depot received the shipment at 12:49 as planned.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "non-reference-spaced-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Acceptable weights are 20 – 24 kg under the agreement.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Acceptable weights are 20 – 25 kg under the agreement.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "non-reference-compact-range",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Acceptable weights are 20–24 kg under the agreement.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Acceptable weights are 20–25 kg under the agreement.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "dash-fraction",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48/50 pallet positions were filled by the evening crew.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49/50 pallet positions were filled by the evening crew.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "dash-fraction-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48/50 pallet positions were filled by the evening crew.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49/50 pallet positions were filled by the evening crew. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "dash-fraction-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49/50 pallet positions were filled by the evening crew.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48/50 pallet positions were filled by the evening crew. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "dash-count-comma",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48, plus six spaces for exceptions, were marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49, plus six spaces for exceptions, were marked.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "dash-count-comma-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48, plus six spaces for exceptions, were marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49, plus six spaces for exceptions, were marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "dash-count-comma-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49, plus six spaces for exceptions, were marked.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48, plus six spaces for exceptions, were marked. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "word-total-fraction",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 48/50 pallet positions remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 49/50 pallet positions remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "word-total-fraction-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 48/50 pallet positions remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 49/50 pallet positions remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "word-total-fraction-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 49/50 pallet positions remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 48/50 pallet positions remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "word-total-colon",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 48: six pallet positions remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 49: six pallet positions remained empty.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "word-total-colon-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 48: six pallet positions remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 49: six pallet positions remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "word-total-colon-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 49: six pallet positions remained empty.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 48: six pallet positions remained empty. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "plural-range-partitive",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 3 — 48 of the report's 50 recommendations were adopted during the vote.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 3 — 49 of the report's 50 recommendations were adopted during the vote.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "plural-range-partitive-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 3 — 48 of the report's 50 recommendations were adopted during the vote.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 3 — 49 of the report's 50 recommendations were adopted during the vote. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "plural-range-partitive-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 3 — 49 of the report's 50 recommendations were adopted during the vote.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Pages 3 — 48 of the report's 50 recommendations were adopted during the vote. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "singular-range-partitive",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48 of the report's 50 recommendations were adopted during the vote.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49 of the report's 50 recommendations were adopted during the vote.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "singular-range-partitive-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48 of the report's 50 recommendations were adopted during the vote.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49 of the report's 50 recommendations were adopted during the vote. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "singular-range-partitive-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 49 of the report's 50 recommendations were adopted during the vote.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 — 48 of the report's 50 recommendations were adopted during the vote. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "range-citation-purpose",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 – 24 for safety procedures.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 – 25 for safety procedures.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "range-citation-purpose-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 – 24 for safety procedures.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 – 25 for safety procedures. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "range-citation-purpose-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 – 25 for safety procedures.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 – 24 for safety procedures. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "range-citation-inclusive",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 — 24 inclusive for the complete procedure.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 — 25 inclusive for the complete procedure.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "range-citation-inclusive-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 — 24 inclusive for the complete procedure.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 — 25 inclusive for the complete procedure. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "range-citation-inclusive-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 — 25 inclusive for the complete procedure.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See pages 20 — 24 inclusive for the complete procedure. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "total-citation-volume",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 48 in this volume contains the table.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 49 in this volume contains the table.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "total-citation-volume-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 48 in this volume contains the table.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 49 in this volume contains the table. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "total-citation-volume-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 49 in this volume contains the table.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Page 3 of 48 in this volume contains the table. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "total-citation-coordinate",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See page 3 of 48 and the diagram above.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See page 3 of 49 and the diagram above.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "total-citation-coordinate-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See page 3 of 48 and the diagram above.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See page 3 of 49 and the diagram above. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "total-citation-coordinate-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See page 3 of 49 and the diagram above.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See page 3 of 48 and the diagram above. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "citation-volume-letter",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See Page 48 L of the handbook.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See Page 49 L of the handbook.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "citation-volume-letter-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See Page 48 L of the handbook.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See Page 49 L of the handbook. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "citation-volume-letter-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See Page 49 L of the handbook.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. See Page 48 L of the handbook. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-attribution-particles",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2024 The University of California. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2025 The University of California. All rights reserved.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-attribution-particles-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2024 The University of California. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2025 The University of California. All rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-attribution-particles-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2025 The University of California. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–2024 The University of California. All rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-short-attribution-particles",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–24 The University of California. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–25 The University of California. All rights reserved.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-short-attribution-particles-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–24 The University of California. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–25 The University of California. All rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-short-attribution-particles-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–25 The University of California. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019–24 The University of California. All rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-lowercase-institution",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019—2024 state of ohio. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019—2025 state of ohio. All rights reserved.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-lowercase-institution-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019—2024 state of ohio. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019—2025 state of ohio. All rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-lowercase-institution-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019—2025 state of ohio. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. Copyright 2019—2024 state of ohio. All rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-lowercase-name",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2024 adidas. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2025 adidas. All rights reserved.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-lowercase-name-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2024 adidas. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2025 adidas. All rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-lowercase-name-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2025 adidas. All rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2024 adidas. All rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-rights-only",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2024 all rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2025 all rights reserved.",
+      "candidate_cut": false,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-rights-only-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2024 all rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2025 all rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-rights-only-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2025 all rights reserved.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2019–2024 all rights reserved. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": false
+    },
+    {
+      "id": "copyright-capitalized-count-comma",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2024 — 2048 Pallets, only six were wet.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2024 — 2049 Pallets, only six were wet.",
+      "candidate_cut": false,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-capitalized-count-comma-cut",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2024 — 2048 Pallets, only six were wet.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2024 — 2049 Pallets, only six were wet. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    },
+    {
+      "id": "copyright-capitalized-count-comma-cut-reversed",
+      "category": "numbers",
+      "candidate": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2024 — 2049 Pallets, only six were wet.",
+      "excerpt": "Inspectors reviewed the intake logs and confirmed that the shipment met the handling requirements. © 2024 — 2048 Pallets, only six were wet. Keep this copy with the files in the records office.",
+      "candidate_cut": true,
+      "meaning_bearing": true
+    }
+  ]
+}
