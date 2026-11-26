@@ -15,7 +15,7 @@ func WrapExtract(inner func(context.Context, extractor.FileType, []byte) (string
 			attribute.String("quarry.extract.file_type", string(fileType)), attribute.Int("quarry.extract.bytes", len(data)))
 		defer span.End()
 		text, err := inner(ctx, fileType, data)
-		RecordError(span, err)
+		RecordError(ctx, span, err)
 		return text, err
 	}
 }

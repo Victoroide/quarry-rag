@@ -16,6 +16,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -300,7 +301,11 @@ func (p *Client) upsertGRPC(ctx context.Context, namespace string, vectors []*pi
 		}
 		start = end
 	}
-	slog.DebugContext(ctx, "pinecone vectors upserted", "vectors", len(vectors), "namespace", namespace)
+	attrs := []any{"vectors", len(vectors)}
+	if !tracing.RedactIdentifiers(ctx) {
+		attrs = append(attrs, "namespace", namespace)
+	}
+	slog.DebugContext(ctx, "pinecone vectors upserted", attrs...)
 	return nil
 }
 
@@ -393,7 +398,11 @@ func (p *Client) DeleteAllVectorsInNamespace(ctx context.Context, namespace stri
 	}); err != nil {
 		return fmt.Errorf("pinecone: delete all vectors in namespace %q: %w", namespace, err)
 	}
-	slog.DebugContext(ctx, "pinecone namespace cleared", "namespace", namespace)
+	if tracing.RedactIdentifiers(ctx) {
+		slog.DebugContext(ctx, "pinecone namespace cleared")
+	} else {
+		slog.DebugContext(ctx, "pinecone namespace cleared", "namespace", namespace)
+	}
 	return nil
 }
 

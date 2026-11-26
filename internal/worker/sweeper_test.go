@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/stretchr/testify/require"
 )
 
@@ -339,4 +341,51 @@ func TestSweeperBacksOffOnOutageAndStopsOnLeaseLoss(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, rep2.TasksCompleted)
 	require.Zero(t, store2.tasks["rev-err"].NextOffset)
+}
+
+type telemetrySweepStore struct {
+	*fakeManifestStore
+	err       error
+	lastError string
+}
+
+func (s *telemetrySweepStore) RenewVectorCleanup(context.Context, domain.VectorCleanupTask, time.Duration) (bool, error) {
+	return false, s.err
+}
+func (s *telemetrySweepStore) ReleaseVectorCleanup(context.Context, domain.VectorCleanupTask) error {
+	return s.err
+}
+func (s *telemetrySweepStore) DeferVectorCleanup(_ context.Context, _ domain.VectorCleanupTask, _ string, _ time.Duration, _ int, lastError string) (bool, error) {
+	s.lastError = lastError
+	return false, s.err
+}
+
+type telemetrySweepVectors struct{ fakePresenceVectors }
+
+func (*telemetrySweepVectors) DeleteVectorIDs(ctx context.Context, _ string, _ []string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestHostedCleanupErrorsRedactRevisionAndProviderText(t *testing.T) {
+	logs := captureTelemetryLogs(t)
+	task := domain.VectorCleanupTask{RevisionID: "synthetic-retired-revision", VectorIDs: []string{"vector-to-delete"}}
+	store := &telemetrySweepStore{fakeManifestStore: newFakeManifestStore(task), err: errors.New("synthetic-provider-text")}
+	sweeper := NewSweeper(store, &telemetrySweepVectors{}, SweepOptions{Lease: 30 * time.Millisecond})
+	bounded, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	ctx := tracing.WithRedactIdentifiers(bounded, true)
+	_, err := sweeper.SweepOnce(ctx)
+	require.NoError(t, err)
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	sweeper.releaseTask(canceled, task)
+	sweeper.deferOnError(canceled, task, "retired", store.err.Error(), &SweepReport{})
+	require.Equal(t, store.err.Error(), store.lastError)
+	for _, message := range []string{"renew vector cleanup lease", "release vector cleanup lease", "defer vector cleanup"} {
+		require.Contains(t, logs.String(), message)
+	}
+	require.Equal(t, 3, strings.Count(logs.String(), "operation failed"))
+	require.NotContains(t, logs.String(), task.RevisionID)
+	require.NotContains(t, logs.String(), store.err.Error())
 }

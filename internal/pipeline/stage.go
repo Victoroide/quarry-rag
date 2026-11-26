@@ -199,10 +199,10 @@ func RunIngestionPipeline(ctx context.Context, ic *IngestContext, stages []Stage
 		start := time.Now()
 		stageCtx, span := otel.Tracer("github.com/Victoroide/quarry-rag/internal/pipeline").Start(ctx, "ingest."+string(s.ID()), trace.WithAttributes(attribute.String(tracing.LangSmithKind, "chain"), attribute.String("quarry.stage", string(s.ID()))))
 		err := func() error {
-			defer finishStageSpan(span)
+			defer finishStageSpan(stageCtx, span)
 			err := s.Run(stageCtx, ic)
 			span.SetAttributes(attribute.Int("quarry.ingest.chunks", len(ic.Chunks)))
-			tracing.RecordError(span, err)
+			tracing.RecordError(stageCtx, span, err)
 			return err
 		}()
 		metrics.FromContext(ctx).StageDuration.WithLabelValues(string(s.ID())).Observe(time.Since(start).Seconds())
@@ -247,12 +247,12 @@ func RunRetrievalPipeline(ctx context.Context, qc *QueryContext, stages []QueryS
 		}
 		stageCtx, span := otel.Tracer("github.com/Victoroide/quarry-rag/internal/pipeline").Start(ctx, name, trace.WithAttributes(attribute.String(tracing.LangSmithKind, kind), attribute.String("quarry.stage", string(s.ID()))))
 		err := func() error {
-			defer finishStageSpan(span)
+			defer finishStageSpan(stageCtx, span)
 			err := s.Run(stageCtx, qc)
 			if span.IsRecording() {
 				setQueryAttributes(stageCtx, span, s.ID(), qc)
 			}
-			tracing.RecordError(span, err)
+			tracing.RecordError(stageCtx, span, err)
 			return err
 		}()
 		elapsed := time.Since(t0)
@@ -282,10 +282,10 @@ func querySpanName(id StageID) string {
 	}
 }
 
-func finishStageSpan(span trace.Span) {
+func finishStageSpan(ctx context.Context, span trace.Span) {
 	defer span.End()
 	if recovered := recover(); recovered != nil {
-		tracing.RecordError(span, fmt.Errorf("pipeline stage panicked"))
+		tracing.RecordError(ctx, span, fmt.Errorf("pipeline stage panicked"))
 		panic(recovered)
 	}
 }

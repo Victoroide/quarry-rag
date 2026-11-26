@@ -103,7 +103,7 @@ func (m manifestTracer) DeleteByManifestRevision(ctx context.Context, docID, rev
 		return errors.New("manifest revision vector cleanup is unavailable")
 	}
 	err := m.manifest.DeleteByManifestRevision(ctx, docID, revisionID, knownIDs)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return err
 }
 
@@ -115,7 +115,7 @@ func (m manifestTracer) DeleteVectorIDs(ctx context.Context, namespace string, i
 		return errors.New("vector presence delete is unavailable")
 	}
 	err := m.checker.DeleteVectorIDs(ctx, namespace, ids)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return err
 }
 
@@ -126,7 +126,7 @@ func (m manifestTracer) FetchPresentVectorIDs(ctx context.Context, namespace str
 		return nil, errors.New("vector presence fetch is unavailable")
 	}
 	present, err := m.checker.FetchPresentVectorIDs(ctx, namespace, ids)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return present, err
 }
 
@@ -137,7 +137,7 @@ func (m manifestTracer) ListPrefixVectorIDs(ctx context.Context, namespace, pref
 		return nil, "", false, errors.New("vector presence list is unavailable")
 	}
 	ids, nextToken, supported, err = m.checker.ListPrefixVectorIDs(ctx, namespace, prefix, limit, token)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return ids, nextToken, supported, err
 }
 
@@ -217,7 +217,7 @@ func (s revisionDeletes) DeleteByRevision(ctx context.Context, docID, revision s
 	ctx, span := s.store.begin(ctx, "delete", "tool")
 	defer span.End()
 	err := s.revisions.DeleteByRevision(ctx, docID, revision)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return err
 }
 
@@ -272,7 +272,7 @@ func (s *vectorStore) Upsert(ctx context.Context, namespace string, chunks []dom
 	defer span.End()
 	span.SetAttributes(attribute.Int("quarry.vector.records", len(chunks)))
 	err := s.VectorStore.Upsert(ctx, namespace, chunks)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return err
 }
 
@@ -281,7 +281,7 @@ func (s *vectorStore) upsertWithVisibility(ctx context.Context, writer domain.Vi
 	defer span.End()
 	span.SetAttributes(attribute.Int("quarry.vector.records", len(chunks)))
 	probe, err := writer.UpsertWithVisibility(ctx, namespace, chunks)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return probe, err
 }
 
@@ -290,7 +290,7 @@ func (s *vectorStore) query(ctx context.Context, topK int, call func(context.Con
 	defer span.End()
 	results, err := call(ctx)
 	span.SetAttributes(attribute.Int("quarry.vector.top_k", topK), attribute.Int("quarry.vector.results", len(results)))
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return results, err
 }
 
@@ -362,7 +362,7 @@ func (s *vectorStore) DeleteByDocID(ctx context.Context, docID string) error {
 	ctx, span := s.begin(ctx, "delete", "tool")
 	defer span.End()
 	err := s.deleter.DeleteByDocID(ctx, docID)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return err
 }
 
@@ -370,7 +370,7 @@ func (s *vectorStore) DeleteAllVectorsInNamespace(ctx context.Context, namespace
 	ctx, span := s.begin(ctx, "delete", "tool")
 	defer span.End()
 	err := s.deleter.DeleteAllVectorsInNamespace(ctx, namespace)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return err
 }
 
@@ -396,6 +396,6 @@ func (s revisionDeletes) DeleteByAttempt(ctx context.Context, docID, revision, a
 		return errors.New("attempt vector cleanup is unavailable")
 	}
 	err := deleter.DeleteByAttempt(ctx, docID, revision, attempt)
-	RecordError(span, err)
+	RecordError(ctx, span, err)
 	return err
 }

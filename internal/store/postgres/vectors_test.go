@@ -1,7 +1,10 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"testing"
@@ -9,15 +12,21 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-func vectorDatabase(t *testing.T) (*Client, *VectorStore) {
+func vectorDatabase(t *testing.T, opts ...Option) (*Client, *VectorStore) {
 	t.Helper()
-	c, err := NewClient(t.Context(), pgtest.StartVector(t))
+	c, err := NewClient(t.Context(), pgtest.StartVector(t), opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
 	require.NoError(t, c.RunMigrations(t.Context()))
@@ -376,4 +385,48 @@ func TestVectorTieOrdering(t *testing.T) {
 	require.Len(t, got, 2)
 	require.Equal(t, domain.ChunkID("a-first"), got[0].Chunk.ID)
 	require.Equal(t, domain.ChunkID("z-last"), got[1].Chunk.ID)
+}
+
+func TestPGVectorSearchErrorTelemetryRedaction(t *testing.T) {
+	const missingTable = "synthetic_missing_vector_relation"
+	_, v := vectorDatabase(t, WithQueryTracer(tracing.NewQueryTracer()))
+	v.table = missingTable
+
+	var logs bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+	recorder := tracetest.NewSpanRecorder()
+	prevTracer := otel.GetTracerProvider()
+	tracer := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tracer)
+	t.Cleanup(func() {
+		require.NoError(t, tracer.Shutdown(context.WithoutCancel(t.Context())))
+		otel.SetTracerProvider(prevTracer)
+	})
+
+	ctx, parent := otel.Tracer("test").Start(tracing.WithRedactIdentifiers(t.Context(), true), "vector search")
+	defer parent.End()
+	_, report, err := v.QueryFilteredDetailed(ctx, []float32{1, 0, 0}, 1, domain.VectorFilter{})
+	require.ErrorContains(t, err, missingTable)
+	require.Equal(t, SearchStatusError, report.Status)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "42P01", pgErr.Code)
+	require.Contains(t, logs.String(), "pgvector query failed")
+	require.Contains(t, logs.String(), "operation failed")
+	require.NotContains(t, logs.String(), missingTable)
+
+	var failures int
+	for _, span := range recorder.Ended() {
+		output := fmt.Sprint(span.Name(), span.Status(), span.Attributes(), span.Events())
+		require.NotContains(t, output, missingTable)
+		if span.Status().Code == codes.Error {
+			failures++
+			require.Equal(t, "db.query", span.Name())
+			require.Equal(t, "operation failed", span.Status().Description)
+			require.Len(t, span.Events(), 1)
+		}
+	}
+	require.Positive(t, failures)
 }

@@ -21,19 +21,25 @@ func Tracing(next http.Handler, captureContent bool) http.Handler {
 // TracingWithRedaction continues incoming traces while optionally forcing
 // content capture off and marking contexts to omit document/object identifiers.
 func TracingWithRedaction(next http.Handler, captureContent, redactIdentifiers bool) http.Handler {
-	if redactIdentifiers {
-		captureContent = false
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		if redactIdentifiers {
+			ctx = tracing.WithContentCapture(tracing.WithRedactIdentifiers(ctx, true), false)
+		}
 		switch r.URL.Path {
 		case "/livez", "/readyz", "/health":
-			next.ServeHTTP(w, r)
+			if redactIdentifiers {
+				rt := r.WithContext(ctx)
+				next.ServeHTTP(w, rt)
+				r.Pattern = rt.Pattern
+			} else {
+				next.ServeHTTP(w, r)
+			}
 			return
 		}
-		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
-		ctx = tracing.WithContentCapture(ctx, captureContent)
-		if redactIdentifiers {
-			ctx = tracing.WithRedactIdentifiers(ctx, true)
+		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(r.Header))
+		if !redactIdentifiers {
+			ctx = tracing.WithContentCapture(ctx, captureContent)
 		}
 		requestID := logctx.RequestID(ctx)
 		method := spanMethod(r.Method)
@@ -55,7 +61,7 @@ func TracingWithRedaction(next http.Handler, captureContent, redactIdentifiers b
 			span.SetAttributes(attribute.String("http.route", rt.Pattern[i:]))
 		}
 		if rw.statusCode >= http.StatusInternalServerError {
-			tracing.RecordError(span, errors.New(http.StatusText(rw.statusCode)))
+			tracing.RecordError(ctx, span, errors.New(http.StatusText(rw.statusCode)))
 		}
 	})
 }

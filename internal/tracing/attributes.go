@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	"errors"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -27,11 +28,32 @@ func start(ctx context.Context, name, kind string, spanKind trace.SpanKind, attr
 	return otel.Tracer("github.com/Victoroide/quarry-rag/internal/tracing").Start(ctx, name, trace.WithSpanKind(spanKind), trace.WithAttributes(attrs...))
 }
 
+var (
+	errOperationFailed   = errors.New("operation failed")
+	errOperationCanceled = errors.New("operation canceled")
+	errOperationTimedOut = errors.New("operation timed out")
+)
+
+// ErrorForTelemetry returns a bounded error for logs and spans when redaction is enabled.
+func ErrorForTelemetry(ctx context.Context, err error) error {
+	if err == nil || !RedactIdentifiers(ctx) {
+		return err
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return errOperationTimedOut
+	case errors.Is(err, context.Canceled):
+		return errOperationCanceled
+	default:
+		return errOperationFailed
+	}
+}
+
 // RecordError records an operation failure without changing its returned error.
-func RecordError(span trace.Span, err error) {
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+func RecordError(ctx context.Context, span trace.Span, err error) {
+	if safe := ErrorForTelemetry(ctx, err); safe != nil {
+		span.RecordError(safe)
+		span.SetStatus(codes.Error, safe.Error())
 	}
 }
 
