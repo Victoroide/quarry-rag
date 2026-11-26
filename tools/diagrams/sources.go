@@ -234,6 +234,10 @@ func parseSQL(sql string) (sqlSchema, error) {
 	}
 	alter := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(\w+)\s+([^;]+)`)
 	for _, m := range alter.FindAllStringSubmatch(sql, -1) {
+		// Grant storage belongs to the operator reference, so its tables are not modeled here.
+		if strings.HasPrefix(m[1], "grant_catalog_") {
+			continue
+		}
 		for _, part := range splitSQL(m[2]) {
 			add := regexp.MustCompile(`(?is)^ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(.+)$`).FindStringSubmatch(part)
 			drop := regexp.MustCompile(`(?i)^DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?(\w+)`).FindStringSubmatch(part)
