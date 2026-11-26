@@ -401,13 +401,31 @@ described in [PostgreSQL vectors](#postgresql-vectors).
 3. Stage with `-apply` while the service keeps serving. Repeat until a run
    reports `complete: true`. Resume a bounded run with the cursor it reports.
 4. Freeze writers for the target generation and wait for the settling time.
-   Reads continue; [writes pause](api.md#writer-pause). Freezing and activation
-   refuse a target in a different vector store than an active
+   Reads continue; [writes pause](api.md#writer-pause). Freeze quiescence and
+   activation wait until no unfinalized deletion receipt remains in
+   `document_deletions`, and report up to 20 document IDs of any open receipts
+   (`open_deletion_ids` in reports; inventory also reports `open_deletions` and
+   `open_deletion_ids` without blocking live staging). Freezing and activation
+   also refuse a target in a different vector store than an active
    [evaluation fixture](development.md#evidence-evaluation), because only workers
    attached to the fixture's store can lease its job or delete it by receipt.
-   Delete each such fixture by its original receipt first. After a freeze,
-   thaw, delete and freeze again. A receipt with an unknown binding blocks as
-   well; resolve it as that section describes.
+   Delete each such fixture by its original receipt first, or thaw, delete and
+   freeze again. A receipt with an unknown binding blocks as well; resolve it
+   as that section describes.
+
+   If open deletion receipts block a freeze or activation, clear them without
+   bypassing the freeze:
+
+   1. Thaw writers: `make reindex ARGS="-thaw -apply"`.
+   2. For each reported document ID, repeat the deletion with its saved
+      incarnation via `X-Document-Incarnation`, `Client.DeleteDocumentIncarnation`,
+      or `make cleanup IDS="<document-uuid>@<incarnation-uuid>"`. Because
+      status endpoints return `404` once a document enters `deleting` or its row
+      is gone, use the incarnation recorded before deletion or inspect the open
+      receipt in `document_deletions` when recovering an abandoned deletion or
+      an unfinished legacy reservation whose document row is already gone.
+   3. Freeze writers again:
+      `make reindex ARGS="-freeze -apply -generation <name>"`.
 5. Start staging again from the beginning and finish catch-up. Verify with declared
    thresholds and `-apply` to record the result, then activate. Verification and
    activation fail if anything changed after the catch-up. For different embedding

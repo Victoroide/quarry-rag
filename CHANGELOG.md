@@ -48,6 +48,7 @@ Notable changes are grouped by release.
 
 ### Changed
 
+- `make reindex` freeze, activation and inventory reports now include up to 20 document IDs of open deletion receipts blocking quiescence, and the [deployment guide](docs/deployment.md#changing-models-or-vector-stores) documents how to thaw, complete qualified retries and re-freeze.
 - Release archives are checked for platform coverage and package contents before publication. See [release packaging](docs/development.md#releases).
 - PostgreSQL vector queries handle server query timeouts consistently across locales.
 - `make cleanup` with `GO_RAG_FAKE_MODE` forwards each deletion once to the running service on `SERVER_PORT`, because that service owns the in-memory vectors.
