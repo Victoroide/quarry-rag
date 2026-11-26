@@ -12,6 +12,10 @@ type VectorFilter struct {
 	DocumentIDs []string
 
 	Collection string
+
+	// Authorized, when set, limits every search to the documents its subject may
+	// read. A store that cannot enforce it must refuse the search.
+	Authorized *AuthorizedScope
 }
 
 // MatchesNothing reports whether the filter excludes every document.
