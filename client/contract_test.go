@@ -121,6 +121,7 @@ func TestJSONContract(t *testing.T) {
 		{client.TokenUsage{}, domain.TokenUsage{}},
 		{client.DocumentSummary{}, domain.DocumentSummary{}},
 		{client.DeleteResponse{}, handler.DeleteResponse{}},
+		{client.DeletionModeResponse{}, handler.DeletionModeResponse{}},
 		{client.FileURL{}, handler.FileResponse{}},
 		{client.ErrorResponse{}, handler.APIError{}},
 	} {

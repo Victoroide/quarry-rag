@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -114,4 +115,74 @@ func TestDeletionTargetsExposeTheOwningInMemoryIndex(t *testing.T) {
 	// A hosted deployment never treats a process-local index as the owner.
 	require.Nil(t, deletionTargets(&config.Config{PineconeIndexName: "index"}, index).Memory)
 	require.Nil(t, deletionTargets(&config.Config{FakeMode: true}, nil).Memory)
+}
+
+func TestDeletionModeRouteIsAServiceRoute(t *testing.T) {
+	store := &touchedStore{}
+	router := NewRouter(&RouterDeps{ChunkStore: store, Config: &config.Config{ServiceToken: "permitted"}})
+	for _, token := range []string{"", "other"} {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/deletion-mode", http.NoBody)
+		if token != "" {
+			req.Header.Set("X-Service-Token", token)
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusUnauthorized, rec.Code, "token %q", token)
+	}
+	require.Zero(t, store.touched.Load(), "an unauthenticated mode check reads nothing")
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/deletion-mode", http.NoBody)
+	req.Header.Set("X-Service-Token", "permitted")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.JSONEq(t, `{"deletion_mode":"active"}`, rec.Body.String())
+	require.EqualValues(t, 1, store.touched.Load())
+	require.Zero(t, store.deleted.Load())
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		req = httptest.NewRequestWithContext(t.Context(), method, "/deletion-mode", http.NoBody)
+		req.Header.Set("X-Service-Token", "permitted")
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code, method)
+	}
+	require.EqualValues(t, 1, store.touched.Load(), "no other method reads or writes the marker")
+}
+
+// acceptingStore records the admission request the router builds.
+type acceptingStore struct {
+	domain.ChunkStore
+	accepted []domain.AcceptRequest
+}
+
+func (s *acceptingStore) AcceptDocument(_ context.Context, req domain.AcceptRequest) (domain.AcceptResult, error) {
+	s.accepted = append(s.accepted, req)
+	return domain.AcceptResult{Outcome: domain.AcceptAccepted, DocumentID: req.Document.ID}, nil
+}
+
+func TestRouterRequestsTaggedVectorsOnlyFromACapableBackend(t *testing.T) {
+	for name, tc := range map[string]struct {
+		driver   domain.VectorDeleter
+		manifest bool
+		want     bool
+	}{
+		"backend that deletes one incarnation": {memory.NewFakeVectorStore(), false, true},
+		"backend limited to document deletion": {&vectorsSpy{}, false, false},
+		"no backend":                           {nil, false, false},
+		"manifested hosted vectors":            {memory.NewFakeVectorStore(), true, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := &acceptingStore{}
+			router := NewRouter(&RouterDeps{ChunkStore: store, PineconeDriver: tc.driver, Config: &config.Config{ServiceToken: "permitted", HostedVectorManifest: tc.manifest}})
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/ingest", strings.NewReader(`{"content":"router admission"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Service-Token", "permitted")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			require.Len(t, store.accepted, 1)
+			require.Equal(t, tc.want, store.accepted[0].SupportsScopedVectors, "the database marker, not the router, decides the format")
+		})
+	}
 }

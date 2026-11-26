@@ -5,6 +5,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
 	"net/http"
 	"os"
@@ -230,4 +233,36 @@ func TestServeDrainsBeforeShutdown(t *testing.T) {
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestServerEnablesLegacyDeletionReservations pins the production wiring: the
+// router the server builds reserves every ID-only deletion under the activation
+// lock, with no local setting that could turn it off.
+func TestServerEnablesLegacyDeletionReservations(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	require.NoError(t, err)
+	var literals int
+	ast.Inspect(file, func(node ast.Node) bool {
+		literal, ok := node.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		selector, ok := literal.Type.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "RouterDeps" {
+			return true
+		}
+		literals++
+		var enabled bool
+		for _, element := range literal.Elts {
+			pair, isPair := element.(*ast.KeyValueExpr)
+			if !isPair || pair.Key.(*ast.Ident).Name != "LegacyDeletionReservations" {
+				continue
+			}
+			value, isIdent := pair.Value.(*ast.Ident)
+			enabled = isIdent && value.Name == "true"
+		}
+		require.True(t, enabled, "the server router must enable legacy deletion reservations unconditionally")
+		return true
+	})
+	require.Equal(t, 1, literals, "the server builds exactly one router")
 }

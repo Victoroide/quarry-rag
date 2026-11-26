@@ -197,6 +197,7 @@ func TestOpenAPIJSONFields(t *testing.T) {
 		"DocumentIncarnationSummary": reflect.TypeFor[domain.DocumentIncarnationSummary](),
 		"DocumentRef":                reflect.TypeFor[domain.DocumentRef](),
 		"DeleteResponse":             reflect.TypeFor[handler.DeleteResponse](),
+		"DeletionModeResponse":       reflect.TypeFor[handler.DeletionModeResponse](),
 		"FileResponse":               reflect.TypeFor[handler.FileResponse](),
 		"APIError":                   reflect.TypeFor[handler.APIError](),
 	}
@@ -413,6 +414,7 @@ func TestOpenAPIPayloadBindings(t *testing.T) {
 		{"get", "/documents/{doc_id}", "", "DocumentStatusResponse", []string{"200"}},
 		{"delete", "/documents/{doc_id}", "", "DeleteResponse", []string{"200"}},
 		{"get", "/documents/{doc_id}/file", "", "FileResponse", []string{"200"}},
+		{"get", "/deletion-mode", "", "DeletionModeResponse", []string{"200"}},
 	} {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
 			path := openAPIObject(t, paths[route.path])
