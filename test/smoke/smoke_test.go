@@ -1,8 +1,11 @@
 // Package smoke runs end-to-end smoke tests against a live server at localhost:8081.
 // Set RUN_SMOKE=1 to enable these tests.
 //
-// These tests create documents in the configured live services.
-// Each test automatically cleans up its created documents via t.Cleanup.
+// The tests that write documents need a target whose database has activated
+// checkpointed deletion. They check it through the service before their first
+// ingest and never activate it. Each such test registers cleanup for its own
+// confirmed admission, which deletes through the service with the incarnation
+// saved at admission. The pre-upgrade document check only reads.
 package smoke
 
 import (
@@ -10,7 +13,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -20,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Victoroide/quarry-rag/internal/cleanup"
+	qclient "github.com/Victoroide/quarry-rag/client"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/google/uuid"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
@@ -33,6 +35,17 @@ func skipUnlessSmoke(t *testing.T) {
 	t.Helper()
 	if os.Getenv("RUN_SMOKE") != "1" {
 		t.Skip("skipping smoke test; set RUN_SMOKE=1 to run")
+	}
+}
+
+// requireSmokeDeletion stops a writing test before its first ingest unless the
+// target service reports an activated database. It never changes the target.
+func requireSmokeDeletion(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := checkActivatedTarget(ctx, smokeDocumentClient(t)); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -99,8 +112,10 @@ func TestSmoke_HealthIncludesS3(t *testing.T) {
 // Test 2: Ingest a DOCX file via multipart.
 func TestSmoke_IngestDOCXFile(t *testing.T) {
 	skipUnlessSmoke(t)
+	requireSmokeDeletion(t)
 
-	docxData := buildTestDOCX("Smoke Test Reference Document: Cedar Archive retains reports for seven years using Python Spark and AWS Bedrock integration for indexed document research")
+	// Unique content keeps a duplicate match from returning another document.
+	docxData := buildTestDOCX("Smoke Test Reference Document " + uuid.NewString() + ": Cedar Archive retains reports for seven years using Python Spark and AWS Bedrock integration for indexed document research")
 	body, contentType := createMultipartBody("smoke_test.docx", docxData)
 
 	resp, err := request(t.Context(), http.MethodPost, baseURL+"/ingest", contentType, body)
@@ -164,10 +179,11 @@ func TestSmoke_UnsupportedFileType(t *testing.T) {
 // Test 5: Large file upload returns 413.
 func TestSmoke_LargeFileUpload(t *testing.T) {
 	skipUnlessSmoke(t)
+	requireSmokeDeletion(t)
 
 	// Create a DOCX with a very large body (>20MB would be needed for real test,
 	// but we'll verify the endpoint handles the multipart path correctly).
-	bigText := strings.Repeat("This is a large document content block. ", 1000)
+	bigText := uuid.NewString() + strings.Repeat("This is a large document content block. ", 1000)
 	docxData := buildTestDOCX(bigText)
 	body, contentType := createMultipartBody("big.docx", docxData)
 
@@ -200,8 +216,10 @@ func TestSmoke_LargeFileUpload(t *testing.T) {
 // Test 6: Existing JSON ingest still works.
 func TestSmoke_JSONIngestStillWorks(t *testing.T) {
 	skipUnlessSmoke(t)
+	requireSmokeDeletion(t)
 
-	payload := `{"content":"Smoke test: JSON ingest path verification. This document is ingested via the original JSON API path to verify backward compatibility."}`
+	docID := uuid.NewString()
+	payload := `{"document_id":"` + docID + `","content":"Smoke test ` + docID + `: JSON ingest path verification. This document is ingested via the original JSON API path to verify backward compatibility."}`
 	resp, err := request(t.Context(), http.MethodPost, baseURL+"/ingest", "application/json", strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("json ingest request: %v", err)
@@ -215,16 +233,15 @@ func TestSmoke_JSONIngestStillWorks(t *testing.T) {
 		t.Fatalf("expected 202 or 200, got %d", resp.StatusCode)
 	}
 
-	// Extract document ID for cleanup if response is JSON
+	// Only an accepted request for this test's own unique identifier is a
+	// confirmed new admission that cleanup may address.
 	if resp.StatusCode == http.StatusAccepted {
 		var result map[string]string
-		if decodeErr := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&result); decodeErr == nil {
-			if docID := result["document_id"]; docID != "" {
-				t.Logf("ingested JSON doc: %s", docID)
-
-				registerDocumentCleanup(t.Context(), t, docID)
-			}
+		if decodeErr := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&result); decodeErr != nil || result["document_id"] != docID {
+			t.Fatalf("accepted response does not confirm document %s: %s", docID, bodyBytes)
 		}
+		t.Logf("ingested JSON doc: %s", docID)
+		registerDocumentCleanup(t.Context(), t, docID)
 	}
 }
 
@@ -240,8 +257,30 @@ func request(ctx context.Context, method, url, contentType string, body io.Reade
 	return (&http.Client{Timeout: 120 * time.Second}).Do(req)
 }
 
-func registerDocumentCleanup(parent context.Context, t *testing.T, docID string) func() {
+// smokeDocumentClient addresses the service under test with the configured token.
+func smokeDocumentClient(t *testing.T) *qclient.Client {
 	t.Helper()
+	api, err := qclient.New(baseURL, qclient.WithServiceToken(os.Getenv("SERVICE_TOKEN")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api
+}
+
+// registerDocumentCleanup tracks a document that this test's own request was
+// just accepted for. It reads the incarnation once, from the admitted document,
+// and registers cleanup that deletes through the service with that value. A
+// document whose incarnation cannot be read gets no cleanup: the failure names
+// it so an operator can remove it deliberately.
+func registerDocumentCleanup(parent context.Context, t *testing.T, docID string) (incarnation string, cancelCleanup func()) {
+	t.Helper()
+	api := smokeDocumentClient(t)
+	readCtx, stopRead := context.WithTimeout(parent, 15*time.Second)
+	defer stopRead()
+	incarnation, err := readAdmittedIncarnation(readCtx, api, docID)
+	if err != nil {
+		t.Fatalf("document %s was accepted but cannot be cleaned up automatically: %v", docID, err)
+	}
 	needed := true
 	t.Cleanup(func() {
 		if !needed {
@@ -249,65 +288,16 @@ func registerDocumentCleanup(parent context.Context, t *testing.T, docID string)
 		}
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 60*time.Second)
 		defer cancel()
-		cfg, err := config.Load()
-		if err != nil {
-			t.Errorf("load deletion configuration: %v", err)
-			return
-		}
-		cleaner, err := cleanup.New(ctx, cfg)
-		if err != nil {
-			t.Errorf("connect deletion stores: %v", err)
-			return
-		}
-		defer func() {
-			if closeErr := cleaner.Close(ctx); closeErr != nil {
-				t.Errorf("close deletion stores: %v", closeErr)
-			}
-		}()
-		if err := deleteWhenPresent(ctx, func() error { return cleaner.Delete(ctx, docID) }); err != nil {
+		if err := deleteSavedIncarnation(ctx, api, docID, incarnation); err != nil {
 			t.Errorf("delete document %s: %v", docID, err)
 		}
 	})
-	return func() { needed = false }
-}
-
-func deleteWhenPresent(ctx context.Context, deleteDocument func() error) error {
-	for {
-		err := deleteDocument()
-		if !errors.Is(err, cleanup.ErrDocumentNotFound) {
-			return err
-		}
-		timer := time.NewTimer(100 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-}
-
-func TestDeferredDeletionWaitsForIngestion(t *testing.T) {
-	attempts := 0
-	err := deleteWhenPresent(t.Context(), func() error {
-		attempts++
-		if attempts == 1 {
-			return cleanup.ErrDocumentNotFound
-		}
-		return nil
-	})
-	if err != nil || attempts != 2 {
-		t.Fatalf("deferred deletion: attempts=%d error=%v", attempts, err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if err := deleteWhenPresent(ctx, func() error { return cleanup.ErrDocumentNotFound }); !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected bounded cancellation: %v", err)
-	}
+	return incarnation, func() { needed = false }
 }
 
 func TestSmoke_LargeDocumentIsIndexed(t *testing.T) {
 	skipUnlessSmoke(t)
+	requireSmokeDeletion(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	index, dims := vectorSmokeIndex(ctx, t)
@@ -316,7 +306,7 @@ func TestSmoke_LargeDocumentIsIndexed(t *testing.T) {
 	for i := 0; content.Len() < 900000; i++ {
 		fmt.Fprintf(&content, "Record %06d in collection %s describes archive retention, storage locations, reference numbers and document retrieval procedures.\n\n", i, marker)
 	}
-	docID, _ := ingestVectorSmoke(ctx, t, content.String()[:900000])
+	docID, _, _ := ingestVectorSmoke(ctx, t, content.String()[:900000])
 	waitVectorSmoke(ctx, t, func() (bool, error) {
 		present, err := vectorSmokeHasDocument(ctx, index, dims, docID)
 		if err != nil || !present {
@@ -328,10 +318,11 @@ func TestSmoke_LargeDocumentIsIndexed(t *testing.T) {
 
 func TestSmoke_DeleteRemovesVectors(t *testing.T) {
 	skipUnlessSmoke(t)
+	requireSmokeDeletion(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	index, dims := vectorSmokeIndex(ctx, t)
-	docID, cancelCleanup := ingestVectorSmoke(ctx, t, "Archive deletion verification for collection "+uuid.NewString()+". Records contain storage references and retention procedures for document retrieval.")
+	docID, incarnation, cancelCleanup := ingestVectorSmoke(ctx, t, "Archive deletion verification for collection "+uuid.NewString()+". Records contain storage references and retention procedures for document retrieval.")
 	waitVectorSmoke(ctx, t, func() (bool, error) {
 		present, err := vectorSmokeHasDocument(ctx, index, dims, docID)
 		if err != nil || !present {
@@ -339,13 +330,12 @@ func TestSmoke_DeleteRemovesVectors(t *testing.T) {
 		}
 		return vectorSmokeDocumentStored(ctx, docID)
 	})
-	resp, err := request(ctx, http.MethodDelete, baseURL+"/documents/"+docID, "", http.NoBody)
+	resp, err := smokeDocumentClient(t).DeleteDocumentIncarnation(ctx, docID, incarnation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("delete returned %d", resp.StatusCode)
+	if !resp.Deleted {
+		t.Fatal("document deletion was not acknowledged")
 	}
 	cancelCleanup()
 	deletionCtx, deletionCancel := context.WithTimeout(ctx, 60*time.Second)
@@ -385,9 +375,10 @@ func vectorSmokeIndex(ctx context.Context, t *testing.T) (index *pinecone.IndexC
 	return conn, cfg.EmbeddingDimensions
 }
 
-func ingestVectorSmoke(ctx context.Context, t *testing.T, content string) (docID string, cancelCleanup func()) {
+func ingestVectorSmoke(ctx context.Context, t *testing.T, content string) (docID, incarnation string, cancelCleanup func()) {
 	t.Helper()
-	payload, err := json.Marshal(map[string]string{"document_id": uuid.NewString(), "content": content})
+	requested := uuid.NewString()
+	payload, err := json.Marshal(map[string]string{"document_id": requested, "content": content})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,11 +396,11 @@ func ingestVectorSmoke(ctx context.Context, t *testing.T, content string) (docID
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if result.DocumentID == "" {
-		t.Fatal("missing document_id")
+	if result.DocumentID != requested {
+		t.Fatalf("accepted response does not confirm document %s: %q", requested, result.DocumentID)
 	}
-	cancelCleanup = registerDocumentCleanup(ctx, t, result.DocumentID)
-	return result.DocumentID, cancelCleanup
+	incarnation, cancelCleanup = registerDocumentCleanup(ctx, t, requested)
+	return requested, incarnation, cancelCleanup
 }
 
 func vectorSmokeHasDocument(ctx context.Context, conn *pinecone.IndexConnection, dims int, docID string) (bool, error) {

@@ -8,6 +8,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -388,6 +389,65 @@ func TestTaggedAdmissionWithoutGrantFailsClosed(t *testing.T) {
 	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM documents), (SELECT count(*) FROM ingest_jobs)`).Scan(&docs, &jobs))
 	require.Zero(t, docs)
 	require.Zero(t, jobs)
+}
+
+// UpgradedServingRoleDatabase gives an existing serving role only its original
+// service-mode privileges and the SQL from the published upgrade section.
+func UpgradedServingRoleDatabase(t *testing.T) (owner, serving *Client) {
+	t.Helper()
+	owner = jobsDatabase(t)
+	roles := newGrantRoles(t, owner.Pool.Config().ConnString(), "quarry_service")
+	grantExec(t, owner, roles.sql(`
+		CREATE ROLE {quarry_service};
+		GRANT USAGE ON SCHEMA public TO {quarry_service};
+		GRANT SELECT ON public.schema_migrations TO {quarry_service};
+		GRANT SELECT, INSERT, UPDATE, DELETE ON public.documents, public.chunks,
+			public.ingest_jobs, public.document_fingerprints TO {quarry_service};
+		GRANT SELECT, INSERT, UPDATE ON public.document_pdf_extractions TO {quarry_service};
+		GRANT EXECUTE ON FUNCTION public.vector_writer_state(),
+			public.vector_bind_legacy(text, text, text) TO {quarry_service};
+	`))
+	for _, marker := range []string{
+		"-- Serving role upgrade for migrations 019, 023 and 025",
+		"-- Serving role upgrade for migration 029",
+		"-- Serving role upgrade for migration 030",
+	} {
+		grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", marker))
+	}
+	var err error
+	serving, err = NewClient(t.Context(), owner.Pool.Config().ConnString(), func(config *pgxpool.Config) {
+		config.ConnConfig.RuntimeParams["role"] = roles.name("quarry_service")
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, serving.Close(context.Background())) })
+	serving.SetAuthzMode("service")
+	return owner, serving
+}
+
+func TestUpgradedServingRoleAdmitsAcrossActivation(t *testing.T) {
+	owner, serving := UpgradedServingRoleDatabase(t)
+	_, err := serving.Pool.Exec(t.Context(), `SELECT activated_at FROM document_deletion_activation`)
+	requireSQLState(t, err, "42501")
+
+	admit := func(t *testing.T, content string, tagged bool) {
+		t.Helper()
+		req := jobsRequest(content)
+		req.SupportsScopedVectors = true
+		result, acceptErr := serving.AcceptDocument(t.Context(), req)
+		require.NoError(t, acceptErr)
+		require.Equal(t, domain.AcceptAccepted, result.Outcome)
+		var scoped bool
+		require.NoError(t, owner.Pool.QueryRow(t.Context(), `SELECT scoped_vectors FROM documents WHERE id=$1`, result.DocumentID).Scan(&scoped))
+		require.Equal(t, tagged, scoped)
+	}
+
+	admit(t, "admitted before activation", false)
+	job, err := serving.ClaimJob(t.Context(), "upgraded-serving-worker", time.Minute, 3)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	_, err = owner.ActivateDeletion(t.Context())
+	require.NoError(t, err)
+	admit(t, "admitted after activation", true)
 }
 
 func TestRestrictedServingLoginReleasesOfflineHeldReceipt(t *testing.T) {
