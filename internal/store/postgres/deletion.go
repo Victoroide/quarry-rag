@@ -32,8 +32,10 @@ const (
 const deletionClaimLimit = time.Minute
 
 var (
-	_ domain.DocumentDeleter    = (*Client)(nil)
-	_ domain.DocumentFileReader = (*Client)(nil)
+	_ domain.DocumentDeleter          = (*Client)(nil)
+	_ domain.DocumentFileReader       = (*Client)(nil)
+	_ domain.ScopedDocumentFileReader = (*Client)(nil)
+	_ domain.ScopedDocumentDeleter    = (*Client)(nil)
 )
 
 // DeletionActive reports whether an operator selected checkpointed deletion.
@@ -212,6 +214,13 @@ func (c *Client) beginDeletion(ctx context.Context, id domain.DocumentID, ops do
 		// The intent is already durable; the caller resumes it.
 		return incarnation, false, nil
 	}
+	if intentErr := insertDeletionIntentTx(ctx, tx, id, incarnation, source, mode, ops); intentErr != nil {
+		return "", false, intentErr
+	}
+	return incarnation, false, tx.Commit(ctx)
+}
+
+func insertDeletionIntentTx(ctx context.Context, tx pgx.Tx, id domain.DocumentID, incarnation string, source *string, mode string, ops domain.DeleteOperations) error {
 	var bucket, index *string
 	if source != nil {
 		bucket = nullable(ops.SourceBucket)
@@ -227,7 +236,7 @@ func (c *Client) beginDeletion(ctx context.Context, id domain.DocumentID, ops do
 		AND (claim_until IS NULL OR claim_until<=clock_timestamp())
 		AND (memory_owner IS NULL OR memory_owner=$4::uuid)`, string(id), incarnation, mode, nullable(ops.MemoryOwner))
 	if err != nil {
-		return "", false, err
+		return err
 	}
 	if tag.RowsAffected() != 1 {
 		// Historical document-wide deletes cannot prove that no older write is
@@ -241,24 +250,24 @@ func (c *Client) beginDeletion(ctx context.Context, id domain.DocumentID, ops do
 				AND (document_deletions.claim_until IS NULL OR document_deletions.claim_until<=clock_timestamp())`,
 			string(id), incarnation, source, bucket, mode, index, mode == legacyVectors)
 		if err != nil {
-			return "", false, err
+			return err
 		}
 		if tag.RowsAffected() != 1 {
 			// Another cleanup record owns this identity and is not yet released.
-			return "", false, domain.ErrDeletionBusy
+			return domain.ErrDeletionBusy
 		}
 	}
 	if _, err = tx.Exec(ctx, `UPDATE documents SET status='deleting',updated_at=NOW() WHERE id=$1`, string(id)); err != nil {
-		return "", false, err
+		return err
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM ingest_jobs WHERE document_id=$1`, string(id)); err != nil {
-		return "", false, err
+		return err
 	}
 	// Shared content must not match a document that is going away.
 	if _, err = tx.Exec(ctx, `DELETE FROM document_fingerprints WHERE document_id=$1`, string(id)); err != nil {
-		return "", false, err
+		return err
 	}
-	return incarnation, false, tx.Commit(ctx)
+	return nil
 }
 
 // deletionDeadline returns the context bound and the time its claim may last.
@@ -467,4 +476,133 @@ func (c *Client) WithDocumentFile(ctx context.Context, id domain.DocumentID, sig
 		return false, signErr
 	}
 	return true, tx.Commit(ctx)
+}
+
+// WithScopedDocumentFile verifies active principal status and owner or
+// read-plus-download access under shared row locks while the caller signs.
+func (c *Client) WithScopedDocumentFile(ctx context.Context, principal domain.Principal, id domain.DocumentID, sign func(context.Context, string) error) (domain.ScopedFileResult, error) {
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return domain.ScopedFileResult{}, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var active bool
+	var key *string
+	err = tx.QueryRow(ctx, `SELECT active, s3_key FROM grant_catalog_authorize_file($1::uuid,$2::uuid,$3::uuid)`,
+		principal.TenantID, principal.ID, string(id)).Scan(&active, &key)
+	if err != nil {
+		return domain.ScopedFileResult{}, err
+	}
+	if !active {
+		return domain.ScopedFileResult{Active: false}, nil
+	}
+	if key == nil {
+		return domain.ScopedFileResult{Active: true, Found: false}, nil
+	}
+	if signErr := sign(ctx, *key); signErr != nil {
+		return domain.ScopedFileResult{Active: true}, signErr
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ScopedFileResult{}, err
+	}
+	return domain.ScopedFileResult{Active: true, Found: true}, nil
+}
+
+// BeginScopedDeletion atomically verifies owner-only deletion against the live
+// incarnation and persists the checkpointed cleanup intent.
+func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Principal, validUntil time.Time, id domain.DocumentID, ops domain.DeleteOperations) (incarnation string, complete bool, err error) {
+	parsed, err := uuid.Parse(string(id))
+	if err != nil {
+		return "", false, domain.ErrDocumentNotFound
+	}
+	id = domain.DocumentID(parsed.String())
+	expected, err := canonicalIncarnation(ops.ExpectedIncarnation)
+	if err != nil {
+		return "", false, err
+	}
+	if !time.Now().Before(validUntil) {
+		return "", false, domain.ErrUnauthorized
+	}
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	var state string
+	var source *string
+	var scoped bool
+	docErr := tx.QueryRow(ctx, `SELECT COALESCE(incarnation,id)::text,status,s3_key,scoped_vectors FROM documents WHERE id=$1 FOR UPDATE`, string(id)).
+		Scan(&incarnation, &state, &source, &scoped)
+	if docErr != nil && !errors.Is(docErr, pgx.ErrNoRows) {
+		return "", false, docErr
+	}
+
+	var active, authorized, finalizedMatch bool
+	if authErr := tx.QueryRow(ctx, `SELECT active, authorized, finalized_match FROM grant_catalog_authorize_delete($1::uuid,$2::uuid,$3::uuid,$4::uuid)`,
+		principal.TenantID, principal.ID, string(id), nullable(expected)).Scan(&active, &authorized, &finalizedMatch); authErr != nil {
+		return "", false, authErr
+	}
+	if !active {
+		return "", false, domain.ErrForbidden
+	}
+	if errors.Is(docErr, pgx.ErrNoRows) {
+		if !finalizedMatch {
+			return "", false, domain.ErrDocumentNotFound
+		}
+		if !time.Now().Before(validUntil) {
+			return "", false, domain.ErrUnauthorized
+		}
+		return expected, true, nil
+	}
+	if !authorized {
+		return "", false, domain.ErrDocumentNotFound
+	}
+	if !time.Now().Before(validUntil) {
+		return "", false, domain.ErrUnauthorized
+	}
+	if parsed.Version() == 5 {
+		var reserved bool
+		if reserveErr := tx.QueryRow(ctx, `SELECT evaluation_fixture_reserved($1)`, parsed.String()).Scan(&reserved); reserveErr != nil {
+			return "", false, reserveErr
+		}
+		if reserved {
+			return "", false, domain.ErrFixtureDeletionRequired
+		}
+	}
+	if expected != "" && expected != incarnation {
+		return "", false, domain.ErrDeletionPreconditionFailed
+	}
+	if source != nil && ops.Source == nil {
+		return "", false, domain.ErrFileStorageUnavailable
+	}
+	mode, err := vectorMode(scoped, ops)
+	if err != nil {
+		return "", false, err
+	}
+	if state == "deleting" {
+		if _, recErr := tx.Exec(ctx, `SELECT grant_catalog_record_deletion_owner($1::uuid,$2::uuid,$3::uuid,$4::uuid)`,
+			principal.TenantID, principal.ID, string(id), incarnation); recErr != nil {
+			return "", false, recErr
+		}
+		return incarnation, false, tx.Commit(ctx)
+	}
+	if intentErr := insertDeletionIntentTx(ctx, tx, id, incarnation, source, mode, ops); intentErr != nil {
+		return "", false, intentErr
+	}
+	if _, err = tx.Exec(ctx, `SELECT grant_catalog_record_deletion_owner($1::uuid,$2::uuid,$3::uuid,$4::uuid)`,
+		principal.TenantID, principal.ID, string(id), incarnation); err != nil {
+		return "", false, err
+	}
+	return incarnation, false, tx.Commit(ctx)
+}
+
+// ResumeScopedDeletion finishes detached cross-store cleanup for an already
+// authorized deletion intent.
+func (c *Client) ResumeScopedDeletion(ctx context.Context, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
+	parsed, err := uuid.Parse(string(id))
+	if err != nil {
+		return domain.ErrDocumentNotFound
+	}
+	return c.resumeObservedDeletion(ctx, domain.DocumentID(parsed.String()), incarnation, ops)
 }
