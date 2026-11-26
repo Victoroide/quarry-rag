@@ -4,7 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -344,6 +347,144 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	require.True(t, receipt.finalized)
 	require.True(t, receipt.held)
 	require.Equal(t, domain.AcceptDeletionConflict, admission(t, c, id, "replacement"))
+}
+
+// smallPoolDatabase opens a migrated client whose pool holds at most maxConns connections.
+func smallPoolDatabase(t *testing.T, maxConns int) *pgstore.Client {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("requires a Docker daemon")
+	}
+	u, err := url.Parse(startPostgres(t))
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("pool_max_conns", strconv.Itoa(maxConns))
+	u.RawQuery = q.Encode()
+	c, err := pgstore.NewClient(t.Context(), u.String())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
+	require.NoError(t, c.RunMigrations(t.Context()))
+	return c
+}
+
+// blockFirstCalls makes the first n calls of a provider kind wait until release
+// closes, and signals each arrival on entered.
+func blockFirstCalls(stores *deletionStores, kind string, n int) (entered, release chan struct{}) {
+	entered, release = make(chan struct{}, n), make(chan struct{})
+	var calls atomic.Int32
+	stores.hook(kind, func(ctx context.Context) error {
+		if int(calls.Add(1)) > n {
+			return nil
+		}
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	})
+	return entered, release
+}
+
+func awaitArrivals(t *testing.T, entered chan struct{}, n int) {
+	t.Helper()
+	for range n {
+		select {
+		case <-entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("a guarded deletion never reached its provider call")
+		}
+	}
+}
+
+func advisoryLocks(t *testing.T, c *pgstore.Client) int {
+	t.Helper()
+	var n int
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND granted`).Scan(&n))
+	return n
+}
+
+func TestGuardedIDOnlyDeleteRejectsBurstWith503BusyBeforeLocks(t *testing.T) {
+	c := durableDatabase(t)
+	c.SetLegacyDeletionConcurrency(2)
+	stores := newDeletionStores()
+	ids := []string{uuid.NewString(), uuid.NewString(), uuid.NewString()}
+	for _, id := range ids {
+		acceptDeletable(t, c, id, "burst document "+id, false, "")
+	}
+	entered, release := blockFirstCalls(stores, "namespace", 2)
+	server := deletionServer(t, c, "token", legacyRoutes(stores))
+	untouched := documentState(t, c, ids[2])
+	require.NotEmpty(t, untouched)
+	replies := make(chan httpReply, 2)
+	for _, id := range ids[:2] {
+		go func() { replies <- sendDelete(t, server, "token", id, "") }()
+	}
+	awaitArrivals(t, entered, 2)
+	locks := advisoryLocks(t, c)
+
+	refused := sendDelete(t, server, "token", ids[2], "")
+	require.Equal(t, http.StatusServiceUnavailable, refused.code, refused.body)
+	require.Equal(t, "5", refused.retryAfter)
+	require.Contains(t, refused.body, `"busy"`)
+	require.Equal(t, 2, stores.count("namespace"), "the refused request made no provider call")
+	require.Equal(t, locks, advisoryLocks(t, c), "the refused request took no lock")
+	require.Equal(t, untouched, documentState(t, c, ids[2]), "the refused document is untouched")
+	var receipts int
+	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM document_deletions WHERE document_id=$1`, ids[2]).Scan(&receipts))
+	require.Zero(t, receipts, "the refused request reserved nothing")
+
+	close(release)
+	for range 2 {
+		require.Equal(t, http.StatusOK, (<-replies).code)
+	}
+	require.Equal(t, http.StatusOK, sendDelete(t, server, "token", ids[2], "").code, "a retry succeeds once a slot is free")
+}
+
+func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
+	c := smallPoolDatabase(t, 2)
+	c.SetLegacyDeletionConcurrency(2)
+	stores := newDeletionStores()
+	ids := []string{uuid.NewString(), uuid.NewString()}
+	for _, id := range ids {
+		acceptDeletable(t, c, id, "slow document "+id, false, "")
+	}
+	entered, release := blockFirstCalls(stores, "namespace", 2)
+	server := deletionServer(t, c, "token", legacyRoutes(stores))
+	replies := make(chan httpReply, 2)
+	for _, id := range ids {
+		go func() { replies <- sendDelete(t, server, "token", id, "") }()
+	}
+	awaitArrivals(t, entered, 2)
+
+	// Both guarded deletions are inside a provider call. Other traffic on the
+	// same two-connection pool finishes well inside its own deadline.
+	started := time.Now()
+	var wg sync.WaitGroup
+	results := make(chan httpReply, 6)
+	for range 2 {
+		wg.Go(func() {
+			results <- doRequest(t, server, http.MethodPost, "/ingest", "token", nil, `{"content":"admitted during slow deletions `+uuid.NewString()+`"}`)
+		})
+		wg.Go(func() { results <- doRequest(t, server, http.MethodGet, "/documents", "token", nil, "") })
+		wg.Go(func() {
+			results <- doRequest(t, server, http.MethodGet, "/documents/"+uuid.NewString(), "token", nil, "")
+		})
+	}
+	wg.Wait()
+	close(results)
+	for reply := range results {
+		require.Less(t, reply.code, http.StatusInternalServerError, reply.body)
+		require.NotEqual(t, http.StatusServiceUnavailable, reply.code, reply.body)
+	}
+	require.Less(t, time.Since(started), 5*time.Second)
+	require.Zero(t, c.Pool.Stat().AcquiredConns(), "the guarded deletions hold no pooled connection")
+
+	close(release)
+	for range 2 {
+		require.Equal(t, http.StatusOK, (<-replies).code)
+	}
 }
 
 func assertNoError(t *testing.T, err error) bool {

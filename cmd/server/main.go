@@ -97,6 +97,7 @@ func run() error {
 		}
 	}()
 	pgClient.EnableHostedVectorManifests(cfg.HostedVectorManifest)
+	pgClient.SetLegacyDeletionConcurrency(cfg.LegacyDeletionConcurrency)
 	if migrationErr := pgClient.RunMigrations(startupCtx); migrationErr != nil {
 		return fmt.Errorf("startup: migrations: %w", migrationErr)
 	}
