@@ -2,15 +2,370 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/logctx"
+	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
+
+const runtimeAuditFunction = "grant_catalog_record_security_audit(text,uuid,uuid,bigint,text,text,text,uuid,uuid)"
+const runtimeAuditValidator = "grant_catalog_validate_security_audit(text,text)"
+const runtimeAuditCall = `SELECT grant_catalog_record_security_audit($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+const runtimeAuditShadowRelations = `CREATE TEMP TABLE grant_catalog_policy_revision (singleton boolean, revision bigint);
+	INSERT INTO grant_catalog_policy_revision VALUES (true, 19);
+	CREATE TEMP TABLE grant_catalog_security_audit (request_id text, tenant_id uuid, principal_id uuid,
+		policy_revision bigint, action text, outcome text, reason text, document_id uuid, incarnation uuid)`
+
+type runtimeAuditFunctionIdentity struct {
+	oid, owner int64
+	acl        string
+}
+
+func readRuntimeAuditFunctionIdentity(t *testing.T, owner *Client) runtimeAuditFunctionIdentity {
+	t.Helper()
+	var identity runtimeAuditFunctionIdentity
+	require.NoError(t, owner.Pool.QueryRow(t.Context(), `SELECT oid::bigint, proowner::bigint, proacl::text
+		FROM pg_proc WHERE oid = $1::text::regprocedure`, runtimeAuditFunction).Scan(&identity.oid, &identity.owner, &identity.acl))
+	return identity
+}
+
+func requireRuntimeAuditRejection(t *testing.T, err error, field string) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "22023", pgErr.Code)
+	require.Equal(t, "invalid runtime audit "+field, pgErr.Message)
+	require.Empty(t, pgErr.Detail)
+	require.Empty(t, pgErr.Hint)
+	require.Empty(t, pgErr.InternalQuery)
+}
+
+// The published 029 upgrade grants work on the historical schema.
+func grantLegacyRuntimeAuditAccess(t *testing.T, owner *Client, roles grantRoles) {
+	t.Helper()
+	grantExec(t, owner, roles.sql(`GRANT USAGE ON SCHEMA public TO {quarry_service}`))
+	grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "Serving role upgrade for migration 029"))
+}
+
+func TestRuntimeSecurityAuditWriterRestrictsActions(t *testing.T) {
+	ctx := t.Context()
+	databaseURL := startTestDatabase(t)
+	owner := migrationTestClient(t, databaseURL)
+	applyMigrationPrefix(t, owner, 34)
+	grantExec(t, owner, `UPDATE grant_catalog_policy_revision SET revision = 17 WHERE singleton`)
+	roles := newGrantRoles(t, databaseURL, "quarry_service")
+	grantExec(t, owner, roles.sql(`CREATE ROLE {quarry_service}`))
+	grantLegacyRuntimeAuditAccess(t, owner, roles)
+	serving := roleClient(t, owner, roles.name("quarry_service"))
+	before := readRuntimeAuditFunctionIdentity(t, owner)
+	conn, err := serving.Pool.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn.Release()
+	_, err = conn.Exec(ctx, runtimeAuditShadowRelations)
+	require.NoError(t, err)
+	const prepared = "record_runtime_audit"
+	_, err = conn.Conn().Prepare(ctx, prepared, runtimeAuditCall)
+	require.NoError(t, err)
+	_, err = conn.Exec(ctx, prepared, "before upgrade", nil, nil, nil, "query", "allow", "synthetic", nil, nil)
+	require.NoError(t, err)
+
+	require.NoError(t, owner.RunMigrations(ctx))
+	require.Equal(t, before, readRuntimeAuditFunctionIdentity(t, owner))
+	fresh := roleClient(t, owner, roles.name("quarry_service"))
+	for _, session := range []struct {
+		name, statement string
+		db              auditExecer
+	}{
+		{"prepared connection", prepared, conn},
+		{"reconnected", runtimeAuditCall, fresh.Pool},
+	} {
+		t.Run(session.name, func(t *testing.T) {
+			ctx := t.Context()
+			var beforeCount int
+			require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT count(*) FROM grant_catalog_security_audit`).Scan(&beforeCount))
+			actions := []string{"ingest", "query", "document_list", "document_status", "file_sign", "document_delete", "subject_auth", "trust_key_load"}
+			outcomes := []string{"allow", "deny", "error"}
+			id := uuid.NewString()
+			for _, action := range actions {
+				for _, outcome := range outcomes {
+					_, err := session.db.Exec(ctx, session.statement, nil, nil, nil, nil, action, outcome, session.name, nil, nil)
+					require.NoError(t, err, "%s/%s", action, outcome)
+					var count int
+					require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT count(*) FROM grant_catalog_security_audit
+						WHERE action=$1 AND outcome=$2 AND reason=$3 AND request_id='' AND policy_revision=17
+						  AND operator IS NULL AND tenant_id IS NULL AND principal_id IS NULL
+						  AND document_id IS NULL AND incarnation IS NULL`, action, outcome, session.name).Scan(&count))
+					require.Equal(t, 1, count, "%s/%s", action, outcome)
+				}
+			}
+			_, err := session.db.Exec(ctx, session.statement, session.name, id, id, int64(0), "query", "allow", "override", id, id)
+			require.NoError(t, err)
+			var overrideCount int
+			require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT count(*) FROM grant_catalog_security_audit
+				WHERE request_id=$1 AND tenant_id=$2 AND principal_id=$2 AND policy_revision=0
+				  AND action='query' AND outcome='allow' AND reason='override' AND document_id=$2
+				  AND incarnation=$2 AND operator IS NULL`, session.name, id).Scan(&overrideCount))
+			require.Equal(t, 1, overrideCount)
+
+			for _, action := range []any{"corpus_cutover", "grant_import", "QUERY", " query", "query ", "", nil, "query\n\t", strings.Repeat("x", 4096)} {
+				_, err = session.db.Exec(ctx, session.statement, nil, nil, nil, nil, action, "allow", "synthetic", nil, nil)
+				requireRuntimeAuditRejection(t, err, "action")
+			}
+			for _, outcome := range []any{"unknown", "ALLOW", " allow", "allow ", "", nil, "allow\n\t", strings.Repeat("x", 4096)} {
+				_, err = session.db.Exec(ctx, session.statement, nil, nil, nil, nil, "query", outcome, "synthetic", nil, nil)
+				requireRuntimeAuditRejection(t, err, "outcome")
+			}
+			limit, tooLong := strings.Repeat("é", 64), strings.Repeat("é", 64)+"x"
+			_, err = session.db.Exec(ctx, session.statement, limit, nil, nil, nil, "query", "allow", limit, nil, nil)
+			require.NoError(t, err)
+			_, err = session.db.Exec(ctx, session.statement, tooLong, nil, nil, nil, "query", "allow", limit, nil, nil)
+			requireSQLState(t, err, "23514")
+			_, err = session.db.Exec(ctx, session.statement, limit, nil, nil, nil, "query", "allow", tooLong, nil, nil)
+			requireSQLState(t, err, "23514")
+			assertGrantCount(t, owner, "security_audit", beforeCount+len(actions)*len(outcomes)+2)
+		})
+	}
+	assertRuntimeAuditShadowEmpty(t, conn.Conn())
+}
+
+func TestRuntimeSecurityAuditWriterPreservesRolesAndOperatorEvents(t *testing.T) {
+	ctx := t.Context()
+	databaseURL := startTestDatabase(t)
+	owner := migrationTestClient(t, databaseURL)
+	roles := newGrantRoles(t, databaseURL, servingRoles...)
+	grantExec(t, owner, roles.sql(`CREATE ROLE {quarry_service}; CREATE ROLE {quarry_operator}; CREATE ROLE {quarry_auditor};
+		ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO {quarry_service}, {quarry_operator}, {quarry_auditor}`))
+	applyMigrationPrefix(t, owner, 34)
+	for _, role := range []string{"public", roles.name("quarry_service"), roles.name("quarry_operator"), roles.name("quarry_auditor")} {
+		assertRuntimeAuditExecute(t, owner, role, false)
+	}
+	grantLegacyRuntimeAuditAccess(t, owner, roles)
+	grantExec(t, owner, roles.sql(`GRANT USAGE ON SCHEMA public TO {quarry_auditor};
+		GRANT SELECT ON public.grant_catalog_security_audit TO {quarry_auditor}`))
+	before := readRuntimeAuditFunctionIdentity(t, owner)
+	service := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {quarry_service}`))
+	operator := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {quarry_operator}`))
+	auditor := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {quarry_auditor}`))
+	const legacyRows = `SELECT to_jsonb(audit)::text FROM grant_catalog_security_audit AS audit
+		WHERE request_id='legacy' AND operator IS NULL ORDER BY audit_id`
+	for _, action := range []string{"corpus_cutover", "grant_import"} {
+		grantExec(t, service, runtimeAuditCall, "legacy", nil, nil, nil, action, "allow", "synthetic", nil, nil)
+	}
+	rows, err := auditor.Pool.Query(ctx, legacyRows)
+	require.NoError(t, err)
+	legacy, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	require.Len(t, legacy, 2)
+
+	require.NoError(t, owner.RunMigrations(ctx))
+	require.Equal(t, before, readRuntimeAuditFunctionIdentity(t, owner))
+	grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "GRANT USAGE ON SCHEMA public"))
+	require.Equal(t, before, readRuntimeAuditFunctionIdentity(t, owner))
+	assertRuntimeAuditExecute(t, owner, roles.name("quarry_service"), true)
+	for _, role := range []string{"public", roles.name("quarry_operator"), roles.name("quarry_auditor")} {
+		assertRuntimeAuditExecute(t, owner, role, false)
+	}
+	for _, role := range []string{"public", roles.name("quarry_service"), roles.name("quarry_operator"), roles.name("quarry_auditor")} {
+		var executable bool
+		require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT has_function_privilege($1::name, $2::text, 'EXECUTE')`,
+			role, runtimeAuditValidator).Scan(&executable))
+		require.False(t, executable, role)
+	}
+	for _, query := range []string{
+		`INSERT INTO grant_catalog_security_audit (action, outcome, reason) VALUES ('query', 'allow', 'synthetic')`,
+		`DELETE FROM grant_catalog_security_audit`,
+		`SELECT * FROM grant_catalog_security_audit`,
+		`SELECT * FROM grant_catalog_activate_grants(false)`,
+		`SELECT grant_catalog_validate_security_audit('query', 'allow')`,
+	} {
+		_, err = service.Pool.Exec(ctx, query)
+		requireSQLState(t, err, "42501")
+	}
+	_, err = auditor.Pool.Exec(ctx, runtimeAuditCall, nil, nil, nil, nil, "query", "allow", "synthetic", nil, nil)
+	requireSQLState(t, err, "42501")
+
+	_, err = operator.ActivateGrants(ctx, false)
+	require.EqualError(t, err, "grants activation: checkpointed document deletion must be activated first")
+	assertGrantCount(t, owner, "security_audit", len(legacy))
+	_, err = owner.ActivateDeletion(ctx)
+	require.NoError(t, err)
+	activation, err := operator.ActivateGrants(ctx, false)
+	require.NoError(t, err)
+	require.False(t, activation.AlreadyActive)
+	batch := testGrantBatch(activation.Revision)
+	batch["tenants"] = []grantEntry{{"tenant_id": uuid.NewString()}}
+	imported, err := importTestBatch(ctx, operator, batch, false)
+	require.NoError(t, err)
+	for _, event := range []struct {
+		action, reason string
+		revision       int64
+	}{
+		{"corpus_cutover", "grants_activated", activation.Revision},
+		{"grant_import", "batch_committed", imported.Revision},
+	} {
+		var count int
+		require.NoError(t, auditor.Pool.QueryRow(ctx, `SELECT count(*) FROM grant_catalog_security_audit
+			WHERE action=$1 AND reason=$2 AND policy_revision=$3 AND operator=$4 AND outcome='allow'`,
+			event.action, event.reason, event.revision, roles.name("quarry_operator")).Scan(&count))
+		require.Equal(t, 1, count, event.action)
+	}
+	rows, err = auditor.Pool.Query(ctx, legacyRows)
+	require.NoError(t, err)
+	after, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	require.Equal(t, legacy, after)
+	assertGrantCount(t, owner, "security_audit", 4)
+}
+
+func assertRuntimeAuditExecute(t *testing.T, owner *Client, role string, want bool) {
+	t.Helper()
+	var executable bool
+	require.NoError(t, owner.Pool.QueryRow(t.Context(), `SELECT has_function_privilege($1::name, $2::text, 'EXECUTE')`,
+		role, runtimeAuditFunction).Scan(&executable))
+	require.Equal(t, want, executable, role)
+}
+
+func TestRuntimeSecurityAuditWriterBindsMetadataSchema(t *testing.T) {
+	ctx := t.Context()
+	databaseURL := startTestDatabase(t)
+	admin := migrationTestClient(t, databaseURL)
+	require.NoError(t, admin.RunMigrations(ctx))
+	grantExec(t, admin, `CREATE SCHEMA "AuditCorpus"; UPDATE public.grant_catalog_policy_revision SET revision=11`)
+	owner := grantRoleClient(t, databaseURL, `SET search_path TO "AuditCorpus", public`)
+	require.NoError(t, owner.RunMigrations(ctx))
+	grantExec(t, owner, `UPDATE grant_catalog_policy_revision SET revision=13 WHERE singleton`)
+	roles := newGrantRoles(t, databaseURL, servingRoles...)
+	grantExec(t, owner, roles.sql(`CREATE ROLE {quarry_service}; CREATE ROLE {quarry_operator}; CREATE ROLE {quarry_auditor}`))
+	grants := publishedServingSQL(t, roles, "grant-catalog.md", "GRANT USAGE ON SCHEMA public")
+	grantExec(t, owner, strings.NewReplacer("ON SCHEMA public", `ON SCHEMA "AuditCorpus"`, "public.", `"AuditCorpus".`).Replace(grants))
+	assertRuntimeAuditExecute(t, owner, roles.name("quarry_service"), true)
+	assertRuntimeAuditExecute(t, owner, roles.name("quarry_auditor"), false)
+	assertRuntimeAuditExecute(t, owner, "public", false)
+	service := grantRoleClient(t, databaseURL, roles.sql(`SET SESSION AUTHORIZATION {quarry_service}; SET search_path TO pg_temp, "AuditCorpus", public`))
+	conn, err := service.Pool.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn.Release()
+	_, err = conn.Exec(ctx, runtimeAuditShadowRelations)
+	require.NoError(t, err)
+	_, err = conn.Exec(ctx, runtimeAuditCall, "scoped", nil, nil, nil, "query", "allow", "synthetic", nil, nil)
+	require.NoError(t, err)
+	_, err = conn.Exec(ctx, runtimeAuditCall, nil, nil, nil, nil, "corpus_cutover", "allow", "synthetic", nil, nil)
+	requireRuntimeAuditRejection(t, err, "action")
+	var revision int64
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT policy_revision FROM "AuditCorpus".grant_catalog_security_audit`).Scan(&revision))
+	require.EqualValues(t, 13, revision)
+	assertGrantCount(t, owner, "security_audit", 1)
+	assertRuntimeAuditShadowEmpty(t, conn.Conn())
+	assertGrantCount(t, admin, "security_audit", 0)
+
+	t.Run("case-insensitive collation", func(t *testing.T) {
+		ctx := t.Context()
+		var icu bool
+		require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_collation WHERE collprovider='i')`).Scan(&icu))
+		if !icu {
+			t.Skip("requires ICU collation support")
+		}
+		grantExec(t, owner, `CREATE COLLATION "AuditCorpus".case_insensitive (provider=icu, locale='und-u-ks-level2', deterministic=false)`)
+		var same bool
+		require.NoError(t, conn.QueryRow(ctx, `SELECT 'QUERY' COLLATE "AuditCorpus".case_insensitive = 'query'`).Scan(&same))
+		require.True(t, same)
+		const collatedCall = `SELECT grant_catalog_record_security_audit($1, $2, $3, $4,
+			$5::text COLLATE "AuditCorpus".case_insensitive, $6, $7, $8, $9)`
+		_, err := conn.Exec(ctx, collatedCall, nil, nil, nil, nil, "QUERY", "allow", "synthetic", nil, nil)
+		requireRuntimeAuditRejection(t, err, "action")
+		_, err = conn.Exec(ctx, collatedCall, nil, nil, nil, nil, "query", "ALLOW", "synthetic", nil, nil)
+		requireRuntimeAuditRejection(t, err, "outcome")
+		assertGrantCount(t, owner, "security_audit", 1)
+	})
+}
+
+func TestRuntimeSecurityAuditWriterRestoresDefinitions(t *testing.T) {
+	ctx := t.Context()
+	databaseURL := startTestDatabase(t)
+	source := migrationTestClient(t, databaseURL)
+	require.NoError(t, source.RunMigrations(ctx))
+	grantExec(t, source, `ALTER SCHEMA public RENAME TO "Restored Corpus"`)
+	var validatorDDL, writerDDL string
+	require.NoError(t, source.Pool.QueryRow(ctx, `SELECT pg_get_functiondef(validator.oid), pg_get_functiondef(writer.oid)
+		FROM pg_proc AS validator JOIN pg_depend AS dependency
+		  ON dependency.refclassid = 'pg_proc'::regclass AND dependency.refobjid = validator.oid
+		JOIN pg_proc AS writer ON dependency.classid = 'pg_proc'::regclass AND dependency.objid = writer.oid
+		WHERE dependency.deptype = 'n' AND validator.oid = $1::text::regprocedure AND writer.oid = $2::text::regprocedure`,
+		`"Restored Corpus".`+runtimeAuditValidator, `"Restored Corpus".`+runtimeAuditFunction).Scan(&validatorDDL, &writerDDL))
+
+	targetURL := pgtest.Sibling(t, databaseURL)
+	target := migrationTestClient(t, targetURL)
+	applyMigrationPrefix(t, target, 34)
+	grantExec(t, target, `ALTER SCHEMA public RENAME TO "Restored Corpus"`)
+	grantExec(t, target, validatorDDL)
+	grantExec(t, target, writerDDL)
+	restored := grantRoleClient(t, targetURL, `SET search_path TO "Restored Corpus"`)
+	require.NoError(t, restored.RecordSecurityAudit(ctx, domain.SecurityAuditEvent{Action: "query", Outcome: "allow"}))
+	_, err := restored.Pool.Exec(ctx, runtimeAuditCall, nil, nil, nil, nil, "query", "invalid", "synthetic", nil, nil)
+	requireRuntimeAuditRejection(t, err, "outcome")
+	assertGrantCount(t, restored, "security_audit", 1)
+}
+
+func assertRuntimeAuditShadowEmpty(t *testing.T, conn *pgx.Conn) {
+	t.Helper()
+	var tempCount int
+	require.NoError(t, conn.QueryRow(t.Context(), `SELECT count(*) FROM pg_temp.grant_catalog_security_audit`).Scan(&tempCount))
+	require.Zero(t, tempCount)
+}
+
+func TestRuntimeSecurityAuditWriterPreservesTransactions(t *testing.T) {
+	ctx := t.Context()
+	owner, serving, _ := restrictedDatabase(t)
+	before := readRuntimeAuditFunctionIdentity(t, owner)
+	const functionRowVersion = `SELECT xmin::text FROM pg_proc WHERE oid = $1::text::regprocedure`
+	var originalVersion, repeatedVersion string
+	require.NoError(t, owner.Pool.QueryRow(ctx, functionRowVersion, runtimeAuditFunction).Scan(&originalVersion))
+	require.NoError(t, owner.RunMigrations(ctx))
+	requireRecordedMigrations(t, owner)
+	require.Equal(t, before, readRuntimeAuditFunctionIdentity(t, owner))
+	require.NoError(t, owner.Pool.QueryRow(ctx, functionRowVersion, runtimeAuditFunction).Scan(&repeatedVersion))
+	require.Equal(t, originalVersion, repeatedVersion, "repeated migrations must not replace the writer again")
+
+	for _, scenario := range []struct {
+		name   string
+		reject bool
+	}{
+		{"caller rollback", false},
+		{"rejected call", true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			txCtx := t.Context()
+			tx, err := serving.Pool.Begin(txCtx)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback(context.WithoutCancel(txCtx)) }()
+			_, err = tx.Exec(txCtx, runtimeAuditCall, "rolled back", nil, nil, nil, "query", "allow", "synthetic", nil, nil)
+			require.NoError(t, err)
+			if scenario.reject {
+				_, err = tx.Exec(txCtx, runtimeAuditCall, nil, nil, nil, nil, "grant_import", "allow", "synthetic", nil, nil)
+				requireRuntimeAuditRejection(t, err, "action")
+				require.ErrorIs(t, tx.Commit(txCtx), pgx.ErrTxCommitRollback)
+			} else {
+				require.NoError(t, tx.Rollback(txCtx))
+			}
+			assertGrantCount(t, owner, "security_audit", 0)
+		})
+	}
+
+	tx, err := serving.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	_, err = tx.Exec(ctx, runtimeAuditCall, "committed", nil, nil, nil, "query", "allow", "synthetic", nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+	assertGrantCount(t, owner, "security_audit", 1)
+}
 
 func TestPublishedServingUpgradeRestoresServiceMode(t *testing.T) {
 	owner, serving, roles := restrictedDatabase(t)
@@ -322,6 +677,16 @@ func TestCorpusModeAndSecurityAuditPrivilegesAndBlocking(t *testing.T) {
 	require.Zero(t, deletingCount, "failed audit must roll back deletion intent")
 
 	grantExec(t, admin, `DROP TRIGGER refuse_runtime_audit ON grant_catalog_security_audit; DROP FUNCTION refuse_runtime_audit()`)
+
+	canceled, cancel := context.WithCancel(reqCtx)
+	cancel()
+	require.ErrorIs(t, service.RecordSecurityAudit(canceled, domain.SecurityAuditEvent{
+		RequestID: "canceled-audit", Action: "query", Outcome: "allow", Reason: "synthetic",
+	}), context.Canceled)
+	var canceledRows int
+	require.NoError(t, auditor.Pool.QueryRow(t.Context(), `SELECT count(*) FROM grant_catalog_security_audit
+		WHERE request_id='canceled-audit'`).Scan(&canceledRows))
+	require.Zero(t, canceledRows)
 
 	// Auditor reads the recorded cutover, import, and ingest audit events.
 	var total int
