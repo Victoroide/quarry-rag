@@ -30,6 +30,7 @@ Notable changes are grouped by release.
 ### Fixed
 
 - Bound operational error logs and trace errors in grants mode to prevent disclosure of document identifiers and input excerpts.
+- Reindex staging recovery requires the pending write UUID, preventing stale confirmations from clearing a later mutation.
 
 ## [0.2.0] - 2026-11-26
 

@@ -429,6 +429,19 @@ the table and its indexes as the metadata owner. See
 [vector reindex database privileges](#vector-reindex-database-privileges) for
 the login and privilege requirements.
 
+Before applying migration 041, stop pre-upgrade staging executables and all
+processes that can still dispatch mutations to the staging target. Apply the
+migration before invoking the updated maintenance commands. On rollback, keep
+the migration and use the updated maintenance executable or leave staging and
+recovery disabled.
+
+Before confirming an unacknowledged staging write, stop all dispatch-capable
+senders for the bound target. Obtain provider-side evidence that the exact
+outstanding mutation can no longer change that target. A database disconnect,
+context error or empty read is insufficient settlement evidence. Migration 041
+assigns an identity to each legacy pending row without establishing settlement.
+Keep the journal held when evidence is unavailable.
+
 Before cutting a tagged corpus over to PostgreSQL, upgrade every serving,
 worker and cleanup binary to a release that supports tagged documents on
 pgvector. Finish catch-up and verification under the freeze before routing
