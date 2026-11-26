@@ -72,6 +72,7 @@ Database-backed tests skip under `go test -short` even when shared services are 
 To reuse running services instead, set both `QUARRY_TEST_POSTGRES_ADMIN_DSN` and `QUARRY_TEST_PGVECTOR_ADMIN_DSN` to PostgreSQL URLs for superusers on an ordinary PostgreSQL 16 server and on a server where the `vector` extension and the `es_ES.utf8` system locale are available. Each URL must specify a host and an administrator, either in the user info or the `user` query parameter. An omitted maintenance database defaults to `postgres`. Set a database in the path or use the `dbname` or `database` query parameter to override it. A single host defaults to port 5432.
 
 Each test then gets a new empty database, created from `template0` with a random name and dropped when the test ends, even if its setup failed, together with the databases and roles the test requested through `pgtest.Sibling`, `pgtest.SiblingLatin1` and `pgtest.Role`. Connections that outlive the test are closed by the drop. Setting only one variable, an invalid URL or an unreachable service fails the test. Only the two test settings supply administrator addresses. Tests that touch cluster-wide state take their role names from `pgtest.Role` and scope lock observations to their own database, so any order and any number of concurrent fixtures stay isolated.
+The advisory-lock count probe counts a fixture-local holder while a sibling holds the same key.
 
 The offline query test ingests through HTTP, polls document status until completion, and verifies cited evidence and document restrictions through the router.
 
