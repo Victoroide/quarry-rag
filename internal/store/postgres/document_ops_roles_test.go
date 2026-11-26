@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
@@ -74,7 +75,7 @@ func TestScopedDocumentOperationsNeedOnlyDocumentedFunctionPrivileges(t *testing
 
 	rec := newDeletionRecorder()
 	ops := rec.ops("")
-	ops.InMemory = true
+	ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
 	inc, complete, err := service.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), req.Document.ID, ops)
 	require.NoError(t, err)
 	require.False(t, complete)

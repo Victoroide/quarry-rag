@@ -145,6 +145,12 @@ func hostedVectors(mode string) bool {
 	return mode == legacyVectors || mode == revisionVectors || mode == manifestVectors
 }
 
+// memoryBacked reports whether the receipt's vectors live in a serving process,
+// whose owner alone can replay and release them.
+func memoryBacked(mode string) bool {
+	return mode == memoryVectors || mode == memoryRevision
+}
+
 func nullable(value string) *string {
 	if value == "" {
 		return nil
@@ -254,27 +260,35 @@ func insertDeletionIntentTx(ctx context.Context, tx pgx.Tx, id domain.DocumentID
 	if hostedVectors(mode) {
 		index = nullable(ops.VectorIndex)
 	}
+	// A receipt for process-local vectors names the process that owns them, so
+	// only that process can later release the hold. Without an owner the receipt
+	// could never be released by its service, so none is created.
+	owner := nullable(ops.MemoryOwner)
+	if memoryBacked(mode) && owner == nil {
+		return domain.ErrVectorStorageUnavailable
+	}
 	// An ID-only cleanup that began before activation committed a reservation for
 	// this lifetime. The qualified retry takes it over, keeping its hold and its
 	// recorded backend, unless a live cleanup still owns its claim.
-	tag, err := tx.Exec(ctx, `UPDATE document_deletions SET kind='qualified_intent',step=0,claim=NULL,claim_until=NULL
+	tag, err := tx.Exec(ctx, `UPDATE document_deletions SET kind='qualified_intent',step=0,claim=NULL,claim_until=NULL,
+		memory_owner=CASE WHEN vector_mode IN ('memory','memory_revision') THEN COALESCE(memory_owner,$4::uuid) END
 		WHERE document_id=$1 AND incarnation=$2 AND kind='legacy_reservation' AND NOT finalized AND vector_mode=$3
 		AND (claim_until IS NULL OR claim_until<=clock_timestamp())
-		AND (memory_owner IS NULL OR memory_owner=$4::uuid)`, string(id), incarnation, mode, nullable(ops.MemoryOwner))
+		AND (memory_owner IS NULL OR memory_owner=$4::uuid)`, string(id), incarnation, mode, owner)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() != 1 {
 		// Historical document-wide deletes cannot prove that no older write is
 		// outstanding, so their identity stays held until it is reconciled.
-		tag, err = tx.Exec(ctx, `INSERT INTO document_deletions(document_id,incarnation,kind,source_key,source_bucket,vector_mode,vector_index,held)
-			VALUES($1,$2,'qualified_intent',$3,$4,$5,$6,$7)
+		tag, err = tx.Exec(ctx, `INSERT INTO document_deletions(document_id,incarnation,kind,source_key,source_bucket,vector_mode,vector_index,held,memory_owner)
+			VALUES($1,$2,'qualified_intent',$3,$4,$5,$6,$7,CASE WHEN $5::text IN ('memory','memory_revision') THEN $8::uuid END)
 			ON CONFLICT(document_id) DO UPDATE SET incarnation=EXCLUDED.incarnation,kind=EXCLUDED.kind,source_key=EXCLUDED.source_key,
 				source_bucket=EXCLUDED.source_bucket,vector_mode=EXCLUDED.vector_mode,vector_index=EXCLUDED.vector_index,
-				memory_owner=NULL,step=0,held=EXCLUDED.held,finalized=FALSE,claim=NULL,claim_until=NULL
+				memory_owner=EXCLUDED.memory_owner,step=0,held=EXCLUDED.held,finalized=FALSE,claim=NULL,claim_until=NULL
 			WHERE document_deletions.finalized AND NOT document_deletions.held
 				AND (document_deletions.claim_until IS NULL OR document_deletions.claim_until<=clock_timestamp())`,
-			string(id), incarnation, source, bucket, mode, index, mode == legacyVectors)
+			string(id), incarnation, source, bucket, mode, index, mode == legacyVectors, owner)
 		if err != nil {
 			return err
 		}
