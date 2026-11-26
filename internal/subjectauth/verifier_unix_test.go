@@ -4,9 +4,11 @@ package subjectauth
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func makeTrustFileGroupWritable(t *testing.T, path string) {
@@ -29,4 +31,45 @@ func TestSubjectTrustFilePermissions(t *testing.T) {
 
 func TestTrustTransitionRejectsInsecureReread(t *testing.T) {
 	testTrustTransitionInvalidReread(t, makeTrustFileGroupWritable)
+}
+
+func TestTrustReadLimitsAndRecoveryUnix(t *testing.T) {
+	verifier, _, path := newFixtureVerifier(t)
+	original, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, verifier.ValidateTrust())
+
+	for _, tc := range []struct {
+		name    string
+		replace func(*testing.T)
+	}{
+		{"group writable", func(t *testing.T) { makeTrustFileGroupWritable(t, path) }},
+		{"world writable", func(t *testing.T) { require.NoError(t, os.Chmod(path, 0o602)) }},
+		{"fifo", func(t *testing.T) {
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, unix.Mkfifo(path, 0o600))
+		}},
+		{"outside symlink", func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), "outside.json")
+			replaceTrust(t, target, original)
+			relative, err := filepath.Rel(filepath.Dir(path), target)
+			require.NoError(t, err)
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, os.Symlink(relative, path))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.replace(t)
+			require.ErrorIs(t, awaitTrustResult(t, startTrustCall(verifier.ValidateTrust)), ErrAuthorityUnavailable)
+			require.NoError(t, os.Remove(path))
+			replaceTrust(t, path, original)
+			require.NoError(t, verifier.ValidateTrust())
+		})
+	}
+
+	contained := filepath.Join(filepath.Dir(path), "contained.json")
+	replaceTrust(t, contained, original)
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.Symlink(filepath.Base(contained), path))
+	require.NoError(t, verifier.ValidateTrust())
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"io/fs"
 	"strings"
 	"sync"
 	"time"
@@ -40,55 +41,112 @@ type TrustObserver func(TrustEvent) error
 type trustFile struct {
 	path                 string
 	observer             TrustObserver
+	readFile             func(string, int64, fs.FileMode) ([]byte, error)
 	mu                   sync.Mutex
 	last                 trustSnapshot
 	unavailable          bool
 	transitionInProgress bool
+	generation           uint64
 }
 
 func (f *trustFile) load(now func() time.Time) (trustSnapshot, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.transitionInProgress {
+		f.mu.Unlock()
 		return trustSnapshot{}, ErrAuthorityUnavailable
 	}
-	candidate, ok := f.readFresh(now, f.last)
-	if !ok {
-		f.notifyUnavailable()
-		return trustSnapshot{}, ErrAuthorityUnavailable
-	}
-	if f.last.keys == nil || candidate.digest != f.last.digest {
-		reason := "trust_loaded"
-		if f.last.keys != nil {
-			reason = "trust_rotated"
-		}
-		if err := f.observe(TrustEvent{Action: "trust_key_load", Outcome: "allow", Reason: reason}); err != nil {
-			return trustSnapshot{}, ErrAuthorityUnavailable
-		}
+	generation := f.generation
+	f.mu.Unlock()
 
-		// The file may have been replaced or expired while the audit ran.
-		current, ok := f.readFresh(now, candidate)
-		if !ok {
-			f.notifyUnavailable()
-			return trustSnapshot{}, ErrAuthorityUnavailable
-		}
-		if current.digest != candidate.digest {
-			return trustSnapshot{}, ErrAuthorityUnavailable
-		}
-		f.last = candidate
+	_, digest, err := f.readTrustBytes()
+
+	f.mu.Lock()
+	// A completed transition also invalidates samples taken before it began.
+	if f.transitionInProgress || generation != f.generation {
+		f.mu.Unlock()
+		return trustSnapshot{}, ErrAuthorityUnavailable
 	}
-	f.unavailable = false
-	return f.last, nil
+	if err != nil {
+		return f.failUnavailableLocked()
+	}
+	last := f.last
+	if last.keys != nil && digest == last.digest {
+		if !now().Before(last.expiresAt) {
+			return f.failUnavailableLocked()
+		}
+		f.unavailable = false
+		f.mu.Unlock()
+		return last, nil
+	}
+
+	f.reserveTransitionLocked()
+	f.mu.Unlock()
+	return f.loadTransition(now, last)
 }
 
-// readFresh runs under mu so a caller cannot publish an older read after a
-// newer one. Every read checks the file policy, even on a digest match.
-func (f *trustFile) readFresh(now func() time.Time, cached trustSnapshot) (trustSnapshot, bool) {
-	data, err := credential.ReadFile(f.path, maxTrustBytes, 0o022)
+// loadTransition owns the reservation through both rereads and the audit.
+func (f *trustFile) loadTransition(now func() time.Time, last trustSnapshot) (trustSnapshot, error) {
+	defer f.releaseTransition()
+
+	candidate, ok := f.freshTrust(now, last)
+	if !ok {
+		f.mu.Lock()
+		return f.failUnavailableLocked()
+	}
+	if last.keys != nil && candidate.digest == last.digest {
+		return f.publishFresh(now, last)
+	}
+
+	reason := "trust_loaded"
+	if last.keys != nil {
+		reason = "trust_rotated"
+	}
+	if f.observer != nil {
+		if err := f.observer(TrustEvent{Action: "trust_key_load", Outcome: "allow", Reason: reason}); err != nil {
+			return trustSnapshot{}, ErrAuthorityUnavailable
+		}
+	}
+
+	current, ok := f.freshTrust(now, candidate)
+	if !ok {
+		f.mu.Lock()
+		return f.failUnavailableLocked()
+	}
+	if current.digest != candidate.digest {
+		return trustSnapshot{}, ErrAuthorityUnavailable
+	}
+	return f.publishFresh(now, current)
+}
+
+func (f *trustFile) publishFresh(now func() time.Time, snapshot trustSnapshot) (trustSnapshot, error) {
+	f.mu.Lock()
+	if !now().Before(snapshot.expiresAt) {
+		return f.failUnavailableLocked()
+	}
+	f.last = snapshot
+	f.unavailable = false
+	f.mu.Unlock()
+	return snapshot, nil
+}
+
+// readTrustBytes checks the file policy on every read, including cache hits.
+func (f *trustFile) readTrustBytes() ([]byte, [sha256.Size]byte, error) {
+	readFile := f.readFile
+	if readFile == nil {
+		readFile = credential.ReadFile
+	}
+	data, err := readFile(f.path, maxTrustBytes, 0o022)
+	if err != nil {
+		return nil, [sha256.Size]byte{}, err
+	}
+	return data, sha256.Sum256(data), nil
+}
+
+func (f *trustFile) freshTrust(now func() time.Time, cached trustSnapshot) (trustSnapshot, bool) {
+	data, digest, err := f.readTrustBytes()
 	if err != nil {
 		return trustSnapshot{}, false
 	}
-	digest := sha256.Sum256(data)
 	if cached.keys != nil && cached.digest == digest {
 		return cached, now().Before(cached.expiresAt)
 	}
@@ -97,27 +155,31 @@ func (f *trustFile) readFresh(now func() time.Time, cached trustSnapshot) (trust
 	return parsed, ok && now().Before(parsed.expiresAt)
 }
 
-// notifyUnavailable records one best-effort event until a successful load.
-func (f *trustFile) notifyUnavailable() {
-	if !f.unavailable {
-		f.unavailable = true
-		_ = f.observe(TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"})
+// failUnavailableLocked releases mu and records one best-effort event per
+// episode. A transition caller already owns the reservation.
+func (f *trustFile) failUnavailableLocked() (trustSnapshot, error) {
+	notify := !f.unavailable && f.observer != nil
+	f.unavailable = true
+	if notify && !f.transitionInProgress {
+		f.reserveTransitionLocked()
+		defer f.releaseTransition()
 	}
+	f.mu.Unlock()
+	if notify {
+		_ = f.observer(TrustEvent{Action: "trust_key_load", Outcome: "error", Reason: "trust_unavailable"})
+	}
+	return trustSnapshot{}, ErrAuthorityUnavailable
 }
 
-// observe releases mu during the callback and returns with it held, keeping
-// other loads out of the transition without waiting for the audit write.
-func (f *trustFile) observe(event TrustEvent) error {
-	if f.observer == nil {
-		return nil
-	}
+func (f *trustFile) reserveTransitionLocked() {
 	f.transitionInProgress = true
+	f.generation++
+}
+
+func (f *trustFile) releaseTransition() {
+	f.mu.Lock()
+	f.transitionInProgress = false
 	f.mu.Unlock()
-	defer func() {
-		f.mu.Lock()
-		f.transitionInProgress = false
-	}()
-	return f.observer(event)
 }
 
 func parseTrust(raw []byte) (trustSnapshot, bool) {
