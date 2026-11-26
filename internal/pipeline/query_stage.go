@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"regexp"
 	"slices"
 	"sort"
@@ -905,69 +906,759 @@ func NewSynthesisStageWithCatalog(amb *llm.Ambassador, cfg *config.Config, catal
 // ID returns the stage identifier.
 func (s *SynthesisStage) ID() StageID { return StageSynthesis }
 
-// trimChunksForSynthesis budgets sanitized excerpts in candidate order.
-// A partial final excerpt needs a sentence boundary and at least 64 tokens;
-// the first excerpt is always retained, with a hard cut if necessary.
-func trimChunksForSynthesis(in []domain.ScoredChunk, budget int, relativeFloor float64, requireEvidence bool) (out []domain.ScoredChunk, truncated []bool) {
-	if requireEvidence {
-		usable := make([]domain.ScoredChunk, 0, len(in))
-		for _, sc := range in {
-			sc.Chunk.Text = sanitizeExcerpt(sc.Chunk.Text)
-			if strings.TrimSpace(sc.Chunk.Text) != "" {
-				usable = append(usable, sc)
-			}
-		}
-		in = usable
+const (
+	defaultSynthesisContextBudget = 2400
+	defaultRelativeScoreFloor     = 0.55
+	minPartialExcerptTokens       = 64
+	maxSynthesisExcerpts          = 100
+	contextShingleWidth           = 5
+	maxShinglesPerChunk           = 1024
+)
+
+// trimChunksForSynthesis budgets sanitized excerpts using the configured policy.
+// Empty or control-only bodies are dropped before selecting the leading usable
+// passage. That leading passage is always retained under the first-candidate
+// exception to the relative score floor, including after reranking, while later
+// candidates must satisfy the vector floor and output chunk/byte caps.
+func trimChunksForSynthesis(ctx context.Context, in []domain.ScoredChunk, budget int, relativeFloor float64, policy string) (out []domain.ScoredChunk, truncated []bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
 	}
-	if len(in) == 0 {
-		return in, nil
+	usable := make([]domain.ScoredChunk, 0, len(in))
+	for _, sc := range in {
+		sc.Chunk.Text = sanitizeExcerpt(sc.Chunk.Text)
+		if strings.TrimSpace(sc.Chunk.Text) != "" {
+			usable = append(usable, sc)
+		}
+	}
+	if len(usable) == 0 {
+		return nil, nil, nil
 	}
 	if budget <= 0 {
-		budget, relativeFloor = 2400, 0.55
+		budget, relativeFloor = defaultSynthesisContextBudget, defaultRelativeScoreFloor
 	}
 	// Reranking may reorder candidates: the floor follows the best vector score
 	// and skips weaker candidates instead of ending selection.
-	top := in[0].Score
-	for _, sc := range in[1:] {
-		top = max(top, sc.Score)
+	top := 0.0
+	hasTop := false
+	for _, sc := range usable {
+		if !math.IsNaN(sc.Score) && (!hasTop || sc.Score > top) {
+			top = sc.Score
+			hasTop = true
+		}
 	}
 	floor := top * relativeFloor
-	out = make([]domain.ScoredChunk, 0, len(in))
-	truncated = make([]bool, 0, len(in))
-	remaining := budget
-	for _, sc := range in {
-		if sc.Score < floor && len(out) > 0 {
+	maxExcerpts := min(maxSynthesisExcerpts, max(1, budget))
+	maxBytes := (budget*4 + maxExcerpts*3) * utf8.UTFMax
+
+	if policy == config.SynthesisContextPolicyDiverse {
+		return selectDiverseChunks(ctx, usable, budget, top, floor, maxExcerpts, maxBytes)
+	}
+	return selectRankedChunks(ctx, usable, budget, floor, maxExcerpts, maxBytes)
+}
+
+func selectRankedChunks(ctx context.Context, usable []domain.ScoredChunk, budget int, floor float64, maxExcerpts, maxBytes int) (out []domain.ScoredChunk, truncated []bool, err error) {
+	out = make([]domain.ScoredChunk, 0, min(len(usable), maxExcerpts))
+	truncated = make([]bool, 0, min(len(usable), maxExcerpts))
+	remaining, usedBytes := budget, 0
+	for _, sc := range usable {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if len(out) >= maxExcerpts {
+			break
+		}
+		if len(out) > 0 && (math.IsNaN(sc.Score) || sc.Score < floor) {
 			continue
 		}
-		if !requireEvidence {
-			sc.Chunk.Text = sanitizeExcerpt(sc.Chunk.Text)
-		}
 		tokens := llm.EstimateTokens(sc.Chunk.Text)
-		if tokens > remaining {
-			if remaining < 64 && len(out) > 0 {
+		if tokens > remaining || usedBytes+len(sc.Chunk.Text) > maxBytes {
+			if (remaining < minPartialExcerptTokens || maxBytes-usedBytes <= 0) && len(out) > 0 {
 				break
 			}
-			runes := []rune(sc.Chunk.Text)
-			cut := sort.Search(len(runes)+1, func(n int) bool {
-				return llm.EstimateTokens(string(runes[:n])) > remaining
-			}) - 1
-			body := string(runes[:cut])
-			if end := strings.LastIndexAny(body, ".\n"); end >= 0 && llm.EstimateTokens(body[:end+1]) >= 64 {
-				body = body[:end+1]
-			} else if len(out) > 0 {
+			if len(out) > 0 && remaining <= 0 {
 				break
 			}
-			if requireEvidence && strings.TrimSpace(body) == "" {
-				continue
+			body, ok := cutExcerptToBudget(sc.Chunk.Text, remaining, maxBytes-usedBytes, len(out) == 0)
+			if !ok {
+				if len(out) == 0 {
+					continue
+				}
+				break
 			}
 			sc.Chunk.Text = body
 			out, truncated = append(out, sc), append(truncated, true)
 			break
 		}
+		if len(out) > 0 && remaining == 0 {
+			break
+		}
 		out, truncated = append(out, sc), append(truncated, false)
 		remaining -= tokens
+		usedBytes += len(sc.Chunk.Text)
 	}
-	return out, truncated
+	return out, truncated, nil
+}
+
+type diverseCandidate struct {
+	chunk            domain.ScoredChunk
+	rank             int
+	tokens           int
+	shingles         []uint64
+	signals          meaningSignals
+	signalsDone      bool
+	lastCutRemTokens int
+	lastCutRemBytes  int
+	lastCutValid     bool
+	lastCutBody      string
+	lastCutTokens    int
+	lastCutShingles  []uint64
+	lastCutSignals   meaningSignals
+	lastCutSigDone   bool
+	selected         bool
+	unfitting        bool
+}
+
+type selectedExcerpt struct {
+	docID       domain.DocumentID
+	index       int
+	text        string
+	shingles    map[uint64]struct{}
+	signals     meaningSignals
+	signalsDone bool
+}
+
+type meaningSignals struct {
+	numbers map[string]struct{}
+	terms   map[string]struct{}
+}
+
+const (
+	meaningBearingOverlapThreshold = 0.50
+	crossDocOverlapWeight          = 0.95
+)
+
+// meaningBearingWordTerms lists space-delimited negations, exceptions, and
+// qualifiers across the built-in response languages (en, es, pt, fr, de, it),
+// normalized via NFC, width folding, lowercasing, and apostrophe folding.
+var meaningBearingWordTerms = []string{
+	// en
+	"no", "not", "never", "none", "neither", "nor", "nothing", "nowhere", "nobody",
+	"cannot", "can't", "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "weren't",
+	"won't", "wouldn't", "couldn't", "shouldn't", "mustn't", "hasn't", "haven't", "hadn't",
+	"needn't", "mightn't", "shan't", "ain't",
+	"only", "solely", "exclusively", "merely",
+	"except", "excepting", "excluding", "unless", "until", "till", "without",
+	"at least", "at most", "no more than", "no less than",
+	"prohibited", "forbidden", "disallowed",
+	// es
+	"nunca", "jamás", "jamas", "ningún", "ningun", "ninguno", "ninguna", "ningunos", "ningunas",
+	"nada", "nadie", "ni", "tampoco", "prohibido", "prohibida", "prohibidos", "prohibidas",
+	"solo", "sólo", "solamente", "únicamente", "unicamente", "exclusivamente",
+	"excepto", "salvo", "a menos que", "a no ser que", "salvo que", "excepto que",
+	"hasta", "sin", "al menos", "por lo menos", "como mínimo", "como minimo",
+	"como máximo", "como maximo", "a lo sumo", "como mucho",
+	// pt
+	"não", "nao", "jamais", "nenhum", "nenhuma", "nenhuns", "nenhumas",
+	"ninguém", "ninguem", "nem", "proibido", "proibida", "proibidos", "proibidas",
+	"apenas", "somente", "só", "exceto", "a não ser que", "a nao ser que",
+	"até", "sem", "pelo menos", "ao menos", "no mínimo", "no minimo",
+	"no máximo", "no maximo", "quando muito",
+	// fr
+	"ne", "n'est", "n'a", "n'ont", "n'était", "n'étaient", "n'aura", "n'auront", "n'y", "n'en",
+	"pas", "non", "aucun", "aucune", "aucuns", "aucunes", "rien", "personne",
+	"nul", "nulle", "nullement", "interdit", "interdite", "interdits", "interdites",
+	"seulement", "uniquement", "sauf", "excepté", "excepte", "hormis",
+	"à moins que", "a moins que", "à moins de", "a moins de",
+	"jusqu'à", "jusqu'a", "jusqu'au", "jusqu'aux", "jusque", "sans",
+	"au moins", "tout au moins", "au plus", "tout au plus",
+	// de
+	"nicht", "kein", "keine", "keinen", "keinem", "keiner", "keines",
+	"nie", "niemals", "niemand", "nichts", "weder", "noch", "nein", "verboten", "untersagt",
+	"nur", "lediglich", "ausschließlich", "ausschliesslich", "einzig",
+	"außer", "ausser", "ausgenommen", "es sei denn", "sofern nicht", "wenn nicht",
+	"bis", "ohne", "mindestens", "wenigstens", "zumindest", "höchstens", "hoechstens",
+	// it
+	"mai", "nessun", "nessuno", "nessuna", "nessuni", "nessune",
+	"niente", "nulla", "né", "neppure", "nemmeno", "neanche",
+	"vietato", "vietata", "vietati", "vietate", "proibito", "proibita",
+	"soltanto", "eccetto", "tranne", "a meno che", "fino", "finché", "finche",
+	"senza", "almeno", "tutt'al più", "tutt'al piu", "al massimo", "al più", "al piu",
+}
+
+// meaningBearingDenseTerms lists negators and qualifiers matched as substrings
+// in non-space-delimited scripts (Han, Kana, Hangul, Thai).
+var meaningBearingDenseTerms = []string{
+	"不", "没", "無", "无", "未", "非",
+	"ない", "ません",
+	"않", "안", "못", "없",
+	"ไม่",
+	"禁止", "のみ", "だけ", "以外",
+	"금지", "제외",
+	"ห้าม", "เท่านั้น", "ยกเว้น", "จนกว่า", "อย่างน้อย", "อย่างมาก",
+}
+
+func selectDiverseChunks(ctx context.Context, usable []domain.ScoredChunk, budget int, top, floor float64, maxExcerpts, maxBytes int) (out []domain.ScoredChunk, truncated []bool, err error) {
+	candidates := make([]diverseCandidate, 0, len(usable))
+	hasRerank := false
+	for rank, sc := range usable {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		// Keep the leading usable passage regardless of relative floor; later
+		// candidates must meet the vector floor.
+		if rank > 0 && (math.IsNaN(sc.Score) || sc.Score < floor) {
+			continue
+		}
+		if sc.RerankScore != nil {
+			hasRerank = true
+		}
+		candidates = append(candidates, diverseCandidate{
+			chunk:  sc,
+			rank:   rank,
+			tokens: llm.EstimateTokens(sc.Chunk.Text),
+		})
+	}
+	if len(candidates) == 0 {
+		return nil, nil, nil
+	}
+
+	out = make([]domain.ScoredChunk, 0, min(len(candidates), maxExcerpts))
+	truncated = make([]bool, 0, min(len(candidates), maxExcerpts))
+	coveredAll := make(map[uint64]struct{})
+	coveredByDoc := make(map[domain.DocumentID]map[uint64]struct{})
+	selectedExcerpts := make([]selectedExcerpt, 0, min(len(candidates), maxExcerpts))
+	remaining, usedBytes := budget, 0
+
+	// Always retain the leading usable passage first.
+	for i := range candidates {
+		c := &candidates[i]
+		effBody := c.chunk.Chunk.Text
+		effTokens := c.tokens
+		effTrunc := false
+		if effTokens > remaining || len(effBody) > maxBytes {
+			cutBody, ok := cutExcerptToBudget(effBody, remaining, maxBytes, true)
+			if !ok {
+				c.unfitting = true
+				continue
+			}
+			effBody = cutBody
+			effTokens = llm.EstimateTokens(cutBody)
+			effTrunc = true
+		}
+		c.selected = true
+		chosen := c.chunk
+		chosen.Chunk.Text = effBody
+		out = append(out, chosen)
+		truncated = append(truncated, effTrunc)
+		remaining -= effTokens
+		usedBytes += len(effBody)
+		recordSelectedShingles(chosen.Chunk.DocumentID, chosen.Chunk.Index, effBody, extractContextShingles(effBody), coveredAll, coveredByDoc, &selectedExcerpts)
+		break
+	}
+	if len(out) == 0 {
+		return nil, nil, nil
+	}
+
+	for i := range candidates {
+		if !candidates[i].selected && !candidates[i].unfitting {
+			candidates[i].shingles = extractContextShingles(candidates[i].chunk.Chunk.Text)
+		}
+	}
+
+	for len(out) < maxExcerpts && remaining > 0 && usedBytes < maxBytes {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		remBytes := maxBytes - usedBytes
+		bestIdx := -1
+		bestScore := math.Inf(-1)
+		var bestBody string
+		var bestTokens int
+		var bestTrunc bool
+		var bestShingles []uint64
+
+		for i := range candidates {
+			c := &candidates[i]
+			if c.selected || c.unfitting {
+				continue
+			}
+			effBody := c.chunk.Chunk.Text
+			effTokens := c.tokens
+			effTrunc := false
+			shingles := c.shingles
+			if effTokens > remaining || len(effBody) > remBytes {
+				if remaining < minPartialExcerptTokens || remBytes <= 0 {
+					c.unfitting = true
+					continue
+				}
+				if c.lastCutValid && (c.lastCutRemTokens == remaining && c.lastCutRemBytes == remBytes ||
+					(c.lastCutTokens <= remaining && len(c.lastCutBody) <= remBytes)) {
+					effBody = c.lastCutBody
+					effTokens = c.lastCutTokens
+					shingles = c.lastCutShingles
+				} else {
+					cutBody, ok := cutExcerptToBudget(effBody, remaining, remBytes, false)
+					if !ok {
+						c.unfitting = true
+						continue
+					}
+					effBody = cutBody
+					effTokens = llm.EstimateTokens(cutBody)
+					shingles = extractContextShingles(cutBody)
+					c.lastCutRemTokens = remaining
+					c.lastCutRemBytes = remBytes
+					c.lastCutValid = true
+					c.lastCutBody = cutBody
+					c.lastCutTokens = effTokens
+					c.lastCutShingles = shingles
+					c.lastCutSigDone = false
+				}
+				effTrunc = true
+			}
+			score, skipSameDocDup := scoreDiverseCandidate(c, effBody, effTrunc, shingles, effTokens, remaining, top, hasRerank, coveredAll, coveredByDoc[c.chunk.Chunk.DocumentID], selectedExcerpts)
+			if skipSameDocDup {
+				c.unfitting = true
+				continue
+			}
+			if bestIdx < 0 || diverseCandidateBetter(score, c, bestScore, &candidates[bestIdx]) {
+				bestIdx = i
+				bestScore = score
+				bestBody = effBody
+				bestTokens = effTokens
+				bestTrunc = effTrunc
+				bestShingles = shingles
+			}
+		}
+		if bestIdx < 0 {
+			break
+		}
+		chosen := &candidates[bestIdx]
+		chosen.selected = true
+		selectedChunk := chosen.chunk
+		selectedChunk.Chunk.Text = bestBody
+		out = append(out, selectedChunk)
+		truncated = append(truncated, bestTrunc)
+		remaining -= bestTokens
+		usedBytes += len(bestBody)
+		recordSelectedShingles(chosen.chunk.Chunk.DocumentID, chosen.chunk.Chunk.Index, bestBody, bestShingles, coveredAll, coveredByDoc, &selectedExcerpts)
+	}
+	return out, truncated, nil
+}
+
+func recordSelectedShingles(
+	docID domain.DocumentID,
+	index int,
+	text string,
+	shingles []uint64,
+	coveredAll map[uint64]struct{},
+	coveredByDoc map[domain.DocumentID]map[uint64]struct{},
+	selected *[]selectedExcerpt,
+) {
+	docSet := coveredByDoc[docID]
+	if docSet == nil {
+		docSet = make(map[uint64]struct{}, len(shingles))
+		coveredByDoc[docID] = docSet
+	}
+	excerptSet := make(map[uint64]struct{}, len(shingles))
+	for _, h := range shingles {
+		coveredAll[h] = struct{}{}
+		docSet[h] = struct{}{}
+		excerptSet[h] = struct{}{}
+	}
+	*selected = append(*selected, selectedExcerpt{
+		docID:    docID,
+		index:    index,
+		text:     text,
+		shingles: excerptSet,
+	})
+}
+
+func scoreDiverseCandidate(
+	c *diverseCandidate,
+	effBody string,
+	effTrunc bool,
+	shingles []uint64,
+	effTokens, remaining int,
+	top float64,
+	hasRerank bool,
+	coveredAll map[uint64]struct{},
+	coveredSameDoc map[uint64]struct{},
+	selected []selectedExcerpt,
+) (score float64, pureSameDocDuplicate bool) {
+	total := len(shingles)
+	if total == 0 {
+		total = 1
+	}
+	allDup, sameDocDup := 0, 0
+	for _, h := range shingles {
+		if _, ok := coveredAll[h]; ok {
+			allDup++
+			if _, same := coveredSameDoc[h]; same {
+				sameDocDup++
+			}
+		}
+	}
+	crossDocDup := allDup - sameDocDup
+	novel := total - allDup
+	if novel == 0 && sameDocDup == total {
+		return 0, true
+	}
+
+	novelRatio := float64(novel) / float64(total)
+	sameDocDupRatio := float64(sameDocDup) / float64(total)
+	crossDocDupRatio := float64(crossDocDup) / float64(total)
+	dupRatio := float64(allDup) / float64(total)
+
+	if dupRatio >= meaningBearingOverlapThreshold && len(selected) > 0 {
+		bestIdx := bestOverlappingExcerpt(shingles, selected)
+		if bestIdx >= 0 {
+			candSignals := candidateMeaningSignals(c, effBody, effTrunc)
+			excSignals := excerptMeaningSignals(&selected[bestIdx])
+			if hasMeaningBearingSignalDiff(candSignals, excSignals, effTrunc) {
+				novelRatio = 1
+				sameDocDupRatio = 0
+				crossDocDupRatio = 0
+			}
+		}
+	}
+
+	rel := 1.0 / (1.0 + 0.20*float64(c.rank))
+	if !hasRerank && top > 0 && c.chunk.Score > 0 {
+		rel = min(1.0, c.chunk.Score/top)
+	}
+
+	effDupRatio := 1.0 - novelRatio
+	if sameDocDupRatio > 0 || crossDocDupRatio > 0 {
+		effDupRatio = sameDocDupRatio + crossDocOverlapWeight*crossDocDupRatio
+	}
+	excessDup := max(0.0, effDupRatio-0.50)
+	dupPenalty := 4.5 * excessDup * excessDup
+
+	cost := max(1, effTokens)
+	costRatio := float64(cost) / float64(max(1, remaining))
+
+	return rel - dupPenalty - 0.10*costRatio, false
+}
+
+func bestOverlappingExcerpt(shingles []uint64, selected []selectedExcerpt) int {
+	bestIdx := -1
+	bestHits := -1
+	for i := range selected {
+		hits := 0
+		set := selected[i].shingles
+		for _, h := range shingles {
+			if _, ok := set[h]; ok {
+				hits++
+			}
+		}
+		if hits > bestHits {
+			bestHits = hits
+			bestIdx = i
+		}
+	}
+	return bestIdx
+}
+
+func candidateMeaningSignals(c *diverseCandidate, effBody string, effTrunc bool) meaningSignals {
+	if effTrunc {
+		if !c.lastCutSigDone {
+			c.lastCutSignals = extractMeaningSignals(effBody)
+			c.lastCutSigDone = true
+		}
+		return c.lastCutSignals
+	}
+	if !c.signalsDone {
+		c.signals = extractMeaningSignals(effBody)
+		c.signalsDone = true
+	}
+	return c.signals
+}
+
+func excerptMeaningSignals(s *selectedExcerpt) meaningSignals {
+	if !s.signalsDone {
+		s.signals = extractMeaningSignals(s.text)
+		s.signalsDone = true
+	}
+	return s.signals
+}
+
+func meaningBearingDifference(candidate, excerpt string, candidateCut bool) bool {
+	return hasMeaningBearingSignalDiff(extractMeaningSignals(candidate), extractMeaningSignals(excerpt), candidateCut)
+}
+
+func hasMeaningBearingSignalDiff(cand, exc meaningSignals, candidateCut bool) bool {
+	for n := range cand.numbers {
+		if _, ok := exc.numbers[n]; !ok {
+			return true
+		}
+	}
+	for t := range cand.terms {
+		if _, ok := exc.terms[t]; !ok {
+			return true
+		}
+	}
+	if !candidateCut {
+		for n := range exc.numbers {
+			if _, ok := cand.numbers[n]; !ok {
+				return true
+			}
+		}
+		for t := range exc.terms {
+			if _, ok := cand.terms[t]; !ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func extractMeaningSignals(text string) meaningSignals {
+	runes := normalizeContextRunes(text)
+	for i, r := range runes {
+		if r == '\u2019' || r == '\u02bc' {
+			runes[i] = '\''
+		}
+	}
+	var numbers map[string]struct{}
+	var digitBuf []rune
+	flushDigits := func() {
+		if len(digitBuf) == 0 {
+			return
+		}
+		if numbers == nil {
+			numbers = make(map[string]struct{})
+		}
+		numbers[string(digitBuf)] = struct{}{}
+		digitBuf = digitBuf[:0]
+	}
+	for _, r := range runes {
+		if unicode.IsDigit(r) {
+			digitBuf = append(digitBuf, r)
+		} else {
+			flushDigits()
+		}
+	}
+	flushDigits()
+
+	normStr := string(runes)
+	var terms map[string]struct{}
+	for _, term := range meaningBearingWordTerms {
+		if containsWordTerm(normStr, term) {
+			if terms == nil {
+				terms = make(map[string]struct{})
+			}
+			terms[term] = struct{}{}
+		}
+	}
+	for _, term := range meaningBearingDenseTerms {
+		if strings.Contains(normStr, term) {
+			if terms == nil {
+				terms = make(map[string]struct{})
+			}
+			terms[term] = struct{}{}
+		}
+	}
+	return meaningSignals{numbers: numbers, terms: terms}
+}
+
+func containsWordTerm(normStr, term string) bool {
+	pos := 0
+	for pos <= len(normStr)-len(term) {
+		relIdx := strings.Index(normStr[pos:], term)
+		if relIdx < 0 {
+			return false
+		}
+		idx := pos + relIdx
+		beforeOK := idx == 0
+		if !beforeOK {
+			prev, _ := utf8.DecodeLastRuneInString(normStr[:idx])
+			beforeOK = !isContextWordRune(prev)
+		}
+		afterIdx := idx + len(term)
+		afterOK := afterIdx == len(normStr)
+		if !afterOK {
+			next, _ := utf8.DecodeRuneInString(normStr[afterIdx:])
+			afterOK = !isContextWordRune(next)
+		}
+		if beforeOK && afterOK {
+			return true
+		}
+		_, size := utf8.DecodeRuneInString(normStr[idx:])
+		pos = idx + max(1, size)
+	}
+	return false
+}
+
+func isContextWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
+}
+
+// diverseCandidateBetter breaks ties deterministically; rank is unique among
+// candidates, while the remaining fields keep the fallback order explicit.
+func diverseCandidateBetter(scoreA float64, a *diverseCandidate, scoreB float64, b *diverseCandidate) bool {
+	const eps = 1e-12
+	if math.Abs(scoreA-scoreB) > eps {
+		return scoreA > scoreB
+	}
+	if a.rank != b.rank {
+		return a.rank < b.rank
+	}
+	if a.chunk.Chunk.ID != b.chunk.Chunk.ID {
+		return a.chunk.Chunk.ID < b.chunk.Chunk.ID
+	}
+	if a.chunk.Chunk.DocumentID != b.chunk.Chunk.DocumentID {
+		return a.chunk.Chunk.DocumentID < b.chunk.Chunk.DocumentID
+	}
+	return a.chunk.Chunk.Index < b.chunk.Chunk.Index
+}
+
+func cutExcerptToBudget(text string, remTokens, remBytes int, allowHardCut bool) (string, bool) {
+	if remTokens < 0 || remBytes <= 0 {
+		return "", false
+	}
+	runes := []rune(text)
+	byteEnds := make([]int, len(runes)+1)
+	for i, r := range runes {
+		byteEnds[i+1] = byteEnds[i] + utf8.RuneLen(r)
+	}
+	cut := sort.Search(len(runes)+1, func(n int) bool {
+		return n/4 > remTokens || byteEnds[n] > remBytes
+	}) - 1
+	if cut <= 0 {
+		return "", false
+	}
+	body := string(runes[:cut])
+	if end := strings.LastIndexAny(body, ".\n"); end >= 0 && llm.EstimateTokens(body[:end+1]) >= minPartialExcerptTokens {
+		body = body[:end+1]
+	} else if !allowHardCut {
+		return "", false
+	}
+	if strings.TrimSpace(body) == "" {
+		return "", false
+	}
+	return body, true
+}
+
+func normalizeContextRunes(text string) []rune {
+	normalized := strings.ToLower(width.Fold.String(norm.NFC.String(text)))
+	runes := make([]rune, 0, len(normalized))
+	prevSpace := true
+	for _, r := range normalized {
+		if unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		if unicode.IsSpace(r) {
+			if !prevSpace {
+				runes = append(runes, ' ')
+				prevSpace = true
+			}
+			continue
+		}
+		runes = append(runes, r)
+		prevSpace = false
+	}
+	if len(runes) > 0 && runes[len(runes)-1] == ' ' {
+		runes = runes[:len(runes)-1]
+	}
+	return runes
+}
+
+func extractContextShingles(text string) []uint64 {
+	runes := normalizeContextRunes(text)
+	if len(runes) == 0 {
+		return nil
+	}
+	if len(runes) <= contextShingleWidth {
+		return []uint64{hashRuneShingle(runes)}
+	}
+	windows := len(runes) - contextShingleWidth + 1
+	if windows <= maxShinglesPerChunk {
+		seen := make(map[uint64]struct{}, windows)
+		for i := range windows {
+			seen[hashRuneShingle(runes[i:i+contextShingleWidth])] = struct{}{}
+		}
+		out := make([]uint64, 0, len(seen))
+		for h := range seen {
+			out = append(out, h)
+		}
+		slices.Sort(out)
+		return out
+	}
+	// Bounded bottom-k min-hash sketch retains <= maxShinglesPerChunk unique hashes
+	// across the whole body so tails remain represented without unbounded memory.
+	seen := make(map[uint64]struct{}, maxShinglesPerChunk)
+	heap := make([]uint64, 0, maxShinglesPerChunk)
+	for i := range windows {
+		h := hashRuneShingle(runes[i : i+contextShingleWidth])
+		if _, ok := seen[h]; ok {
+			continue
+		}
+		if len(heap) < maxShinglesPerChunk {
+			seen[h] = struct{}{}
+			heap = append(heap, h)
+			siftUpMaxHeap(heap, len(heap)-1)
+			continue
+		}
+		if h < heap[0] {
+			delete(seen, heap[0])
+			seen[h] = struct{}{}
+			heap[0] = h
+			siftDownMaxHeap(heap, 0)
+		}
+	}
+	slices.Sort(heap)
+	return heap
+}
+
+func hashRuneShingle(runes []rune) uint64 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	var buf [utf8.UTFMax]byte
+	h := uint64(offset64)
+	for _, r := range runes {
+		n := utf8.EncodeRune(buf[:], r)
+		for _, b := range buf[:n] {
+			h ^= uint64(b)
+			h *= prime64
+		}
+	}
+	h += 0x9e3779b97f4a7c15
+	h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9
+	h = (h ^ (h >> 27)) * 0x94d049bb133111eb
+	return h ^ (h >> 31)
+}
+
+func siftUpMaxHeap(h []uint64, i int) {
+	for i > 0 {
+		p := (i - 1) / 2
+		if h[p] >= h[i] {
+			break
+		}
+		h[p], h[i] = h[i], h[p]
+		i = p
+	}
+}
+
+func siftDownMaxHeap(h []uint64, i int) {
+	n := len(h)
+	for {
+		left := 2*i + 1
+		if left >= n {
+			break
+		}
+		largest := left
+		if right := left + 1; right < n && h[right] > h[left] {
+			largest = right
+		}
+		if h[i] >= h[largest] {
+			break
+		}
+		h[i], h[largest] = h[largest], h[i]
+		i = largest
+	}
 }
 
 // Run synthesizes a grounded answer in the language of the question.
@@ -1004,13 +1695,33 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 			}
 		}
 	}
+	if err := synthesisCtx.Err(); err != nil {
+		return fmt.Errorf("synthesis_stage: %w", err)
+	}
 	if len(qc.RetrievedChunks) == 0 {
 		return s.finishWithoutEvidence(synthesisCtx, qc)
 	}
 
-	strict := s.cfg.SynthesisInputProfile != "" && qc.AnswerMode != domain.AnswerModeEvidence
-	chunks, truncated := trimChunksForSynthesis(qc.RetrievedChunks, s.cfg.SynthesisContextTokens, s.cfg.SynthesisRelativeScoreFloor, strict)
-	if strict && len(chunks) == 0 {
+	var policy, llmProvider, guardrailID string
+	var budget int
+	var floor float64
+	var strict bool
+	var serviceTokens []string
+	if s.cfg != nil {
+		strict = s.cfg.SynthesisInputProfile != "" && qc.AnswerMode != domain.AnswerModeEvidence
+		budget = s.cfg.SynthesisContextTokens
+		floor = s.cfg.SynthesisRelativeScoreFloor
+		policy = s.cfg.SynthesisContextPolicy
+		llmProvider = s.cfg.LLMProvider
+		guardrailID = s.cfg.BedrockGuardrailID
+		serviceTokens = s.cfg.ServiceTokens
+	}
+	chunks, truncated, trimErr := trimChunksForSynthesis(synthesisCtx, qc.RetrievedChunks, budget, floor, policy)
+	if trimErr != nil {
+		return fmt.Errorf("synthesis_stage: %w", trimErr)
+	}
+	if len(chunks) == 0 {
+		qc.RetrievedChunks = nil
 		return s.finishWithoutEvidence(synthesisCtx, qc)
 	}
 	qc.ContextChunks = len(chunks)
@@ -1037,14 +1748,14 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	switch {
 	case !strict:
 		boundary = newBoundary()
-	case s.cfg.LLMProvider == "openai":
+	case llmProvider == "openai":
 		boundary = newCountingBoundary()
 	default:
-		boundary = bedrockCountingBoundary(s.cfg.ServiceTokens, qc.OriginalQuery, chunks)
+		boundary = bedrockCountingBoundary(serviceTokens, qc.OriginalQuery, chunks)
 	}
 	builder := synthesisPromptBuilder{
 		question: qc.OriginalQuery, includeCitations: qc.IncludeCitations,
-		boundary: boundary, guardrail: s.cfg.BedrockGuardrailID != "",
+		boundary: boundary, guardrail: guardrailID != "",
 		maxTokens: answerSynthesisMaxOutput,
 	}
 	request, system, prompt := builder.build(chunks)
