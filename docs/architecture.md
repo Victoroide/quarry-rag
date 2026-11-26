@@ -390,8 +390,10 @@ selection and XML work from detection travel in the child request header.
 Legacy DOC streams must declare a positive size no larger than the source file.
 Stream reads respect cancellation and stop at the declared size. PDF extraction
 checks relevant decoded streams against a cumulative 8 MiB budget before text
-parsing. It also bounds source reads, page count, font count, Unicode font-map
-size and declarations, and stream nesting. It honors the caller's deadline and
+parsing; JPEG images are validated without decoding and do not use that budget.
+It also bounds source reads to 64 MiB per document (including JPEG image data,
+cached per stream offset), page count, font count, Unicode font-map size and
+declarations, and stream nesting. It honors the caller's deadline and
 otherwise applies a 30-second default. Extraction-limit failures use HTTP 422.
 
 Failure-status updates use a separate five-second context after task cancellation. Deletion treats missing vector namespaces as completed operations, allowing partial deletions to be retried before metadata is removed.

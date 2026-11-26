@@ -380,12 +380,20 @@ In [mixed mode](configuration.md#environment-variables), the isolated parser
 checks every page before a source is accepted. Clean digital PDFs, including
 text in Form XObjects, fonts selected through graphics-state dictionaries and
 simple layout rules, go directly to ingestion. When
-any page needs detection, Textract receives the full original. Raster samples
-are checked against the declared dimensions and decoded-stream budget. Mixed
-mode supports raw, Flate and ASCII85 image streams with supported sample
-layouts, including the default Flate predictor with or without an explicit
-setting. Inline images and other unverifiable streams return an extraction
-error before submission.
+any page needs detection, Textract receives the full original. Raw, Flate and
+ASCII85 samples—including the default Flate predictor with or without an explicit
+setting—are decoded and checked against the declared dimensions and the
+decoded-stream budget in the
+[extraction limits](architecture.md#extraction-boundaries). Baseline, extended
+and progressive JPEG images with `DCTDecode` as the only filter (optionally with
+`ColorTransform` 0 or 1), 8-bit samples and one, three or four components are
+checked without decoding pixels: Quarry verifies the marker structure through
+the end-of-image marker and requires the frame's dimensions and components to
+match the image dictionary. Device, indexed (non-JPEG) and ICC-based color
+spaces with one, three or four components are supported. Inline images, JPEG in
+encrypted PDFs, arithmetic, lossless, hierarchical and 12-bit JPEG, JPEG 2000,
+JBIG2, CCITT and other unverifiable streams return an extraction error before
+submission.
 
 Quarry selects at most one text source per page and preserves page order. An
 embedded page is considered readable with at least 10 trimmed UTF-8 bytes and
