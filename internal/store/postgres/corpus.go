@@ -175,8 +175,12 @@ func (c *Client) LoadDocumentSnapshotBounded(ctx context.Context, id string, max
 	return &snapshot, nil
 }
 
-// UnexpectedChunkKeys returns only keys absent from the eligible source corpus.
-func (c *Client) UnexpectedChunkKeys(ctx context.Context, keys []string) ([]string, error) {
+// UnexpectedChunkKeys returns the keys that are not current in the eligible
+// source corpus: bare chunk keys and hosted manifest keys. On a hosted target a
+// tagged document is current only under its tagged physical keys, so
+// hostedTagged also reports the bare key of a tagged document. A PostgreSQL
+// target keeps tagged documents under the bare key and passes false.
+func (c *Client) UnexpectedChunkKeys(ctx context.Context, keys []string, hostedTagged bool) ([]string, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
@@ -199,7 +203,7 @@ func (c *Client) UnexpectedChunkKeys(ctx context.Context, keys []string) ([]stri
 		rows, err := c.Pool.Query(ctx, `SELECT replace(c.id::text, '-', '') FROM chunks c
  JOIN documents d ON c.document_id=d.id
  LEFT JOIN hosted_vector_revisions r ON r.document_id=d.id
- WHERE c.id=ANY($1::uuid[]) AND r.active_revision_id IS NULL AND `+eligibleDocument, ids)
+ WHERE c.id=ANY($1::uuid[]) AND r.active_revision_id IS NULL AND NOT ($2::boolean AND d.scoped_vectors) AND `+eligibleDocument, ids, hostedTagged)
 		if err != nil {
 			return nil, err
 		}

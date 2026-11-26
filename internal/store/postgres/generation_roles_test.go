@@ -296,7 +296,7 @@ func TestReindexMaintenanceRoleWithDocumentedGrants(t *testing.T) {
 	require.NoError(t, reindex.ThawWriters(ctx))
 
 	// Rollback staging requires UnexpectedChunkKeys and DELETE/UPSERT on legacy chunk_vectors.
-	extra, err := reindex.UnexpectedChunkKeys(ctx, []string{strings.ReplaceAll(unassignedChunkID, "-", ""), "00000000000000000000000000000001"})
+	extra, err := reindex.UnexpectedChunkKeys(ctx, []string{strings.ReplaceAll(unassignedChunkID, "-", ""), "00000000000000000000000000000001"}, false)
 	require.NoError(t, err)
 	require.Equal(t, []string{"00000000000000000000000000000001"}, extra)
 	legacyStore, err := OpenGenerationVectorStore(ctx, reindex, 3, LegacyGeneration, WithExactScopeMax(10))

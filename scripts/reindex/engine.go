@@ -9,6 +9,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 )
 
@@ -102,19 +103,14 @@ type stager struct {
 	fence      *pgstore.GenerationFence
 	retired    *pgstore.Client
 	// taggedTarget is true when the target stores revision-qualified hosted
-	// vector IDs and revision_id metadata for manifested documents.
+	// vector IDs: manifest keys with revision_id metadata, or tagged keys.
 	taggedTarget bool
+	// copyFromTagged is the same property of the store that copyFrom reads.
+	copyFromTagged bool
 	// copyFrom serves reusable vectors; nil forces every vector to be computed.
 	copyFrom vectorReader
 	embed    domain.EmbeddingProvider
 	calls    int
-}
-
-func targetVectorID(docID, activeRevisionID string, c domain.Chunk, tagged bool) string {
-	if tagged && activeRevisionID != "" {
-		return domain.FormatRevisionVectorID(domain.DocumentID(docID), activeRevisionID, c.Index)
-	}
-	return string(c.ID)
 }
 
 func validVector(v []float32, dimensions int) error {
@@ -156,7 +152,7 @@ func (s *stager) run(ctx context.Context) (stageReport, error) {
 			switch {
 			case rev.DeclaredChunks != rev.Chunks:
 				rep.Inconsistent = append(rep.Inconsistent, rev.ID)
-			case rev.ScopedVectors || (!s.taggedTarget && rev.ActiveRevisionID != ""):
+			case taggedRefusal(s.taggedTarget, rev) != "":
 				rep.Unsupported = append(rep.Unsupported, rev.ID)
 			case cp.Complete && cp.SourceRevision == rev.Revision && cp.Incarnation == rev.Incarnation:
 				rep.Skipped++
@@ -227,13 +223,16 @@ func (s *stager) stageDocument(ctx context.Context, rev pgstore.DocumentRevision
 		rep.Inconsistent = append(rep.Inconsistent, rev.ID)
 		return nil
 	}
-	if snap.ScopedVectors || (!s.taggedTarget && snap.ActiveRevisionID != "") {
+	if taggedRefusal(s.taggedTarget, snap.DocumentRevision) != "" {
 		rep.Unsupported = append(rep.Unsupported, rev.ID)
 		return nil
 	}
 	ids := make([]string, len(snap.Chunks))
 	for i, c := range snap.Chunks {
-		ids[i] = targetVectorID(snap.ID, snap.ActiveRevisionID, c, s.taggedTarget)
+		ids[i], err = vectorKey(s.taggedTarget, snap.DocumentRevision, c)
+		if err != nil {
+			return err
+		}
 	}
 	chunks, copied, embedded, err := s.vectors(ctx, snap)
 	if err != nil {
@@ -306,14 +305,18 @@ func (s *stager) deleteKeys(ctx context.Context, ids []string) error {
 func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (chunks []domain.Chunk, copied, embedded int, err error) {
 	chunks = make([]domain.Chunk, len(snap.Chunks))
 	var reusable map[string]domain.Chunk
+	var sourceKeys []string
 	if s.copyFrom != nil {
-		ids := make([]string, len(snap.Chunks))
+		sourceKeys = make([]string, len(snap.Chunks))
 		for i, c := range snap.Chunks {
-			ids[i] = targetVectorID(snap.ID, snap.ActiveRevisionID, c, snap.ActiveRevisionID != "")
+			sourceKeys[i], err = vectorKey(s.copyFromTagged, snap.DocumentRevision, c)
+			if err != nil {
+				return nil, 0, 0, err
+			}
 		}
-		reusable = make(map[string]domain.Chunk, len(ids))
-		for start := 0; start < len(ids); start += 100 {
-			part, fetchErr := s.copyFrom.Fetch(ctx, ids[start:min(start+100, len(ids))])
+		reusable = make(map[string]domain.Chunk, len(sourceKeys))
+		for start := 0; start < len(sourceKeys); start += 100 {
+			part, fetchErr := s.copyFrom.Fetch(ctx, sourceKeys[start:min(start+100, len(sourceKeys))])
 			if hardSourceError(ctx, fetchErr) {
 				return nil, 0, 0, fmt.Errorf("read source vectors: %w", fetchErr)
 			}
@@ -324,7 +327,7 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 	}
 	var missing []int
 	for i, c := range snap.Chunks {
-		c.Metadata = chunkMetadata(snap, c)
+		c.Metadata = chunkMetadata(s.taggedTarget, snap, c)
 		// A target record names the document incarnation it was written for, so
 		// that retrieval can discard a record that outlived its document.
 		c.VectorIncarnation = snap.Incarnation
@@ -333,12 +336,20 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 			c.VectorID = domain.FormatRevisionVectorID(domain.DocumentID(snap.ID), snap.ActiveRevisionID, c.Index)
 		}
 		chunks[i] = c
-		fetchID := targetVectorID(snap.ID, snap.ActiveRevisionID, c, snap.ActiveRevisionID != "")
-		src, ok := reusable[fetchID]
+		sourceKey := string(c.ID)
+		if s.copyFrom != nil {
+			sourceKey = sourceKeys[i]
+		}
+		src, ok := reusable[sourceKey]
 		srcTenant, _ := src.Metadata[domain.VectorTenantKey].(string)
+		srcRev, revPresent := src.Metadata[domain.VectorRevisionKey]
+		srcAtt, attPresent := src.Metadata[domain.VectorAttemptKey]
+		revStr, revOK := srcRev.(string)
+		attStr, attOK := srcAtt.(string)
 		identityMatches := ok && src.DocumentID == c.DocumentID && src.ID == c.ID && src.Text == c.Text && src.Index == c.Index &&
 			(src.VectorIncarnation == "" || src.VectorIncarnation == snap.Incarnation) &&
-			(srcTenant == "" || srcTenant == snap.TenantID) && src.RevisionID == c.RevisionID
+			(srcTenant == "" || srcTenant == snap.TenantID) && src.RevisionID == c.RevisionID &&
+			(!isTagged(snap.DocumentRevision) || ((!revPresent || revOK && revStr == snap.Incarnation) && (!attPresent || attOK && attStr == snap.VectorAttempt)))
 		if identityMatches {
 			copyLayoutMetadata(chunks[i].Metadata, src.Metadata)
 		}
@@ -376,7 +387,7 @@ func hardSourceError(ctx context.Context, err error) bool {
 
 // chunkMetadata derives the stored labels from PostgreSQL, the authority for
 // document type and collection, and from the chunk text.
-func chunkMetadata(snap *pgstore.DocumentSnapshot, c domain.Chunk) map[string]any {
+func chunkMetadata(tagged bool, snap *pgstore.DocumentSnapshot, c domain.Chunk) map[string]any {
 	kind, quality := chunker.Classify(c.Text)
 	md := map[string]any{"doc_type": snap.DocType, "kind": string(kind), "quality": string(quality)}
 	if snap.Collection != "" {
@@ -386,6 +397,10 @@ func chunkMetadata(snap *pgstore.DocumentSnapshot, c domain.Chunk) map[string]an
 		md[domain.VectorTenantKey] = snap.TenantID
 	}
 	copyLayoutMetadata(md, c.Metadata)
+	if tagged && isTagged(snap.DocumentRevision) {
+		md[domain.VectorRevisionKey] = snap.Incarnation
+		md[domain.VectorAttemptKey] = snap.VectorAttempt
+	}
 	return md
 }
 
@@ -451,9 +466,35 @@ func (s *stager) pruneRetired(ctx context.Context, rep *stageReport) error {
 		if err != nil {
 			return fmt.Errorf("list retired target keys: %w", err)
 		}
-		extra, err := s.retired.UnexpectedChunkKeys(ctx, keys)
-		if err != nil {
-			return err
+		var untagged []string
+		var tagged []pgstore.TaggedVectorKey
+		for _, key := range keys {
+			if doc, rev, att, chunk, ok := pcstore.ParseTaggedVectorID(key); ok {
+				tagged = append(tagged, pgstore.TaggedVectorKey{
+					Key:        key,
+					DocumentID: doc,
+					Revision:   rev,
+					Attempt:    att,
+					ChunkID:    chunk,
+				})
+			} else {
+				untagged = append(untagged, key)
+			}
+		}
+		var extra []string
+		if len(untagged) > 0 {
+			uExtra, uErr := s.retired.UnexpectedChunkKeys(ctx, untagged, s.taggedTarget)
+			if uErr != nil {
+				return uErr
+			}
+			extra = append(extra, uExtra...)
+		}
+		if len(tagged) > 0 {
+			tExtra, tErr := s.retired.UnexpectedTaggedKeys(ctx, tagged)
+			if tErr != nil {
+				return tErr
+			}
+			extra = append(extra, tExtra...)
 		}
 		if deleteErr := s.deleteKeys(ctx, extra); deleteErr != nil {
 			return deleteErr

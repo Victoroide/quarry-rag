@@ -3,6 +3,7 @@ package pinecone
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -134,4 +135,58 @@ func TestDeleteIDsUsesTheDefaultNamespace(t *testing.T) {
 	conn := &fakeIndexConn{deleteIDs: func(_ context.Context, ids []string) error { deleted = append(deleted, ids...); return nil }}
 	require.NoError(t, testClient(conn).Delete(t.Context(), "", []string{"a", "b"}))
 	require.Equal(t, []string{"a", "b"}, deleted)
+}
+
+func TestParseTaggedVectorID(t *testing.T) {
+	doc, rev, att, chunk, ok := ParseTaggedVectorID("doc-1/rev-1/att-1/chunk-1")
+	require.True(t, ok)
+	require.Equal(t, [4]string{"doc-1", "rev-1", "att-1", "chunk-1"}, [4]string{doc, rev, att, chunk})
+
+	maxChunk := strings.Repeat("a", 512-len("d/r/a/"))
+	maxID := "d/r/a/" + maxChunk
+	require.Len(t, maxID, 512)
+	doc, rev, att, chunk, ok = ParseTaggedVectorID(maxID)
+	require.True(t, ok)
+	require.Equal(t, [4]string{"d", "r", "a", maxChunk}, [4]string{doc, rev, att, chunk})
+
+	for _, invalid := range []string{
+		"",
+		"chunk-1",
+		"doc-1/rev-1",
+		"doc-1/rev-1/chunk-1",
+		"doc-1/rev-1//chunk-1",
+		"/rev-1/att-1/chunk-1",
+		"doc-1//att-1/chunk-1",
+		"doc-1/rev-1/att-1/",
+		"doc-1/rev-1/att-1/chunk-1/extra",
+		maxID + "b",
+	} {
+		_, _, _, _, ok = ParseTaggedVectorID(invalid)
+		require.False(t, ok, invalid)
+	}
+}
+
+func FuzzParseTaggedVectorID(f *testing.F) {
+	f.Add("doc/rev/att/chunk")
+	f.Add("doc/rev/chunk")
+	f.Add("doc/rev//chunk")
+	f.Add("chunk")
+	f.Add("doc/rev/att/chunk/extra")
+	f.Fuzz(func(t *testing.T, id string) {
+		doc, rev, att, chunk, ok := ParseTaggedVectorID(id)
+		if !ok {
+			parts := strings.Split(id, "/")
+			if len(parts) == 4 && parts[0] != "" && parts[1] != "" && parts[2] != "" && parts[3] != "" && len(id) <= 512 {
+				t.Fatalf("expected valid 4-part tagged vector ID %q to parse", id)
+			}
+			return
+		}
+		require.NotEmpty(t, doc)
+		require.NotEmpty(t, rev)
+		require.NotEmpty(t, att)
+		require.NotEmpty(t, chunk)
+		formatted, err := TaggedVectorID(doc, rev, att, chunk)
+		require.NoError(t, err)
+		require.Equal(t, id, formatted)
+	})
 }
