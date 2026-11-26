@@ -8,6 +8,9 @@ import (
 // VectorRevisionKey identifies vectors written for a document incarnation.
 const VectorRevisionKey = "document_revision"
 
+// VectorTenantKey records the owning tenant on vectors of an owned document.
+const VectorTenantKey = "tenant_id"
+
 // VectorAttemptKey identifies the tagged worker attempt that wrote a vector.
 const VectorAttemptKey = "vector_attempt"
 
