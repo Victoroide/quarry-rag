@@ -120,6 +120,9 @@ func acceptIngestWith(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 	case domain.AcceptConflict:
 		writeJSONError(rw, http.StatusConflict, "conflict", "document_id already exists with different content")
 		return result.Outcome, nil
+	case domain.AcceptDeletionConflict:
+		writeJSONError(rw, http.StatusConflict, "conflict", "document_id is reserved by a deletion")
+		return result.Outcome, nil
 	case domain.AcceptOCRRetryRequired:
 		writeJSONError(rw, http.StatusConflict, "conflict", "retry the mixed PDF with its document_id")
 		return result.Outcome, nil

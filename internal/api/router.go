@@ -11,6 +11,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/api/handler"
 	"github.com/Victoroide/quarry-rag/internal/api/middleware"
 	"github.com/Victoroide/quarry-rag/internal/citationsupport"
+	"github.com/Victoroide/quarry-rag/internal/cleanup"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
@@ -112,8 +113,13 @@ func NewRouter(deps *RouterDeps) http.Handler {
 	mux.HandleFunc("POST /query", middleware.RequireServiceTokens(tokens, handler.QueryHandler(deps.Retriever, deps.Ambassador, deps.Config, deps.PGPool, queryOpts...)))
 	mux.HandleFunc("GET /documents", middleware.RequireServiceTokens(tokens, handler.ListDocumentsHandler(deps.ChunkStore)))
 	mux.HandleFunc("GET /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DocumentStatusHandler(deps.ChunkStore)))
-	mux.HandleFunc("GET /documents/{doc_id}/file", middleware.RequireServiceTokens(tokens, handler.FileHandler(deps.ChunkStore, deps.S3Client)))
-	mux.HandleFunc("DELETE /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DeleteHandler(deps.ChunkStore, deps.PineconeDriver, deps.S3Client)))
+	var signer handler.FileSigner
+	if deps.S3Client != nil {
+		signer = deps.S3Client
+	}
+	mux.HandleFunc("GET /documents/{doc_id}/file", middleware.RequireServiceTokens(tokens, handler.FileHandler(deps.ChunkStore, signer)))
+	mux.HandleFunc("DELETE /documents/{doc_id}", middleware.RequireServiceTokens(tokens, handler.DeleteHandler(deps.ChunkStore, deps.PineconeDriver, objects,
+		handler.WithCleanupTargets(deletionTargets(deps.Config)))))
 	// Offline fake mode keeps vectors in process memory. A receipt bound to a
 	// store that disappears on restart could never be proved clean again.
 	fixtureStore := deps.FixtureVectorIdentity
@@ -153,4 +159,13 @@ func (unavailableJournal) BeginSourceUpload(context.Context, string) error {
 
 func (unavailableJournal) RecordSourceUploadResult(context.Context, string, domain.SourceUploadResult) error {
 	return errJournalUnavailable
+}
+
+// deletionTargets names the stores checkpointed deletion acts on.
+func deletionTargets(cfg *config.Config) cleanup.Targets {
+	targets := cleanup.Targets{SourceBucket: cfg.S3Bucket, InMemory: cfg.FakeMode}
+	if !cfg.FakeMode && cfg.VectorStore != "postgres" {
+		targets.VectorIndex = cfg.PineconeIndexName
+	}
+	return targets
 }

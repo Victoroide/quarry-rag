@@ -293,7 +293,7 @@ paths:
       parameters:
         - name: X-Document-Incarnation
           in: header
-          description: 'Reserved; see [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
+          description: 'The document lifetime the caller observed. Required for a live document once checkpointed deletion is active and reserved before then; see [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
           schema:
             type: string
             format: uuid
@@ -319,6 +319,8 @@ paths:
         '404':
           $ref: '#/components/responses/Error'
         '412':
+          $ref: '#/components/responses/Error'
+        '428':
           $ref: '#/components/responses/Error'
         '500':
           $ref: '#/components/responses/Error'
