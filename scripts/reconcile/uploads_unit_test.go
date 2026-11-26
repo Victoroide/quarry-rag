@@ -38,6 +38,7 @@ func TestSourceUploadOptions(t *testing.T) {
 func TestSourceUploadOptionsRejectInvalidCombinations(t *testing.T) {
 	for _, args := range [][]string{
 		{"-source-uploads", "-backfill-collections"},
+		{"-source-uploads", "-canonical-document-ids"},
 		{"-source-uploads", "-after=00000000-0000-4000-8000-000000000001"},
 		{"-source-uploads", "-page=10"},
 		{"-source-uploads", "-settle=59s"},
