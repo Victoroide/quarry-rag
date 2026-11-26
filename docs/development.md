@@ -250,12 +250,18 @@ delete marker of that key by version ID. A claimed row fences acceptance: a
 stalled upload that reaches acceptance afterwards fails with `503` and is
 retried by its caller.
 
-Before dispatching a PUT, the writer marks its journal row as uncertain. An
-acknowledgment confirms that attempt alone. A lost response or an earlier
-attempt with an unknown outcome can still produce a version. While the key is
-empty, reconciliation keeps rechecking it at the pace the reasons below give. It
-drops the row after a clean recheck at least `-settle` after the claim only when
-the writer never dispatched a PUT or all attempts are accounted for.
+Before dispatching a PUT, the writer marks its journal row as uncertain. When the
+PUT returns, the writer accounts for each attempt the SDK sent. An attempt is
+accounted for when S3 acknowledged it, when S3 refused it with a redirect or
+client error that carries an `x-amz-request-id` header, or when it failed
+before a connection was established, so none of it was sent. A credential or
+signing failure sends no attempt. A timeout, a lost response, a server error, a
+refusal without that header or any other outcome can still produce a version.
+The writer records the row as settled only when every attempt is accounted for.
+While the key is empty, reconciliation keeps rechecking it at the pace the
+reasons below give. It drops the row after a clean recheck at least `-settle`
+after the claim only when the writer never dispatched a PUT or recorded it as
+settled.
 
 A row pending with `unacknowledged_write` never settles on its own. It records
 a PUT with an unknown outcome and keeps its key under exact-key rechecks. A late

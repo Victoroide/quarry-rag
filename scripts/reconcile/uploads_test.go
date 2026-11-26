@@ -309,6 +309,44 @@ func TestTimedOutPUTAfterSettlementWindow(t *testing.T) {
 	}
 }
 
+func TestRefusedUploadSettlesAfterTheWindow(t *testing.T) {
+	r := newRig(t, newDatabase(t), "refused-upload", true)
+	r.bucket.putMode = func(string) putMode { return putRefused }
+	require.Equal(t, http.StatusServiceUnavailable, r.upload("", noteText).Code)
+	require.Empty(t, r.bucket.keys())
+
+	var state, writeState string
+	var acknowledged bool
+	require.NoError(t, r.pg.Pool.QueryRow(t.Context(),
+		`SELECT state, write_state, acknowledged_at IS NOT NULL FROM source_uploads WHERE bucket=$1`, r.bucket.name).
+		Scan(&state, &writeState, &acknowledged))
+	require.Equal(t, "staged", state)
+	require.Equal(t, "settled", writeState)
+	require.False(t, acknowledged)
+
+	r.expire()
+	opts, err := parseOptions([]string{"-source-uploads", "-apply"}, &strings.Builder{})
+	require.NoError(t, err)
+	first := r.reconcile(opts)
+	require.Equal(t, 1, first.Pending)
+	require.Zero(t, first.Settled)
+	require.Len(t, first.Uploads, 1)
+	require.Equal(t, reasonAwaitingSettlement, first.Uploads[0].Reason)
+	require.False(t, first.Uploads[0].Acknowledged)
+	require.False(t, first.Uploads[0].WritePending)
+
+	_, err = r.pg.Pool.Exec(t.Context(), `UPDATE source_uploads SET
+		claimed_at=NOW()-make_interval(secs=>$2), next_check_at=NOW() WHERE bucket=$1`,
+		r.bucket.name, (opts.Settle + time.Second).Seconds())
+	require.NoError(t, err)
+
+	second := r.reconcile(opts)
+	require.Equal(t, 1, second.Settled)
+	require.Zero(t, second.Pending)
+	require.Empty(t, second.Journal)
+	require.Empty(t, r.states())
+}
+
 func TestVersionedBucketsLoseEveryVersionOfAnUnlinkedKey(t *testing.T) {
 	r := newRig(t, newDatabase(t), "versioned", true)
 	r.bucket.putMode = func(string) putMode { return putStoresButFail }

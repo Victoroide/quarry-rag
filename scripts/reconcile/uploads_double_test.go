@@ -34,6 +34,7 @@ const (
 	putStoresButFail                    // the object is stored but the caller sees a failure
 	putLandsLater                       // the caller sees a timeout and the object lands afterwards
 	putRetryAcknowledged                // a retry succeeds while an older PUT can still land
+	putRefused                          // the bucket refused every attempt and stored nothing
 )
 
 type storedVersion struct {
@@ -106,6 +107,8 @@ func (b *bucketDouble) PutSource(_ context.Context, key string, _ extractor.File
 	switch mode {
 	case putStopsBefore:
 		return domain.SourceUploadResult{}, errCrash
+	case putRefused:
+		return domain.SourceUploadResult{Settled: true}, &smithy.GenericAPIError{Code: "AccessDenied", Message: "refused"}
 	case putLandsLater:
 		b.landing[key] = data
 		return domain.SourceUploadResult{}, context.DeadlineExceeded
