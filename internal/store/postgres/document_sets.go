@@ -162,7 +162,7 @@ func (c *Client) CreateDocumentSet(ctx context.Context, req DocumentSetRequest) 
 		return tx.QueryRow(ctx, `
 SELECT result_set::text, result_revision::text, result_expires, result_members, result_replayed
 FROM grant_catalog_create_document_set($1::uuid,$2::uuid,$3::integer,$4::text,$5::uuid[],$6::integer)`,
-			tenant.String(), owner.String(), int32(ttl/time.Second), key, documents, int32(req.MaxMembers)).
+			tenant.String(), owner.String(), int64(ttl/time.Second), key, documents, int64(req.MaxMembers)).
 			Scan(&created.ID, &created.Revision, &created.ExpiresAt, &created.Members, &created.Replayed)
 	})
 	if err != nil {
@@ -184,7 +184,7 @@ func (c *Client) PurgeExpiredDocumentSets(ctx context.Context) (int, error) {
 		if schemaErr := bindMetadataSchema(ctx, tx); schemaErr != nil {
 			return schemaErr
 		}
-		return tx.QueryRow(ctx, `SELECT grant_catalog_purge_document_sets($1::integer)`, int32(PurgeDocumentSetsStep)).Scan(&removed)
+		return tx.QueryRow(ctx, `SELECT grant_catalog_purge_document_sets($1::integer)`, int64(PurgeDocumentSetsStep)).Scan(&removed)
 	})
 	if err != nil {
 		return 0, documentSetError(err)

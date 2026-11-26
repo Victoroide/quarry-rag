@@ -20,6 +20,8 @@ type queryInput struct {
 	AllowedDocumentIDs []string          `json:"allowed_document_ids,omitempty" jsonschema:"Document UUIDs the caller may read. Omit for unrestricted retrieval; an empty list matches no documents."`
 
 	Collection string `json:"collection,omitempty" jsonschema:"Only retrieve documents with this collection label; empty means all collections."`
+
+	DocumentSetID string `json:"document_set_id,omitempty" jsonschema:"UUID of a document set owned by the authenticated subject, where the service enabled document sets. It narrows the documents searched and grants no access."`
 }
 
 type queryOutput struct {

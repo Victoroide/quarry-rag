@@ -33,13 +33,20 @@ type DocumentSetAuthority interface {
 	EvidenceInSet(principal Principal, set DocumentSetRef, collection, docType string) SubjectEvidence
 }
 
-// DocumentSetScopedVectorStore marks a vector store that joins a set's
-// membership inside its own ranking statement. A relation store must implement
-// it before it may serve a query that carries a set, because it receives no
-// document list to enforce the membership with.
+// DocumentSetScopedVectorStore is a vector store that can confine a search to a
+// set's membership. A relation store joins the membership inside its own
+// ranking statement. A relation store that cannot must report false, because it
+// receives no document list to enforce the membership with.
 type DocumentSetScopedVectorStore interface {
-	GrantScopedVectorStore
-	DocumentSetScope()
+	SupportsDocumentSets() bool
+}
+
+// PartitionedVectorStore is a hosted store that splits the members of a scoped
+// search into bounded requests. It reports how many requests one search over
+// the given number of members makes, so a caller can price the search before
+// it spends anything. The second result is false when the store cannot say.
+type PartitionedVectorStore interface {
+	SearchPartitions(members int) (requests int, ok bool)
 }
 
 // SearchBudget bounds the hosted search attempts of one request. It counts

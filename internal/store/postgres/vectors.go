@@ -522,9 +522,9 @@ func hasScopeFilter(filter domain.VectorFilter) bool {
 // GrantScope reports that search joins the readable-document relation itself.
 func (*VectorStore) GrantScope() domain.GrantScopeKind { return domain.GrantScopeRelation }
 
-// DocumentSetScope reports that search also joins a set's membership, so a
+// SupportsDocumentSets reports that search also joins a set's membership, so a
 // query that carries a set is confined to it inside the ranking statement.
-func (*VectorStore) DocumentSetScope() {}
+func (*VectorStore) SupportsDocumentSets() bool { return true }
 
 var _ domain.DocumentSetScopedVectorStore = (*VectorStore)(nil)
 

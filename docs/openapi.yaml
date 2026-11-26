@@ -177,7 +177,7 @@ paths:
                 type: string
                 description: 'Events `context` (QueryStreamContext), `delta` (QueryStreamDelta), `done` (QueryStreamDone) and `error` (APIError); see [streamed query answers](api.md#streamed-query-answers).'
         '400':
-          description: 'Invalid query or embedding input rejected by the local profile. See [POST /query](api.md#post-query).'
+          description: 'Invalid query, including a null, malformed or disabled `document_set_id`, or embedding input rejected by the local profile. See [POST /query](api.md#post-query).'
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -189,6 +189,16 @@ paths:
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
+          description: 'Forbidden query, including a query from an inactive principal before set resolution.'
+        '404':
+          description: 'A well-formed `document_set_id` that is missing, foreign, deleted or expired. See [document sets](api.md#document-sets).'
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
         '413':
           $ref: '#/components/responses/Error'
         '415':
@@ -208,6 +218,7 @@ paths:
                 $ref: '#/components/schemas/APIError'
         '503':
           $ref: '#/components/responses/RetryableError'
+          description: 'Service unavailable, including when document sets are enabled and the vector store cannot confine a search to the set.'
         '504':
           $ref: '#/components/responses/Error'
           description: 'Query timeout. See the status conditions under [POST /query](api.md#post-query).'
@@ -829,6 +840,10 @@ components:
           items:
             type: string
             format: uuid
+        document_set_id:
+          type: string
+          format: uuid
+          description: 'Optional reference to a document set owned by the authenticated subject. Accepted only when `DOCUMENT_SETS_ENABLED` is true; see [document sets](api.md#document-sets).'
     QueryResponse:
       type: object
       description: 'See [POST /query](api.md#post-query).'

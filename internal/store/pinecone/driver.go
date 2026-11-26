@@ -92,6 +92,15 @@ func (d *Driver) QueryFiltered(ctx context.Context, embedding []float32, topK in
 // GrantScope reports that every search sends its tenant and allowed incarnations.
 func (*Driver) GrantScope() domain.GrantScopeKind { return domain.GrantScopeMembership }
 
+// SearchPartitions reports how many requests one search over the given number
+// of members sends: one per ten thousand documents, and none for an empty scope.
+func (*Driver) SearchPartitions(members int) (int, bool) {
+	if members < 0 {
+		return 0, false
+	}
+	return partitionCount(members), true
+}
+
 // VisibilityRefillLimit caps metadata-bearing refill responses with values omitted.
 func (*Driver) VisibilityRefillLimit() int { return maxRefillTopK }
 

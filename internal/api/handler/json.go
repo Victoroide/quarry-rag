@@ -17,6 +17,11 @@ func isJSONRequest(r *http.Request) bool {
 	return err == nil && mediaType == "application/json"
 }
 
+// fieldError reports a request field that rejected its own value while decoding.
+type fieldError struct{ message string }
+
+func (e fieldError) Error() string { return e.message }
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	body, err := io.ReadAll(r.Body)
@@ -31,9 +36,13 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) bo
 		writeJSONError(w, http.StatusRequestEntityTooLarge, "validation", "request body exceeds maximum size")
 	} else {
 		message := "invalid JSON body"
-		if strings.HasPrefix(err.Error(), "json: unknown field ") {
+		var field fieldError
+		switch {
+		case errors.As(err, &field):
+			message = field.message
+		case strings.HasPrefix(err.Error(), "json: unknown field "):
 			message = strings.TrimPrefix(err.Error(), "json: ")
-		} else if strings.HasPrefix(err.Error(), "duplicate field ") {
+		case strings.HasPrefix(err.Error(), "duplicate field "):
 			message = err.Error()
 		}
 		writeJSONError(w, http.StatusBadRequest, "validation", message)
