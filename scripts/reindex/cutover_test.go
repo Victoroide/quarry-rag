@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -477,4 +480,161 @@ func TestRollbackCatchesUpTheRetiredTargetBeforeSwitchingBack(t *testing.T) {
 	retired, err := f.pg.Generation(t.Context(), "g2")
 	require.NoError(t, err)
 	require.Equal(t, pgstore.StateRetired, retired.State)
+}
+
+func TestFreezeReportsOpenDeletionReceiptsAndRecoversAfterQualifiedRetry(t *testing.T) {
+	f := newFixture(t)
+	h := newHarness(t, f, "postgres")
+	_, err := f.pg.Pool.Exec(t.Context(), `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	require.NoError(t, err)
+
+	target := f.docs[0]
+	var incarnation string
+	require.NoError(t, f.pg.Pool.QueryRow(t.Context(), `SELECT COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, target.ID).Scan(&incarnation))
+
+	err = f.pg.DeleteWithCleanup(t.Context(), domain.DocumentID(target.ID), domain.DeleteOperations{
+		ExpectedIncarnation: incarnation,
+		LegacyNamespace:     func(context.Context, string) error { return nil },
+		LegacyVectors:       func(context.Context, string) error { return errors.New("provider outage") },
+	})
+	require.ErrorContains(t, err, "provider outage")
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	err = execute(ctx, h.deps, options{Generation: "g2", Freeze: true, Apply: true, Quiesce: 0}, &out, 10*time.Millisecond)
+	require.ErrorContains(t, err, fmt.Sprintf("0 jobs running, 1 deletions open (%s); the freeze stays in force", target.ID))
+
+	var rep map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &rep), out.String())
+	quiesce := rep["quiesce"].(map[string]any)
+	require.EqualValues(t, 1, quiesce["OpenDeletions"])
+	require.Equal(t, []any{target.ID}, quiesce["open_deletion_ids"])
+	require.ErrorIs(t, f.pg.WritersOpen(t.Context()), domain.ErrWritersFrozen, "the freeze stays in force after a timeout")
+
+	_, err = h.run(options{Thaw: true, Apply: true})
+	require.NoError(t, err)
+	require.NoError(t, f.pg.WritersOpen(t.Context()))
+
+	// A bare UUID retry cannot finish a checkpointed deletion; it must use the incarnation.
+	err = f.pg.DeleteWithCleanup(t.Context(), domain.DocumentID(target.ID), domain.DeleteOperations{
+		LegacyNamespace: func(context.Context, string) error { return nil },
+		LegacyVectors:   func(context.Context, string) error { return nil },
+	})
+	require.ErrorIs(t, err, domain.ErrDeletionPreconditionRequired)
+
+	err = f.pg.DeleteWithCleanup(t.Context(), domain.DocumentID(target.ID), domain.DeleteOperations{
+		ExpectedIncarnation: incarnation,
+		LegacyNamespace:     func(context.Context, string) error { return nil },
+		LegacyVectors:       func(context.Context, string) error { return nil },
+	})
+	require.NoError(t, err)
+
+	rep, err = h.run(options{Generation: "g2", Freeze: true, Apply: true, Quiesce: 0})
+	require.NoError(t, err)
+	quiesce = rep["quiesce"].(map[string]any)
+	require.EqualValues(t, 0, quiesce["OpenDeletions"])
+	_, hasIDs := quiesce["open_deletion_ids"]
+	require.False(t, hasIDs)
+}
+
+func TestActivateRefusesAndNamesOpenDeletionReceipts(t *testing.T) {
+	f := newFixture(t)
+	h := newHarness(t, f, "postgres")
+	h.attestSource()
+	h.stagePinecone("g2", "quarry-g2", sourceModel, 0)
+
+	_, err := h.run(options{Generation: "g2", Freeze: true, Apply: true, Quiesce: 0})
+	require.NoError(t, err)
+	apply := verifyOptions("g2")
+	apply.Apply = true
+	_, err = h.run(apply)
+	require.NoError(t, err)
+
+	openID := uuid.NewString()
+	_, err = f.pg.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'quarantine','local')`, openID, uuid.NewString())
+	require.NoError(t, err)
+
+	report, err := h.run(options{Generation: "g2", Activate: true, Quiesce: 0})
+	require.ErrorContains(t, err, "not ready")
+	require.Equal(t, false, report["ready"])
+	require.Contains(t, fmt.Sprint(report["reasons"]), fmt.Sprintf("1 open deletions (%s) must finish before activation", openID))
+	quiesce := report["quiesce"].(map[string]any)
+	require.Equal(t, []any{openID}, quiesce["open_deletion_ids"])
+
+	report, err = h.run(options{Generation: "g2", Activate: true, Apply: true, Quiesce: 0})
+	require.ErrorContains(t, err, fmt.Sprintf("0 in-flight jobs and 1 open deletions (%s) must finish before activation", openID))
+	require.Equal(t, false, report["applied"])
+	require.Contains(t, fmt.Sprint(report["reasons"]), openID)
+}
+
+func TestFreezeAndActivateErrorsExcludeDocumentContent(t *testing.T) {
+	f := newFixture(t)
+	h := newHarness(t, f, "postgres")
+	h.attestSource()
+	h.stagePinecone("g2", "quarry-g2", sourceModel, 0)
+
+	docID := uuid.NewString()
+	const (
+		secretContent    = "SECRET_CONTENT_MARKER_256"
+		secretChunk      = "SECRET_CHUNK_MARKER_256"
+		secretCollection = "secret-collection-256"
+		secretDocType    = "secret-type-256"
+		secretFile       = "secret-file-256.txt"
+	)
+	_, err := f.pg.Pool.Exec(t.Context(),
+		`INSERT INTO documents(id,content,status,collection,doc_type,file_name,chunk_count,fingerprint) VALUES($1,$2,'deleting',$3,$4,$5,1,$6)`,
+		docID, secretContent, secretCollection, secretDocType, secretFile, "fp-"+docID)
+	require.NoError(t, err)
+	_, err = f.pg.Pool.Exec(t.Context(),
+		`INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,$3,3)`,
+		hexChunkID(docID, 0), docID, secretChunk)
+	require.NoError(t, err)
+	_, err = f.pg.Pool.Exec(t.Context(),
+		`INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'qualified_intent','local')`,
+		docID, uuid.NewString())
+	require.NoError(t, err)
+
+	assertExcludesSecrets := func(text string) {
+		t.Helper()
+		require.Contains(t, text, docID)
+		for _, secret := range []string{secretContent, secretChunk, secretCollection, secretDocType, secretFile} {
+			require.NotContains(t, text, secret)
+		}
+	}
+
+	var invOut bytes.Buffer
+	err = execute(t.Context(), h.deps, options{
+		Generation: "g2", Profile: h.profileFile("g2.json", testProfile(sourceModel)),
+		TargetStore: "pinecone", TargetIndex: "quarry-g2",
+		MaxDocuments: 1000, MaxChunks: 100000, MaxBytes: 128 << 20, Batch: 100, Page: 100, Timeout: time.Minute,
+	}, &invOut, 10*time.Millisecond)
+	require.NoError(t, err)
+	assertExcludesSecrets(invOut.String())
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	var freezeOut bytes.Buffer
+	err = execute(ctx, h.deps, options{Generation: "g2", Freeze: true, Apply: true, Quiesce: 0}, &freezeOut, 10*time.Millisecond)
+	require.Error(t, err)
+	assertExcludesSecrets(err.Error())
+	assertExcludesSecrets(freezeOut.String())
+
+	apply := verifyOptions("g2")
+	apply.Apply = true
+	_, err = h.run(apply)
+	require.NoError(t, err)
+
+	previewReport, err := h.run(options{Generation: "g2", Activate: true, Quiesce: 0})
+	require.Error(t, err)
+	previewJSON, marshalErr := json.Marshal(previewReport)
+	require.NoError(t, marshalErr)
+	assertExcludesSecrets(string(previewJSON))
+
+	applyReport, err := h.run(options{Generation: "g2", Activate: true, Apply: true, Quiesce: 0})
+	require.Error(t, err)
+	assertExcludesSecrets(err.Error())
+	applyJSON, marshalErr := json.Marshal(applyReport)
+	require.NoError(t, marshalErr)
+	assertExcludesSecrets(string(applyJSON))
 }

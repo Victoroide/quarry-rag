@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -172,6 +174,9 @@ func TestDefaultInventoryWritesNothingAndCallsNoProvider(t *testing.T) {
 	require.Equal(t, false, copyReport["eligible"])
 	require.Contains(t, copyReport["reason"], "unknown")
 	require.Equal(t, "unregistered", report["target"].(map[string]any)["state"])
+	require.EqualValues(t, 0, report["open_deletions"])
+	_, hasOpenIDs := report["open_deletion_ids"]
+	require.False(t, hasOpenIDs)
 	require.Empty(t, report["blockers"])
 }
 
@@ -358,4 +363,33 @@ func TestStageRefusesDriftedGenerations(t *testing.T) {
 	require.ErrorContains(t, err, "different store, target or profile")
 	_, err = h.run(options{Generation: "g3", Profile: first, TargetStore: "pinecone", TargetIndex: "quarry-g2", Apply: true, MaxEmbedCalls: 1000})
 	require.ErrorIs(t, err, pgstore.ErrGenerationDrift, "a target belongs to one generation")
+}
+
+func TestInventoryReportsOpenDeletionsWithoutBlockingStaging(t *testing.T) {
+	f := newFixture(t)
+	h := newHarness(t, f, "postgres")
+	h.attestSource()
+
+	deletingDoc := f.docs[0].ID
+	_, err := f.pg.Pool.Exec(t.Context(), `UPDATE documents SET status='deleting' WHERE id=$1`, deletingDoc)
+	require.NoError(t, err)
+	_, err = f.pg.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'qualified_intent','local')`, deletingDoc, uuid.NewString())
+	require.NoError(t, err)
+
+	retiredID := uuid.NewString()
+	_, err = f.pg.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'legacy_reservation','legacy')`, retiredID, uuid.NewString())
+	require.NoError(t, err)
+
+	profile := h.profileFile("target.json", testProfile(sourceModel))
+	report, err := h.run(options{Generation: "g2", Profile: profile, TargetStore: "pinecone", TargetIndex: "quarry-g2"})
+	require.NoError(t, err)
+	require.Empty(t, report["blockers"])
+	require.EqualValues(t, 2, report["open_deletions"])
+	wantIDs := []string{deletingDoc, retiredID}
+	slices.Sort(wantIDs)
+	require.Equal(t, []any{wantIDs[0], wantIDs[1]}, report["open_deletion_ids"])
+
+	stageReport, err := h.run(options{Generation: "g2", Profile: profile, TargetStore: "pinecone", TargetIndex: "quarry-g2", Apply: true})
+	require.NoError(t, err)
+	require.Equal(t, true, stageReport["complete"])
 }

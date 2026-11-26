@@ -10,21 +10,23 @@ import (
 )
 
 type inventoryReport struct {
-	Action      string                  `json:"action"`
-	Generation  string                  `json:"generation"`
-	Profile     domain.EmbeddingProfile `json:"profile"`
-	ProfileHash string                  `json:"profile_hash"`
-	Target      targetReport            `json:"target"`
-	Source      sourceReport            `json:"source"`
-	Copy        copyReport              `json:"copy"`
-	Documents   documentCounts          `json:"documents"`
-	Chunks      int                     `json:"chunks"`
-	TextBytes   int64                   `json:"text_bytes"`
-	Ledger      ledgerCounts            `json:"ledger"`
-	Plan        planReport              `json:"plan"`
-	Truncated   bool                    `json:"truncated"`
-	Blockers    []string                `json:"blockers"`
-	Writes      int                     `json:"writes"`
+	Action          string                  `json:"action"`
+	Generation      string                  `json:"generation"`
+	Profile         domain.EmbeddingProfile `json:"profile"`
+	ProfileHash     string                  `json:"profile_hash"`
+	Target          targetReport            `json:"target"`
+	Source          sourceReport            `json:"source"`
+	Copy            copyReport              `json:"copy"`
+	Documents       documentCounts          `json:"documents"`
+	Chunks          int                     `json:"chunks"`
+	TextBytes       int64                   `json:"text_bytes"`
+	Ledger          ledgerCounts            `json:"ledger"`
+	Plan            planReport              `json:"plan"`
+	Truncated       bool                    `json:"truncated"`
+	OpenDeletions   int                     `json:"open_deletions"`
+	OpenDeletionIDs []string                `json:"open_deletion_ids,omitempty"`
+	Blockers        []string                `json:"blockers"`
+	Writes          int                     `json:"writes"`
 }
 
 type targetReport struct {
@@ -187,6 +189,12 @@ func (d deps) inventory(ctx context.Context, opts options, p targetPlan, profile
 	if countErr := d.countDocuments(ctx, &rep); countErr != nil {
 		return rep, countErr
 	}
+	quiesce, err := d.pg.WriterQuiesce(ctx, 0)
+	if err != nil {
+		return rep, err
+	}
+	rep.OpenDeletions = quiesce.OpenDeletions
+	rep.OpenDeletionIDs = quiesce.OpenDeletionIDs
 	if scanErr := d.scanPlan(ctx, opts, p, row != nil, &rep); scanErr != nil {
 		return rep, scanErr
 	}

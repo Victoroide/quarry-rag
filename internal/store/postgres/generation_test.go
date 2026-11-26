@@ -3,6 +3,9 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -272,11 +275,13 @@ func TestQuiesceCountsRunningLeases(t *testing.T) {
 	status, err = c.WriterQuiesce(t.Context(), time.Hour)
 	require.NoError(t, err)
 	require.False(t, status.Quiet(), "the settling window has not elapsed")
-	_, err = c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'quarantine','local')`, uuid.NewString(), uuid.NewString())
+	firstID := uuid.NewString()
+	_, err = c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'quarantine','local')`, firstID, uuid.NewString())
 	require.NoError(t, err)
 	status, err = c.WriterQuiesce(t.Context(), 0)
 	require.NoError(t, err)
 	require.Equal(t, 1, status.OpenDeletions)
+	require.Equal(t, []string{firstID}, status.OpenDeletionIDs)
 	require.False(t, status.Quiet())
 
 	legacyID := uuid.NewString()
@@ -285,12 +290,16 @@ func TestQuiesceCountsRunningLeases(t *testing.T) {
 	status, err = c.WriterQuiesce(t.Context(), 0)
 	require.NoError(t, err)
 	require.Equal(t, 2, status.OpenDeletions)
+	wantIDs := []string{firstID, legacyID}
+	slices.Sort(wantIDs)
+	require.Equal(t, wantIDs, status.OpenDeletionIDs)
 	require.False(t, status.Quiet())
 	_, err = c.Pool.Exec(t.Context(), `UPDATE document_deletions SET finalized=TRUE WHERE document_id=$1`, legacyID)
 	require.NoError(t, err)
 	status, err = c.WriterQuiesce(t.Context(), 0)
 	require.NoError(t, err)
 	require.Equal(t, 1, status.OpenDeletions)
+	require.Equal(t, []string{firstID}, status.OpenDeletionIDs)
 }
 
 func TestReplicaOnAnotherGenerationCannotWrite(t *testing.T) {
@@ -768,4 +777,83 @@ func TestVectorRowsMatchUsesPinnedGenerationTable(t *testing.T) {
 	matches, err = c.VectorRowsMatch(ctx, doc)
 	require.NoError(t, err)
 	require.True(t, matches)
+}
+
+func TestFormatOpenDeletions(t *testing.T) {
+	require.Empty(t, FormatOpenDeletions(0, nil))
+	require.Empty(t, FormatOpenDeletions(1, nil))
+	require.Empty(t, FormatOpenDeletions(0, []string{"a"}))
+	require.Equal(t, " (a)", FormatOpenDeletions(1, []string{"a"}))
+	require.Equal(t, " (a, b)", FormatOpenDeletions(2, []string{"a", "b"}))
+
+	ids20 := make([]string, maxReportedOpenDeletions)
+	for i := range ids20 {
+		ids20[i] = fmt.Sprintf("id-%02d", i)
+	}
+	require.Equal(t, " ("+strings.Join(ids20, ", ")+", +5 more)", FormatOpenDeletions(25, ids20))
+
+	emptyJSON, err := json.Marshal(Quiesce{Frozen: true, Settled: true})
+	require.NoError(t, err)
+	require.NotContains(t, string(emptyJSON), "open_deletion_ids")
+
+	withIDsJSON, err := json.Marshal(Quiesce{Frozen: true, Settled: true, OpenDeletions: 1, OpenDeletionIDs: []string{"doc-1"}})
+	require.NoError(t, err)
+	require.Contains(t, string(withIDsJSON), `"open_deletion_ids":["doc-1"]`)
+}
+
+func TestActivateRefusesAndNamesOpenDeletionReceipts(t *testing.T) {
+	c := jobsDatabase(t)
+	verifiedGeneration(t, c, "g2", "digest")
+
+	openID := uuid.NewString()
+	_, err := c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'qualified_intent','local')`, openID, uuid.NewString())
+	require.NoError(t, err)
+
+	err = c.ActivateGeneration(t.Context(), "g2", "digest", 0)
+	require.ErrorContains(t, err, fmt.Sprintf("0 in-flight jobs and 1 open deletions (%s) must finish before activation", openID))
+
+	_, err = c.Pool.Exec(t.Context(), `UPDATE document_deletions SET finalized=TRUE WHERE document_id=$1`, openID)
+	require.NoError(t, err)
+	require.NoError(t, c.ActivateGeneration(t.Context(), "g2", "digest", 0))
+}
+
+func TestQuiesceAndActivateBoundReportedOpenDeletionIDs(t *testing.T) {
+	c := jobsDatabase(t)
+	verifiedGeneration(t, c, "g2", "digest")
+
+	ids := make([]string, 25)
+	for i := range ids {
+		ids[i] = uuid.NewString()
+		_, err := c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode) VALUES($1,$2,'quarantine','local')`, ids[i], uuid.NewString())
+		require.NoError(t, err)
+	}
+	slices.Sort(ids)
+
+	q, err := c.WriterQuiesce(t.Context(), 0)
+	require.NoError(t, err)
+	require.Equal(t, 25, q.OpenDeletions)
+	require.Len(t, q.OpenDeletionIDs, maxReportedOpenDeletions)
+	require.Equal(t, ids[:maxReportedOpenDeletions], q.OpenDeletionIDs)
+	require.Equal(t, " ("+strings.Join(ids[:maxReportedOpenDeletions], ", ")+", +5 more)", FormatOpenDeletions(q.OpenDeletions, q.OpenDeletionIDs))
+
+	err = c.ActivateGeneration(t.Context(), "g2", "digest", 0)
+	require.ErrorContains(t, err, fmt.Sprintf("0 in-flight jobs and 25 open deletions (%s, +5 more) must finish before activation", strings.Join(ids[:maxReportedOpenDeletions], ", ")))
+	for _, omitted := range ids[maxReportedOpenDeletions:] {
+		require.NotContains(t, err.Error(), omitted)
+	}
+}
+
+func TestQuiesceIgnoresFinalizedHeldReceipts(t *testing.T) {
+	c := jobsDatabase(t)
+	verifiedGeneration(t, c, "g2", "digest")
+
+	_, err := c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode,finalized,held) VALUES($1,$2,'quarantine','legacy',TRUE,TRUE)`, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+
+	q, err := c.WriterQuiesce(t.Context(), 0)
+	require.NoError(t, err)
+	require.Zero(t, q.OpenDeletions)
+	require.Empty(t, q.OpenDeletionIDs)
+	require.True(t, q.Quiet())
+	require.NoError(t, c.ActivateGeneration(t.Context(), "g2", "digest", 0))
 }
