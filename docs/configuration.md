@@ -48,6 +48,12 @@ The table below lists the environment variables recognized by the service:
 | `INDEX_VISIBILITY_TIMEOUT` | duration | `30s` | 0s to 5m; less than `INGEST_JOB_TIMEOUT` | Maximum Pinecone visibility wait after vector writes. Zero disables waiting. A timeout logs a warning and allows completion. |
 | `HOSTED_VISIBILITY_REFILL` | bool | `false` | Boolean | Enable [visibility refill](architecture.md#hosted-visibility-refill) for Pinecone queries. Independent of `INDEX_VISIBILITY_MODE`. |
 | `HOSTED_VISIBILITY_EXTRA_REQUESTS` | integer | `1` | Non-negative | Maximum additional Pinecone requests per enabled query. Zero keeps the current-chunk checks and allows no additional requests. |
+| `HOSTED_VECTOR_MANIFEST` | bool | `false` | Boolean | Enable revision-fenced hosted vector manifests (`<docID>#<revisionID>#<index>`), active-revision completion fencing, and retired cleanup sweeping. |
+| `HOSTED_VECTOR_SWEEP_INTERVAL` | duration | `10s` | `0s`, or `100ms` to `1h` | Background poll interval for the retired hosted vector sweeper when `HOSTED_VECTOR_MANIFEST=true`. Zero disables background polling. |
+| `HOSTED_VECTOR_SWEEP_PAGE_SIZE` | integer | `100` | 1 to 1000 | External vector IDs deleted or checked per sweeper page. |
+| `HOSTED_VECTOR_SWEEP_BUDGET` | integer | `1000` | 1 to 100000 | Maximum external vector deletions attempted per background sweep tick. |
+| `HOSTED_VECTOR_DRAIN_DELAY` | duration | `30s` | `0s` to `1h` | Minimum time between retiring a revision, whether by supersession, failure or document deletion, and the first sweeper claim of it. `scripts/reconcile -apply` uses the same value. |
+| `HOSTED_VECTOR_CONVERGENCE_DELAY` | duration | `5s` | `0s` to `1h` | Post-delete wait before checking residue on a retired revision. |
 | `INGEST_CONTENT_DEDUP` | string | `collection` | `collection` or `off` | Selects the [document identity policy](api.md#document-identity) for new uploads. See [rollout and rollback](deployment.md#content-deduplication-rollout). |
 | `INGEST_JOB_TIMEOUT` | duration | `15m` | 1m to 2h; greater than lease | Maximum processing time per attempt. |
 | `INGEST_LEASE` | duration | `2m` | 30s to 30m | Lease duration, renewed every third of this interval. |
@@ -340,11 +346,12 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `020_owned_ingestion.sql` | Adds the [owned ingestion](grant-catalog.md#owned-ingestion) entry points and an ownership origin to the grant catalog. |
 | `023_deletion_predicates.sql` | Adds owner-defined predicates that report whether checkpointed deletion is active and whether an unfinished or held deletion reserves a document UUID. Admission and deletion call them, so a restricted serving login needs no access to the marker table. |
 | `024_document_operations.sql` | Adds owner-defined entry points and deletion-owner receipts for [scoped document operations](grant-catalog.md#scoped-document-operations). |
+| `025_hosted_vector_manifest.sql` | Adds `hosted_vector_manifests`, `hosted_vector_revisions` and `hosted_vector_cleanups`, the `hosted_vector_revision_visible` reader predicate, and owner-defined triggers that retire every unretired revision of a document when it is deleted or its status becomes `failed`. It also lets a deletion receipt record a manifested vector target. A restricted serving login needs no privilege on the three tables unless it enables `HOSTED_VECTOR_MANIFEST`. |
 | `026_authorized_retrieval.sql` | Adds the relation of documents each principal may read now and the policy revision function that [authorized retrieval](grant-catalog.md#authorized-retrieval) reads. Service-mode queries do not use them. |
 | `030_deletion_mode_lock.sql` | Adds an owner-defined function through which admission reads the deletion activation marker while holding it in share mode, so a restricted serving login can select the tagged vector format without access to the marker table. |
 
 The service can roll back to the previous binary with migration 010 and its
-checksum still recorded. After applying migration 019, 020, 023, 024, 026 or 030, follow the
+checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026 or 030, follow the
 [serving-role upgrade procedure](grant-catalog.md#upgrade-an-existing-serving-role)
 for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).
@@ -402,6 +409,9 @@ Metrics use Prometheus text format:
   results than `topK`. Explicit caller cancellation is recorded as `canceled`.
   A PostgreSQL cancellation with an active caller is recorded according to the
   [query timeout policy](api.md#post-query).
+- `quarry_hosted_vector_cleanups_total{result}` counts retired hosted vector
+  revision sweep outcomes by `result` (`completed`, `deferred`, `unresolved`,
+  `failed`, and `lease_lost`).
 
 The `route` label holds the matched method and path pattern, or `unmatched` for
 requests with no matching pattern. All durations are in seconds. Histograms use

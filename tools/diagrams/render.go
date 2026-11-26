@@ -1,12 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"html"
 	"math"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 func roundedPath(points []point) string {
@@ -133,46 +135,76 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 		}
 		fmt.Fprintf(&b, `<path id="%s" d="%s"/>`, id, path)
 	}
-	writeGlyphs := func(l label) error {
+	animatedTables := make(map[string]bool)
+	for _, n := range d.Nodes {
+		if len(n.Columns) > 0 && len(n.Times) > 0 {
+			animatedTables[n.ID] = true
+		}
+	}
+	// The normal and highlighted instances of an animated table's labels share one definition.
+	labelIDs := make(map[int]string)
+	for i, l := range labels {
+		if animatedTables[l.Owner] && (l.Kind == "muted" || l.Kind == "accent") {
+			labelIDs[i] = fmt.Sprintf("table-label-%d", i)
+		}
+	}
+	// Text that is written more than once becomes a shared run of glyphs.
+	type runKey struct {
+		bold, group bool
+		size        float64
+		text        string
+	}
+	keyOf := func(l label) runKey { return runKey{l.Bold, l.Kind == "group", l.Size, l.Text} }
+	runUses := make(map[runKey]int)
+	for _, l := range labels {
+		runUses[keyOf(l)]++
+	}
+	for _, n := range d.Nodes {
+		if len(n.Times) == 0 {
+			continue
+		}
+		for j, l := range labels {
+			if l.Owner == n.ID && (l.Kind == "muted" || l.Kind == "accent") && labelIDs[j] == "" {
+				runUses[keyOf(l)]++
+			}
+		}
+	}
+	var runKeys []runKey
+	for key, uses := range runUses {
+		if uses > 1 && utf8.RuneCountInString(key.text) > 1 {
+			runKeys = append(runKeys, key)
+		}
+	}
+	slices.SortFunc(runKeys, func(a, b runKey) int {
+		return cmp.Or(strings.Compare(a.text, b.text), cmp.Compare(a.size, b.size), cmp.Compare(boolRank(a.bold), boolRank(b.bold)), cmp.Compare(boolRank(a.group), boolRank(b.group)))
+	})
+	writeRunGlyphs := func(out *strings.Builder, key runKey) error {
 		x := 0.0
-		for _, r := range l.Text {
-			_, advance, err := f.glyph(l.Bold, r)
+		for _, r := range key.text {
+			_, advance, err := f.glyph(key.bold, r)
 			if err != nil {
 				return err
 			}
 			if r != ' ' {
 				if x == 0 {
-					fmt.Fprintf(&b, `<use href="#%s"/>`, glyphID(l.Bold, r))
+					fmt.Fprintf(out, `<use href="#%s"/>`, glyphID(key.bold, r))
 				} else {
-					fmt.Fprintf(&b, `<use href="#%s" x="%s"/>`, glyphID(l.Bold, r), number(math.Round(x)))
+					fmt.Fprintf(out, `<use href="#%s" x="%s"/>`, glyphID(key.bold, r), number(math.Round(x)))
 				}
 			}
 			x += advance
-			if l.Kind == "group" {
+			if key.group {
 				x += 1000 * groupTracking
 			}
 		}
 		return nil
 	}
-	// Share the glyph runs for SQL types, whose labels recur throughout the schema.
-	type glyphRun struct {
-		text          string
-		bold, tracked bool
-	}
-	runKey := func(l label) glyphRun { return glyphRun{l.Text, l.Bold, l.Kind == "group"} }
-	runs := make(map[glyphRun]int)
-	for _, l := range labels {
-		if !l.ReuseGlyphs {
-			continue
-		}
-		key := runKey(l)
-		if _, found := runs[key]; found {
-			continue
-		}
-		id := len(runs)
-		runs[key] = id
-		fmt.Fprintf(&b, `<g id="run%d">`, id)
-		if err := writeGlyphs(l); err != nil {
+	runIDs := make(map[runKey]string, len(runKeys))
+	for i, key := range runKeys {
+		id := fmt.Sprintf("run-%d", i)
+		runIDs[key] = id
+		fmt.Fprintf(&b, `<g id="%s" transform="scale(%s)">`, id, strconv.FormatFloat(key.size/1000, 'f', -1, 64))
+		if err := writeRunGlyphs(&b, key); err != nil {
 			return nil, err
 		}
 		b.WriteString("</g>")
@@ -182,82 +214,104 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 		fmt.Fprintf(&b, `<rect class="%s" x="%s" y="%s" width="%s" height="%s" rx="%s"%s/>`, class, number(r.X), number(r.Y), number(r.W), number(r.H), number(radius), extra)
 	}
 	rect("background", box{0, 0, d.W, d.H}, groupRadius, ` fill="`+p.Page+`"`)
-	fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s" stroke-dasharray="4 4">`, p.Group, number(groupStroke))
-	for _, g := range d.Groups {
-		rect("group", g.Box, groupRadius, "")
-	}
-	b.WriteString("</g>")
-	fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s" stroke-linejoin="round" marker-end="url(#arrow)">`, p.Edge, number(edgeStroke))
-	for _, e := range d.Edges {
-		fmt.Fprintf(&b, `<path class="edge" d="%s"/>`, roundedPath(e.Points))
-	}
-	b.WriteString("</g>")
-	fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s" stroke-linecap="round">`, p.Accent, number(pulseStroke))
-	for i, e := range d.Edges {
-		if len(e.Times) > 0 {
-			fmt.Fprintf(&b, `<path class="pulse" opacity="0" stroke-dasharray="%s %s" d="%s" style="animation:e%d %ss %s infinite"/>`, number(pulseDash), number(2*edgeLength(e)+2*pulseDash+1), roundedPath(e.Points), i, number(d.Duration), easing)
-		}
-	}
-	b.WriteString("</g>")
-	for i, n := range d.Nodes {
-		fmt.Fprintf(&b, `<g fill="%s" stroke="%s" stroke-width="%s">`, p.Surface, p.Border, number(nodeStroke))
-		if !n.Borderless {
-			rect("node", n.Box, nodeRadius, "")
+	if len(d.Groups) > 0 {
+		fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s" stroke-dasharray="4 4">`, p.Group, number(groupStroke))
+		for _, g := range d.Groups {
+			rect("group", g.Box, groupRadius, "")
 		}
 		b.WriteString("</g>")
+	}
+	if len(d.Edges) > 0 {
+		fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s" stroke-linejoin="round" marker-end="url(#arrow)">`, p.Edge, number(edgeStroke))
+		for _, e := range d.Edges {
+			fmt.Fprintf(&b, `<path class="edge" d="%s"/>`, roundedPath(e.Points))
+		}
+		b.WriteString("</g>")
+		fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s" stroke-linecap="round">`, p.Accent, number(pulseStroke))
+		for i, e := range d.Edges {
+			if len(e.Times) > 0 {
+				fmt.Fprintf(&b, `<path class="pulse" opacity="0" stroke-dasharray="%s %s" d="%s" style="animation:e%d %ss %s infinite"/>`, number(pulseDash), number(2*edgeLength(e)+2*pulseDash+1), roundedPath(e.Points), i, number(d.Duration), easing)
+			}
+		}
+		b.WriteString("</g>")
+	}
+	hasNodes, hasColumns := false, false
+	for _, n := range d.Nodes {
+		hasNodes = hasNodes || !n.Borderless
+		hasColumns = hasColumns || len(n.Columns) > 0
+	}
+	if hasNodes {
+		fmt.Fprintf(&b, `<g fill="%s" stroke="%s" stroke-width="%s">`, p.Surface, p.Border, number(nodeStroke))
+		for _, n := range d.Nodes {
+			if !n.Borderless {
+				rect("node", n.Box, nodeRadius, "")
+			}
+		}
+		b.WriteString("</g>")
+	}
+	for i, n := range d.Nodes {
 		if len(n.Times) > 0 {
 			fmt.Fprintf(&b, `<g fill="%s">`, p.Soft)
 			rect("hit", grow(n.Box, -1), nodeRadius-1, fmt.Sprintf(` opacity="0" style="animation:n%d %ss %s infinite"`, i, number(d.Duration), easing))
 			b.WriteString("</g>")
 		}
-		if len(n.Columns) > 0 {
-			fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s"><path d="M%s %sH%s"/></g>`, p.Border, number(nodeStroke), number(n.Box.X), number(n.Box.Y+42), number(n.Box.X+n.Box.W))
-		}
 	}
-	writeLabel := func(l label, fill, id string) error {
-		fillAttr := ""
-		if fill != p.Text {
-			fillAttr = ` fill="` + fill + `"`
+	if hasColumns {
+		fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s">`, p.Border, number(nodeStroke))
+		for _, n := range d.Nodes {
+			if len(n.Columns) > 0 {
+				fmt.Fprintf(&b, `<path d="M%s %sH%s"/>`, number(n.Box.X), number(n.Box.Y+42), number(n.Box.X+n.Box.W))
+			}
 		}
-		labelAttrs := fillAttr
+		b.WriteString("</g>")
+	}
+	writeLabel := func(l label, id string) error {
+		idAttr := ""
 		if id != "" {
-			// Both the normal and highlighted instances supply their own fill.
-			fmt.Fprintf(&b, `<g%s>`, fillAttr)
-			labelAttrs = ` id="` + id + `"`
+			idAttr = ` id="` + id + `"`
 		}
-		fmt.Fprintf(&b, `<g%s transform="translate(%s %s) scale(%s)">`, labelAttrs, number(l.X), number(l.Y), strconv.FormatFloat(l.Size/1000, 'f', -1, 64))
-		if l.ReuseGlyphs {
-			fmt.Fprintf(&b, `<use href="#run%d"/>`, runs[runKey(l)])
-		} else if err := writeGlyphs(l); err != nil {
+		if runID, ok := runIDs[keyOf(l)]; ok {
+			fmt.Fprintf(&b, `<use%s href="#%s" x="%s" y="%s"/>`, idAttr, runID, number(l.X), number(l.Y))
+			return nil
+		}
+		fmt.Fprintf(&b, `<g%s transform="translate(%s %s) scale(%s)">`, idAttr, number(l.X), number(l.Y), strconv.FormatFloat(l.Size/1000, 'f', -1, 64))
+		if err := writeRunGlyphs(&b, keyOf(l)); err != nil {
 			return err
 		}
 		b.WriteString("</g>")
-		if id != "" {
-			b.WriteString("</g>")
-		}
 		return nil
 	}
 
-	animatedTables := make(map[string]bool)
-	for _, n := range d.Nodes {
-		if len(n.Columns) > 0 && len(n.Times) > 0 {
-			animatedTables[n.ID] = true
+	fillOf := func(l label) string {
+		switch l.Kind {
+		case "muted", "group":
+			return p.Muted
+		case "accent":
+			return p.Accent
+		default:
+			return p.Text
 		}
 	}
-	labelIDs := make(map[int]string)
-	for i, l := range labels {
-		fill := p.Text
-		if l.Kind == "muted" || l.Kind == "group" {
-			fill = p.Muted
+	for _, fill := range []string{p.Text, p.Muted, p.Accent} {
+		opened := false
+		for i, l := range labels {
+			if fillOf(l) != fill {
+				continue
+			}
+			if !opened {
+				if fill == p.Text {
+					b.WriteString("<g>")
+				} else {
+					fmt.Fprintf(&b, `<g fill="%s">`, fill)
+				}
+				opened = true
+			}
+			if err := writeLabel(l, labelIDs[i]); err != nil {
+				return nil, err
+			}
 		}
-		if l.Kind == "accent" {
-			fill = p.Accent
-		}
-		if animatedTables[l.Owner] && (l.Kind == "muted" || l.Kind == "accent") {
-			labelIDs[i] = fmt.Sprintf("table-label-%d", i)
-		}
-		if err := writeLabel(l, fill, labelIDs[i]); err != nil {
-			return nil, err
+		if opened {
+			b.WriteString("</g>")
 		}
 	}
 	for i, n := range d.Nodes {
@@ -271,7 +325,7 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 					fmt.Fprintf(&b, `<use href="#%s"/>`, id)
 					continue
 				}
-				if err := writeLabel(l, p.Text, ""); err != nil {
+				if err := writeLabel(l, ""); err != nil {
 					return nil, err
 				}
 			}
@@ -280,6 +334,13 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 	}
 	b.WriteString("</svg>\n")
 	return []byte(strings.ReplaceAll(b.String(), "><", ">\n<")), nil
+}
+
+func boolRank(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func edgeLength(e edge) float64 {

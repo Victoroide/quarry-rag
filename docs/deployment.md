@@ -284,6 +284,35 @@ watermark in an isolated namespace. The check deletes its test vectors.
 GOMAXPROCS=4 go test -p 2 -count=1 -v ./internal/store/pinecone -run '^TestStagingServerlessVisibilityHeaders$'
 ```
 
+#### Hosted Vector Manifest Rollout
+
+Apply migration 025 and the `hosted_vector_revision_visible` grant before
+starting upgraded processes, whether or not `HOSTED_VECTOR_MANIFEST` is enabled:
+every query asks that predicate whether a hit belongs to the document's active
+revision. A serving login that leaves the flag off needs no privilege on the
+three manifest tables, because document deletion and job failure retire
+revisions in owner-defined triggers. Only replicas that set
+`HOSTED_VECTOR_MANIFEST=true` need the
+[manifest table grants](grant-catalog.md#database-roles)
+and run the sweeper.
+
+Readers accept legacy unrevisioned vectors for a document that has no active
+revision and hits matching the active revision otherwise. Upgrade every replica
+to run the revision-aware readers before enabling `HOSTED_VECTOR_MANIFEST=true`.
+Enable the flag on one replica first and confirm that
+`quarry_hosted_vector_cleanups_total` reports completions.
+
+To roll back, set `HOSTED_VECTOR_MANIFEST=false` and keep at least one replica
+that has the flag enabled and its grants until `scripts/reconcile` reports no
+`retired_revisions`. Retired revisions wait in the database, and only a
+replica with the flag enabled sweeps them. Without one, run `make reconcile
+ARGS="-apply"` against the same configuration to sweep them from the command
+line.
+
+An attempt that was interrupted before the rollback and then completed without
+manifests leaves its vectors in the index. Readers never return them, and they
+are removed when the document is deleted or fails.
+
 #### SDK Deployment Verification
 
 Before upgrading, record the UUID of a completed, searchable staging document in the default namespace. Deploy to staging first, with `GO_RAG_FAKE_MODE=false`, and expose the staging server at `localhost:8081`. Configure the test environment with the staging service token and the same external service settings as the staging server.
@@ -463,7 +492,8 @@ thaw and source attestation) requires these grants:
 ```sql
 GRANT USAGE ON SCHEMA public TO quarry_reindex;
 GRANT SELECT ON public.documents, public.chunks, public.document_deletions,
-  public.ingest_jobs, public.evaluation_fixtures, public.document_pdf_extractions TO quarry_reindex;
+  public.ingest_jobs, public.evaluation_fixtures, public.document_pdf_extractions,
+  public.hosted_vector_revisions TO quarry_reindex;
 GRANT SELECT, INSERT, UPDATE ON public.vector_generations TO quarry_reindex;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.vector_generation_documents TO quarry_reindex;
 GRANT SELECT, UPDATE ON public.vector_state TO quarry_reindex;

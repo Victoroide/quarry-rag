@@ -262,6 +262,10 @@ func parseSQL(sql string) (sqlSchema, error) {
 				if regexp.MustCompile(`(?is)^ADD\s+CONSTRAINT\s+\w+\s+CHECK\s*\(.+\)(?:\s+NOT\s+VALID)?$`).MatchString(part) {
 					continue
 				}
+				// Replacing a check changes no column, type or key, so only a check may be dropped here.
+				if regexp.MustCompile(`(?i)^DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?\w+_check$`).MatchString(part) {
+					continue
+				}
 				return nil, fmt.Errorf("unsupported table alteration: %s", part)
 			}
 			if add != nil {

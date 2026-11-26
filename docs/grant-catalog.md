@@ -89,7 +89,7 @@ GRANT SELECT, INSERT, UPDATE ON public.document_deletions TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
   public.evaluation_fixture_reserved(uuid), public.document_deletion_active(),
   public.document_deletion_active_shared(),
-  public.document_deletion_reserved(uuid) TO quarry_service;
+  public.document_deletion_reserved(uuid), public.hosted_vector_revision_visible(uuid, uuid) TO quarry_service;
 GRANT SELECT (revision) ON public.grant_catalog_policy_revision TO quarry_operator;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_source_snapshot(uuid) TO quarry_operator;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_import_batch(text, boolean) TO quarry_operator;
@@ -113,6 +113,17 @@ GRANT SELECT ON public.grant_catalog_policy_audit TO quarry_auditor;
 
 If serving replicas will enable the source upload journal, also apply the
 [source upload journal database grants](deployment.md#source-upload-journal-database-grants).
+
+Replicas that set `HOSTED_VECTOR_MANIFEST=true` also record and sweep hosted
+vector revisions, so they need access to the three tables that hold them. Apply
+this block only for those replicas. A replica that leaves the flag off needs no
+privilege on these tables: retirement runs in owner-defined triggers, and
+readers consult revisions through `hosted_vector_revision_visible`.
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.hosted_vector_manifests,
+  public.hosted_vector_revisions, public.hosted_vector_cleanups TO quarry_service;
+```
 
 For pgvector, preinstall the extension as a database administrator or use an
 owner login with extension installation privileges. Make the extension schema
@@ -167,21 +178,26 @@ receipt grant that applies only to a deployment that enables fixtures.
 
 ### Upgrade an existing serving role
 
-After the schema owner applies migrations `019_evaluation_fixture_guards.sql`
-and `023_deletion_predicates.sql`, grant the serving login execution on the
-four functions and access to the deletion receipts before starting upgraded
-processes. Ordinary admission, job leasing, removal and the deletion-mode
-check use these functions even when evaluation fixtures are disabled and
-checkpointed deletion is inactive. The login reads the activation marker only
-through `document_deletion_active` and `document_deletion_active_shared` and
-needs no privilege on its table. Substitute the deployed schema and serving
-role names as needed.
+Apply each step after the schema owner applies the named migration and before
+starting upgraded processes. Substitute the deployed schema and serving role
+names as needed.
+
+- Migrations `019_evaluation_fixture_guards.sql` and
+  `023_deletion_predicates.sql` add owner-defined predicates and the deletion
+  receipts. Ordinary admission, job leasing, removal and the deletion-mode check
+  use them even when evaluation fixtures are disabled and checkpointed deletion
+  is inactive. The login reads the activation marker only through
+  `document_deletion_active` and `document_deletion_active_shared` and needs no privilege on its table.
+- Migration `025_hosted_vector_manifest.sql` adds the predicate that readers use
+  to match a hit with the document's active hosted revision. Every query uses
+  it, even when `HOSTED_VECTOR_MANIFEST` is disabled. Only replicas that enable
+  the flag also need the table grants shown above.
 
 ```sql
 GRANT SELECT, INSERT, UPDATE ON public.document_deletions TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
   public.evaluation_fixture_reserved(uuid), public.document_deletion_active(),
-  public.document_deletion_reserved(uuid) TO quarry_service;
+  public.document_deletion_reserved(uuid), public.hosted_vector_revision_visible(uuid, uuid) TO quarry_service;
 ```
 
 After applying `030_deletion_mode_lock.sql`, grant execution of
