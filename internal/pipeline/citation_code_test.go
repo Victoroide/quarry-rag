@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -8,6 +9,17 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/stretchr/testify/require"
 )
+
+var citationFenceRegressions = []struct {
+	name, answer string
+	blocks       []string
+	offset       int
+}{
+	{"dedent to sibling", "1. Install:\n    ```bash\n    npm i x\n2. Run:\n```\nrun\n```\nThen restart [1].", []string{"```\nrun\n```"}, 69},
+	{"dedent after blank", "1. Install:\n    ```bash\n    npm i x\n\n```\nrun\n```\nThen restart [1].", []string{"```\nrun\n```"}, 62},
+	{"dedent from indented block", "Example:\n\n    ```\n    raw\n\n```\nx\n```\nThen [1].", []string{"```\nx\n```"}, 42},
+	{"over-indented top-level closer", "  ```\n  a\n     ```\n  b\n  ```\nThen [1].", []string{"```\n  a\n     ```\n  b\n  ```"}, 34},
+}
 
 func TestCitationCodeRanges(t *testing.T) {
 	for _, tc := range []struct {
@@ -37,17 +49,18 @@ func TestCitationCodeRanges(t *testing.T) {
 		{"unclosed fence runs to the end", "text\n```\ncode [1]", []string{"```\ncode [1]"}},
 		{"lone fence", "```", []string{"```"}},
 		{"three-space indent is a fence", "   ```\nx\n   ```\n[1]", []string{"```\nx\n   ```"}},
-		{"four-space indent is not a fence", "    ```\nx\n    ```", nil},
+		{"four-space indent is not a fence", "    ```\n    x\n    ```", nil},
 		{"four-space opener closed at three spaces", "1. Install:\n    ```bash\n    npm i x[0]\n   ``` \nThen restart [1].", nil},
 		{"two-space opener closed at four spaces", "- Install:\n  ```bash\n  npm i x[0]\n    ``` \nThen restart [1].", []string{"```bash\n  npm i x[0]\n    ```"}},
 		{"three-space opener closed at six spaces", "1. Install:\n   ```bash\n   npm i x[0]\n      ```\nThen restart [1].", []string{"```bash\n   npm i x[0]\n      ```"}},
 		{"top-level fence ignores four-space literal fence", "```markdown\n    ```\n```\nThen [1].", []string{"```markdown\n    ```\n```"}},
 		{"one-space fence ignores four-space literal fence", " ```markdown\n    ```\n ```\nThen [1].", []string{"```markdown\n    ```\n ```"}},
-		{"tilde straddle and length mismatch", "    ~~~~\n    a[0]\n   ~~~\n   ~~~~\n`b` [1]\n  ~~~\n  x[0]\n     ~~\n     ~~~~\nDone [2].", []string{"`b`", "~~~\n  x[0]\n     ~~\n     ~~~~"}},
+		{"tilde straddle and length mismatch", "1. First\n    ~~~~\n    a[0]\n   ~~~\n   ~~~~\n`b` [1]\n- Next\n  ~~~\n  x[0]\n     ~~\n     ~~~~\nDone [2].", []string{"`b`", "~~~\n  x[0]\n     ~~\n     ~~~~"}},
+		{"top-level tilde closer must reach the left margin", "  ~~~\n  x[0]\n     ~~~~\n   ~~~~\nDone [1].", []string{"~~~\n  x[0]\n     ~~~~\n   ~~~~"}},
 		{"indented backtick in info string is not an opener", "    ```a`b\n   ```\nx\n   ```\n`c`", []string{"```\nx\n   ```", "`c`"}},
 		{"tab indent is not a fence", "\t```\nx[0]\n\t```", nil},
-		{"inline span inside unrecognized fence", "    ```bash\n    `x[0]`\n   ``` \n`y[0]` [1]", []string{"`y[0]`"}},
-		{"unclosed four-space fence", "    ```bash\n`x[0]`\nThen [1].", nil},
+		{"inline span inside unrecognized list fence", "1. Install\n    ```bash\n    `x[0]`\n   ``` \n`y[0]` [1]", []string{"`y[0]`"}},
+		{"unclosed four-space fence", "    ```bash\n`x[0]`\nThen [1].", []string{"`x[0]`"}},
 		{"CRLF straddle fences", "1. Install:\r\n    ```bash\r\n    npm i x[0]\r\n   ```\r\n- Next:\r\n  ```bash\r\n  npm i y[0]\r\n    ```\r\nThen [1].", []string{"```bash\r\n  npm i y[0]\r\n    ```"}},
 		{"fence inside a block quote is not recognized", "> ```\n> x[0]\n> ```", nil},
 		{"backtick in the info string is not a fence", "```a`b\nx[0]", nil},
@@ -66,7 +79,67 @@ func TestCitationCodeRanges(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+	for _, tc := range citationFenceRegressions {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.offset, strings.LastIndex(tc.answer, "[1]"))
+			assertCitationCodeRanges(t, tc.answer, tc.blocks)
+		})
+	}
 	require.Equal(t, [][2]int{{2, 8}}, citationCodeRanges("a `b[0]` c"))
+}
+
+func assertCitationCodeRanges(t *testing.T, text string, blocks []string) {
+	t.Helper()
+	var want [][2]int
+	end := 0
+	for _, block := range blocks {
+		i := strings.Index(text[end:], block)
+		require.NotEqual(t, -1, i, "%q is missing from the fixture", block)
+		start := end + i
+		end = start + len(block)
+		want = append(want, [2]int{start, end})
+	}
+	require.Equal(t, want, citationCodeRanges(text))
+}
+
+func TestCitationFenceContainerBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		blocks     []string
+	}{
+		{"ordered parenthesis and multiple digits", "12) Setup\n    ```\n    `x`\n    ```\n`y`", []string{"`y`"}},
+		{"nine digits are a marker", "123456789. Setup\n           ```\n           `x`\n          ```\n          `y`\n`z`", []string{"`z`"}},
+		{"ten digits are prose", "1234567890. Setup\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"sibling resets margin", "12) First\n    ```\n- Second\n  ```\n  `x`\n    ```\n`y`", []string{"```\n  `x`\n    ```", "`y`"}},
+		{"unrelated list expires on prose", "- First\nParagraph\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"marker-like prose", "See - list\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"marker without separating whitespace", "1.No\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"marker-only line", "-  \t\r\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"wide marker padding falls back to one column", "+     Setup\n  ```\n  a\n     ```\n`y`", []string{"```\n  a\n     ```", "`y`"}},
+		{"four padding columns contribute to the margin", "+    Setup\n     ```\n     `x`\n     ```\n     `y`", []string{"`y`"}},
+		{"blank lines keep list and open fence", "* Setup\n \t\r\n  ```\n\r\n \t\r\n  a\n     ```\n`y`", []string{"```\n\r\n \t\r\n  a\n     ```", "`y`"}},
+		{"tab padding after marker uses the current column", "  -\tSetup\r\n \t```\r\n\t`x`\r\n\t  ```\t\r\n\t`y`", []string{"`y`"}},
+		{"mixed indentation counts columns but uses byte offsets", "档案\n- Setup\n  ```\r\n  x\r\n \t```\t\r\n`y`", []string{"```\r\n  x\r\n \t```", "`y`"}},
+		{"nonzero opener indentation keeps list margin", " - Setup\n   ```\n   a\n      ```\n`y`", []string{"```\n   a\n      ```", "`y`"}},
+		{"closer bounds follow margin even when opener is deeper", "- Setup\n   ```\n   a\n      ```\n     ```\n`y`", []string{"```\n   a\n      ```\n     ```", "`y`"}},
+		{"list closer must match delimiter length and tail", "- Setup\n  ~~~~\n  ~~~\n  ````\n  ~~~~ text\n    ~~~~~\t\n`y`", []string{"~~~~\n  ~~~\n  ````\n  ~~~~ text\n    ~~~~~", "`y`"}},
+		{"list suppression uses bounded closer indentation", "- Setup\n    ~~~~\n      ~~~~\n    `x`\n     ~~~~~\n  `y`", []string{"`y`"}},
+		{"opener beyond list fence indentation uses indented block margin", "- Setup\n      ```\n    `x`\n  `y`", []string{"`y`"}},
+		{"standalone tab block ends before dedented inline span", "\t```\n \t`x`\n\t \r\n   `y`", []string{"`y`"}},
+		{"standalone closer remains inside the indented block", "    ~~~\n        ~~~\n    `y`", []string{"`y`"}},
+		{"recognized list fence dedents to prose", "- Setup\r\n  ```\r\n  a\r\n `y` [1]", []string{"```\r\n  a\r\n", "`y`"}},
+		{"recognized list fence dedents to another fence", "- Setup\n  ```\n  a\n```\nb\n```\n[1]", []string{"```\n  a\n", "```\nb\n```"}},
+		{"unclosed list fence at eof without lf", "1. Setup\n   ```\n   a", []string{"```\n   a"}},
+		{"unclosed list fence at eof with lf", "1. Setup\n   ```\n   a\n", []string{"```\n   a\n"}},
+		{"lone carriage return is not a line separator", "- Setup\n  ```\r[1]", []string{"```\r[1]"}},
+		{"block quote is outside the fence subset", "> ```\n> `x`\n> ```\n`y`", []string{"`x`", "`y`"}},
+		{"direct marker fence is outside the fence subset", "- ```\n  `x`\n  ```\n  open", []string{"`x`", "```\n  open"}},
+		{"nested marker does not establish a second margin", "- Outer\n  - Inner\n  ```\n  a\n     ```\n`y`", []string{"```\n  a\n     ```", "`y`"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCitationCodeRanges(t, tc.text, tc.blocks)
+		})
+	}
 }
 
 func TestInCitationCode(t *testing.T) {
@@ -88,6 +161,43 @@ func BenchmarkCitationCodeRanges(b *testing.B) {
 	for b.Loop() {
 		citationCodeRanges(text)
 	}
+}
+
+func BenchmarkCitationCodeRangeDedents(b *testing.B) {
+	const item = "- Setup\n  ```\n  code\n~~~\n[1]\n~~~\nThen [1].\n"
+	for _, kiB := range []int{10, 100} {
+		b.Run(strconv.Itoa(kiB)+"KiB", func(b *testing.B) {
+			answer := strings.Repeat(item, kiB*1024/len(item)+1)[:kiB*1024]
+			b.SetBytes(int64(len(answer)))
+			b.ReportAllocs()
+			for b.Loop() {
+				citationCodeRanges(answer)
+			}
+		})
+	}
+}
+
+func TestVerifyCitationsAfterFenceDedent(t *testing.T) {
+	for _, tc := range citationFenceRegressions {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.offset, strings.LastIndex(tc.answer, "[1]"))
+			for _, streaming := range []bool{false, true} {
+				for _, preserve := range []bool{false, true} {
+					answer, citations := preservingFinalize(t, tc.answer, 1, streaming, preserve)
+					require.Equal(t, tc.answer, answer)
+					require.Equal(t, []int{tc.offset}, citationOffsets(citations))
+				}
+			}
+		})
+	}
+	t.Run("marker inside recovered top-level fence is literal", func(t *testing.T) {
+		answer := strings.Replace(citationFenceRegressions[0].answer, "\nrun\n", "\nrun [01]\n", 1)
+		for _, streaming := range []bool{false, true} {
+			got, citations := preservingFinalize(t, answer, 1, streaming, true)
+			require.Equal(t, answer, got)
+			require.Equal(t, []int{strings.LastIndex(answer, "[1]")}, citationOffsets(citations))
+		}
+	})
 }
 
 // preservingFinalize runs the production finalization for a response mode.
