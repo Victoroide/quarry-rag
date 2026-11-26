@@ -63,7 +63,8 @@ func (d deps) freeze(ctx context.Context, opts options, out io.Writer, poll time
 				if rep.Quiesce != nil {
 					last = *rep.Quiesce
 				}
-				return fmt.Errorf("writers did not quiesce within the timeout: %d jobs running, %d deletions open; the freeze stays in force", last.RunningJobs, last.OpenDeletions)
+				return fmt.Errorf("writers did not quiesce within the timeout: %d jobs running, %d deletions open%s; the freeze stays in force",
+					last.RunningJobs, last.OpenDeletions, pgstore.FormatOpenDeletions(last.OpenDeletions, last.OpenDeletionIDs))
 			case <-timer.C:
 				timer.Reset(poll)
 			}
@@ -145,6 +146,11 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 	if stateErr := d.state(ctx, &rep); stateErr != nil {
 		return stateErr
 	}
+	quiesce, qErr := d.pg.WriterQuiesce(ctx, opts.Quiesce)
+	if qErr != nil {
+		return qErr
+	}
+	rep.Quiesce = &quiesce
 	if row.State != pgstore.StateVerified {
 		rep.Reasons = append(rep.Reasons, fmt.Sprintf("the generation is %s, not verified", row.State))
 	}
@@ -153,6 +159,10 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 	}
 	if !rep.Frozen || rep.FreezeGeneration != opts.Generation {
 		rep.Reasons = append(rep.Reasons, "writers are not frozen for this generation")
+	}
+	if quiesce.OpenDeletions > 0 {
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf("%d open deletions%s must finish before activation",
+			quiesce.OpenDeletions, pgstore.FormatOpenDeletions(quiesce.OpenDeletions, quiesce.OpenDeletionIDs)))
 	}
 	ready := len(rep.Reasons) == 0
 	rep.Ready = &ready
