@@ -23,6 +23,7 @@ Notable changes are grouped by release.
 - `INGEST_CONTENT_DEDUP=off` lets deployments disable content matching across upload IDs and retain explicit UUID retries.
 - Optional OCR of image-only PDF uploads through Amazon Textract (`OCR_PROVIDER=textract`, requires `S3_BUCKET`; migration 008).
 - Opt-in page-aware OCR recovers scanned pages in mixed PDFs, including baseline, extended and progressive JPEG scans and ICC-based color spaces. Request recorded extraction coverage in document summaries with `include_pdf_coverage=true`.
+- Opt-in Textract PDF layout and table extraction (`PDF_LAYOUT_MODE=textract`) preserving reading order, labeled table rows with merged headers, and document-scoped chunk provenance (`pages`, `table_ids`, `row_ids`).
 - Optional PostgreSQL vector store (`VECTOR_STORE=postgres`, pgvector) that writes vectors in the completion transaction.
 - The README shows release and Go reference badges and describes installing released artifacts.
 - Queries report which retrieved chunks reached synthesis (`excerpt`, `truncated`) and, with `include_citations`, return citations checked against their excerpts.

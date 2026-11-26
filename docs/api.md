@@ -423,12 +423,17 @@ result distinguishes it from a blank page, a missing provider page, or a provide
 warning.
 
 Selected [document summaries](#get-documents) report `pdf_coverage` for documents
-accepted under this policy. `pending` means detection has yet to be saved, `complete` means the
-policy resolved all pages, `partial` means some coverage remains unresolved,
-and `failed` means detection ended without a saved result. Ingestion can
-complete with usable partial text. It fails with `no_text` when the selected
-text has fewer than 10 trimmed UTF-8 bytes. Coverage describes extraction evidence,
-and the ingestion status separately tracks indexing.
+accepted under mixed PDF OCR or [PDF layout analysis](#pdf-layout-analysis).
+`pending` means extraction has yet to be saved, `complete` means all pages
+resolved cleanly, `partial` means some pages remain unresolved under mixed OCR
+or were flagged during layout analysis (rotated text beyond 10° or vertical
+baselines, unlinked lines, unmatched layout tables, ambiguous table spans,
+missing or unrecognized pages, or provider warnings), and `failed` means
+extraction ended without a saved result. Per-page statuses and reasons are
+persisted in `document_pdf_extractions` and are not returned in API responses.
+Ingestion can complete with usable partial text. It fails with `no_text` when
+the selected text has fewer than 10 trimmed UTF-8 bytes. Coverage describes
+extraction evidence, and the ingestion status separately tracks indexing.
 
 The collection, original bytes and versioned extraction policy determine mixed
 PDF identity. Matching explicit UUID retries work across both modes on updated
@@ -451,6 +456,42 @@ expires, the retry creates a fresh provider token. Quarry measures this expiry
 from the first acknowledged start, or uses the latest possible start when the
 provider response is unknown. An unusable partial result or expired automatic
 window returns 409 until this later expiry and an explicit UUID retry.
+
+#### PDF layout analysis
+
+Set [`PDF_LAYOUT_MODE=textract`](configuration.md#environment-variables) to
+extract reading-order paragraphs and structured tables from eligible new PDFs,
+including born-digital pages (all-blank PDFs are rejected with `422` before
+object storage). Offline execution (`GO_RAG_FAKE_MODE=true`) invokes neither S3
+nor Textract.
+
+The worker submits one Textract `StartDocumentAnalysis` operation with `LAYOUT`
+and `TABLES` features using the persisted seven-day `ClientRequestToken` window
+and never starts `StartDocumentTextDetection` for layout jobs. Paginated
+responses are collected into a bounded block graph before resolving
+cross-page relationships and rejecting missing block IDs, dangling
+relationships, cycles, repeated pagination tokens, over-limit spans and
+decoded bytes, or decode work beyond a budget proportional to the size of the
+response.
+
+Layout reconstruction emits paragraphs in provider reading order, skips running
+page-number labels, preserves captions and table titles/footers, and formats
+tables as labeled rows with resolved column headers (including merged headers)
+while preserving the input language, normalizing untrusted cell text, and
+escaping cell boundaries (`\` and `|`). Text rotated more than 10° from
+horizontal (or with vertical baselines), unlinked lines, unmatched layout
+tables, ambiguous table spans, and provider warnings mark the affected page
+`partial` with a stored reason. Extractor profile `quarry.pdf.layout.v1` and
+page provenance persist in `document_pdf_extractions` (`pdf_coverage`), and
+chunks carry document-scoped `pages`, `table_ids`, and `row_ids` coordinates in
+vector metadata and query responses. The in-memory and Pinecone vector stores
+return `pages`, `table_ids`, and `row_ids`; `VECTOR_STORE=postgres` omits them
+because `chunk_vectors` has no metadata column.
+
+Existing documents continue serving their previously indexed text. Reprocessing
+an existing document under `PDF_LAYOUT_MODE=textract` requires deleting the
+document first or uploading with a new `document_id`; reusing an existing
+`document_id` from a different extraction profile returns `409 Conflict`.
 
 ---
 
@@ -567,6 +608,9 @@ A citation-shaped number inside a quotation can be literal text. When a quoted n
 | `text` | string | Generated mode returns a preview of up to 600 runes. Evidence mode returns the selected sanitized excerpt body within the context budget set by `SYNTHESIS_CONTEXT_TOKENS` |
 | `kind` | string | Classification category if populated during ingestion (optional) |
 | `quality` | string | Quality rating if populated during ingestion (optional) |
+| `pages` | []int | One-based page numbers covered by the chunk for [PDF layout analysis](#pdf-layout-analysis); returned by the in-memory and Pinecone stores, omitted by `VECTOR_STORE=postgres` (optional) |
+| `table_ids` | []string | Document-scoped logical table identifiers covered by the chunk; returned by the in-memory and Pinecone stores, omitted by `VECTOR_STORE=postgres` (optional) |
+| `row_ids` | []string | Document-scoped logical table row identifiers covered by the chunk; returned by the in-memory and Pinecone stores, omitted by `VECTOR_STORE=postgres` (optional) |
 | `excerpt` | int | One-based selection index. Omitted for chunks outside the selection |
 | `truncated` | bool | True when the context budget cuts the selected excerpt body. Omitted otherwise |
 
@@ -752,7 +796,7 @@ Document summary fields:
 | `index_visibility` | string | Opt-in evidence recorded for indexing during ingestion |
 | `index_visibility_observed_at` | string | RFC 3339 timestamp included with a recorded observation when opted in |
 | `last_error` | string | Last ingestion error, included only for failed documents when recorded |
-| `pdf_coverage` | string | Opt-in extraction coverage when recorded by [mixed PDF OCR](#mixed-pdf-ocr) |
+| `pdf_coverage` | string | Opt-in extraction coverage (`pending`, `complete`, `partial`, or `failed`) when recorded by [mixed PDF OCR](#mixed-pdf-ocr) or [PDF layout analysis](#pdf-layout-analysis); per-page reasons are stored internally and not returned |
 | `incarnation` | string | Opt-in UUID for one lifetime of a document. It stays stable through ingestion status changes. Rows present at migration use their document UUID. Reusing a document UUID creates a new incarnation |
 
 | Index visibility | Meaning |
