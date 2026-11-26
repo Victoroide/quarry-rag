@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net"
@@ -248,12 +249,20 @@ type httpReply struct {
 
 func doRequest(t *testing.T, server *httptest.Server, method, path, token string, headers map[string]string, body string) httpReply {
 	t.Helper()
+	reply, err := readHTTPReply(t.Context(), server, method, path, token, headers, body)
+	require.NoError(t, err)
+	return reply
+}
+
+func readHTTPReply(ctx context.Context, server *httptest.Server, method, path, token string, headers map[string]string, body string) (httpReply, error) {
 	var reader io.Reader = http.NoBody
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(t.Context(), method, server.URL+path, reader)
-	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(ctx, method, server.URL+path, reader)
+	if err != nil {
+		return httpReply{}, fmt.Errorf("construct HTTP request: %w", err)
+	}
 	if token != "" {
 		req.Header.Set("X-Service-Token", token)
 	}
@@ -264,11 +273,21 @@ func doRequest(t *testing.T, server *httptest.Server, method, path, token string
 		req.Header.Set(name, value)
 	}
 	resp, err := server.Client().Do(req)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, resp.Body.Close()) }()
-	data, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	return httpReply{code: resp.StatusCode, body: string(data), retryAfter: resp.Header.Get("Retry-After")}
+	if err != nil {
+		return httpReply{}, fmt.Errorf("send HTTP request: %w", err)
+	}
+	data, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		readErr = fmt.Errorf("read HTTP response body: %w", readErr)
+	}
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close HTTP response body: %w", closeErr)
+	}
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return httpReply{}, err
+	}
+	return httpReply{code: resp.StatusCode, body: string(data), retryAfter: resp.Header.Get("Retry-After")}, nil
 }
 
 func sendDelete(t *testing.T, server *httptest.Server, token, id, incarnation string) httpReply {
