@@ -29,20 +29,25 @@ type Citation struct {
 // VerifyCitations cleans excerpt markers and checks their lexical overlap.
 func VerifyCitations(answer string, excerpts []domain.ScoredChunk) (string, []Citation) {
 	cleaned := cleanCitationMarkers(answer, len(excerpts))
-	return cleaned, verifyCitationMarkers(cleaned, excerpts)
+	return cleaned, verifyCitationMarkers(cleaned, excerpts, nil)
 }
 
 // VerifyStreamCitations checks valid references without rewriting streamed text.
 func VerifyStreamCitations(answer string, excerpts []domain.ScoredChunk) []Citation {
-	return verifyCitationMarkers(answer, excerpts)
+	return verifyCitationMarkers(answer, excerpts, nil)
 }
 
-func verifyCitationMarkers(cleaned string, excerpts []domain.ScoredChunk) []Citation {
+// verifyCitationMarkers checks every in-range marker except those that start
+// inside a literal byte range; skipped markers stay in the sentence text.
+func verifyCitationMarkers(cleaned string, excerpts []domain.ScoredChunk, literal [][2]int) []Citation {
 	citations := make([]Citation, 0)
 	excerptTokens := make(map[int]map[string]struct{})
 	var sentence strings.Builder
 	previous, byteOffset, runeOffset := 0, 0, 0
 	for _, match := range citationMarker.FindAllStringIndex(cleaned, -1) {
+		if inCitationCode(match[0], literal) {
+			continue
+		}
 		text := cleaned[previous:match[0]]
 		if boundary := strings.LastIndexFunc(text, citationSentenceBoundary); boundary >= 0 {
 			sentence.Reset()
@@ -92,7 +97,8 @@ func citationNumbers(marker string) []int {
 }
 
 func cleanCitationMarkers(answer string, count int) string {
-	return cleanCitationMarkersInto(answer, count, nil)
+	cleaned, _ := cleanCitationMarkersInto(answer, count, nil, false)
+	return cleaned
 }
 
 type citationCleanup struct {
@@ -102,10 +108,20 @@ type citationCleanup struct {
 
 func cleanCitationMarkersForAssessment(answer string, count int) (string, *citationCleanup) {
 	cleanup := &citationCleanup{origins: make(map[int]int), editedMarkers: make(map[int]struct{})}
-	return cleanCitationMarkersInto(answer, count, cleanup), cleanup
+	cleaned, _ := cleanCitationMarkersInto(answer, count, cleanup, false)
+	return cleaned, cleanup
 }
 
-func cleanCitationMarkersInto(answer string, count int, cleanup *citationCleanup) string {
+// cleanCitationMarkersInto removes or canonicalizes bracketed numbers. With
+// preserveCode, Markdown code is copied byte for byte, bracketed numbers inside
+// it are left alone, and the returned ranges locate that code in the cleaned
+// answer. A bracket that spans code is never a marker, because every code range
+// contains a backtick or tilde, so the ranges are never edited afterwards.
+func cleanCitationMarkersInto(answer string, count int, cleanup *citationCleanup, preserveCode bool) (cleaned string, literal [][2]int) {
+	var code [][2]int
+	if preserveCode {
+		code = citationCodeRanges(answer)
+	}
 	type opening struct {
 		start   int
 		source  int
@@ -113,7 +129,15 @@ func cleanCitationMarkersInto(answer string, count int, cleanup *citationCleanup
 	}
 	var stack []opening
 	out := make([]byte, 0, len(answer))
-	for i := range len(answer) {
+	for i := 0; i < len(answer); i++ {
+		if len(code) > 0 && i == code[0][0] {
+			start := len(out)
+			out = append(out, answer[code[0][0]:code[0][1]]...)
+			literal = append(literal, [2]int{start, len(out)})
+			i = code[0][1] - 1
+			code = code[1:]
+			continue
+		}
 		switch answer[i] {
 		case '[':
 			stack = append(stack, opening{start: len(out), source: i})
@@ -174,7 +198,7 @@ func cleanCitationMarkersInto(answer string, count int, cleanup *citationCleanup
 			out = append(out, answer[i])
 		}
 	}
-	return string(out)
+	return string(out), literal
 }
 
 func citationSentenceBoundary(r rune) bool {

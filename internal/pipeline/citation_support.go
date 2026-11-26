@@ -384,14 +384,16 @@ func dottedInitials(word string) bool {
 func (s *SynthesisStage) finalizeCitations(ctx context.Context, qc *QueryContext) error {
 	answer := qc.FinalAnswer
 	var cleanup *citationCleanup
+	var literal [][2]int
 	if qc.Stream == nil {
-		if s.citationVerifier == nil {
-			qc.FinalAnswer, qc.Citations = VerifyCitations(answer, qc.Excerpts)
-			return nil
+		if s.citationVerifier != nil {
+			cleanup = &citationCleanup{origins: make(map[int]int), editedMarkers: make(map[int]struct{})}
 		}
-		qc.FinalAnswer, cleanup = cleanCitationMarkersForAssessment(answer, len(qc.Excerpts))
+		qc.FinalAnswer, literal = cleanCitationMarkersInto(answer, len(qc.Excerpts), cleanup, qc.PreserveCode)
+	} else if qc.PreserveCode {
+		literal = citationCodeRanges(answer)
 	}
-	qc.Citations = verifyCitationMarkers(qc.FinalAnswer, qc.Excerpts)
+	qc.Citations = verifyCitationMarkers(qc.FinalAnswer, qc.Excerpts, literal)
 	if s.citationVerifier == nil {
 		return nil
 	}

@@ -417,7 +417,7 @@ func FuzzCitationClaims(f *testing.F) {
 	f.Fuzz(func(t *testing.T, answer string) {
 		chunks := citationEvidence("first", "second")
 		cleaned, cleanup := cleanCitationMarkersForAssessment(answer, len(chunks))
-		jsonCitations, streamCitations := verifyCitationMarkers(cleaned, chunks), VerifyStreamCitations(answer, chunks)
+		jsonCitations, streamCitations := verifyCitationMarkers(cleaned, chunks, nil), VerifyStreamCitations(answer, chunks)
 		jsonClaims, streamClaims := citationClaims(answer, jsonCitations, cleanup), citationClaims(answer, streamCitations, nil)
 		require.Len(t, jsonClaims, len(streamClaims))
 		excerpts := func(claim citedSentence, citations []Citation) []int {
@@ -440,4 +440,85 @@ func FuzzCitationClaims(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestCitationSupportPreservingCodeAssessesDisplayedLiteral(t *testing.T) {
+	for _, tc := range []struct {
+		name, literal, cleaned string
+	}{
+		{"zero index", "stations[0]", "stations"},
+		{"normalized index", "stations[01]", "stations[1]"},
+		{"retained index", "stations[1]", "stations[1]"},
+	} {
+		for _, preserve := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/preserve=%t", tc.name, preserve), func(t *testing.T) {
+				claim := "The first station is `" + tc.literal + "`"
+				answer := claim + " [1]."
+				chunks := citationEvidence(claim + ".")
+				qc := &QueryContext{Excerpts: chunks, FinalAnswer: answer, IncludeCitations: true, PreserveCode: preserve}
+				var submitted []citationsupport.Batch
+				verifier := claimVerifier(func(_ context.Context, batch citationsupport.Batch) ([]citationsupport.Status, error) {
+					submitted = append(submitted, batch)
+					return []citationsupport.Status{citationsupport.Supported}, nil
+				})
+				stage := NewSynthesisStage(nil, &config.Config{}).WithCitationSupport(verifier)
+				require.NoError(t, stage.finalizeCitations(t.Context(), qc))
+				require.Equal(t, &citationsupport.Coverage{Sentences: 1, CitedSentences: 1}, qc.CitationCoverage)
+				trailing := qc.Citations[len(qc.Citations)-1]
+				if !preserve && tc.literal != tc.cleaned {
+					// Legacy cleanup rewrote the literal, so no claim is attached to it.
+					require.Equal(t, "The first station is `"+tc.cleaned+"` [1].", qc.FinalAnswer)
+					require.Equal(t, citationsupport.Unchecked, trailing.Support.Status)
+					require.Empty(t, submitted)
+					return
+				}
+				require.Equal(t, answer, qc.FinalAnswer)
+				require.Equal(t, citationsupport.Supported, trailing.Support.Status)
+				require.Equal(t, []citationsupport.Batch{{
+					Pairs:  []citationsupport.Pair{{Claim: claim, Body: claim + "."}},
+					Claims: [][]int{{0}},
+				}}, submitted)
+				if preserve {
+					// Only the marker outside code is a citation.
+					require.Len(t, qc.Citations, 1)
+				}
+			})
+		}
+	}
+}
+
+func TestCitationSupportPreservingCodeCoverage(t *testing.T) {
+	// The claim scanner reads the fenced line as ordinary text, so its marker
+	// makes a cited sentence. With the option that marker is code: it is not a
+	// citation and the sentence is no longer counted as cited.
+	answer := "Run it:\n\n```\nb[1]\n```"
+	for _, tc := range []struct {
+		preserve  bool
+		citations int
+		cited     int
+	}{{false, 1, 1}, {true, 0, 0}} {
+		qc := &QueryContext{Excerpts: citationEvidence("b"), FinalAnswer: answer, IncludeCitations: true, PreserveCode: tc.preserve}
+		stage := NewSynthesisStage(nil, &config.Config{}).WithCitationSupport(claimVerifier(func(context.Context, citationsupport.Batch) ([]citationsupport.Status, error) {
+			return []citationsupport.Status{citationsupport.Supported}, nil
+		}))
+		require.NoError(t, stage.finalizeCitations(t.Context(), qc))
+		require.Equal(t, answer, qc.FinalAnswer)
+		require.Len(t, qc.Citations, tc.citations)
+		require.Equal(t, tc.cited, qc.CitationCoverage.CitedSentences)
+		require.Equal(t, 2, qc.CitationCoverage.Sentences)
+	}
+}
+
+func TestCitationSupportPreservingCodeAbstainsWhenScannersDisagree(t *testing.T) {
+	// The claim scanner keeps the code state across the soft-wrapped fence lines
+	// and reads the final marker as code; the citation stays unchecked.
+	answer := "```\nb[1]\n```\nDone [1]."
+	qc := &QueryContext{Excerpts: citationEvidence("Done"), FinalAnswer: answer, IncludeCitations: true, PreserveCode: true}
+	stage := NewSynthesisStage(nil, &config.Config{}).WithCitationSupport(claimVerifier(func(context.Context, citationsupport.Batch) ([]citationsupport.Status, error) {
+		t.Fatal("no claim should be submitted")
+		return nil, nil
+	}))
+	require.NoError(t, stage.finalizeCitations(t.Context(), qc))
+	require.Len(t, qc.Citations, 1)
+	require.Equal(t, citationsupport.Unchecked, qc.Citations[0].Support.Status)
 }
