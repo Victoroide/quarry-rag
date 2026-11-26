@@ -758,6 +758,9 @@ Reclamation only considers objects recorded in the journal.
   Older releases ignore every `source_uploads` row, and a later journaled
   release resumes their rechecks, as described in the
   [reclamation reference](development.md#source-upload-reclamation-scriptsreconcile).
+  Upgrade the reconciliation command before enabling journaled owned uploads.
+  Keep that version of the command available during rollback so it can continue
+  reclaiming incarnation-scoped keys.
 - **Bucket versioning.** Deleting a key in a versioned bucket only adds a delete
   marker and keeps every version, so a delete is not erasure. Reclamation lists
   the exact recorded key and deletes each version and marker by its version ID.

@@ -260,10 +260,9 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_record_security_audit(text, uuid,
 
 ## Owned ingestion
 
-Owned ingestion is the internal ingestion path for a verified principal. No
-public route enables it yet, so the HTTP contract is unchanged. A handler that
-uses it requires the verified subject and refuses every upload unless
-`INGEST_CONTENT_DEDUP=off` and the store supports owners.
+In `AUTHZ_MODE=grants`, `POST /ingest` uses owned ingestion for a verified
+principal. This path requires `INGEST_CONTENT_DEDUP=off` and a store that
+supports owners.
 
 Acceptance runs in this order, and every step that can reveal or change shared
 state follows the authorization:
@@ -286,9 +285,12 @@ state follows the authorization:
    pending.
 4. Only then does the service detect the file type, extract text, defer OCR and
    store the original. The object key names the document, the intended
-   incarnation and the attempt. A refused or uncertain acceptance removes only
-   the attempt's own object, and keeps it when the stored key proves the
-   acceptance committed.
+   incarnation and the attempt. With `SOURCE_UPLOAD_JOURNAL=true`, an owned
+   multipart upload stages a journal row before writing that key and leaves
+   unadopted uploads for [reclamation](development.md#source-upload-reclamation-scriptsreconcile).
+   With the journal disabled, a refused acceptance removes only its own
+   attempt's object. After an uncertain acceptance, it keeps the object when
+   the stored key matches the attempt or the lookup fails.
 
 The acceptance transaction holds the principal and the collection's create
 permission until it commits, so a revocation waits for it or is already
