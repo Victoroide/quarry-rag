@@ -305,3 +305,22 @@ func TestFreezeWaitsForAnAppliedReconcilePass(t *testing.T) {
 	require.NoError(t, <-deleted)
 	require.NoError(t, pg.FreezeWriters(t.Context(), "g2"))
 }
+
+type countingGate struct{ calls int }
+
+func (g *countingGate) AcquireWriter(context.Context) (func(), error) {
+	g.calls++
+	return func() {}, nil
+}
+
+func TestDryRunMaintenanceTakesNoWriterSession(t *testing.T) {
+	gate := &countingGate{}
+	worked := 0
+	work := func() error { worked++; return nil }
+	require.NoError(t, runMaintenance(t.Context(), gate, options{}, work))
+	require.Equal(t, 1, worked)
+	require.Equal(t, 0, gate.calls)
+	require.NoError(t, runMaintenance(t.Context(), gate, options{Apply: true}, work))
+	require.Equal(t, 2, worked)
+	require.Equal(t, 1, gate.calls)
+}

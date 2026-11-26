@@ -198,9 +198,11 @@ When replicas share an account quota expressed in concurrent requests, the large
 
 Apply this formula to `QUERY_CONCURRENCY` and `EMBED_CONCURRENCY` with the quotas of the models they call, and to `EXTRACT_CONCURRENCY` when the deployment sets its own cluster-wide upload limit. Each result must stay within the variable's [bounds](configuration.md#environment-variables); a result below 1 means the quota cannot support that many replicas. Retries run inside these limits, so they add requests but not concurrency.
 
-PostgreSQL connections also add up across replicas. Each replica opens one pool of at most `pool_max_conns` connections, set in [`DATABASE_URL`](configuration.md#environment-variables); startup migrations use this pool. Maintenance connections are administrative sessions plus the separate pools of `make cleanup`, `make reconcile` and `make reindex`, each capped by the same setting. The total must fit within `max_connections` less the server's reserved slots, such as `superuser_reserved_connections`:
+PostgreSQL connections also add up across processes. Each process opens one pool of at most `pool_max_conns` connections, set in [`DATABASE_URL`](configuration.md#environment-variables); startup migrations use this pool. Some operations also hold a dedicated session outside the pool, so that a lock never waits for a pooled connection. Each admitted document deletion holds one until its request finishes, and a replica admits at most `pool_max_conns` deletions at a time, so a serving replica can use up to `2 × pool_max_conns` connections. `make cleanup`, an applied `make reconcile`, and a `make reindex` command while it holds its generation lock each add one session to their own pool. Administrative sessions count as well. The total must fit within `max_connections` less the reserved slots (`superuser_reserved_connections` and `reserved_connections`), and within any per-role or per-database connection limit:
 
-`replicas × pool_max_conns + maintenance connections ≤ max_connections − reserved slots`
+`replicas × 2 × pool_max_conns + Σ (maintenance pool_max_conns + 1) + administrative sessions ≤ max_connections − reserved slots`
+
+For example, three replicas with `pool_max_conns=16` can use 96 connections. One `make reindex` command with `pool_max_conns=4` and one administrative session raise the total to 102, more than PostgreSQL's default `max_connections` of 100 less its 3 reserved superuser slots allows. Lower `pool_max_conns` or raise `max_connections`.
 
 ## Query and Proxy Timeouts
 
