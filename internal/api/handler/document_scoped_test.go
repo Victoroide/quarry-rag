@@ -40,6 +40,7 @@ type scopedMockStore struct {
 	docs            map[string]*scopedMemoryEntry
 	active          map[string]bool
 	revision        int64
+	catalogRevision int64
 	listErr         error
 	statusErr       error
 	policyErr       error
@@ -122,7 +123,7 @@ func (s *scopedMockStore) ScopedPolicyState(_ context.Context, principal domain.
 	if s.policyErr != nil {
 		return domain.ScopedPolicyState{}, s.policyErr
 	}
-	return domain.ScopedPolicyState{Active: s.active[principal.ID], Revision: s.revision}, nil
+	return domain.ScopedPolicyState{Active: s.active[principal.ID], Revision: s.revision, CatalogRevision: s.catalogRevision}, nil
 }
 
 func (s *scopedMockStore) canReadLocked(entry *scopedMemoryEntry, principal domain.Principal) bool {
@@ -142,7 +143,7 @@ func (s *scopedMockStore) ListScopedDocumentsPage(_ context.Context, principal d
 		return domain.ScopedDocumentPage{}, s.listErr
 	}
 	if !s.active[principal.ID] {
-		return domain.ScopedDocumentPage{Active: false, Revision: s.revision}, nil
+		return domain.ScopedDocumentPage{Active: false, Revision: s.revision, CatalogRevision: s.catalogRevision}, nil
 	}
 	ids := make([]string, 0, len(s.docs))
 	for id := range s.docs {
@@ -171,7 +172,7 @@ func (s *scopedMockStore) ListScopedDocumentsPage(_ context.Context, principal d
 			break
 		}
 	}
-	return domain.ScopedDocumentPage{Active: true, Revision: s.revision, Documents: docs}, nil
+	return domain.ScopedDocumentPage{Active: true, Revision: s.revision, CatalogRevision: s.catalogRevision, Documents: docs}, nil
 }
 
 func (s *scopedMockStore) GetScopedDocumentSummary(_ context.Context, principal domain.Principal, id domain.DocumentID, includeIncarnation bool) (domain.ScopedDocumentSummary, error) {
@@ -181,18 +182,18 @@ func (s *scopedMockStore) GetScopedDocumentSummary(_ context.Context, principal 
 		return domain.ScopedDocumentSummary{}, s.statusErr
 	}
 	if !s.active[principal.ID] {
-		return domain.ScopedDocumentSummary{Active: false, Revision: s.revision}, nil
+		return domain.ScopedDocumentSummary{Active: false, Revision: s.revision, CatalogRevision: s.catalogRevision}, nil
 	}
 	entry, ok := s.docs[string(id)]
 	if !ok || !s.canReadLocked(entry, principal) {
-		return domain.ScopedDocumentSummary{Active: true, Revision: s.revision}, nil
+		return domain.ScopedDocumentSummary{Active: true, Revision: s.revision, CatalogRevision: s.catalogRevision}, nil
 	}
 	doc := entry.summary
 	doc.S3Key = entry.s3Key
 	if !includeIncarnation {
 		doc.Incarnation = ""
 	}
-	return domain.ScopedDocumentSummary{Active: true, Revision: s.revision, Document: &doc}, nil
+	return domain.ScopedDocumentSummary{Active: true, Revision: s.revision, CatalogRevision: s.catalogRevision, Document: &doc}, nil
 }
 
 func (s *scopedMockStore) WithScopedDocumentFile(ctx context.Context, principal domain.Principal, id domain.DocumentID, sign func(context.Context, string) error) (domain.ScopedFileResult, error) {
@@ -571,7 +572,7 @@ func TestScopedListingRechecksPolicyAndSubjectAcrossBatches(t *testing.T) {
 		}
 	}
 
-	// Unrelated policy revision bump once succeeds cleanly on retry.
+	// A caller policy revision bump succeeds cleanly on retry.
 	var bumps int
 	store.beforePolicy = func() {
 		store.mu.Lock()

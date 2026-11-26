@@ -255,7 +255,9 @@ paths:
         - $ref: '#/components/parameters/IncludePDFCoverage'
       responses:
         '200':
-          description: Document inventory
+          description: >-
+            Document inventory. After a grants-mode stream begins, a caller policy
+            change or inactive principal can end it with partial JSON and no count.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -269,10 +271,12 @@ paths:
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
+          description: Access denied, including an inactive principal before a grants-mode response starts.
         '500':
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/Error'
+          description: Inventory unavailable, including four consecutive caller policy mismatches before the response starts.
   /documents/{doc_id}:
     parameters:
       - $ref: '#/components/parameters/RequestID'
@@ -291,7 +295,7 @@ paths:
         - $ref: '#/components/parameters/IncludePDFCoverage'
       responses:
         '200':
-          description: Document summary
+          description: Document summary released after a caller policy recheck in grants mode.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -305,12 +309,14 @@ paths:
           $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
+          description: Access denied, including an inactive principal in grants mode.
         '404':
           $ref: '#/components/responses/Error'
         '500':
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/Error'
+          description: Status unavailable, including four consecutive caller policy mismatches in grants mode.
     delete:
       operationId: deleteDocument
       summary: Remove a document and its stored artifacts
