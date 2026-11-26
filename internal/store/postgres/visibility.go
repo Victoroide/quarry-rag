@@ -19,6 +19,22 @@ type Visibility struct {
 
 	Collection string
 	DocType    string
+	// Subject, when set, requires every document to be readable by this principal
+	// at its current incarnation. Service mode leaves it nil and reads no grant
+	// relation.
+	Subject *domain.Principal
+}
+
+// readableJoin restricts the documents relation aliased d to those the principal
+// may read now. The relation itself requires an active principal, a ready
+// ownership row for the live incarnation and a completed document.
+func readableJoin(subject *domain.Principal, args []any) (join string, next []any) {
+	if subject == nil {
+		return "", args
+	}
+	args = append(args, subject.TenantID, subject.ID)
+	return fmt.Sprintf(` JOIN grant_catalog_readable_documents g ON g.tenant_id=$%d::uuid AND g.principal_id=$%d::uuid
+  AND g.document_id=d.id AND g.incarnation=COALESCE(d.incarnation,d.id)`, len(args)-1, len(args)), args
 }
 
 // ObserveUntaggedIncarnations reads a consistent view of the SQL identities
@@ -31,12 +47,13 @@ func (v Visibility) ObserveUntaggedIncarnations(ctx context.Context, allowedIDs 
 			return incarnations, nil
 		}
 	}
+	join, args := readableJoin(v.Subject, []any{v.Collection, v.DocType, allowedIDs})
 	rows, err := v.Pool.Query(ctx, `
-SELECT id::text, COALESCE(incarnation,id)::text
-FROM documents
-WHERE NOT scoped_vectors AND NOT vector_incarnation_required
-  AND ($1='' OR collection=$1) AND ($2='' OR doc_type=$2)
-  AND ($3::uuid[] IS NULL OR id=ANY($3::uuid[]))`, v.Collection, v.DocType, allowedIDs)
+SELECT d.id::text, COALESCE(d.incarnation,d.id)::text
+FROM documents d`+join+`
+WHERE NOT d.scoped_vectors AND NOT d.vector_incarnation_required
+  AND ($1='' OR d.collection=$1) AND ($2='' OR d.doc_type=$2)
+  AND ($3::uuid[] IS NULL OR d.id=ANY($3::uuid[]))`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: observe untagged incarnations: %w", err)
 	}
@@ -138,13 +155,14 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 		return input, previews, nil
 	}
 
+	join, args := readableJoin(v.Subject, []any{chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs})
 	rows, err := source.Query(ctx, `
 SELECT hit.ord, d.doc_type, COALESCE(d.incarnation,d.id)::text,
        CASE WHEN d.id=ANY($11::uuid[]) THEN d.content_preview END
 FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[])
 	WITH ORDINALITY AS hit(chunk_id, doc_id, idx, hash, revision, incarnation, attempt, vector_incarnation, ord)
 JOIN chunks c ON c.id=hit.chunk_id AND c.document_id=hit.doc_id AND c.chunk_index=hit.idx
-JOIN documents d ON d.id=c.document_id AND d.status='completed'
+JOIN documents d ON d.id=c.document_id AND d.status='completed'`+join+`
 WHERE ($9='' OR d.collection=$9) AND ($10='' OR d.doc_type=$10)
   AND (hit.incarnation='' OR hit.incarnation=COALESCE(d.incarnation,d.id)::text)
   AND ((hit.vector_incarnation='' AND NOT d.vector_incarnation_required)
@@ -152,7 +170,7 @@ WHERE ($9='' OR d.collection=$9) AND ($10='' OR d.doc_type=$10)
   AND (CASE WHEN d.scoped_vectors THEN COALESCE(d.incarnation,d.id)::text ELSE '' END)=hit.revision
   AND COALESCE(d.vector_attempt::text,'')=hit.attempt
   AND encode(digest(convert_to(c.text, 'UTF8'), 'sha256'), 'hex')=hit.hash
-ORDER BY hit.ord`, chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs)
+ORDER BY hit.ord`, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("postgres: visible evidence: %w", err)
 	}
@@ -214,11 +232,11 @@ func (v Visibility) VisibleDocumentIDs(ctx context.Context, ids []string) (map[s
 		return visible, nil
 	}
 
-	query := `SELECT d.id::text FROM documents d WHERE d.id = ANY($1::uuid[]) AND d.status = 'completed'`
-	args := []any{queryIDs}
+	join, args := readableJoin(v.Subject, []any{queryIDs})
+	query := `SELECT d.id::text FROM documents d` + join + ` WHERE d.id = ANY($1::uuid[]) AND d.status = 'completed'`
 	if v.Collection != "" {
-		query += ` AND d.collection = $2`
 		args = append(args, v.Collection)
+		query += fmt.Sprintf(` AND d.collection = $%d`, len(args))
 	}
 	rows, err := v.Pool.Query(ctx, query, args...)
 	if err != nil {

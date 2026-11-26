@@ -95,7 +95,8 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_authorize_ingest(uuid, uuid, text
   public.grant_catalog_bind_accepted_document(uuid, uuid, text, uuid, uuid, boolean),
   public.grant_catalog_publish_accepted_document(uuid, uuid),
   public.grant_catalog_document_tenant(uuid, uuid) TO quarry_service;
-GRANT SELECT ON public.grant_catalog_active_principals TO quarry_service;
+GRANT SELECT ON public.grant_catalog_active_principals, public.grant_catalog_readable_documents TO quarry_service;
+GRANT EXECUTE ON FUNCTION public.grant_catalog_read_revision(uuid, uuid) TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_backfill_candidates(uuid, integer),
   public.grant_catalog_publish_verified_document(uuid, uuid, text, text) TO quarry_operator;
 GRANT SELECT ON public.grant_catalog_policy_audit TO quarry_auditor;

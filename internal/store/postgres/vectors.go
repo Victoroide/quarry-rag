@@ -432,7 +432,28 @@ func scanScoredChunks(ctx context.Context, tx pgx.Tx, query string, args ...any)
 }
 
 func hasScopeFilter(filter domain.VectorFilter) bool {
-	return filter.DocType != "" || filter.Collection != "" || filter.DocumentIDs != nil
+	return filter.DocType != "" || filter.Collection != "" || filter.DocumentIDs != nil || filter.Authorized != nil
+}
+
+// GrantScope reports that search joins the readable-document relation itself.
+func (*VectorStore) GrantScope() domain.GrantScopeKind { return domain.GrantScopeRelation }
+
+// authorizedJoin restricts the completed documents joined as d to those the
+// filter's subject may read at their current incarnation. The relation sits in
+// the FROM clause, so ranking and LIMIT only ever see readable rows. A scope
+// that does not name both a tenant and a principal matches nothing.
+func authorizedJoin(args []any, scope *domain.AuthorizedScope) (join string, next []any, matches bool) {
+	if scope == nil {
+		return "", args, true
+	}
+	tenant, tenantErr := uuid.Parse(scope.TenantID)
+	principal, principalErr := uuid.Parse(scope.PrincipalID)
+	if tenantErr != nil || principalErr != nil {
+		return "", nil, false
+	}
+	args = append(args, tenant.String(), principal.String())
+	return fmt.Sprintf(` JOIN grant_catalog_readable_documents g ON g.tenant_id=$%d::uuid AND g.principal_id=$%d::uuid
+  AND g.document_id=d.id AND g.incarnation=COALESCE(d.incarnation,d.id)`, len(args)-1, len(args)), args, true
 }
 
 func appendFilterPredicates(args []any, filter domain.VectorFilter, matchDocumentLabels bool) (predicates string, nextArgs []any, matches bool) {
@@ -471,18 +492,26 @@ func probeSQL(limit int, filter domain.VectorFilter) (query string, args []any, 
 	if !ok {
 		return "", nil, false
 	}
+	join, args, ok := authorizedJoin(args, filter.Authorized)
+	if !ok {
+		return "", nil, false
+	}
 	args = append(args, limit)
 	query = fmt.Sprintf(`SELECT count(*) FROM (
  SELECT 1
- FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'
+ FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'%s
  WHERE TRUE%s
  LIMIT $%d
-) s`, predicates, len(args))
+) s`, join, predicates, len(args))
 	return query, args, true
 }
 
 func exactSQL(literal string, topK, scopeLimit int, filter domain.VectorFilter) (query string, args []any, matches bool) {
 	predicates, args, ok := appendFilterPredicates([]any{literal}, filter, true)
+	if !ok {
+		return "", nil, false
+	}
+	join, args, ok := authorizedJoin(args, filter.Authorized)
 	if !ok {
 		return "", nil, false
 	}
@@ -496,7 +525,7 @@ func exactSQL(literal string, topK, scopeLimit int, filter domain.VectorFilter) 
 	query = fmt.Sprintf(`WITH candidates AS MATERIALIZED (
  SELECT v.chunk_id,v.embedding <=> $1::text::vector AS distance,
         COALESCE(d.incarnation,d.id)::text AS observed_incarnation
- FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'
+ FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'%s
  WHERE TRUE%s
  LIMIT $%d
 ),
@@ -507,7 +536,7 @@ ranked AS (
 )
 SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-r.distance,r.observed_incarnation
 FROM ranked r JOIN chunk_vectors v ON v.chunk_id=r.chunk_id
-ORDER BY r.distance,v.chunk_id`, predicates, scopeArg, limitClause)
+ORDER BY r.distance,v.chunk_id`, join, predicates, scopeArg, limitClause)
 	return query, args, true
 }
 
@@ -516,9 +545,13 @@ func searchSQL(literal string, topK int, filter domain.VectorFilter, matchDocume
 	if !ok {
 		return "", nil, false
 	}
+	join, args, ok := authorizedJoin(args, filter.Authorized)
+	if !ok {
+		return "", nil, false
+	}
 	query = `SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.embedding <=> $1::text::vector AS distance,
  COALESCE(d.incarnation,d.id)::text AS observed_incarnation
- FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed' WHERE TRUE` + predicates
+ FROM chunk_vectors v JOIN documents d ON d.id=v.document_id AND d.status='completed'` + join + ` WHERE TRUE` + predicates
 	if topK > 0 {
 		args = append(args, topK)
 		query += fmt.Sprintf(" ORDER BY distance LIMIT $%d", len(args))
