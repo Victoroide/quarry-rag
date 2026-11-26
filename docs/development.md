@@ -357,7 +357,7 @@ retries after `-settle`/3 doubled for up to six steps, at most one day (about
 | `delete_failed`, `delete_failed:<code>` | A delete returned an error. A later check reinspects the key. |
 | `byte_limit` | The next version would exceed `-max-bytes`. |
 | `referenced_by_document` | A document or deletion receipt names the key; it is never deleted. |
-| `unrecognized_key` | The key is not `documents/{type}/{document}/{upload}/{file}` for its own row. |
+| `unrecognized_key` | The key does not match its row in either supported format, `documents/{type}/{document}/{upload}/{file}` or `documents/{type}/{document}/{incarnation}/{upload}/{file}`. The incarnation uses canonical UUID spelling. |
 
 A database error stops the command with a nonzero status; an S3 error leaves
 the affected upload pending. Rerun the inventory until `journal` shows no

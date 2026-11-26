@@ -56,7 +56,7 @@ paths:
     post:
       operationId: ingestDocument
       summary: Accept a document
-      description: 'See [document identity](api.md#document-identity), [queue admission and retries](api.md#queue-admission-and-retries), and optional [image-only](api.md#image-only-pdf-ocr), [mixed](api.md#mixed-pdf-ocr), or [layout](api.md#pdf-layout-analysis) PDF processing.'
+      description: 'See [document identity](api.md#document-identity), [owned ingestion in grants mode](grant-catalog.md#owned-ingestion), [queue admission and retries](api.md#queue-admission-and-retries), and optional [image-only](api.md#image-only-pdf-ocr), [mixed](api.md#mixed-pdf-ocr), or [layout](api.md#pdf-layout-analysis) PDF processing.'
       security:
         - ServiceToken: []
         - ServiceToken: []

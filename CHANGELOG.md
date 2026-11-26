@@ -8,6 +8,10 @@ Notable changes are grouped by release.
 
 - Vector reindex supports tagged documents in both directions between Pinecone and PostgreSQL, including retrieval and checkpointed deletion after PostgreSQL cutover.
 
+### Fixed
+
+- With `SOURCE_UPLOAD_JOURNAL=true`, owned multipart uploads journal each incarnation-scoped original before writing it, so reconciliation can reclaim originals that acceptance never adopted.
+
 ## [0.2.0] - 2026-11-26
 
 ### Upgrade from 0.1.0
