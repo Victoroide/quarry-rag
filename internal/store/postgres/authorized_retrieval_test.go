@@ -2,8 +2,12 @@ package postgres
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/Victoroide/quarry-rag/internal/pipeline"
+	"github.com/Victoroide/quarry-rag/internal/retriever"
+	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
@@ -312,4 +316,37 @@ func TestServingLoginNeedsOnlyTheDocumentedRetrievalPrivileges(t *testing.T) {
 	require.Error(t, err, "the serving login still reads no catalog relation")
 	_, err = service.Pool.Exec(t.Context(), `SELECT 1 FROM grant_catalog_document_ownership`)
 	require.Error(t, err)
+}
+
+func TestAuthorizedPgvectorIncludesTaggedEvidence(t *testing.T) {
+	f := newRetrievalFixture(t)
+	ctx := t.Context()
+	for _, id := range []string{f.own, f.shared, f.peerOnly, f.other} {
+		_, err := f.c.Pool.Exec(ctx, `UPDATE documents SET scoped_vectors=TRUE, vector_attempt=$2, vector_incarnation_required=TRUE WHERE id=$1`, id, uuid.NewString())
+		require.NoError(t, err)
+	}
+	wrapped := tracing.WrapVectorStore(f.vectors, "postgresql")
+	require.Equal(t, domain.GrantScopeRelation, wrapped.(domain.GrantScopedVectorStore).GrantScope())
+	for _, limit := range []int{0, 10} {
+		f.vectors.exactScopeMax = limit
+		authorized := &domain.AuthorizedScope{TenantID: f.owner.TenantID, PrincipalID: f.owner.ID}
+		filter := domain.VectorFilter{Authorized: authorized}
+		filtered := wrapped.(domain.FilteredVectorStore)
+		hits, err := filtered.QueryFiltered(ctx, retrievalQuery, 10, filter)
+		require.NoError(t, err)
+		require.Equal(t, []string{f.own, f.shared}, documentIDs(hits))
+		ret := retriever.NewRetriever(wrapped, nil, 0.1, 10)
+		vis := Visibility{Pool: f.c.Pool, Subject: &f.owner}
+		auth := pipeline.NewReadAuthorization(f.owner, time.Now().Add(time.Minute), f.reader, *authorized, f.currentRevision(t))
+		qc := &pipeline.QueryContext{
+			Authorization: auth, EvidenceVisibility: vis, MaxChunks: 10,
+			QueryEmbedding: retrievalQuery, RetrievalMode: string(retriever.RetrievalModeGlobal),
+		}
+		require.NoError(t, pipeline.NewRetrievalStage(ret).Run(ctx, qc))
+		require.Equal(t, []string{f.own, f.shared}, documentIDs(qc.RetrievedChunks))
+		filter.Collection = "excluded"
+		hits, err = filtered.QueryFiltered(ctx, retrievalQuery, 10, filter)
+		require.NoError(t, err)
+		require.Empty(t, hits)
+	}
 }

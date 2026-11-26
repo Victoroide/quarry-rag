@@ -127,11 +127,15 @@ CREATE TRIGGER delay_fingerprint_insert BEFORE INSERT ON document_fingerprints F
 	require.True(t, renewed, "the heartbeat must not wait for the completion transaction")
 
 	// Hold completion past the original expiry; only the renewal keeps the claim alive.
-	require.Eventually(t, func() bool {
-		var expired bool
-		queryErr := c.Pool.QueryRow(ctx, `SELECT $1::timestamptz<=clock_timestamp()`, originalDeadline).Scan(&expired)
-		return queryErr == nil && expired
-	}, lease, 15*time.Millisecond, "the original lease expires while persistence is still waiting")
+	_, err = c.Pool.Exec(ctx, `SELECT pg_sleep_until($1)`, originalDeadline)
+	require.NoError(t, err)
+	var expired, stillLive bool
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT $2::timestamptz<=clock_timestamp(), lease_until>clock_timestamp() FROM ingest_jobs WHERE document_id=$1`, string(id), originalDeadline).Scan(&expired, &stillLive))
+	require.True(t, expired, "the original lease expires while persistence is still waiting")
+	require.True(t, stillLive, "the renewed lease remains live after the original deadline")
+	waiting, err := hasAdvisoryWaiter(ctx, c.Pool, advisoryKey)
+	require.NoError(t, err)
+	require.True(t, waiting, "completion is still waiting at the fingerprint insert")
 	unlock()
 	done := <-complete
 	require.NoError(t, done.err)

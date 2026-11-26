@@ -77,7 +77,7 @@ func exhaustiveQuerySnapshot(t *testing.T, tx pgx.Tx, embedding []float32, dims,
 		limitClause = fmt.Sprintf(" LIMIT $%d", len(args))
 	}
 	sql := fmt.Sprintf(`SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-(v.embedding <=> $1::text::vector) AS score,
- COALESCE(d.incarnation,d.id)::text
+ `+rankedIdentitySQL+`
  FROM chunk_vectors v JOIN documents d ON d.id=v.document_id
  WHERE %s
  ORDER BY (v.embedding <=> $1::text::vector) ASC, v.chunk_id ASC%s`, where.String(), limitClause)
@@ -1730,3 +1730,68 @@ func (p *probePauseTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx
 type staticEmbedder struct{ vec []float32 }
 
 func (s staticEmbedder) Embed(context.Context, string) ([]float32, error) { return s.vec, nil }
+
+func TestPgvectorReportsRankedVectorIdentity(t *testing.T) {
+	c, _ := isolatedVectorDatabase(t, pgtest.StartVector(t), func(cfg *pgxpool.Config) { cfg.MaxConns = 1 })
+	ctx := t.Context()
+	vs, err := NewVectorStore(ctx, c, 3)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name                      string
+		scoped, pending, required bool
+		attempt                   *string
+		historical                bool
+	}{
+		{name: "legacy untagged"},
+		{name: "historical untagged", historical: true},
+		{name: "incarnation required", required: true},
+		{name: "published", scoped: true, attempt: new(uuid.NewString())},
+		{name: "null attempt", scoped: true},
+		{name: "pending", scoped: true, pending: true, attempt: new(uuid.NewString())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			id, incarnation := uuid.NewString(), uuid.NewString()
+			storedIncarnation := &incarnation
+			if tc.historical {
+				storedIncarnation = nil
+				incarnation = id
+			}
+			_, err := c.Pool.Exec(ctx, `INSERT INTO documents
+ (id, incarnation, content, status, doc_type, collection, scoped_vectors, vector_attempt, vector_mutation_pending, vector_incarnation_required)
+ VALUES ($1,$2,'Ranked record.','completed','report','ranked',$3,$4,$5,$6)`,
+				id, storedIncarnation, tc.scoped, tc.attempt, tc.pending, tc.required)
+			require.NoError(t, err)
+			legacyMetadata := map[string]any{"doc_type": "report", "collection": "ranked", "kind": "body", "quality": "good"}
+			input := domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: domain.DocumentID(id), Text: "Ranked record.",
+				TokenCount: 2, Embedding: retrievalQuery, VectorIncarnation: uuid.NewString(), Metadata: legacyMetadata}
+			input.Metadata[domain.VectorRevisionKey] = uuid.NewString()
+			input.Metadata[domain.VectorAttemptKey] = uuid.NewString()
+			require.NoError(t, vs.Upsert(ctx, "", []domain.Chunk{input}))
+			wantMetadata := map[string]any{"doc_type": "report", "collection": "ranked", "kind": "body", "quality": "good"}
+			wantVectorIncarnation := ""
+			if tc.required {
+				wantVectorIncarnation = incarnation
+			}
+			if tc.scoped && !tc.pending && tc.attempt != nil {
+				wantMetadata[domain.VectorRevisionKey] = incarnation
+				wantMetadata[domain.VectorAttemptKey] = *tc.attempt
+				wantVectorIncarnation = incarnation
+			}
+			for _, limit := range []int{0, 10} {
+				vs.exactScopeMax = limit
+				for _, k := range []int{0, 1} {
+					got, exact, err := vs.QueryFilteredWithExactness(ctx, retrievalQuery, k, domain.VectorFilter{Collection: "ranked", DocumentIDs: []string{id}})
+					require.NoError(t, err)
+					require.Equal(t, limit > 0, exact)
+					require.Len(t, got, 1)
+					require.Equal(t, input.ID, got[0].Chunk.ID)
+					require.Equal(t, float64(1), got[0].Score)
+					require.Equal(t, incarnation, got[0].ObservedIncarnation)
+					require.Equal(t, wantVectorIncarnation, got[0].Chunk.VectorIncarnation)
+					require.Equal(t, wantMetadata, got[0].Chunk.Metadata)
+				}
+			}
+		})
+	}
+}
