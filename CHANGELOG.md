@@ -14,6 +14,7 @@ Notable changes are grouped by release.
 - Optional [strict synthesis budgeting](docs/configuration.md#strict-synthesis-budgets) measures complete model input, reserves answer space and reports the measured input count.
 - `DOCX_STORIES` lets deployments opt in to indexing DOCX headers, footers and comments.
 - An internal owned ingestion path binds private documents, jobs, original objects and vectors to a verified tenant, owner and document incarnation, and a scoped backfill verifies historical assignments before they become readable. No public route enables it. See [grant catalog](docs/grant-catalog.md#owned-ingestion).
+- An internal authorized retrieval path confines every search, routing preview, model input and response to the verified principal's current grants on pgvector and Pinecone, and rechecks them before each disclosure, including server-sent frames (migration 026). No public route enables it. See [grant catalog](docs/grant-catalog.md#authorized-retrieval).
 - Staged delegated access-token verification with request-scoped subject credentials for the Go client and stdio MCP.
 - Document status and inventory can include the ingestion-time index visibility observation and timestamp on request, with opt-in Pinecone serverless watermark checks.
 

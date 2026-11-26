@@ -334,6 +334,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `019_evaluation_fixture_guards.sql` | Moves the reservation checks used by ordinary admission, leasing and removal into owner-defined predicates, so a restricted serving login needs no access to the receipt table. |
 | `020_owned_ingestion.sql` | Adds the [owned ingestion](grant-catalog.md#owned-ingestion) entry points and an ownership origin to the grant catalog. |
 | `023_deletion_predicates.sql` | Adds owner-defined predicates that report whether checkpointed deletion is active and whether an unfinished or held deletion reserves a document UUID. Admission and deletion call them, so a restricted serving login needs no access to the marker table. |
+| `026_authorized_retrieval.sql` | Adds the relation of documents each principal may read now and the policy revision function that [authorized retrieval](grant-catalog.md#authorized-retrieval) reads. Service-mode queries do not use them. |
 
 The service can roll back to the previous binary with migration 010 and its
 checksum still recorded. After applying migration 019, 020 or 023, follow the

@@ -161,8 +161,12 @@ GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
 After applying migration `020_owned_ingestion.sql`, grant reading
 `grant_catalog_active_principals` and execution of the five serving functions
 and the two operator functions before enabling
-[owned ingestion](#owned-ingestion) or the scoped backfill. Service-mode
-ingestion and job leasing need none of them until a document is assigned.
+[owned ingestion](#owned-ingestion) or the scoped backfill. After applying
+`026_authorized_retrieval.sql`, grant reading
+`grant_catalog_readable_documents` and execution of
+`grant_catalog_read_revision` before enabling
+[authorized retrieval](#authorized-retrieval). Service-mode ingestion, job
+leasing and queries need none of them until a document is assigned.
 
 ## Owned ingestion
 
@@ -218,6 +222,104 @@ label beside the revision and attempt tags that already fence its writes and
 cleanup to one incarnation, so a retired lease or incarnation can neither
 publish into nor remove a replacement's data. Completion publishes readiness
 for accepted documents in the same transaction that completes them.
+
+## Authorized retrieval
+
+Authorized retrieval is the internal query path for a verified principal. No
+public route enables it yet, so the HTTP contract is unchanged. A handler that
+uses it requires the verified subject and a vector store that enforces read
+scopes. Without both it refuses every request with `503` before anything is
+embedded. A store without the capability, including the in-memory fake, is
+refused, and no branch of a scoped request ever falls back to an unfiltered
+search.
+
+### Request scope
+
+A request derives its scope from the verified tenant and principal, the
+documents the principal may read now and the current policy revision. A
+document is readable when its principal is active, its current incarnation has
+a ready ownership row held by the principal or a direct `read` grant, and the
+document is complete. The scope is then intersected with `allowed_document_ids`,
+`collection` and `filter_doc_type`.
+
+- An omitted or `null` allowlist uses every readable document, unless
+  `REQUIRE_DOCUMENT_ALLOWLIST` requires one, which is a `400`.
+- An explicit empty list matches nothing and never widens the scope.
+- Well-formed UUIDs that are foreign, deleted or unknown drop out without an
+  error.
+- An empty intersection returns the localized no-evidence response in both
+  answer modes with no embedding, vector, reranking or generation call.
+
+### Search
+
+The scope applies to the similarity probe, entity previews, explicit and
+automatic routing, the selected LOCAL document, GLOBAL retrieval, sparse LOCAL
+top-up, the hosted refill and the fallback after a failed probe.
+
+- pgvector joins `grant_catalog_readable_documents` inside the ranking
+  statement for the exact-scope probe, exact ranking and approximate ranking,
+  so grants and the current incarnation limit the rows before ordering and
+  `LIMIT`. Nothing lists the membership, so `MAX_ALLOWED_DOCUMENT_IDS` limits
+  only the inline allowlist.
+- Pinecone sends the tenant, the allowed incarnations and the allowed document
+  IDs in every request to the default namespace, split into requests of at most
+  10,000 values per predicate. Before embedding, the service lists the
+  readable members and returns `422` with `scope_too_large` when they exceed
+  `MAX_ALLOWED_DOCUMENT_IDS` (25,000 by default). It never truncates the list.
+  Only vectors that carry the revision and tenant tags can match, so a
+  historical untagged vector never does.
+
+The query is embedded only after the scope is known to be non-empty and within
+capacity. Both backends use the same candidate checks afterward.
+
+### Candidate and preview checks
+
+Hosted hits are untrusted references. A hit whose tenant label contradicts the
+scope, or that lacks the incarnation tag of a listed member, is dropped on
+return. Every remaining candidate is then matched against the completed
+PostgreSQL chunks, joined to the principal's readable relation, for identity,
+body digest, category and incarnation before scores merge or any preview is
+read. Previews are loaded only for readable documents, so a document the
+principal cannot read can neither change the route nor appear in a diagnostic.
+The response and model input use the verified fields. Probe candidates that
+influenced the route, previews and counts are checked again at release.
+
+### Disclosure checks
+
+Immediately before each reranker or synthesis request, each JSON release and
+each `context`, `delta` and `done` frame, the service checks the credential's
+exact expiry without skew, the signing key's trust, the principal's standing and
+the policy revision from the primary database, and every document and preview
+that contributed. A response with no evidence is checked the same way. A
+revision lower than one already observed is a lagging read and counts as
+unavailable authority.
+
+| Outcome | Before the first byte | After streaming began |
+|---|---|---|
+| Credential expired | `401` `unauthorized` | terminal `error` event, `unauthorized` |
+| Grant, principal, document or preview changed | `403` `forbidden` | terminal `error` event, `forbidden` |
+| Database, trust data or scope capability unavailable | `503` `unavailable` | terminal `error` event, `unavailable` |
+| Scope above hosted capacity | `422` `scope_too_large` | not applicable |
+
+Each outcome has a fixed message and carries no identifier or count. A failure
+cancels upstream work, and nothing from the rejected disclosure is sent. The
+decision for a send is bounded by its immediately preceding check. A read that
+was authorized at dispatch can still be in flight when a grant changes, so a
+revocation stops the next disclosure, not one already delivered or a request
+already accepted by a model provider. Evidence-only queries never call a
+reranker or a model. Responses are `Cache-Control: private, no-store`, and the
+service keeps no shared retrieval, answer or preview cache. The Go client and the
+stdio tools return only what the response carries.
+
+### Residual channels
+
+A shared approximate index can change recall or latency as its contents change
+even when every returned row is authorized. Measure recall, p50 and p95
+query-start and frame latency, and database statements per request for the
+corpus, backend and scope sizes of the deployment, and compare them with
+service mode. Use exact search over the authorized relation or separate indexes
+for independent search behavior. Provider-side prompt caching and anything
+already sent to a model provider are outside the service's control.
 
 ## Assign historical documents
 
