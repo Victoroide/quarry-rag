@@ -4,6 +4,32 @@ Notable changes are grouped by release.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+### Upgrade from 0.1.0
+
+1. As the schema owner, apply the pending PostgreSQL migrations `009` through
+   `030` in order. Apply the [serving-role upgrade grants](docs/grant-catalog.md#upgrade-an-existing-serving-role)
+   before starting upgraded processes. For hosted and offline vector stores,
+   grant restricted serving logins execution of `document_deletion_active_shared`
+   after migration 030 and before starting upgraded processes in either
+   authorization mode. Admission that may select the tagged vector format uses
+   the function even while checkpointed deletion is inactive.
+2. Prepare callers to save each document's incarnation with
+   `include_incarnation=true`. Pause mutations and retire pre-upgrade
+   executables. Deploy 0.2.0 with the deletion marker unset. Settle or quarantine
+   outstanding hosted effects by UUID, index and namespace before activation.
+3. As the schema owner, run `make cleanup IDS=--activate-deletion`. Verify the
+   mode on every replica and switch callers before resuming writes. After
+   activation, retain the marker and deploy only compatible builds. See the
+   [checkpointed deletion upgrade order](docs/deployment.md#upgrade-order).
+
+If changing embedding models or vector stores, finish upgrading all replicas
+and workers before running `make reindex`. Stage the target, freeze writers and
+wait for quiescence, then catch up, verify and activate the generation. Deploy
+all replicas sharing the queue with the new generation and matching settings
+before thawing writers. See [changing models or vector stores](docs/deployment.md#changing-models-or-vector-stores).
+
 ### Added
 
 - `make reconcile ARGS=-canonical-document-ids` rewrites hosted vector document IDs written in another UUID spelling, such as upper case, so allowlisted queries, deletions and backfills match them.
@@ -24,8 +50,8 @@ Notable changes are grouped by release.
 - Optional [Word binary stories](docs/api.md#word-binary-extraction) for `.doc` uploads.
 - Optional [strict synthesis budgeting](docs/configuration.md#strict-synthesis-budgets) measures complete model input, reserves answer space and reports the measured input count.
 - `DOCX_STORIES` lets deployments opt in to indexing DOCX headers, footers and comments.
-- An internal owned ingestion path binds private documents, jobs, original objects and vectors to a verified tenant, owner and document incarnation, and a scoped backfill verifies historical assignments before they become readable. No public route enables it. See [grant catalog](docs/grant-catalog.md#owned-ingestion).
-- An internal authorized retrieval path confines every search, routing preview, model input and response to the verified principal's current grants on pgvector and Pinecone, and rechecks them before each disclosure, including server-sent frames (migration 026). No public route enables it. See [grant catalog](docs/grant-catalog.md#authorized-retrieval).
+- An internal owned ingestion path binds private documents, jobs, original objects and vectors to a verified tenant, owner and document incarnation, and a scoped backfill verifies historical assignments before they become readable. See [grant catalog](docs/grant-catalog.md#owned-ingestion).
+- An internal authorized retrieval path confines every search, routing preview, model input and response to the verified principal's current grants on pgvector and Pinecone, and rechecks them before each disclosure, including server-sent frames (migration 026). Both paths are available only through internal entry points. See [grant catalog](docs/grant-catalog.md#authorized-retrieval).
 - Internal scoped handlers authorize document inventory, status, assertion-bounded original-file signing and owner-only checkpointed deletion against the grant catalog. No public route enables them. See [grant catalog](docs/grant-catalog.md#scoped-document-operations).
 - Staged delegated access-token verification with request-scoped subject credentials for the Go client and stdio MCP.
 - Document status and inventory can include the ingestion-time index visibility observation and timestamp on request, with opt-in Pinecone serverless watermark checks.
@@ -60,7 +86,7 @@ Notable changes are grouped by release.
 ### Changed
 
 - Guarded ID-only deletions, which legacy deletion reservations introduce, run on a PostgreSQL session outside the pool, so slow provider calls no longer hold pooled connections. A replica runs at most `LEGACY_DELETION_CONCURRENCY` of them (default a quarter of `pool_max_conns`, at least one), answers further requests with `503` `busy` and `Retry-After: 5` before it takes a lock or a connection, and the [connection sizing formula](docs/deployment.md#concurrency-limits) counts the extra sessions.
-- **Breaking after activation.** While the database is inactive, bare `DELETE`, `make cleanup <uuid>` and the MCP tool keep addressing the live UUID. After an operator runs `make cleanup IDS="--activate-deletion"`, deletion of a live document requires its saved incarnation (`428` without it and `412` for the wrong lifetime). Subsequent admissions record incarnation-tagged vectors where supported. Pause mutations and retire pre-upgrade executables. Apply the [serving-role upgrade grants](docs/grant-catalog.md#upgrade-an-existing-serving-role), including the migration 030 grant for hosted or offline vectors in either authorization mode, before starting the new release with the database inactive. Settle or quarantine outstanding hosted effects by UUID, index and namespace before activation. Verify the mode on every replica and switch callers before resuming writes. After activation, retain the marker and deploy only compatible builds. See [activating checkpointed deletion](docs/deployment.md#activating-checkpointed-deletion).
+- **Breaking after activation.** While the database is inactive, bare `DELETE`, `make cleanup <uuid>` and the MCP tool keep addressing the live UUID. After an operator runs `make cleanup IDS="--activate-deletion"`, deletion of a live document requires its saved incarnation (`428` without it and `412` for the wrong lifetime). Subsequent admissions record incarnation-tagged vectors where supported. See [activating checkpointed deletion](docs/deployment.md#activating-checkpointed-deletion).
 - Smoke tests that write documents require an activated target, check it through `GET /deletion-mode` before their first ingest, never activate it and remove only their own documents with a qualified request through the service; see the [staging procedure](docs/deployment.md#smoke-testing-a-staging-deployment).
 - `make reindex` freeze, activation and inventory reports now include up to 20 document IDs of open deletion receipts blocking quiescence, and the [deployment guide](docs/deployment.md#changing-models-or-vector-stores) documents how to thaw, complete qualified retries and re-freeze.
 - Deployment and grant-catalog documentation specifies the PostgreSQL privileges required by a non-owner `make reindex` maintenance login, including `EXECUTE` on `grant_catalog_document_tenant`, `ingest_jobs`, `evaluation_fixtures`, `document_pdf_extractions`, and pre-created or self-created generation vector tables.
@@ -86,7 +112,6 @@ Notable changes are grouped by release.
 
 - Mixed PDF JPEG inspection skips bounded runs of extraneous non-marker bytes between segments (up to 64 bytes per gap and 256 bytes per image) instead of rejecting valid scans as `unparseable`.
 - `preserve_code` citation cleanup tracks fence-like openers indented four or more spaces until their matching closing line and closes two- or three-space list-item fences across four- to six-space closing lines, preventing nested fence straddles from hiding later citations.
-- For hosted and offline vector stores, grant restricted serving logins execution of `document_deletion_active_shared` after migration 030 and before starting upgraded processes in either authorization mode. Admission that may select the tagged vector format uses the function even while checkpointed deletion is inactive.
 - Document deletion can checkpoint each external step under a durable, incarnation-qualified receipt before it removes the document, so a retry resumes the same lifetime instead of returning `404` or reaching a replacement. A database uses [checkpointed deletion](docs/api.md#checkpointed-deletion) only after explicit activation. Migration `023_deletion_predicates.sql` adds owner-defined predicates, and restricted serving logins need the [upgrade grants](docs/grant-catalog.md#upgrade-an-existing-serving-role) before they run upgraded processes.
 - Ingestion checks the current document incarnation and lease before vector mutations. Queries validate the document lifetime before using search hits for routing or evidence.
 - Failed-document retries respect the persisted ingestion queue limit.
