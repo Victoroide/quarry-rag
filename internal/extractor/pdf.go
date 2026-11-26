@@ -163,11 +163,12 @@ func stripControlChars(s string) string {
 
 // Stream and source budgets also bound repeated object reads in malformed files.
 type pdfSource struct {
-	ctx       context.Context
-	reader    *bytes.Reader
-	remaining int64
-	limitErr  error
-	encrypted bool
+	ctx        context.Context
+	reader     *bytes.Reader
+	remaining  int64
+	limitErr   error
+	encrypted  bool
+	jpegFrames map[int64]pdfJPEGFrame // validated JPEG frames by stream offset for this document
 }
 
 func (s *pdfSource) ReadAt(p []byte, offset int64) (int, error) {
