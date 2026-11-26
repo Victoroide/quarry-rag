@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -31,6 +33,9 @@ type DocumentRevision struct {
 	// ScopedVectors marks a document whose vectors use the tagged format, with
 	// revision-qualified physical keys that a copy by logical key cannot reproduce.
 	ScopedVectors bool
+	// ActiveRevisionID holds the active revision UUID when the document uses
+	// hosted vector manifests, or empty otherwise.
+	ActiveRevisionID string
 }
 
 // DocumentSnapshot is one completed document read from a single snapshot.
@@ -47,9 +52,11 @@ const eligibleDocument = `d.status = 'completed'
 const documentTenantSQL = `CASE WHEN d.grant_catalog_assigned THEN COALESCE(grant_catalog_document_tenant(d.id, COALESCE(d.incarnation, d.id))::text, '') ELSE '' END`
 
 const revisionSQL = `SELECT d.id::text, COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, d.chunk_count, c.n, c.bytes,
- encode(sha256(convert_to(jsonb_build_array('v3', COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, c.n, c.fingerprint)::text, 'UTF8')), 'hex'),
- d.scoped_vectors
- FROM eligible d CROSS JOIN LATERAL (
+ encode(sha256(convert_to(jsonb_build_array('v4', COALESCE(d.incarnation, d.id)::text, d.doc_type, d.collection, ` + documentTenantSQL + `, COALESCE(r.active_revision_id::text, ''), c.n, c.fingerprint)::text, 'UTF8')), 'hex'),
+ d.scoped_vectors, COALESCE(r.active_revision_id::text, '')
+ FROM eligible d
+ LEFT JOIN hosted_vector_revisions r ON r.document_id = d.id
+ CROSS JOIN LATERAL (
   SELECT count(*)::int AS n, COALESCE(sum(octet_length(text)),0) AS bytes,
    string_agg(id::text || ':' || chunk_index::text || ':' || token_count::text || ':' ||
      encode(sha256(convert_to(text, 'UTF8')), 'hex'), ',' ORDER BY chunk_index, id) AS fingerprint
@@ -57,7 +64,7 @@ const revisionSQL = `SELECT d.id::text, COALESCE(d.incarnation, d.id)::text, d.d
  ) c`
 
 func scanRevision(rows pgx.Row, r *DocumentRevision) error {
-	return rows.Scan(&r.ID, &r.Incarnation, &r.DocType, &r.Collection, &r.TenantID, &r.DeclaredChunks, &r.Chunks, &r.TextBytes, &r.Revision, &r.ScopedVectors)
+	return rows.Scan(&r.ID, &r.Incarnation, &r.DocType, &r.Collection, &r.TenantID, &r.DeclaredChunks, &r.Chunks, &r.TextBytes, &r.Revision, &r.ScopedVectors, &r.ActiveRevisionID)
 }
 
 // DocumentRevisions lists completed documents after a document ID in ascending order.
@@ -162,31 +169,81 @@ func (c *Client) LoadDocumentSnapshotBounded(ctx context.Context, id string, max
 
 // UnexpectedChunkKeys returns only keys absent from the eligible source corpus.
 func (c *Client) UnexpectedChunkKeys(ctx context.Context, keys []string) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
 	ids := make([]string, 0, len(keys))
+	var manifestDocs, manifestRevs []string
+	var manifestIndices []int32
 	for _, key := range keys {
-		id, err := uuid.Parse(key)
-		if err == nil && key == fmt.Sprintf("%x", id[:]) {
+		if id, err := uuid.Parse(key); err == nil && key == fmt.Sprintf("%x", id[:]) {
 			ids = append(ids, id.String())
+			continue
+		}
+		if docID, revID, idx, ok := parseManifestVectorID(key); ok {
+			manifestDocs = append(manifestDocs, docID)
+			manifestRevs = append(manifestRevs, revID)
+			manifestIndices = append(manifestIndices, idx)
 		}
 	}
-	rows, err := c.Pool.Query(ctx, `SELECT replace(c.id::text, '-', '') FROM chunks c
- JOIN documents d ON c.document_id=d.id WHERE c.id=ANY($1::uuid[]) AND `+eligibleDocument, ids)
-	if err != nil {
-		return nil, err
+	eligible := make(map[string]bool, len(keys))
+	if len(ids) > 0 {
+		rows, err := c.Pool.Query(ctx, `SELECT replace(c.id::text, '-', '') FROM chunks c
+ JOIN documents d ON c.document_id=d.id
+ LEFT JOIN hosted_vector_revisions r ON r.document_id=d.id
+ WHERE c.id=ANY($1::uuid[]) AND r.active_revision_id IS NULL AND `+eligibleDocument, ids)
+		if err != nil {
+			return nil, err
+		}
+		present, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range present {
+			eligible[key] = true
+		}
 	}
-	present, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return nil, err
+	if len(manifestDocs) > 0 {
+		rows, err := c.Pool.Query(ctx, `SELECT d.id::text || '#' || r.active_revision_id::text || '#' || c.chunk_index::text
+ FROM unnest($1::uuid[], $2::uuid[], $3::int[]) AS k(doc_id, rev_id, idx)
+ JOIN documents d ON d.id = k.doc_id
+ JOIN hosted_vector_revisions r ON r.document_id = d.id AND r.active_revision_id = k.rev_id
+ JOIN chunks c ON c.document_id = d.id AND c.chunk_index = k.idx
+ WHERE `+eligibleDocument, manifestDocs, manifestRevs, manifestIndices)
+		if err != nil {
+			return nil, err
+		}
+		present, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range present {
+			eligible[key] = true
+		}
 	}
-	eligible := make(map[string]bool, len(present))
-	for _, key := range present {
-		eligible[key] = true
-	}
-	extra := make([]string, 0, len(keys)-len(present))
+	extra := make([]string, 0, len(keys))
 	for _, key := range keys {
 		if !eligible[key] {
 			extra = append(extra, key)
 		}
 	}
 	return extra, nil
+}
+
+func parseManifestVectorID(key string) (docID, revID string, index int32, ok bool) {
+	parts := strings.Split(key, "#")
+	if len(parts) != 3 {
+		return "", "", 0, false
+	}
+	docUUID, err1 := uuid.Parse(parts[0])
+	revUUID, err2 := uuid.Parse(parts[1])
+	idx, err3 := strconv.ParseInt(parts[2], 10, 32)
+	if err1 != nil || err2 != nil || err3 != nil || idx < 0 {
+		return "", "", 0, false
+	}
+	canonical := domain.FormatRevisionVectorID(domain.DocumentID(docUUID.String()), revUUID.String(), int(idx))
+	if canonical != key {
+		return "", "", 0, false
+	}
+	return docUUID.String(), revUUID.String(), int32(idx), true
 }

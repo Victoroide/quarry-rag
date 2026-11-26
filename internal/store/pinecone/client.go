@@ -228,6 +228,10 @@ func (p *Client) UpsertWithVisibility(ctx context.Context, namespace string, chu
 		if c.VectorIncarnation != "" {
 			mdMap[domain.VectorIncarnationKey] = c.VectorIncarnation
 		}
+		if c.RevisionID != "" {
+			mdMap["revision_id"] = c.RevisionID
+			mdMap["chunk_id"] = string(c.ID)
+		}
 		for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey, "pages", "table_ids", "row_ids"} {
 			if value, ok := c.Metadata[key]; ok {
 				mdMap[key] = pineconeMetadataValue(value)
@@ -244,9 +248,15 @@ func (p *Client) UpsertWithVisibility(ctx context.Context, namespace string, chu
 		if err != nil {
 			return nil, fmt.Errorf("pinecone: build metadata for chunk %s: %w", c.ID, err)
 		}
-		id, idErr := physicalVectorID(c)
-		if idErr != nil {
-			return nil, idErr
+		id := c.VectorID
+		if id == "" {
+			var idErr error
+			id, idErr = physicalVectorID(c)
+			if idErr != nil {
+				return nil, idErr
+			}
+		} else if len(id) > 512 {
+			return nil, fmt.Errorf("pinecone: chunk %s vector ID exceeds 512 bytes", c.ID)
 		}
 		size := 4*len(c.Embedding) + len(id) + proto.Size(md) + 32
 		if size > maxUpsertBytes {
@@ -700,6 +710,202 @@ func ignoreNotFound(err error) error {
 	return err
 }
 
+// DeleteVectorIDs removes exact external vector IDs from namespace.
+func (p *Client) DeleteVectorIDs(ctx context.Context, namespace string, ids []string) error {
+	return p.Delete(ctx, namespace, ids)
+}
+
+// DeleteByManifestRevision deletes vectors belonging only to (docID, revisionID),
+// using exact IDs when supplied or falling back to revision-scoped filtering.
+func (p *Client) DeleteByManifestRevision(ctx context.Context, docID, revisionID string, knownIDs []string) error {
+	if revisionID == "" {
+		return errors.New("pinecone: revision_id is required for revision-targeted deletion")
+	}
+	if len(knownIDs) > 0 {
+		return p.Delete(ctx, "", knownIDs)
+	}
+	filter, err := structpb.NewStruct(map[string]any{
+		"doc_id":      map[string]any{"$eq": docID},
+		"revision_id": map[string]any{"$eq": revisionID},
+	})
+	if err != nil {
+		return fmt.Errorf("pinecone: build revision filter: %w", err)
+	}
+	err = p.mutate(ctx, true, func(attemptCtx context.Context) error {
+		return ignoreNotFound(p.defaultConn.DeleteVectorsByFilter(attemptCtx, filter))
+	})
+	switch status.Code(err) {
+	case codes.InvalidArgument, codes.Unimplemented, codes.FailedPrecondition:
+		prefix := domain.RevisionVectorPrefix(domain.DocumentID(docID), revisionID)
+		listedErr := p.deleteByRevisionPrefix(ctx, "", prefix)
+		if listedErr == nil {
+			return nil
+		}
+		if !errors.Is(listedErr, errPrefixListUnsupported) {
+			return fmt.Errorf("pinecone: delete vectors by revision %s: %w", revisionID, listedErr)
+		}
+		err = p.deleteByManifestQuery(ctx, docID, revisionID, filter)
+	}
+	if err != nil {
+		return fmt.Errorf("pinecone: delete vectors by revision %s: %w", revisionID, err)
+	}
+	return nil
+}
+
+func (p *Client) deleteByManifestQuery(ctx context.Context, docID, revisionID string, filter *structpb.Struct) error {
+	vector := make([]float32, p.dims)
+	vector[0] = 1
+	req := &pinecone.QueryByVectorValuesRequest{Vector: vector, TopK: cleanupPageSize, MetadataFilter: filter, IncludeMetadata: true}
+	deleted := make(map[string]struct{})
+	for {
+		matches, err := p.queryMatches(ctx, p.defaultConn, req, nil)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(matches))
+		for _, match := range matches {
+			if match == nil || match.Vector == nil {
+				continue
+			}
+			fields := match.Vector.Metadata.GetFields()
+			if fields["doc_id"].GetStringValue() != docID || fields["revision_id"].GetStringValue() != revisionID {
+				continue
+			}
+			if _, ok := deleted[match.Vector.Id]; !ok {
+				deleted[match.Vector.Id] = struct{}{}
+				ids = append(ids, match.Vector.Id)
+			}
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		if err := p.Delete(ctx, "", ids); err != nil {
+			return err
+		}
+		if len(matches) < int(req.TopK) {
+			return nil
+		}
+	}
+}
+
+var errPrefixListUnsupported = errors.New("pinecone: prefix listing is unsupported")
+
+func (p *Client) deleteByRevisionPrefix(ctx context.Context, namespace, prefix string) error {
+	var token string
+	seen := make(map[string]bool)
+	for {
+		ids, next, supported, err := p.ListPrefixVectorIDs(ctx, namespace, prefix, 100, token)
+		if err != nil {
+			return err
+		}
+		if !supported {
+			return errPrefixListUnsupported
+		}
+		if len(ids) > 0 {
+			if err := p.Delete(ctx, namespace, ids); err != nil {
+				return err
+			}
+		}
+		if next == "" {
+			return nil
+		}
+		if seen[next] {
+			return errors.New("pinecone: vector listing repeated a pagination token")
+		}
+		seen[next] = true
+		token = next
+	}
+}
+
+// FetchPresentVectorIDs returns the subset of ids currently stored in namespace.
+func (p *Client) FetchPresentVectorIDs(ctx context.Context, namespace string, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	conn, release, err := p.conn(namespace)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	var present []string
+	for start := 0; start < len(ids); start += 1000 {
+		batch := ids[start:min(start+1000, len(ids))]
+		var res *pinecone.FetchVectorsResponse
+		if err := p.do(ctx, p.queryAttempts(), func(attemptCtx context.Context) error {
+			var fetchErr error
+			res, fetchErr = conn.FetchVectors(attemptCtx, batch)
+			return fetchErr
+		}); err != nil {
+			return nil, fmt.Errorf("pinecone: fetch vectors in namespace %q: %w", namespace, err)
+		}
+		if res == nil {
+			continue
+		}
+		for _, id := range batch {
+			if res.Vectors[id] != nil {
+				present = append(present, id)
+			}
+		}
+	}
+	return present, nil
+}
+
+// ListPrefixVectorIDs lists one page of external IDs matching prefix when supported.
+func (p *Client) ListPrefixVectorIDs(ctx context.Context, namespace, prefix string, limit int, token string) (ids []string, nextToken string, supported bool, err error) {
+	if limit < 1 || limit > 1000 {
+		return nil, "", false, fmt.Errorf("pinecone: list limit must be between 1 and 1000")
+	}
+	conn, release, err := p.conn(namespace)
+	if err != nil {
+		return nil, "", false, err
+	}
+	defer release()
+	page := uint32(limit)
+	req := &pinecone.ListVectorsRequest{Prefix: &prefix, Limit: &page}
+	if token != "" {
+		req.PaginationToken = &token
+	}
+	var res *pinecone.ListVectorsResponse
+	if doErr := p.do(ctx, p.queryAttempts(), func(attemptCtx context.Context) error {
+		var listErr error
+		res, listErr = conn.ListVectors(attemptCtx, req)
+		return listErr
+	}); doErr != nil {
+		if IsListUnsupported(doErr) {
+			return nil, "", false, nil
+		}
+		return nil, "", true, fmt.Errorf("pinecone: list prefix %q in namespace %q: %w", prefix, namespace, doErr)
+	}
+	if res == nil {
+		return nil, "", true, nil
+	}
+	out := make([]string, 0, len(res.VectorIds))
+	for _, id := range res.VectorIds {
+		if id != nil && *id != "" {
+			out = append(out, *id)
+		}
+	}
+	next := ""
+	if res.NextPaginationToken != nil {
+		next = *res.NextPaginationToken
+	}
+	return out, next, true, nil
+}
+
+// IsListUnsupported reports whether a Pinecone index error indicates that vector
+// listing is unsupported (such as pod-based indexes).
+func IsListUnsupported(err error) bool {
+	if status.Code(err) == codes.Unimplemented {
+		return true
+	}
+	if status.Code(err) != codes.InvalidArgument && status.Code(err) != codes.FailedPrecondition {
+		return false
+	}
+	message := strings.ToLower(status.Convert(err).Message())
+	return strings.Contains(message, "list") && (strings.Contains(message, "not supported") ||
+		(strings.Contains(message, "only supported") && strings.Contains(message, "serverless")))
+}
+
 // Ping verifies connectivity to the Pinecone index.
 func (p *Client) Ping(ctx context.Context) error {
 	return p.do(ctx, min(3, p.maxAttempts), func(attemptCtx context.Context) error {
@@ -715,11 +921,17 @@ func (p *Client) Ping(ctx context.Context) error {
 // false for a record whose incarnation, revision or attempt tags are not
 // self-consistent, so that no reader treats it as a retrievable chunk.
 func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
-	chunk := domain.Chunk{ID: domain.ChunkID(id)}
+	chunk := domain.Chunk{ID: domain.ChunkID(id), VectorID: id}
 	if md == nil {
 		return chunk, true
 	}
 	fields := md.GetFields()
+	if v, ok := fields["chunk_id"]; ok && v.GetStringValue() != "" {
+		chunk.ID = domain.ChunkID(v.GetStringValue())
+	}
+	if v, ok := fields["revision_id"]; ok && v.GetStringValue() != "" {
+		chunk.RevisionID = v.GetStringValue()
+	}
 	if v, ok := fields["doc_id"]; ok {
 		chunk.DocumentID = domain.DocumentID(v.GetStringValue())
 	}
@@ -752,7 +964,7 @@ func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
 				return chunk, false
 			}
 		}
-		logical, ok := target.logicalID(string(chunk.ID))
+		logical, ok := target.logicalID(id)
 		if !ok {
 			return chunk, false
 		}

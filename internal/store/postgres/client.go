@@ -24,6 +24,15 @@ type Client struct {
 	vectorPin        atomic.Pointer[vectorPin]
 	vectorStateReady atomic.Bool
 	writerSlots      chan struct{}
+	hostedManifests  atomic.Bool
+}
+
+// EnableHostedVectorManifests marks a node whose login may read the manifest
+// tables. Such a node tells deletion which revisions a document owns. Any other
+// node never touches those tables, so a restricted serving login needs no
+// privilege on them while the feature is off.
+func (c *Client) EnableHostedVectorManifests(enabled bool) {
+	c.hostedManifests.Store(enabled)
 }
 
 // Option customizes PostgreSQL pool construction.

@@ -6,6 +6,14 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 )
 
+var (
+	_ domain.VectorStore                   = (*Driver)(nil)
+	_ domain.VectorDeleter                 = (*Driver)(nil)
+	_ domain.RevisionVectorDeleter         = (*Driver)(nil)
+	_ domain.ManifestRevisionVectorDeleter = (*Driver)(nil)
+	_ domain.VectorPresenceChecker         = (*Driver)(nil)
+)
+
 // Driver implements the domain.VectorStore interface using Pinecone.
 type Driver struct {
 	client *Client
@@ -49,6 +57,26 @@ func (d *Driver) DeleteByDocID(ctx context.Context, docID string) error {
 // DeleteByRevision removes only vectors for one document incarnation.
 func (d *Driver) DeleteByRevision(ctx context.Context, docID, revision string) error {
 	return d.client.DeleteByRevision(ctx, docID, revision)
+}
+
+// DeleteByManifestRevision removes vectors belonging only to one manifested revision.
+func (d *Driver) DeleteByManifestRevision(ctx context.Context, docID, revisionID string, knownIDs []string) error {
+	return d.client.DeleteByManifestRevision(ctx, docID, revisionID, knownIDs)
+}
+
+// DeleteVectorIDs removes exact external vector IDs from the target namespace.
+func (d *Driver) DeleteVectorIDs(ctx context.Context, namespace string, ids []string) error {
+	return d.client.DeleteVectorIDs(ctx, namespace, ids)
+}
+
+// FetchPresentVectorIDs returns the subset of external IDs still present in namespace.
+func (d *Driver) FetchPresentVectorIDs(ctx context.Context, namespace string, ids []string) ([]string, error) {
+	return d.client.FetchPresentVectorIDs(ctx, namespace, ids)
+}
+
+// ListPrefixVectorIDs lists one page of external IDs matching prefix when supported.
+func (d *Driver) ListPrefixVectorIDs(ctx context.Context, namespace, prefix string, limit int, token string) (ids []string, nextToken string, supported bool, err error) {
+	return d.client.ListPrefixVectorIDs(ctx, namespace, prefix, limit, token)
 }
 
 // Ping verifies connectivity to the Pinecone index.

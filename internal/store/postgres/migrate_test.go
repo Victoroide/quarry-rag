@@ -602,6 +602,7 @@ func TestEvaluationMigrationInventory(t *testing.T) {
 		"017_evaluation_fixtures.sql",
 		"018_evaluation_vector_identity.sql",
 		"019_evaluation_fixture_guards.sql",
+		"025_hosted_vector_manifest.sql",
 	})
 }
 

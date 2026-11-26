@@ -31,35 +31,154 @@ func WrapVectorStore(inner domain.VectorStore, system string) domain.VectorStore
 	revisions := revisionDeletes{wrapped, scoped}
 	refill, canRefill := inner.(domain.VisibilityRefillStore)
 	writer, canWrite := inner.(domain.VisibilityWriter)
-	if canRefill {
-		visible := &visibilityRefillStore{wrapped, refill}
-		if canWrite {
-			hosted := &hostedVisibilityStore{visible, writer}
-			if canDeleteRevision {
-				return &hostedRevisionVectorStore{hosted, revisions}
+	var base domain.VectorStore
+	switch {
+	case canRefill && canWrite && canDeleteRevision:
+		base = &hostedRevisionVectorStore{&hostedVisibilityStore{&visibilityRefillStore{wrapped, refill}, writer}, revisions}
+	case canRefill && canWrite:
+		base = &hostedVisibilityStore{&visibilityRefillStore{wrapped, refill}, writer}
+	case canRefill && canDeleteRevision:
+		base = &revisionRefillVectorStore{&visibilityRefillStore{wrapped, refill}, revisions}
+	case canRefill:
+		base = &visibilityRefillStore{wrapped, refill}
+	case canWrite && canDeleteRevision:
+		base = &writableRevisionVectorStore{&visibilityWriterStore{wrapped, writer}, revisions}
+	case canWrite:
+		base = &visibilityWriterStore{wrapped, writer}
+	case canDeleteRevision:
+		base = &revisionVectorStore{wrapped, revisions}
+	default:
+		base = wrapped
+	}
+	manifestDeleter, canManifestDelete := inner.(domain.ManifestRevisionVectorDeleter)
+	checker, canCheck := inner.(domain.VectorPresenceChecker)
+	if !canManifestDelete && !canCheck {
+		if rev, ok := base.(*revisionVectorStore); ok {
+			if memory, isMem := inner.(domain.InMemoryIndex); isMem {
+				return &memoryVectorStore{rev, memory}
 			}
-			return hosted
 		}
-		if canDeleteRevision {
-			return &revisionRefillVectorStore{visible, revisions}
-		}
-		return visible
+		return base
 	}
-	if canWrite {
-		writable := &visibilityWriterStore{wrapped, writer}
-		if canDeleteRevision {
-			return &writableRevisionVectorStore{writable, revisions}
+	mt := manifestTracer{wrapped, manifestDeleter, checker}
+	switch v := base.(type) {
+	case *hostedRevisionVectorStore:
+		return &hostedRevisionManifestStore{v, mt}
+	case *revisionRefillVectorStore:
+		return &refillRevisionManifestStore{v, mt}
+	case *writableRevisionVectorStore:
+		return &writableRevisionManifestStore{v, mt}
+	case *revisionVectorStore:
+		rm := &revisionManifestStore{v, mt}
+		if memory, isMem := inner.(domain.InMemoryIndex); isMem {
+			return &memoryManifestVectorStore{rm, memory}
 		}
-		return writable
+		return rm
+	case *hostedVisibilityStore:
+		return &hostedManifestStore{v, mt}
+	case *visibilityRefillStore:
+		return &refillManifestStore{v, mt}
+	case *visibilityWriterStore:
+		return &writerManifestStore{v, mt}
+	default:
+		return &manifestVectorStore{wrapped, mt}
 	}
-	if canDeleteRevision {
-		revision := &revisionVectorStore{wrapped, revisions}
-		if memory, ok := inner.(domain.InMemoryIndex); ok {
-			return &memoryVectorStore{revision, memory}
-		}
-		return revision
+}
+
+type memoryManifestVectorStore struct {
+	*revisionManifestStore
+	domain.InMemoryIndex
+}
+
+type manifestTracer struct {
+	vs       *vectorStore
+	manifest domain.ManifestRevisionVectorDeleter
+	checker  domain.VectorPresenceChecker
+}
+
+func (m manifestTracer) DeleteByManifestRevision(ctx context.Context, docID, revisionID string, knownIDs []string) error {
+	ctx, span := m.vs.begin(ctx, "delete", "tool")
+	defer span.End()
+	if m.manifest == nil {
+		return errors.New("manifest revision vector cleanup is unavailable")
 	}
-	return wrapped
+	err := m.manifest.DeleteByManifestRevision(ctx, docID, revisionID, knownIDs)
+	RecordError(span, err)
+	return err
+}
+
+func (m manifestTracer) DeleteVectorIDs(ctx context.Context, namespace string, ids []string) error {
+	ctx, span := m.vs.begin(ctx, "delete", "tool")
+	defer span.End()
+	span.SetAttributes(attribute.Int("quarry.vector.records", len(ids)))
+	if m.checker == nil {
+		return errors.New("vector presence delete is unavailable")
+	}
+	err := m.checker.DeleteVectorIDs(ctx, namespace, ids)
+	RecordError(span, err)
+	return err
+}
+
+func (m manifestTracer) FetchPresentVectorIDs(ctx context.Context, namespace string, ids []string) ([]string, error) {
+	ctx, span := m.vs.begin(ctx, "fetch", "tool")
+	defer span.End()
+	if m.checker == nil {
+		return nil, errors.New("vector presence fetch is unavailable")
+	}
+	present, err := m.checker.FetchPresentVectorIDs(ctx, namespace, ids)
+	RecordError(span, err)
+	return present, err
+}
+
+func (m manifestTracer) ListPrefixVectorIDs(ctx context.Context, namespace, prefix string, limit int, token string) (ids []string, nextToken string, supported bool, err error) {
+	ctx, span := m.vs.begin(ctx, "list", "tool")
+	defer span.End()
+	if m.checker == nil {
+		return nil, "", false, errors.New("vector presence list is unavailable")
+	}
+	ids, nextToken, supported, err = m.checker.ListPrefixVectorIDs(ctx, namespace, prefix, limit, token)
+	RecordError(span, err)
+	return ids, nextToken, supported, err
+}
+
+type manifestVectorStore struct {
+	*vectorStore
+	manifestTracer
+}
+
+type refillManifestStore struct {
+	*visibilityRefillStore
+	manifestTracer
+}
+
+type writerManifestStore struct {
+	*visibilityWriterStore
+	manifestTracer
+}
+
+type hostedManifestStore struct {
+	*hostedVisibilityStore
+	manifestTracer
+}
+
+type revisionManifestStore struct {
+	*revisionVectorStore
+	manifestTracer
+}
+
+type refillRevisionManifestStore struct {
+	*revisionRefillVectorStore
+	manifestTracer
+}
+
+type writableRevisionManifestStore struct {
+	*writableRevisionVectorStore
+	manifestTracer
+}
+
+type hostedRevisionManifestStore struct {
+	*hostedRevisionVectorStore
+	manifestTracer
 }
 
 // memoryVectorStore keeps the owner identity and deletion slots of a

@@ -23,4 +23,14 @@ func TestWrappedMemoryStoreKeepsItsOwnerAndDeletionSlots(t *testing.T) {
 
 	_, revisions := wrapped.(domain.RevisionVectorDeleter)
 	require.True(t, revisions)
+
+	manifests, ok := wrapped.(domain.ManifestRevisionVectorDeleter)
+	require.True(t, ok, "wrapped in-memory store must keep ManifestRevisionVectorDeleter")
+	require.NoError(t, manifests.DeleteByManifestRevision(t.Context(), "doc", "rev", []string{"doc#rev#0"}))
+
+	presence, ok := wrapped.(domain.VectorPresenceChecker)
+	require.True(t, ok, "wrapped in-memory store must keep VectorPresenceChecker")
+	present, err := presence.FetchPresentVectorIDs(t.Context(), "", []string{"doc#rev#0"})
+	require.NoError(t, err)
+	require.Empty(t, present)
 }

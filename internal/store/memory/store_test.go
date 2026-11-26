@@ -238,14 +238,17 @@ func TestOfflineStoreRoundTripsLayoutProvenance(t *testing.T) {
 	rows := []string{"p1-t1-r1"}
 	require.NoError(t, s.Upsert(t.Context(), "", []domain.Chunk{{
 		ID:         "c1",
+		VectorID:   "doc-1#rev-1#0",
+		RevisionID: "rev-1",
 		DocumentID: "doc-1",
 		Text:       "Key: Alpha | Val: 1",
 		Embedding:  []float32{1, 0},
 		Metadata: map[string]any{
-			"doc_type":  "report",
-			"pages":     pages,
-			"table_ids": tables,
-			"row_ids":   rows,
+			"doc_type":             "report",
+			domain.VectorTenantKey: "tenant-1",
+			"pages":                pages,
+			"table_ids":            tables,
+			"row_ids":              rows,
 		},
 	}}))
 	pages[0] = 99
@@ -255,6 +258,9 @@ func TestOfflineStoreRoundTripsLayoutProvenance(t *testing.T) {
 	got, err := s.QueryFiltered(t.Context(), []float32{1, 0}, 1, domain.VectorFilter{})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
+	require.Equal(t, domain.ChunkID("c1"), got[0].Chunk.ID)
+	require.Equal(t, "rev-1", got[0].Chunk.RevisionID)
+	require.Equal(t, "tenant-1", got[0].Chunk.Metadata[domain.VectorTenantKey])
 	require.Equal(t, []int{1, 2}, got[0].Chunk.Metadata["pages"])
 	require.Equal(t, []string{"p1-t1"}, got[0].Chunk.Metadata["table_ids"])
 	require.Equal(t, []string{"p1-t1-r1"}, got[0].Chunk.Metadata["row_ids"])
