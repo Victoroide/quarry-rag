@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/api/middleware"
 	"github.com/Victoroide/quarry-rag/internal/citationsupport"
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -150,7 +151,25 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		queryTimeout = time.Minute
 	}
 	synthesis := pipeline.NewSynthesisStageWithCatalog(amb, cfg, options.noEvidenceCatalog).WithCitationSupport(options.citationVerifier)
+	var authz *authorizedQuery
+	if options.authority != nil {
+		var capable bool
+		if authz, capable = newAuthorizedQuery(options.authority, ret); !capable {
+			slog.Error("authorized retrieval requires a vector store that enforces read scopes")
+			return func(w http.ResponseWriter, _ *http.Request) { refuseAuthorizedQuery(w) }
+		}
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		var subject middleware.VerifiedSubject
+		if authz != nil {
+			w.Header().Set("Cache-Control", "private, no-store")
+			var verified bool
+			subject, verified = middleware.SubjectFromContext(r.Context())
+			if !subjectValid(subject, verified) {
+				writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
+				return
+			}
+		}
 		if !isJSONRequest(r) {
 			writeJSONError(w, http.StatusUnsupportedMediaType, "validation", "Content-Type must be application/json")
 			return
@@ -182,6 +201,24 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
 		defer cancel()
 
+		routingCfg := pipeline.RoutingConfigFromConfig(cfg)
+		retrieval := pipeline.NewRetrievalStage(ret)
+		routing := pipeline.NewRoutingStageWithConfig(ret, nil, nil, routingCfg)
+		var authorization *pipeline.ReadAuthorization
+		var evidence domain.EvidenceVisibility
+		if authz != nil {
+			var staged bool
+			if routing, retrieval, evidence, staged = authz.stages(ret, subject.Principal, &req, routingCfg); !staged {
+				refuseAuthorizedQuery(w)
+				return
+			}
+			var err error
+			if authorization, req.AllowedDocumentIDs, err = authz.derive(ctx, subject, &req, cfg); err != nil {
+				authorizedFailure(w, r, credentialFailure(err, subject))
+				return
+			}
+		}
+
 		qc := &pipeline.QueryContext{
 			OriginalQuery:        req.Query,
 			MaxChunks:            effectiveMaxChunks(req.MaxChunks, cfg.MaxChunksPerQuery),
@@ -194,6 +231,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			AcceptLanguage:       strings.Join(r.Header.Values("Accept-Language"), ","),
 			Collection:           req.Collection,
 			RequireCitationScope: req.IncludeCitations && options.citationVerifier != nil,
+			Authorization:        authorization,
 		}
 
 		var stream *queryStream
@@ -201,10 +239,11 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 			stream = newQueryStream(ctx, w, r, qc)
 		}
 
-		routingCfg := pipeline.RoutingConfigFromConfig(cfg)
-		retrieval := pipeline.NewRetrievalStage(ret)
-		routing := pipeline.NewRoutingStageWithConfig(ret, nil, nil, routingCfg)
-		if pool != nil {
+		if authz != nil {
+			qc.EvidenceVisibility = evidence
+			qc.HostedVisibilityRefill = cfg.HostedVisibilityRefill && ret.SupportsVisibilityRefill()
+			qc.HostedVisibilityExtraRequests = cfg.HostedVisibilityExtraRequests
+		} else if pool != nil {
 			visibility := pgstore.Visibility{Pool: pool, Collection: req.Collection, DocType: req.FilterDocType}
 			retrieval = pipeline.NewRetrievalStageWithVisibility(ret, visibility)
 			previews := pgstore.Previews{Pool: pool, Collection: req.Collection, DocType: req.FilterDocType}
@@ -232,6 +271,7 @@ func QueryHandler(ret *retriever.Retriever, amb *llm.Ambassador, cfg *config.Con
 		if err == nil {
 			err = ctx.Err()
 		}
+		err = boundedFailure(err, authorization)
 		if err == nil {
 			slog.DebugContext(r.Context(), "query completed", "mode", qc.RetrievalMode, "chunks", len(qc.RetrievedChunks), "duration", time.Since(start))
 		}

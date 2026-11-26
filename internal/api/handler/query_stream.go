@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -79,8 +80,19 @@ func newQueryStream(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	return s
 }
 
+// requestEnded reports whether the client is gone. Under a verified principal
+// the request context also carries the credential deadline. Its expiry is not a
+// disconnect, so the stream can still end with its bounded terminal error.
+func (s *queryStream) requestEnded() error {
+	err := s.r.Context().Err()
+	if err != nil && s.qc.Authorization != nil && errors.Is(err, context.DeadlineExceeded) && s.qc.Authorization.Expired() {
+		return nil
+	}
+	return err
+}
+
 func (s *queryStream) event(ctx context.Context, name string, value any) error {
-	if err := s.r.Context().Err(); err != nil {
+	if err := s.requestEnded(); err != nil {
 		return err
 	}
 	data, err := json.Marshal(value)
@@ -97,7 +109,11 @@ func (s *queryStream) event(ctx context.Context, name string, value any) error {
 	}
 	if !s.started {
 		s.w.Header().Set("Content-Type", "text/event-stream")
-		s.w.Header().Set("Cache-Control", "no-cache")
+		if s.qc.Authorization != nil {
+			s.w.Header().Set("Cache-Control", "private, no-store")
+		} else {
+			s.w.Header().Set("Cache-Control", "no-cache")
+		}
 		s.w.Header().Set("X-Accel-Buffering", "no")
 		setQueryLanguageHeaders(s.w.Header(), s.qc)
 		s.w.WriteHeader(http.StatusOK)
@@ -120,7 +136,7 @@ func (s *queryStream) finish(ctx context.Context, err error) {
 			return
 		}
 		slog.ErrorContext(ctx, "query processing failed", "error", err)
-		if s.writeErr != nil || s.r.Context().Err() != nil {
+		if s.writeErr != nil || s.requestEnded() != nil {
 			return
 		}
 		code, _, body := queryErrorResponse(err)
