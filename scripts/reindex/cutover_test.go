@@ -499,18 +499,8 @@ func TestFreezeReportsOpenDeletionReceiptsAndRecoversAfterQualifiedRetry(t *test
 	})
 	require.ErrorContains(t, err, "provider outage")
 
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	var out bytes.Buffer
-	err = execute(ctx, h.deps, options{Generation: "g2", Freeze: true, Apply: true, Quiesce: 0}, &out, 10*time.Millisecond)
-	require.ErrorContains(t, err, fmt.Sprintf("0 jobs running, 1 deletions open (%s); the freeze stays in force", target.ID))
-
-	var rep map[string]any
-	require.NoError(t, json.Unmarshal(out.Bytes(), &rep), out.String())
-	quiesce := rep["quiesce"].(map[string]any)
-	require.EqualValues(t, 1, quiesce["OpenDeletions"])
-	require.Equal(t, []any{target.ID}, quiesce["open_deletion_ids"])
-	require.ErrorIs(t, f.pg.WritersOpen(t.Context()), domain.ErrWritersFrozen, "the freeze stays in force after a timeout")
+	freeze := options{Generation: "g2", Freeze: true, Apply: true, Quiesce: 0}
+	h.requireFreezeBlockedByDeletion(freeze, target.ID)
 
 	_, err = h.run(options{Thaw: true, Apply: true})
 	require.NoError(t, err)
@@ -530,9 +520,9 @@ func TestFreezeReportsOpenDeletionReceiptsAndRecoversAfterQualifiedRetry(t *test
 	})
 	require.NoError(t, err)
 
-	rep, err = h.run(options{Generation: "g2", Freeze: true, Apply: true, Quiesce: 0})
+	rep, err := h.run(freeze)
 	require.NoError(t, err)
-	quiesce = rep["quiesce"].(map[string]any)
+	quiesce := rep["quiesce"].(map[string]any)
 	require.EqualValues(t, 0, quiesce["OpenDeletions"])
 	_, hasIDs := quiesce["open_deletion_ids"]
 	require.False(t, hasIDs)
