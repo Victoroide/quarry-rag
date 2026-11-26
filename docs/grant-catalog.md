@@ -94,9 +94,15 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_authorize_ingest(uuid, uuid, text
   public.grant_catalog_lock_ingest_permission(uuid, uuid, text),
   public.grant_catalog_bind_accepted_document(uuid, uuid, text, uuid, uuid, boolean),
   public.grant_catalog_publish_accepted_document(uuid, uuid),
-  public.grant_catalog_document_tenant(uuid, uuid) TO quarry_service;
+  public.grant_catalog_document_tenant(uuid, uuid),
+  public.grant_catalog_policy_state(uuid, uuid),
+  public.grant_catalog_list_documents(uuid, uuid, uuid, integer, text, boolean),
+  public.grant_catalog_get_document(uuid, uuid, uuid, boolean),
+  public.grant_catalog_authorize_file(uuid, uuid, uuid),
+  public.grant_catalog_authorize_delete(uuid, uuid, uuid, uuid),
+  public.grant_catalog_record_deletion_owner(uuid, uuid, uuid, uuid),
+  public.grant_catalog_read_revision(uuid, uuid) TO quarry_service;
 GRANT SELECT ON public.grant_catalog_active_principals, public.grant_catalog_readable_documents TO quarry_service;
-GRANT EXECUTE ON FUNCTION public.grant_catalog_read_revision(uuid, uuid) TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_backfill_candidates(uuid, integer),
   public.grant_catalog_publish_verified_document(uuid, uuid, text, text) TO quarry_operator;
 GRANT SELECT ON public.grant_catalog_policy_audit TO quarry_auditor;
@@ -126,9 +132,10 @@ search path. Catalog entry points and document cleanup stay with the renamed
 corpus.
 
 The serving login needs no catalog table privilege. Its only catalog access is
-reading `grant_catalog_active_principals` and executing the five owned-ingestion
-functions granted above, each of which runs with the schema owner's rights. The
-catalog owner and database
+reading `grant_catalog_active_principals` and `grant_catalog_readable_documents`
+and executing the owned-ingestion, scoped document-operation and
+authorized-retrieval functions granted above, each of which runs with the
+schema owner's rights. The catalog owner and database
 administrators have administrative access. Give each operator an internal
 database login name and avoid shared operator logins. The audit records the
 authenticated PostgreSQL session login, revision, batch UUID, payload digest
@@ -162,6 +169,12 @@ After applying migration `020_owned_ingestion.sql`, grant reading
 `grant_catalog_active_principals` and execution of the five serving functions
 and the two operator functions before enabling
 [owned ingestion](#owned-ingestion) or the scoped backfill. After applying
+migration `024_document_operations.sql`, grant execution of the six scoped
+document-operation functions (`grant_catalog_policy_state`,
+`grant_catalog_list_documents`, `grant_catalog_get_document`,
+`grant_catalog_authorize_file`, `grant_catalog_authorize_delete` and
+`grant_catalog_record_deletion_owner`) before enabling
+[scoped document operations](#scoped-document-operations). After applying
 `026_authorized_retrieval.sql`, grant reading
 `grant_catalog_readable_documents` and execution of
 `grant_catalog_read_revision` before enabling
@@ -222,6 +235,41 @@ label beside the revision and attempt tags that already fence its writes and
 cleanup to one incarnation, so a retired lease or incarnation can neither
 publish into nor remove a replacement's data. Completion publishes readiness
 for accepted documents in the same transaction that completes them.
+
+## Scoped document operations
+
+Scoped document handlers authorize inventory, status, original-file signing and
+deletion for a verified principal. No public route enables them yet, so the
+service-mode HTTP contracts stay unchanged. Every scoped response and error sets
+`Cache-Control: private, no-store`, and handlers refuse to fall back to
+unscoped stores (`503`).
+
+- **Inventory and status:** Listing and status lookups apply the same-tenant
+  ownership or `read` grant inside SQL before ordering, counting, limiting or
+  streaming, exposing accepted documents in `processing`, `failed` and
+  `completed` states and verified historical assignments while excluding
+  unverified legacy rows and documents in `deleting` state. An omitted or empty
+  `collection` filters across the caller's tenant without granting default
+  collection access, and `after` acts only as an exclusive UUID cursor. Policy
+  revision, principal status and token expiry are rechecked before releasing
+  each page or bounded streaming batch. Raw `s3_key` values are omitted and
+  internal `last_error` messages on failed rows are mapped to a bounded public
+  category (`no_text`, `ocr_result_expired`, `ocr_text_too_large`,
+  `embedding_limit`, `no_chunks`, `ocr_failed` or `processing_failed`).
+- **Original-file signing:** Shared row locks verify active principal status
+  and ownership or `read` plus `download` grants directly before signing. The
+  requested presigned URL lifetime is the smaller of `900` seconds and the whole
+  seconds remaining before token expiry, and signing is refused (`401`) when
+  fewer than one second remains. A missing, unassigned, unverified, denied,
+  read-only, deleting, absent-original or storage-disabled lookup returns the
+  same `404` envelope with zero signing calls.
+- **Owner-only deletion:** Only the active document owner may delete (`404` for
+  grantees and non-owners). Authorization and the incarnation-pinned
+  `document_deletions` intent commit atomically under the caller's request and
+  credential deadline before detached cross-store cleanup runs; cancellation or
+  token expiry before commit leaves the document intact and makes zero vector or
+  object-store calls, while a committed intent finishes cleanup for that exact
+  incarnation without affecting any replacement UUID.
 
 ## Authorized retrieval
 
