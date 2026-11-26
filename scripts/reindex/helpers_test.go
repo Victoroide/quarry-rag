@@ -77,9 +77,6 @@ func newDoc(collection, docType string, texts ...string) docSpec {
 
 func vectorDB(t *testing.T) *pgstore.Client {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.StartVector(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(context.Background())) })

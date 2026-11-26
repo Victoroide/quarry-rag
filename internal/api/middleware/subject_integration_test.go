@@ -38,9 +38,6 @@ func (f subjectLookupFunc) ResolvePrincipal(ctx context.Context, issuer, subject
 }
 
 func TestSubjectCredentialsWithGrantCatalog(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon or the test services")
-	}
 	address := pgtest.Start(t)
 	owner, err := postgres.NewClient(t.Context(), address)
 	require.NoError(t, err)
