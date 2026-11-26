@@ -309,7 +309,7 @@ func handleFileIngest(rw http.ResponseWriter, r *http.Request, wk *worker.Worker
 			docType = domain.DefaultDocType
 		}
 		var uploadErr error
-		written, uploadErr = writer.write(r.Context(), docID, req.Collection, docType, fileName, ft, fileData)
+		written, uploadErr = writer.write(r.Context(), docID, req.Collection, docType, fileName, ft, "", fileData)
 		if uploadErr != nil {
 			slog.ErrorContext(r.Context(), "upload source file", "error", uploadErr)
 			rw.Header().Set("Retry-After", "30")

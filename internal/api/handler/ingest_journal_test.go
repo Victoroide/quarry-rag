@@ -96,6 +96,9 @@ func (o *journaledObjects) Bucket() string { return o.bucket }
 func (o *journaledObjects) NewKey(documentID, uploadID, docType, fileName string) string {
 	return "documents/" + docType + "/" + documentID + "/" + uploadID + "/" + fileName
 }
+func (*journaledObjects) NewOwnedKey(documentID, incarnation, uploadID, docType, fileName string) string {
+	return "documents/" + docType + "/" + documentID + "/" + incarnation + "/" + uploadID + "/" + fileName
+}
 
 func (o *journaledObjects) PutSource(ctx context.Context, key string, _ extractor.FileType, r io.Reader) (domain.SourceUploadResult, error) {
 	o.trace.add("put")
