@@ -1,16 +1,16 @@
 {
   "Width": 840,
-  "Height": 2176,
+  "Height": 2194,
   "Nodes": {
     "documents": {
       "X": 16,
       "Y": 78,
       "W": 352,
-      "H": 582
+      "H": 600
     },
     "document_deletions": {
       "X": 16,
-      "Y": 668,
+      "Y": 686,
       "W": 352,
       "H": 292
     },
@@ -58,19 +58,19 @@
     },
     "vector_generations": {
       "X": 16,
-      "Y": 1428,
+      "Y": 1446,
       "W": 352,
       "H": 312
     },
     "vector_generation_documents": {
       "X": 16,
-      "Y": 968,
+      "Y": 986,
       "W": 352,
       "H": 204
     },
     "vector_state": {
       "X": 16,
-      "Y": 1180,
+      "Y": 1198,
       "W": 352,
       "H": 240
     },
@@ -88,7 +88,7 @@
     },
     "hosted_vector_cleanups": {
       "X": 16,
-      "Y": 1748,
+      "Y": 1766,
       "W": 352,
       "H": 366
     }

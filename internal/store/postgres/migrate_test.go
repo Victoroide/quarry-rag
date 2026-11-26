@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"encoding/json"
 	"fmt"
 	neturl "net/url"
 	"slices"
@@ -99,14 +100,13 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 
 	type snapshot struct {
 		filenode uint32
-		rows     string
+		rows     map[string]map[string]json.RawMessage
 	}
 	read := func() snapshot {
 		var s snapshot
-		require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_relation_filenode('documents'), jsonb_build_array(
-			to_jsonb(d)-ARRAY['incarnation','grant_catalog_assigned','index_visibility','index_visibility_observed_at','scoped_vectors','vector_attempt','vector_incarnation_required',
-				'vector_mutation_deletes','vector_delete_uncertain','vector_mutation_pending','vector_mutation_uncertain',
-				'vector_mutation_claim','vector_mutation_until'], to_jsonb(ch), to_jsonb(f), to_jsonb(j)-ARRAY['lease_token','pdf_required','pdf_claim_attempt'])::text
+		require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_relation_filenode('documents'), jsonb_build_object(
+			'documents', to_jsonb(d), 'chunks', to_jsonb(ch),
+			'document_fingerprints', to_jsonb(f), 'ingest_jobs', to_jsonb(j))
 			FROM documents d JOIN chunks ch ON ch.document_id=d.id
 			JOIN document_fingerprints f ON f.document_id=d.id JOIN ingest_jobs j ON j.document_id=d.id
 			WHERE d.id=$1 AND j.state='running' AND j.lease_until > clock_timestamp()`, id).Scan(&s.filenode, &s.rows))
@@ -114,7 +114,12 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	}
 	before := read()
 	require.NoError(t, c.RunMigrations(ctx))
-	require.Equal(t, before, read())
+	after := read()
+	require.Equal(t, before.filenode, after.filenode)
+	// Additive migrations may add columns. Every original column must keep its value.
+	for table, row := range before.rows {
+		require.Subset(t, after.rows[table], row, "preserve the original %s row", table)
+	}
 	requireRecordedMigrations(t, c)
 	requireInactiveDeletionSchema(t, c)
 
@@ -633,4 +638,28 @@ func TestInvalidMigrationFilesAreRejected(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestUntaggedStampMigrationKeepsExistingRows(t *testing.T) {
+	c := migrationTestClient(t, startTestDatabase(t))
+	applyMigrationsExcept(t, c, 27)
+	ctx := t.Context()
+	id := uuid.NewString()
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id, content) VALUES ($1, 'existing')`, id)
+	require.NoError(t, err)
+
+	// A database deployed from a version with a higher migration number can
+	// still apply this additive migration without rewriting documents.
+	var before, after int64
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_relation_filenode('documents')::bigint`).Scan(&before))
+	require.NoError(t, c.RunMigrations(ctx))
+	requireRecordedMigrations(t, c)
+	var nullStamp bool
+	var content string
+	require.NoError(t, c.Pool.QueryRow(ctx, `
+SELECT pg_relation_filenode('documents')::bigint, untagged_since IS NULL, content FROM documents WHERE id=$1`, id).
+		Scan(&after, &nullStamp, &content))
+	require.Equal(t, before, after)
+	require.True(t, nullStamp)
+	require.Equal(t, "existing", content)
 }

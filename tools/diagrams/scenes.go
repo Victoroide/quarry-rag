@@ -135,7 +135,7 @@ func schemaColumnBaseline(index int) float64 {
 }
 
 func dataModel() diagram {
-	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", MaxW: 840, MaxH: 2180,
+	d := diagram{Name: "database-schema", Title: "PostgreSQL data model", MaxW: 840, MaxH: 2200,
 		Description: "Data model. The chunks, document_fingerprints, ingest_jobs, document_pdf_extractions and hosted_vector_revisions tables reference documents.id with cascading deletion. The documents table holds an incarnation UUID. The document_deletions table stores receipts keyed by public document UUID independently of the live row, and document_deletion_activation stores the singleton activation timestamp. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. The vector_generations table records each vector target and its embedding profile, vector_generation_documents holds the per-document write ledger of a generation and references vector_generations.name, and vector_state records the active generation, the writer freeze and any pending active cleanup reservation. The hosted_vector_manifests and hosted_vector_cleanups tables record write intents and retired vector tombstones independently of live document rows, so deletion and UUID reuse cannot drop pending vector cleanup. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column."}
 	d.Nodes = []node{
 		{ID: "documents", Title: "documents", Columns: []column{
@@ -145,7 +145,8 @@ func dataModel() diagram {
 			{"vector_mutation_deletes", "BOOLEAN", "", ""},
 			{"vector_delete_uncertain", "BOOLEAN", "", ""},
 			{"vector_mutation_pending", "BOOLEAN", "", ""}, {"vector_mutation_uncertain", "BOOLEAN", "", ""},
-			{"vector_mutation_claim", "UUID", "", ""}, {"vector_mutation_until", "TIMESTAMPTZ", "", ""}}},
+			{"vector_mutation_claim", "UUID", "", ""}, {"vector_mutation_until", "TIMESTAMPTZ", "", ""},
+			{"untagged_since", "XID8", "", ""}}},
 		{ID: "chunks", Title: "chunks", Columns: []column{{"id", "UUID", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"chunk_index", "INTEGER", "", ""}, {"text", "TEXT", "", ""}, {"token_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_fingerprints", Title: "document_fingerprints", Columns: []column{{"fingerprint", "TEXT", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"created_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"pdf_required", "BOOLEAN", "", ""}, {"pdf_claim_attempt", "INTEGER", "", ""}, {"lease_token", "UUID", "", ""}}},
@@ -186,7 +187,7 @@ func dataModel() diagram {
 		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {484, v.y}}})
 	}
 	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs", "documents-pdf-extractions", "documents-evaluation", "documents-uploads", "documents-hosted-vector-revisions"})
-	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 2154, Size: sublabelSize, Kind: "muted"}}
+	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 2172, Size: sublabelSize, Kind: "muted"}}
 	return d
 }
 
