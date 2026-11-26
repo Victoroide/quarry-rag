@@ -77,3 +77,50 @@ func TestDockerfileChecksImageAgainstPinnedBuildInputs(t *testing.T) {
 	require.Contains(t, stage, "--mount=type=bind,from=runtime-output,target=/image")
 	require.Contains(t, stage, ".github/scripts/image-check.sh /image/runtime-image.tar")
 }
+
+var (
+	dockerFrom     = regexp.MustCompile(`(?m)^FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*$`)
+	dockerFromLine = regexp.MustCompile(`(?m)^FROM\b`)
+	dockerPinned   = regexp.MustCompile(`^[a-z0-9][a-z0-9./_-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$`)
+	dockerGoImages = regexp.MustCompile(`(?m)^FROM\s+(?:--platform=\S+\s+)?(golang:\S+)\s+AS\s+(\S+)`)
+)
+
+func TestDockerfileEveryBaseIsPinnedWhereUsed(t *testing.T) {
+	data, err := os.ReadFile("../../Dockerfile")
+	require.NoError(t, err)
+	text := string(data)
+	require.NotRegexp(t, `(?m)^ARG\s+\w*IMAGE`, text, "a build argument hides the image from static analysis")
+
+	earlier := map[string]bool{}
+	froms := dockerFrom.FindAllStringSubmatch(text, -1)
+	require.NotEmpty(t, froms)
+	require.Len(t, dockerFromLine.FindAllString(text, -1), len(froms),
+		"every FROM line must be a plain image reference with an optional stage name")
+	for _, from := range froms {
+		ref, stage := from[1], from[2]
+		require.False(t, strings.Contains(ref, "$"), "image %q is resolved at build time", ref)
+		if !earlier[ref] {
+			require.Regexp(t, dockerPinned, ref, "image must be a literal tag@sha256 reference or an earlier stage")
+		}
+		if stage != "" {
+			earlier[stage] = true
+		}
+	}
+}
+
+func TestDockerfileGoStagesShareOnePinnedImage(t *testing.T) {
+	data, err := os.ReadFile("../../Dockerfile")
+	require.NoError(t, err)
+	goImages := dockerGoImages.FindAllStringSubmatch(string(data), -1)
+	require.Len(t, goImages, 2, "base and build-base declare the Go image")
+	require.Equal(t, "base", goImages[0][2])
+	require.Equal(t, "build-base", goImages[1][2])
+	require.Equal(t, goImages[0][1], goImages[1][1], "both Go stages use the same image")
+	require.Regexp(t, dockerPinned, goImages[0][1])
+}
+
+func TestDependabotUpdatesDockerfileImages(t *testing.T) {
+	data, err := os.ReadFile("../../.github/dependabot.yml")
+	require.NoError(t, err)
+	require.Regexp(t, `(?m)^  - package-ecosystem: docker\n    directory: /\n`, string(data))
+}
