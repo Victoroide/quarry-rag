@@ -58,7 +58,7 @@ func stageSnapshot(t *testing.T, snapshot pg.DocumentSnapshot, source vectorRead
 	led := &recordingLedger{}
 	opts := defaultOptions()
 	opts.MaxEmbedCalls = 10
-	s := &stager{corpus: snapshotCorpus{snapshot}, ledger: led, target: pineconeStore{target}, generation: "g2", profile: testProfile(sourceModel), opts: opts, copyFrom: source, embed: embedder}
+	s := &stager{corpus: snapshotCorpus{snapshot}, ledger: led, target: pineconeStore{target}, generation: "g2", taggedTarget: true, copyFromTagged: true, profile: testProfile(sourceModel), opts: opts, copyFrom: source, embed: embedder}
 	rep, err := s.run(t.Context())
 	require.NoError(t, err)
 	return rep, target, led

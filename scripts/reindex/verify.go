@@ -143,7 +143,7 @@ scan:
 				rep.Coverage.Inconsistent++
 				continue
 			}
-			if rev.ScopedVectors {
+			if isTagged(rev) {
 				rep.Coverage.TaggedVectors++
 				continue
 			}
@@ -223,7 +223,9 @@ scan:
 func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSnapshot, rep *verifyReport, expected map[string]scopeDoc, sample *[]sampleChunk) (present, valid int, err error) {
 	ids := make([]string, len(snap.Chunks))
 	for i, c := range snap.Chunks {
-		ids[i] = targetVectorID(snap.ID, snap.ActiveRevisionID, c, v.taggedTarget)
+		if ids[i], err = vectorKey(v.taggedTarget, snap.DocumentRevision, c); err != nil {
+			return 0, 0, err
+		}
 		expected[ids[i]] = scopeDoc{id: snap.ID, chunkID: string(c.ID), revisionID: snap.ActiveRevisionID, collection: snap.Collection}
 		*sample = append(*sample, sampleChunk{id: ids[i], doc: snap.ID, collection: snap.Collection, index: c.Index, textHash: sha256.Sum256([]byte(c.Text))})
 	}
@@ -238,7 +240,11 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 		}
 	}
 	for _, want := range snap.Chunks {
-		record, ok := got[targetVectorID(snap.ID, snap.ActiveRevisionID, want, v.taggedTarget)]
+		wantKey, keyErr := vectorKey(v.taggedTarget, snap.DocumentRevision, want)
+		if keyErr != nil {
+			return 0, 0, keyErr
+		}
+		record, ok := got[wantKey]
 		if !ok {
 			rep.Coverage.Missing++
 			continue

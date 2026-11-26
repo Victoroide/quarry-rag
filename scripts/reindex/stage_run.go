@@ -34,7 +34,7 @@ func (d deps) stage(ctx context.Context, opts options, p targetPlan, profile dom
 	if err != nil {
 		return err
 	}
-	s := &stager{corpus: d.pg, ledger: fence.Ledger(), generation: p.generation, profile: profile, opts: opts, fence: fence, taggedTarget: p.store == "pinecone"}
+	s := &stager{corpus: d.pg, ledger: fence.Ledger(), generation: p.generation, taggedTarget: p.store == "pinecone", copyFromTagged: p.live.store == "pinecone", profile: profile, opts: opts, fence: fence}
 	if reuse {
 		live, closeLive, _, openErr := d.openBound(ctx, targetSpec{Store: p.live.store, Target: p.live.target, Generation: p.live.generation, Dimensions: source.Dimensions}, sourceHost)
 		if hardSourceError(ctx, openErr) {
@@ -115,7 +115,7 @@ func (d deps) stage(ctx context.Context, opts options, p targetPlan, profile dom
 		return fmt.Errorf("%d documents declare a chunk count that differs from their stored chunks", len(rep.Inconsistent))
 	}
 	if len(rep.Unsupported) > 0 {
-		return fmt.Errorf("%d documents store tagged vectors, which a reindex does not stage", len(rep.Unsupported))
+		return fmt.Errorf("%d documents store tagged vectors that this target cannot hold or whose published attempt cannot be determined", len(rep.Unsupported))
 	}
 	return nil
 }

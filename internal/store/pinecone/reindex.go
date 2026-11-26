@@ -25,6 +25,24 @@ const (
 // ErrListingUnsupported marks an index that cannot enumerate its record keys.
 var ErrListingUnsupported = errors.New("pinecone: the index does not support listing record keys")
 
+// ParseTaggedVectorID splits a revision- and attempt-qualified vector ID. It
+// accepts only the form TaggedVectorID produces with a non-empty attempt.
+func ParseTaggedVectorID(id string) (document, revision, attempt, chunk string, ok bool) {
+	parts := strings.Split(id, "/")
+	if len(parts) != 4 {
+		return "", "", "", "", false
+	}
+	document, revision, attempt, chunk = parts[0], parts[1], parts[2], parts[3]
+	if document == "" || revision == "" || attempt == "" || chunk == "" {
+		return "", "", "", "", false
+	}
+	formatted, err := TaggedVectorID(document, revision, attempt, chunk)
+	if err != nil || formatted != id {
+		return "", "", "", "", false
+	}
+	return document, revision, attempt, chunk, true
+}
+
 // IndexConn is the index connection used by Client.
 type IndexConn = indexConn
 

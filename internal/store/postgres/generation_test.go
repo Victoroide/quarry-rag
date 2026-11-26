@@ -1040,3 +1040,45 @@ func TestManifestedDocumentKeepsManifestKeys(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{taggedKey}, extra)
 }
+
+func TestUnexpectedChunkKeysFollowsDocumentFormat(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+	taggedID, taggedInc, taggedAtt := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	untaggedID, untaggedInc := uuid.NewString(), uuid.NewString()
+	taggedChunk, untaggedChunk, orphanChunk := uuid.New(), uuid.New(), uuid.New()
+	taggedKey := fmt.Sprintf("%x", taggedChunk[:])
+	untaggedKey := fmt.Sprintf("%x", untaggedChunk[:])
+	orphanKey := fmt.Sprintf("%x", orphanChunk[:])
+
+	_, err := c.Pool.Exec(ctx, `INSERT INTO documents(id,incarnation,content,status,chunk_count,scoped_vectors,vector_attempt) VALUES
+		($1,$2,'b','completed',1,TRUE,$3),
+		($4,$5,'b','completed',1,FALSE,NULL)`, taggedID, taggedInc, taggedAtt, untaggedID, untaggedInc)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES
+		($1,$2,0,'t',1), ($3,$4,0,'u',1)`, taggedChunk.String(), taggedID, untaggedChunk.String(), untaggedID)
+	require.NoError(t, err)
+
+	manifestedID, manifestedInc, manifestedRev := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	manifestedChunk := uuid.New()
+	manifestedBare := fmt.Sprintf("%x", manifestedChunk[:])
+	manifestedKey := manifestedID + "#" + manifestedRev + "#0"
+	_, err = c.Pool.Exec(ctx, `INSERT INTO documents(id,incarnation,content,status,chunk_count,scoped_vectors,vector_attempt) VALUES($1,$2,'b','completed',1,TRUE,$3)`, manifestedID, manifestedInc, uuid.NewString())
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,0,'m',1)`, manifestedChunk.String(), manifestedID)
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO hosted_vector_manifests(revision_id,document_id,incarnation,attempt,id_prefix,vector_ids,chunk_ids,state)
+		VALUES($1,$2,$3,1,$4,ARRAY[$5::text],ARRAY[$6::uuid],'active')`, manifestedRev, manifestedID, manifestedInc, manifestedID+"#"+manifestedRev+"#", manifestedKey, manifestedChunk.String())
+	require.NoError(t, err)
+	_, err = c.Pool.Exec(ctx, `INSERT INTO hosted_vector_revisions(document_id,incarnation,active_revision_id) VALUES($1,$2,$3)`, manifestedID, manifestedInc, manifestedRev)
+	require.NoError(t, err)
+
+	keys := []string{taggedKey, untaggedKey, orphanKey, "not-a-chunk-key", manifestedBare, manifestedKey}
+	hosted, err := c.UnexpectedChunkKeys(ctx, keys, true)
+	require.NoError(t, err)
+	require.Equal(t, []string{taggedKey, orphanKey, "not-a-chunk-key", manifestedBare}, hosted, "a hosted target keeps a tagged document only under its tagged keys and a manifested one only under its manifest keys")
+
+	relational, err := c.UnexpectedChunkKeys(ctx, keys, false)
+	require.NoError(t, err)
+	require.Equal(t, []string{orphanKey, "not-a-chunk-key", manifestedBare}, relational, "a PostgreSQL target holds tagged documents under the bare key")
+}

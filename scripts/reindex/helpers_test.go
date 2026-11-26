@@ -55,12 +55,15 @@ func (e *countingEmbedder) Embed(_ context.Context, text string) ([]float32, err
 }
 
 type docSpec struct {
-	ID         string
-	Collection string
-	DocType    string
-	Status     string
-	Texts      []string
-	S3Key      string
+	ID          string
+	Incarnation string
+	Collection  string
+	DocType     string
+	Status      string
+	Texts       []string
+	S3Key       string
+	Tagged      bool
+	Attempt     string
 }
 
 func hexChunkID(docID string, index int) string {
@@ -84,14 +87,36 @@ func vectorDB(t *testing.T) *pgstore.Client {
 	return pg
 }
 
+func newTaggedDoc(collection, docType string, texts ...string) docSpec {
+	return docSpec{
+		ID:          uuid.NewString(),
+		Incarnation: uuid.NewString(),
+		Collection:  collection,
+		DocType:     docType,
+		Status:      "completed",
+		Texts:       texts,
+		Tagged:      true,
+		Attempt:     uuid.NewString(),
+	}
+}
+
 func insertDoc(t *testing.T, pg *pgstore.Client, d docSpec) []domain.Chunk {
 	t.Helper()
 	var s3 *string
 	if d.S3Key != "" {
 		s3 = &d.S3Key
 	}
-	_, err := pg.Pool.Exec(t.Context(), `INSERT INTO documents(id,content,status,collection,doc_type,chunk_count,fingerprint,s3_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-		d.ID, "content of "+d.ID, d.Status, d.Collection, d.DocType, len(d.Texts), "fp-"+d.ID, s3)
+	var inc *string
+	if d.Incarnation != "" {
+		inc = &d.Incarnation
+	}
+	var att *string
+	if d.Attempt != "" {
+		att = &d.Attempt
+	}
+	_, err := pg.Pool.Exec(t.Context(), `INSERT INTO documents(id,incarnation,content,status,collection,doc_type,chunk_count,fingerprint,s3_key,scoped_vectors,vector_attempt)
+ VALUES($1,COALESCE($2::uuid, gen_random_uuid()),$3,$4,$5,$6,$7,$8,$9,$10,$11::uuid)`,
+		d.ID, inc, "content of "+d.ID, d.Status, d.Collection, d.DocType, len(d.Texts), "fp-"+d.ID, s3, d.Tagged, att)
 	require.NoError(t, err)
 	chunks := make([]domain.Chunk, len(d.Texts))
 	for i, text := range d.Texts {
@@ -112,6 +137,16 @@ func sourceChunks(d docSpec, chunks []domain.Chunk, model string) []domain.Chunk
 		c.Metadata = map[string]any{"doc_type": d.DocType, "kind": string(kind), "quality": string(quality)}
 		if d.Collection != "" {
 			c.Metadata["collection"] = d.Collection
+		}
+		if d.Tagged {
+			revision := d.Incarnation
+			if revision == "" {
+				revision = d.ID
+			}
+			c.Metadata[domain.VectorRevisionKey] = revision
+			if d.Attempt != "" {
+				c.Metadata[domain.VectorAttemptKey] = d.Attempt
+			}
 		}
 		out[i] = c
 	}

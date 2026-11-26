@@ -546,7 +546,7 @@ func TestManifestedCheckpointInvalidationAndUnexpectedChunkKeys(t *testing.T) {
 	oldKey := domain.FormatRevisionVectorID(domain.DocumentID(docID), oldRev, 0)
 	newKey := domain.FormatRevisionVectorID(domain.DocumentID(docID), newRev, 0)
 	bareKey := string(chunks[0].ID)
-	unexpected, err := f.pg.UnexpectedChunkKeys(ctx, []string{newKey, oldKey, bareKey})
+	unexpected, err := f.pg.UnexpectedChunkKeys(ctx, []string{newKey, oldKey, bareKey}, true)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{oldKey, bareKey}, unexpected, "only the active revision key is valid for a manifested document")
 
