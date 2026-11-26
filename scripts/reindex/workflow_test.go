@@ -141,6 +141,22 @@ func (h *harness) run(opts options) (map[string]any, error) {
 	return report, err
 }
 
+func (h *harness) requireFreezeBlockedByDeletion(opts options, documentID string) {
+	h.t.Helper()
+	ctx, cancel := context.WithTimeout(h.t.Context(), time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	err := execute(ctx, h.deps, opts, &out, 10*time.Millisecond)
+	require.ErrorContains(h.t, err, fmt.Sprintf("0 jobs running, 1 deletions open (%s); the freeze stays in force", documentID))
+
+	var report map[string]any
+	require.NoError(h.t, json.Unmarshal(out.Bytes(), &report), out.String())
+	quiesce := report["quiesce"].(map[string]any)
+	require.EqualValues(h.t, 1, quiesce["OpenDeletions"])
+	require.Equal(h.t, []any{documentID}, quiesce["open_deletion_ids"])
+	require.ErrorIs(h.t, h.f.pg.WritersOpen(h.t.Context()), domain.ErrWritersFrozen)
+}
+
 func verifyOptions(generation string) options {
 	return options{Generation: generation, Verify: true, SampleSize: 6, TopK: 5, ScopeDocuments: 3, MinRecall: 0.5, MaxP95: time.Minute}
 }
