@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -300,6 +301,86 @@ func TestHostedFinalCallOutcomesKeepTheIdentityReserved(t *testing.T) {
 	}
 }
 
+type hostedDeleteResult struct {
+	reply httpReply
+	err   error
+}
+
+func startHostedDelete(ctx context.Context, server *httptest.Server, id string) <-chan hostedDeleteResult {
+	results := make(chan hostedDeleteResult, 1)
+	go func() {
+		reply, err := readHTTPReply(ctx, server, http.MethodDelete, "/documents/"+id, "token", nil, "")
+		results <- hostedDeleteResult{reply: reply, err: err}
+	}()
+	return results
+}
+
+func waitForHostedDeleteBarrier(ctx context.Context, entered <-chan struct{}, results <-chan hostedDeleteResult) error {
+	select {
+	case <-entered:
+		return nil
+	case result := <-results:
+		if result.err != nil {
+			return fmt.Errorf("DELETE failed before the final hosted call: %w", result.err)
+		}
+		return fmt.Errorf("DELETE replied before the final hosted call: HTTP %d", result.reply.code)
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for the final hosted call: %w", ctx.Err())
+	}
+}
+
+func waitForHostedDeleteReply(ctx context.Context, results <-chan hostedDeleteResult) (httpReply, error) {
+	select {
+	case result := <-results:
+		if result.err != nil {
+			return httpReply{}, fmt.Errorf("DELETE failed after releasing the final hosted call: %w", result.err)
+		}
+		return result.reply, nil
+	case <-ctx.Done():
+		return httpReply{}, fmt.Errorf("waiting for DELETE after releasing the final hosted call: %w", ctx.Err())
+	}
+}
+
+func blockFinalHostedCall(requestCtx context.Context, stores *deletionStores) (entered <-chan struct{}, unblock func()) {
+	arrival, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	stores.hook("vectors", func(context.Context) error {
+		if calls.Add(1) == 2 {
+			close(arrival)
+			// The handler detaches cleanup from cancellation of the HTTP request.
+			select {
+			case <-release:
+			case <-requestCtx.Done():
+				return requestCtx.Err()
+			}
+		}
+		return nil
+	})
+	return arrival, sync.OnceFunc(func() { close(release) })
+}
+
+func TestHostedDeleteReportsEarlyVectorFailure(t *testing.T) {
+	c := durableDatabase(t)
+	stores := newDeletionStores()
+	id := uuid.NewString()
+	acceptDeletable(t, c, id, "hosted legacy document with an early provider failure", false, "")
+	stores.hook("namespace", failOnce("first hosted call failed"))
+
+	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	defer cancelRequest()
+	entered, unblock := blockFinalHostedCall(requestCtx, stores)
+	defer unblock()
+	server := deletionServer(t, c, "token", legacyRoutes(stores))
+	results := startHostedDelete(requestCtx, server, id)
+	entryCtx, cancelEntry := context.WithTimeout(t.Context(), 30*time.Second)
+	err := waitForHostedDeleteBarrier(entryCtx, entered, results)
+	cancelEntry()
+
+	require.ErrorContains(t, err, "before the final hosted call")
+	require.ErrorContains(t, err, "HTTP 500")
+	require.Equal(t, []string{"namespace:" + id}, stores.all(), "the final provider gate was never reached")
+}
+
 func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	c := durableDatabase(t)
 	sibling := holdSiblingActivationLock(t, c)
@@ -307,37 +388,29 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	stores := newDeletionStores()
 	id := uuid.NewString()
 	acceptDeletable(t, c, id, "hosted legacy document", false, "")
-	entered, release := make(chan struct{}), make(chan struct{})
-	unblock := sync.OnceFunc(func() { close(release) })
+	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	defer cancelRequest()
+	entered, unblock := blockFinalHostedCall(requestCtx, stores)
 	defer unblock()
-	var mu sync.Mutex
-	calls := 0
-	stores.hook("vectors", func(context.Context) error {
-		mu.Lock()
-		calls++
-		call := calls
-		mu.Unlock()
-		if call == 2 {
-			close(entered)
-			<-release
-		}
-		return nil
-	})
 	server := deletionServer(t, c, "token", legacyRoutes(stores))
-	reply := make(chan httpReply, 1)
-	go func() { reply <- sendDelete(t, server, "token", id, "") }()
-	<-entered
+	results := startHostedDelete(requestCtx, server, id)
+	entryCtx, cancelEntry := context.WithTimeout(t.Context(), 30*time.Second)
+	entryErr := waitForHostedDeleteBarrier(entryCtx, entered, results)
+	cancelEntry()
+	require.NoError(t, entryErr)
 
 	// The row is retired and the last call has not been sent.
 	require.Empty(t, documentState(t, c, id))
-	activated := make(chan struct{})
+	activationCtx, cancelActivation := context.WithCancel(t.Context())
+	defer cancelActivation()
+	activated := make(chan error, 1)
 	go func() {
-		defer close(activated)
-		_, err := activator.ActivateDeletion(t.Context())
-		assertNoError(t, err)
+		_, err := activator.ActivateDeletion(activationCtx)
+		activated <- err
 	}()
 	select {
-	case <-activated:
+	case err := <-activated:
+		require.NoError(t, err, "activation returned while the cleanup held the lock")
 		t.Fatal("a healthy activation committed under the cleanup")
 	case <-time.After(500 * time.Millisecond):
 	}
@@ -346,14 +419,19 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	require.NoError(t, sibling.QueryRow(t.Context(), `SELECT TRUE`).Scan(&alive), "the sibling session still holds its lock")
 	require.True(t, alive)
 	select {
-	case <-activated:
+	case err := <-activated:
+		require.NoError(t, err, "activation after the lock disappeared")
 	case <-time.After(10 * time.Second):
 		t.Fatal("activation did not proceed after the lock disappeared")
 	}
 	require.Equal(t, domain.AcceptDeletionConflict, admission(t, activator, id, "replacement"), "the durable hold still blocks the identity")
 
 	unblock()
-	require.Equal(t, http.StatusOK, (<-reply).code)
+	replyCtx, cancelReply := context.WithTimeout(t.Context(), 10*time.Second)
+	reply, err := waitForHostedDeleteReply(replyCtx, results)
+	cancelReply()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, reply.code, reply.body)
 	receipt := legacyReceiptOf(t.Context(), t, c, id)
 	require.True(t, receipt.finalized)
 	require.True(t, receipt.held)
@@ -518,15 +596,6 @@ func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
 	for range 2 {
 		require.Equal(t, http.StatusOK, (<-replies).code)
 	}
-}
-
-func assertNoError(t *testing.T, err error) bool {
-	t.Helper()
-	if err != nil {
-		t.Error(err)
-		return false
-	}
-	return true
 }
 
 // pausedMemory pauses the second document-wide delete, the one sent after the
