@@ -694,3 +694,45 @@ func TestHeldReleaseHonorsTheWriterGate(t *testing.T) {
 		})
 	}
 }
+
+func TestActivationNeedsTheMetadataStoreAndNeverRunsAsPartOfDeletion(t *testing.T) {
+	_, err := (&Cleaner{}).ActivateDeletion(t.Context())
+	require.ErrorContains(t, err, "metadata store is not configured")
+}
+
+func TestFailedModeLookupNeverFallsBackToIDOnlyDeletion(t *testing.T) {
+	databaseURL := pgtest.StartVector(t)
+	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
+	require.NoError(t, metadata.RunMigrations(t.Context()))
+	vectors, err := pgstore.NewVectorStore(t.Context(), metadata, 3)
+	require.NoError(t, err)
+	for name, opts := range map[string][]Option{"unreserved": nil, "reserved": {WithLegacyReservations()}} {
+		t.Run(name, func(t *testing.T) {
+			cleaner, newErr := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL}, opts...)
+			require.NoError(t, newErr)
+			t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
+			id := domain.DocumentID(uuid.NewString())
+			require.NoError(t, metadata.InsertDocument(t.Context(), domain.Document{ID: id}))
+			require.NoError(t, vectors.Upsert(t.Context(), "", []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: id, Embedding: []float32{1, 0, 0}}}))
+
+			// The mode lookup fails the way a lost connection or a failover would.
+			_, err = metadata.Pool.Exec(t.Context(), `ALTER FUNCTION document_deletion_active() RENAME TO document_deletion_active_unavailable`)
+			require.NoError(t, err)
+			failed := cleaner.Delete(t.Context(), string(id))
+			_, restoreErr := metadata.Pool.Exec(t.Context(), `ALTER FUNCTION document_deletion_active_unavailable() RENAME TO document_deletion_active`)
+			require.NoError(t, restoreErr)
+			require.Error(t, failed)
+			require.NotErrorIs(t, failed, ErrDocumentNotFound)
+			exists, existsErr := metadata.DocumentExists(t.Context(), id)
+			require.NoError(t, existsErr)
+			require.True(t, exists, "an unreadable mode never selects ID-only deletion")
+			var remaining int
+			require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT count(*) FROM chunk_vectors WHERE document_id=$1`, string(id)).Scan(&remaining))
+			require.Equal(t, 1, remaining)
+
+			require.NoError(t, cleaner.Delete(t.Context(), string(id)), "the same request succeeds once the lookup answers")
+		})
+	}
+}

@@ -458,6 +458,17 @@ func (c *Cleaner) deleteOffline(ctx context.Context, docID, incarnation string, 
 	return err
 }
 
+// ActivateDeletion is the explicit, database-wide transition to checkpointed
+// deletion. It waits for healthy ID-only cleanups, records the marker once and
+// reports the recorded value on a repeat. It is not part of Delete: no cleanup,
+// request or startup activates the database.
+func (c *Cleaner) ActivateDeletion(ctx context.Context) (domain.DeletionActivation, error) {
+	if c.metadata == nil {
+		return domain.DeletionActivation{}, errors.New("metadata store is not configured")
+	}
+	return c.metadata.ActivateDeletion(ctx)
+}
+
 // ListHeld returns held and unfinished deletion receipts from PostgreSQL.
 func (c *Cleaner) ListHeld(ctx context.Context) ([]domain.HeldDeletion, error) {
 	if c.metadata == nil {

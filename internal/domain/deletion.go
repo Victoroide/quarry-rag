@@ -113,6 +113,23 @@ type DocumentDeleter interface {
 	DeleteWithCleanup(ctx context.Context, id DocumentID, ops DeleteOperations) error
 }
 
+// DeletionActivation reports the database-wide switch to checkpointed deletion.
+type DeletionActivation struct {
+	// ActivatedAt is the database time at which the marker was set. A repeated
+	// activation reports the same value.
+	ActivatedAt time.Time `json:"activated_at"`
+	// AlreadyActive is true when the marker was set before this call.
+	AlreadyActive bool `json:"already_active"`
+}
+
+// DeletionActivator sets the one-way marker that selects checkpointed deletion.
+// Only an explicit administrative operation may call it.
+type DeletionActivator interface {
+	// ActivateDeletion waits for every healthy ID-only cleanup, then records the
+	// marker once. It reports the recorded value when the marker is already set.
+	ActivateDeletion(ctx context.Context) (DeletionActivation, error)
+}
+
 // DocumentFileReader keeps a file lookup valid while the caller signs its address.
 type DocumentFileReader interface {
 	WithDocumentFile(ctx context.Context, id DocumentID, sign func(ctx context.Context, key string) error) (bool, error)

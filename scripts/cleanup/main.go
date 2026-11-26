@@ -1,6 +1,7 @@
 // Package main deletes, inspects, quarantines and releases document
-// identities. Positional arguments accept bare UUIDs (addressing the live
-// document) or UUID@incarnation (addressing only the observed lifetime).
+// identities, and performs the explicit activation of checkpointed deletion.
+// Positional arguments accept bare UUIDs (addressing the live document) or
+// UUID@incarnation (addressing only the observed lifetime).
 package main
 
 import (
@@ -11,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,7 +36,12 @@ const (
 	actionListHeld
 	actionQuarantine
 	actionRelease
+	actionActivate
 )
+
+// activateFlag selects the one-way activation of checkpointed deletion. It is
+// exclusive: it takes no document, no other flag and no value.
+const activateFlag = "--activate-deletion"
 
 // target is one validated command-line argument.
 type target struct {
@@ -97,7 +104,13 @@ func parseTargets(args []string) ([]target, error) {
 
 func parseCommand(args []string) (command, error) {
 	if len(args) == 0 {
-		return command{}, fmt.Errorf("provide document UUIDs, --list-held, --quarantine, or --release-held")
+		return command{}, fmt.Errorf("provide document UUIDs, --list-held, --quarantine, --release-held, or %s", activateFlag)
+	}
+	if slices.Contains(args, activateFlag) {
+		if len(args) != 1 {
+			return command{}, fmt.Errorf("%s is an exclusive action and takes no document, flag or value", activateFlag)
+		}
+		return command{action: actionActivate}, nil
 	}
 	switch args[0] {
 	case "--list-held":
@@ -192,12 +205,15 @@ func runArgs(args []string, stdout io.Writer) error {
 	defer cancel()
 	var opts []cleanup.Option
 	switch cmd.action {
-	case actionListHeld, actionQuarantine:
+	case actionListHeld, actionQuarantine, actionActivate:
 		opts = append(opts, cleanup.WithDirectRecovery(false))
 	case actionRelease:
 		if cmd.terminatedSet {
 			opts = append(opts, cleanup.WithDirectRecovery(true))
 		}
+	default:
+		// An ID-only request reserves its targets under the activation lock.
+		opts = append(opts, cleanup.WithLegacyReservations())
 	}
 	cleaner, err := cleanup.New(ctx, cfg, opts...)
 	if err != nil {
@@ -210,6 +226,12 @@ func runArgs(args []string, stdout io.Writer) error {
 	}()
 
 	switch cmd.action {
+	case actionActivate:
+		activation, activateErr := cleaner.ActivateDeletion(ctx)
+		if activateErr != nil {
+			return activateErr
+		}
+		return json.NewEncoder(stdout).Encode(activation)
 	case actionListHeld:
 		held, listErr := cleaner.ListHeld(ctx)
 		if listErr != nil {

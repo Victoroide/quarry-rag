@@ -529,21 +529,8 @@ func TestActivationWaitsForAHealthyCleanup(t *testing.T) {
 		// of a live row answers by its status, so only a retired row shows the hold.
 		require.NoError(t, store.RetireLegacyDocument(ctx, doc.id, target))
 		go func() {
-			tx, beginErr := activator.Pool.Begin(ctx)
-			if beginErr != nil {
-				activated <- beginErr
-				return
-			}
-			defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-			if _, lockErr := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, DeletionActivationLockID); lockErr != nil {
-				activated <- lockErr
-				return
-			}
-			if _, updateErr := tx.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`); updateErr != nil {
-				activated <- updateErr
-				return
-			}
-			activated <- tx.Commit(ctx)
+			_, activateErr := activator.ActivateDeletion(ctx)
+			activated <- activateErr
 		}()
 		select {
 		case err = <-activated:
@@ -578,7 +565,7 @@ func TestLostSessionReleasesTheLockButNotTheReservation(t *testing.T) {
 		require.Eventually(t, func() bool { return lockIsFree(ctx, t, killer) }, 10*time.Second, 25*time.Millisecond, "the session lock ended with the session")
 
 		// Activation can now commit although the last external call has not returned.
-		_, err = killer.Pool.Exec(ctx, `UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+		_, err = killer.ActivateDeletion(ctx)
 		require.NoError(t, err)
 		require.Equal(t, domain.AcceptDeletionConflict, admit(ctx, t, killer, doc.id, "replacement"), "the durable reservation still blocks the identity")
 		require.False(t, readLegacyReceipt(ctx, t, killer, doc.id).finalized)
