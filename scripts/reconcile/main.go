@@ -27,9 +27,10 @@ type options struct {
 	Limit int
 	Page  int
 
-	BackfillCollections bool
-	BackfillScoped      bool
-	After               string
+	BackfillCollections  bool
+	BackfillScoped       bool
+	CanonicalDocumentIDs bool
+	After                string
 
 	// SourceUploads selects the object-store mode for journaled originals.
 	SourceUploads bool
@@ -51,9 +52,10 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.BoolVar(&opts.Apply, "apply", false, "apply the selected deletions or collection updates")
 	flags.BoolVar(&opts.BackfillCollections, "backfill-collections", false, "label existing vectors with their document collection instead of deleting orphans")
 	flags.BoolVar(&opts.BackfillScoped, "backfill-scoped", false, "verify assigned historical documents and label their current vectors with tenant and incarnation")
-	flags.IntVar(&opts.Limit, "limit", 100000, "maximum vectors and namespace vectors selected, documents for collection backfill, or uploads examined (default 1000 with -source-uploads)")
+	flags.BoolVar(&opts.CanonicalDocumentIDs, "canonical-document-ids", false, "rewrite hosted vector document IDs spelled other than the canonical UUID")
+	flags.IntVar(&opts.Limit, "limit", 100000, "maximum vectors and namespace vectors selected, documents examined, or uploads examined (default 1000 with -source-uploads)")
 	flags.IntVar(&opts.Page, "page", 100, "vector listing page size (1-1000)")
-	flags.StringVar(&opts.After, "after", "", "continue a backfill after this document UUID")
+	flags.StringVar(&opts.After, "after", "", "continue a backfill or canonicalization after this document UUID")
 	flags.BoolVar(&opts.SourceUploads, "source-uploads", false, "reclaim journaled original files that no document adopted, independent of the vector store")
 	flags.DurationVar(&opts.MinAge, "min-age", time.Hour, "with -source-uploads, leave uploads younger than this untouched")
 	flags.DurationVar(&opts.Settle, "settle", 30*time.Minute, "with -source-uploads, minimum time between a claim and the settlement of a fully accounted-for write (at least 1m)")
@@ -65,8 +67,8 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	set := map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	if opts.SourceUploads {
-		if opts.BackfillCollections || opts.BackfillScoped || set["after"] || set["page"] {
-			return opts, errors.New("-source-uploads cannot be combined with -backfill-collections, -backfill-scoped, -after or -page")
+		if opts.BackfillCollections || opts.BackfillScoped || opts.CanonicalDocumentIDs || set["after"] || set["page"] {
+			return opts, errors.New("-source-uploads cannot be combined with -backfill-collections, -backfill-scoped, -canonical-document-ids, -after or -page")
 		}
 		if !set["limit"] {
 			opts.Limit = defaultSourceUploadLimit
@@ -84,13 +86,26 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	if flags.NArg() != 0 || opts.Limit < 1 || opts.Page < 1 || opts.Page > 1000 {
 		return opts, errors.New("provide -limit greater than zero and -page between 1 and 1000, with no positional arguments")
 	}
-	if opts.BackfillCollections && opts.BackfillScoped {
-		return opts, errors.New("choose one backfill mode")
+	modes := 0
+	if opts.BackfillCollections {
+		modes++
+	}
+	if opts.BackfillScoped {
+		modes++
+	}
+	if opts.CanonicalDocumentIDs {
+		modes++
+	}
+	if modes > 1 {
+		return opts, errors.New("choose one reconciliation mode")
+	}
+	if opts.CanonicalDocumentIDs && set["page"] {
+		return opts, errors.New("-page cannot be used with -canonical-document-ids")
 	}
 	if opts.After != "" {
 		id, err := uuid.Parse(opts.After)
-		if err != nil || (!opts.BackfillCollections && !opts.BackfillScoped) {
-			return opts, errors.New("-after requires a backfill mode and a document UUID")
+		if err != nil || (!opts.BackfillCollections && !opts.BackfillScoped && !opts.CanonicalDocumentIDs) {
+			return opts, errors.New("-after requires a backfill or canonicalization mode and a document UUID")
 		}
 		opts.After = id.String()
 	}
@@ -122,6 +137,28 @@ func main() {
 	}
 }
 
+func needsHostedIndex(opts options) bool {
+	if opts.SourceUploads {
+		return false
+	}
+	return opts.CanonicalDocumentIDs || (!opts.BackfillCollections && !opts.BackfillScoped) || opts.Apply
+}
+
+func validateReconcileConfig(opts options, cfg *config.Config) error {
+	if opts.BackfillScoped && cfg.VectorStore == "postgres" {
+		return nil
+	}
+	if needsHostedIndex(opts) {
+		if cfg.VectorStore != "pinecone" {
+			return errors.New("hosted reconciliation requires Pinecone as the active vector store")
+		}
+		if cfg.FakeMode || cfg.PineconeAPIKey == "" || cfg.PineconeIndexName == "" {
+			return errors.New("reconciliation requires a configured hosted vector index")
+		}
+	}
+	return nil
+}
+
 func run() error {
 	opts, err := parseOptions(os.Args[1:], os.Stderr)
 	if err != nil {
@@ -134,12 +171,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	scopedLocal := opts.BackfillScoped && cfg.VectorStore == "postgres"
-	if !scopedLocal && opts.Apply && cfg.VectorStore != "pinecone" {
-		return errors.New("applied reconciliation requires Pinecone as the active vector store")
-	}
-	if !scopedLocal && ((!opts.BackfillCollections && !opts.BackfillScoped) || opts.Apply) && (cfg.FakeMode || cfg.PineconeAPIKey == "" || cfg.PineconeIndexName == "") {
-		return errors.New("reconciliation requires a configured hosted vector index")
+	if cfgErr := validateReconcileConfig(opts, cfg); cfgErr != nil {
+		return cfgErr
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -212,6 +245,13 @@ func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Cl
 			return json.NewEncoder(os.Stdout).Encode(result)
 		}
 	}
+	var documentIDs []string
+	if opts.CanonicalDocumentIDs {
+		documentIDs, err = listDocumentIDs(ctx, pg, opts.After, opts.Limit)
+		if err != nil {
+			return err
+		}
+	}
 	pc, err := pinecone.NewClient(pinecone.NewClientParams{ApiKey: cfg.PineconeAPIKey})
 	if err != nil {
 		return fmt.Errorf("create index client: %w", err)
@@ -232,11 +272,18 @@ func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Cl
 		}
 	}()
 	return pinAndRunMaintenance(ctx, startupCtx, cfg, pg, idx.Host, opts, func() error {
-		return reconcileIndex(ctx, conn, pg, collectionDocuments, opts)
+		return reconcileIndex(ctx, conn, pg, collectionDocuments, documentIDs, opts)
 	})
 }
 
-func reconcileIndex(ctx context.Context, conn *pinecone.IndexConnection, pg *pgstore.Client, collectionDocuments []collectionDocument, opts options) error {
+func reconcileIndex(ctx context.Context, conn *pinecone.IndexConnection, pg *pgstore.Client, collectionDocuments []collectionDocument, documentIDs []string, opts options) error {
+	if opts.CanonicalDocumentIDs {
+		result, canonicalErr := canonicalizeDocumentKeys(ctx, conn, documentIDs, opts)
+		if canonicalErr != nil {
+			return canonicalErr
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
 	if opts.BackfillScoped {
 		result, backfillErr := backfillScoped(ctx, pg, hostedVectors{conn}, opts)
 		if backfillErr != nil {

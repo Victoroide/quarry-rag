@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,6 +251,26 @@ type fakeGate struct{ err error }
 
 func (g fakeGate) AcquireWriter(context.Context) (func(), error) { return func() {}, g.err }
 
+func TestAliasedOrphansStayWithTheOrphanReconciler(t *testing.T) {
+	const aliasedMissing = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+	const aliasedStored = "b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22"
+	const aliasedFailed = "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a33"
+	refs := []vectorRef{
+		{"missing-upper", strings.ToUpper(aliasedMissing)},
+		{"missing-braced", "{" + strings.ToUpper(aliasedMissing) + "}"},
+		{"missing-urn", "urn:uuid:" + aliasedMissing},
+		{"missing-compact", strings.ReplaceAll(aliasedMissing, "-", "")},
+		{"failed-upper", strings.ToUpper(aliasedFailed)},
+		{"live-upper", strings.ToUpper(aliasedStored)},
+	}
+	states := map[string]documentState{
+		aliasedStored: {Status: "completed"},
+		aliasedFailed: {Status: "failed"},
+	}
+	got := selectOrphanVectors(refs, states, 100)
+	require.Equal(t, []string{"missing-upper", "missing-braced", "missing-urn", "missing-compact", "failed-upper"}, got)
+}
+
 func TestMaintenanceWritesRespectTheWriterGate(t *testing.T) {
 	frozen := fakeGate{err: domain.ErrWritersFrozen}
 	_, err := acquireMaintenanceWriter(t.Context(), frozen, options{})
@@ -262,6 +283,8 @@ func TestMaintenanceWritesRespectTheWriterGate(t *testing.T) {
 	_, err = acquireMaintenanceWriter(t.Context(), fakeGate{err: domain.ErrGenerationMismatch}, options{Apply: true, BackfillCollections: true})
 	require.ErrorIs(t, err, domain.ErrGenerationMismatch)
 	_, err = acquireMaintenanceWriter(t.Context(), fakeGate{err: domain.ErrGenerationMismatch}, options{Apply: true, BackfillScoped: true})
+	require.ErrorIs(t, err, domain.ErrGenerationMismatch)
+	_, err = acquireMaintenanceWriter(t.Context(), fakeGate{err: domain.ErrGenerationMismatch}, options{Apply: true, CanonicalDocumentIDs: true})
 	require.ErrorIs(t, err, domain.ErrGenerationMismatch)
 }
 
