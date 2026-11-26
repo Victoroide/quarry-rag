@@ -503,7 +503,7 @@ The referencing sentence begins after the previous `.`, `!`, `?`, `。`, `！`, 
 
 Malformed allowlist entries return 400 `allowed_document_ids must contain UUIDs`; a missing or null required allowlist returns 400 `allowed_document_ids is required`. Lists above `MAX_ALLOWED_DOCUMENT_IDS` return 400 before deduplication.
 
-If retrieval, the document allowlist, or `MIN_RELEVANCE_SCORE` leaves no evidence, the answer is a fixed message selected from the optional `Accept-Language` request header. Built-in languages are `en`, `es`, `pt`, `fr`, `de` and `it`. Deployments can add languages through the [translation catalog](configuration.md#no-evidence-translation-catalog).
+If retrieval, the document allowlist, `MIN_RELEVANCE_SCORE`, or dropping empty and control-only excerpt bodies leaves no usable evidence, the answer is a fixed message selected from the optional `Accept-Language` request header. Built-in languages are `en`, `es`, `pt`, `fr`, `de` and `it`. Deployments can add languages through the [translation catalog](configuration.md#no-evidence-translation-catalog).
 
 The server considers BCP 47 basic language ranges in descending quality order. For each preference it tries the full canonical tag first. It then removes variant, extension and private-use subtags from the right side of the requested range as specified by RFC 4647 and canonicalizes each remaining candidate. A private-use-only range such as `x-lab-qa` can select an installed `x-lab` translation. The server keeps the requested script and region when comparing compatible translations. An unsupported script gives way to another preference. Catalog entries using subtags the language matcher does not represent, such as `hnm` or `isv-Latn`, are selected by canonical tag lookup. Related languages such as Galician (`gl`) and Spanish are considered after explicit language matches. A wildcard leaves selection to an explicit preference or the English default. Weights range from 0 to 1 and allow up to three decimal places. Zero-weight preferences are skipped. Missing, empty, malformed or unmatched headers and combined header values longer than 1,024 bytes use the English answer `No relevant information was found to answer this question.`
 
@@ -515,7 +515,7 @@ Document visibility is checked against PostgreSQL before answer generation. Olde
 
 `MIN_RELEVANCE_SCORE=0` disables the absolute relevance floor; positive values remove lower-scoring chunks before synthesis trimming.
 
-Optional [Bedrock reranking](configuration.md#environment-variables) submits the original question and up to 100 authorized, visible candidate texts after retrieval and before synthesis context selection. Candidates are sorted by descending relevance; ties retain vector order. Reranking changes only the order: `MIN_RELEVANCE_SCORE` and `SYNTHESIS_RELATIVE_SCORE_FLOOR` still compare vector similarity, and candidates below the relative floor are skipped rather than ending selection. A failed, timed-out or invalid reranking response preserves vector order and omits reranking scores; a warning and [outcome counter](configuration.md#metrics) record the fallback. The `rerank` entry in `stage_timings_ms` measures this step.
+Optional [Bedrock reranking](configuration.md#environment-variables) submits the original question and up to 100 authorized, visible candidate texts after retrieval and before synthesis context selection. Candidates are sorted by descending relevance; ties retain vector order. Reranking changes only the order: `MIN_RELEVANCE_SCORE` and `SYNTHESIS_RELATIVE_SCORE_FLOOR` still compare vector similarity, and candidates below the relative floor are skipped rather than ending selection (except for the leading usable candidate under the [first-candidate exception](architecture.md#query-stages)). A failed, timed-out or invalid reranking response preserves vector order and omits reranking scores; a warning and [outcome counter](configuration.md#metrics) record the fallback. The `rerank` entry in `stage_timings_ms` measures this step.
 
 Admitted queries run under the [query time budget](architecture.md#query-time-budget). A canceled request produces no further response bytes. Nonempty truncated or filtered answers retain their completion reason; empty synthesis text uses the `synthesis` error category below.
 
@@ -559,11 +559,12 @@ explicit request for `generated` returns HTTP 403 `forbidden`.
 evidence mode.
 
 Evidence mode uses the same retrieval scope, relevance floor and adaptive
-context selection as generated answers. It preserves vector retrieval order
-and embeds the question without calling an external reranker, answer model or
-citation checker. Hosted vector search receives the embedding and scope
-filters. Deployments that export trace contents apply their existing egress
-policy.
+context selection as generated answers. It embeds the question without calling
+an external reranker, answer model or citation checker. Selected excerpts
+preserve vector retrieval order under `ranked`, while under `diverse` the
+selected excerpts and therefore evidence-mode `scored_chunks` follow selection
+order. Hosted vector search receives the embedding and scope filters.
+Deployments that export trace contents apply their existing egress policy.
 
 With selected evidence, `scored_chunks` lists only the selected excerpts
 using the [scored chunk fields](#scored-chunks).
