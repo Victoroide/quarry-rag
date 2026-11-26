@@ -29,9 +29,6 @@ import (
 
 func durableDatabase(t *testing.T) *pgstore.Client {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	c, err := pgstore.NewClient(t.Context(), startPostgres(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })

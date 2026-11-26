@@ -352,9 +352,6 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 // smallPoolDatabase opens a migrated client whose pool holds at most maxConns connections.
 func smallPoolDatabase(t *testing.T, maxConns int) *pgstore.Client {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	u, err := url.Parse(startPostgres(t))
 	require.NoError(t, err)
 	q := u.Query()

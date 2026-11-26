@@ -257,20 +257,21 @@ func TestRunCleanupCLIParsesOnlyStandardOutput(t *testing.T) {
 }
 
 func TestRetiredProviderMutationWaitsForUUIDQuarantine(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
+	firstDatabaseURL := pgtest.StartVector(t)
 	preUpgradeBin := buildPreUpgradeRouter(t)
 	cleanupBin := buildCleanupBinary(t)
 
-	for _, priorCompatibleReceipt := range []bool{false, true} {
+	for i, priorCompatibleReceipt := range []bool{false, true} {
 		name := "case_a_missing_receipt_on_009"
 		if priorCompatibleReceipt {
 			name = "case_b_unfinished_legacy_receipt_row_removed"
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
-			dbURL := pgtest.StartVector(t)
+			dbURL := firstDatabaseURL
+			if i > 0 {
+				dbURL = pgtest.Sibling(t, firstDatabaseURL)
+			}
 			db, err := pgstore.NewClient(ctx, dbURL)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, db.Close(context.Background())) })
@@ -419,9 +420,6 @@ func TestRetiredProviderMutationWaitsForUUIDQuarantine(t *testing.T) {
 }
 
 func TestCaseBSourceFailureAndWrongTokenKeepHold(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	ctx := t.Context()
 	db := durableDatabase(t)
 	id := uuid.NewString()

@@ -32,9 +32,6 @@ import (
 )
 
 func TestStandaloneCleanupUpgradesPreviousSchema(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires pgvector")
-	}
 	ctx := t.Context()
 	url := pgtest.StartVector(t)
 	c, err := pg.NewClient(ctx, url)

@@ -40,9 +40,6 @@ func (s *countedPostgresVectors) QueryFilteredWithExactness(ctx context.Context,
 }
 
 func TestPostgresVectorsOfflineParity(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	c, err := pgstore.NewClient(t.Context(), pgtest.StartVector(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })

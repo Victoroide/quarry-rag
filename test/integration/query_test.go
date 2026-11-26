@@ -29,9 +29,6 @@ import (
 )
 
 func TestOfflineQueryEndToEnd(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db, err := pgstore.NewClient(t.Context(), startPostgres(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close(context.Background())) })
@@ -92,9 +89,6 @@ func TestOfflineQueryEndToEnd(t *testing.T) {
 }
 
 func TestStrictBudgetQueryIntegration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	db, err := pgstore.NewClient(t.Context(), startPostgres(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close(context.Background())) })

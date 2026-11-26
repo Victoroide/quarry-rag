@@ -79,9 +79,6 @@ func refillFixture(text string, score float64) domain.ScoredChunk {
 }
 
 func TestHostedRefillWithPostgreSQLVisibility(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	c := visibilityClient(t)
 	for _, tc := range []struct {
 		name         string

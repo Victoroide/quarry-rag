@@ -285,9 +285,6 @@ func TestRejectedUpsertAddsNoUncertainty(t *testing.T) {
 	}
 }
 func TestPgvectorRejectsBufferedHitAfterUUIDReuse(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires pgvector")
-	}
 	ctx := t.Context()
 	c, err := pg.NewClient(ctx, pgtest.StartVector(t))
 	require.NoError(t, err)

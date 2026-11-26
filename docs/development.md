@@ -60,14 +60,14 @@ Scope of unit tests:
 
 ### 2. Integration Tests
 
-Integration tests verify database persistence, transactional rollbacks, schema migrations, and pipeline execution. Database-backed tests in `test/integration/`, `internal/store/postgres/`, `internal/store/pinecone/`, `internal/cleanup/`, `scripts/reconcile/` and `scripts/grant-catalog/` receive an empty database from `internal/testutil/pgtest`.
+Integration tests verify database persistence, transactional rollbacks, schema migrations, and pipeline execution. Database-backed tests receive an empty database from `internal/testutil/pgtest`.
 
 ```sh
 go test -race -count=1 ./test/integration/...
 go test -race -count=1 ./internal/store/postgres/...
 ```
 
-Database-backed tests skip under `go test -short` even when shared services are configured. CI runs the full suite. By default every test database runs in its own disposable Testcontainers container and requires Docker. The cleanup container that Testcontainers starts exits, by default, after a test process has had no database container for ten seconds. `internal/testutil/pgtest` gives each test process its own cleanup container, unless `TESTCONTAINERS_SESSION_ID` is set, so that concurrent packages cannot end each other's. It also waits up to a minute for Docker to finish removing an exited one and starts the database again, so a test that begins during the removal does not fail.
+Database-backed tests skip under `go test -short` even when shared services are configured. `pgtest.Start` and `pgtest.StartVector` apply this skip, so a test requests its database before other setup instead of checking `testing.Short()` itself. CI runs the full suite. By default, each fixture starts a disposable Testcontainers container and requires Docker. The cleanup container that Testcontainers starts exits, by default, after a test process has had no database container for ten seconds. `internal/testutil/pgtest` gives each test process its own cleanup container, unless `TESTCONTAINERS_SESSION_ID` is set, so that concurrent packages cannot end each other's. It also waits up to a minute for Docker to finish removing an exited one and starts the database again, so a test that begins during the removal does not fail.
 
 To reuse running services instead, set both `QUARRY_TEST_POSTGRES_ADMIN_DSN` and `QUARRY_TEST_PGVECTOR_ADMIN_DSN` to PostgreSQL URLs for superusers on an ordinary PostgreSQL 16 server and on a server where the `vector` extension and the `es_ES.utf8` system locale are available. Each URL must specify a host and an administrator, either in the user info or the `user` query parameter. An omitted maintenance database defaults to `postgres`. Set a database in the path or use the `dbname` or `database` query parameter to override it. A single host defaults to port 5432.
 
