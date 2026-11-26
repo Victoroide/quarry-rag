@@ -77,9 +77,9 @@ The offline query test ingests through HTTP, polls document status until complet
 
 ### 3. Smoke Tests
 
-Smoke tests run against live, deployed instances and external cloud services (AWS Bedrock, Pinecone, PostgreSQL, and S3). Smoke tests are excluded by default to avoid unexpected cloud consumption or accidental mutation of configured datasets. Accepted documents already have persisted metadata; bounded deferred deletion also removes asynchronous ingestion jobs.
+Smoke tests run against live, deployed instances and external cloud services (AWS Bedrock, Pinecone, PostgreSQL, and S3). Smoke tests are excluded by default to avoid unexpected cloud consumption or accidental mutation of configured datasets. The checks that write documents need a target that has activated checkpointed deletion, and they clean up through the service. The [staging procedure](deployment.md#smoke-testing-a-staging-deployment) owns the prerequisites and the invocation, including the read-only checks that run before activation.
 
-To opt in to smoke testing against a configured service:
+To opt in to smoke testing against a configured, activated service:
 
 ```sh
 RUN_SMOKE=1 go test ./test/smoke/... -count=1 -v -timeout 120s
@@ -181,9 +181,10 @@ make cleanup IDS="<document-uuid-1> <document-uuid-2>"
 make cleanup IDS="--list-held"
 make cleanup IDS="--quarantine <document-uuid>"
 make cleanup IDS="--release-held <document-uuid> <incarnation-uuid>"
+make cleanup IDS="--activate-deletion"
 ```
 
-A bare UUID addresses the live document, which is the only form that works before the database activates [checkpointed deletion](api.md#checkpointed-deletion). `UUID@incarnation` addresses only the lifetime read earlier with `include_incarnation=true`. The incarnation must be one canonical UUID; an empty, repeated or malformed value stops the command before any deletion, and it is never treated as a bare UUID. With `GO_RAG_FAKE_MODE` the vectors live in the running service, so deletion and `--release-held` forward each request once to that service on `SERVER_PORT` with the configured service token.
+`--activate-deletion` is exclusive. It activates [checkpointed deletion](deployment.md#activate-checkpointed-deletion) for the configured database, once, and no other command, test or startup path sets that marker. A bare UUID addresses the live document, which is the only form that works before the database activates [checkpointed deletion](api.md#checkpointed-deletion). `UUID@incarnation` addresses only the lifetime read earlier with `include_incarnation=true`. The incarnation must be one canonical UUID; an empty, repeated or malformed value stops the command before any deletion, and it is never treated as a bare UUID. With `GO_RAG_FAKE_MODE` the vectors live in the running service, so deletion and `--release-held` forward each request once to that service on `SERVER_PORT` with the configured service token.
 
 See [quarantine and hold release](deployment.md#quarantine-and-hold-release) for inspecting held receipts, quarantining absent UUIDs and releasing verified holds.
 

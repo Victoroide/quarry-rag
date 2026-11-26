@@ -961,7 +961,7 @@ Error Status Codes:
 | `428 Precondition Required` | `precondition` | A live document was addressed without `X-Document-Incarnation` on an activated database, or `release_held=true` omitted `X-Document-Incarnation` |
 | `500 Internal Server Error` | `internal` | Database query failure or external deletion error in Pinecone or S3. Repeat the same request |
 | `503 Service Unavailable` | `storage` | A stored file or the document's vectors need a store that is not configured; no data is deleted |
-| `503 Service Unavailable` | `busy` | Another request holds the cleanup claim, or where [legacy deletion reservations](deployment.md#legacy-deletion-reservations) are enabled this replica already runs its limit of ID-only deletions (`too many concurrent deletions`). Nothing was changed; repeat the same request after `Retry-After: 5` |
+| `503 Service Unavailable` | `busy` | Another request holds the cleanup claim, or this replica already runs its limit of guarded ID-only deletions (`too many concurrent deletions`; see [legacy deletion reservations](deployment.md#legacy-deletion-reservations)). Nothing was changed; repeat the same request after `Retry-After: 5` |
 | `503 Service Unavailable` | `frozen` | Writers are paused for a vector migration; no data is deleted. `Retry-After: 30` |
 | `503 Service Unavailable` | `unavailable` | The deletion mode or the document store could not be read, or this replica does not serve the active vector generation; nothing was changed. `Retry-After: 30` when the writer check failed |
 
