@@ -2,9 +2,11 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -177,6 +179,52 @@ func (c *Client) DeleteDocument(ctx context.Context, id string) (*DeleteResponse
 		return nil, err
 	}
 	return &response, nil
+}
+
+// ErrInvalidIncarnation reports an incarnation that is not one canonical UUID.
+// A request that carried it could be mistaken for an ID-only deletion, so the
+// client never sends one.
+var ErrInvalidIncarnation = errors.New("incarnation must be one canonical UUID")
+
+// DeleteDocumentIncarnation removes only the document lifetime the caller
+// observed. Save the value once from GetDocumentWithIncarnation or
+// ListDocumentsWithIncarnation and send the same value on every attempt, including
+// a retry after a lost response. The client never looks up the current value,
+// never repeats the request and never falls back to an ID-only deletion, so
+// send it only to a service that enforces the qualifier.
+func (c *Client) DeleteDocumentIncarnation(ctx context.Context, id, incarnation string) (*DeleteResponse, error) {
+	canonical, err := canonicalIncarnation(incarnation)
+	if err != nil {
+		return nil, err
+	}
+	var response DeleteResponse
+	setIncarnation := func(req *http.Request) { req.Header.Set(incarnationHeader, canonical) }
+	if err := c.jsonRequest(ctx, http.MethodDelete, "/documents/"+url.PathEscape(id), nil, &response, setIncarnation); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+// incarnationHeader names the document lifetime a deletion addresses.
+const incarnationHeader = "X-Document-Incarnation"
+
+// canonicalIncarnation accepts exactly one hyphenated UUID and returns its lowercase form.
+func canonicalIncarnation(value string) (string, error) {
+	if len(value) != 36 {
+		return "", ErrInvalidIncarnation
+	}
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if c != '-' {
+				return "", ErrInvalidIncarnation
+			}
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return "", ErrInvalidIncarnation
+		}
+	}
+	return strings.ToLower(value), nil
 }
 
 // DocumentFileURL retrieves a temporary download address without downloading the file.

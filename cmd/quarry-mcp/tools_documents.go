@@ -21,6 +21,11 @@ type documentInput struct {
 	DocumentID string `json:"document_id" jsonschema:"Document UUID."`
 }
 
+type deleteInput struct {
+	documentInput
+	Incarnation *string `json:"incarnation,omitempty" jsonschema:"Incarnation of the document lifetime to delete: one canonical UUID saved from an earlier status read. Required once the service has activated checkpointed deletion and refused when it has not. An empty or invalid value is rejected and never deletes by document ID alone."`
+}
+
 type getDocumentInput struct {
 	documentInput
 	IncludeIndexVisibility bool `json:"include_index_visibility,omitempty" jsonschema:"Include the index visibility observation."`
@@ -65,7 +70,20 @@ func registerDocumentTools(s *mcp.Server, api *client.Client, cfg config) error 
 		return api.GetDocument(ctx, input.DocumentID)
 	})
 	if !cfg.readOnly {
-		addAPITool(s, &mcp.Tool{Name: "quarry_delete_document", Description: "Delete a document and its stored chunks, vectors and original file", Annotations: writeAnnotations(true)}, cfg.token, func(ctx context.Context, input documentInput) (*client.DeleteResponse, error) {
+		deleteSchema, schemaErr := jsonschema.For[deleteInput](nil)
+		if schemaErr != nil {
+			return schemaErr
+		}
+		// Only one canonical UUID names a lifetime. A null, empty or malformed
+		// value fails validation, so it can never become an ID-only request.
+		incarnation := deleteSchema.Properties["incarnation"]
+		incarnation.Types, incarnation.Type = nil, "string"
+		incarnation.MinLength, incarnation.MaxLength = new(36), new(36)
+		incarnation.Pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+		addAPITool(s, &mcp.Tool{Name: "quarry_delete_document", Description: "Delete a document and its stored chunks, vectors and original file", Annotations: writeAnnotations(true), InputSchema: deleteSchema}, cfg.token, func(ctx context.Context, input deleteInput) (*client.DeleteResponse, error) {
+			if input.Incarnation != nil {
+				return api.DeleteDocumentIncarnation(ctx, input.DocumentID, *input.Incarnation)
+			}
 			return api.DeleteDocument(ctx, input.DocumentID)
 		})
 	}

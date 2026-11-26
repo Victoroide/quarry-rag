@@ -59,7 +59,9 @@ Use the [trusted transport for subject credentials](grant-catalog.md#subject-ide
 | `quarry_get_document` | Document ID and optional `include_index_visibility` | Document summary including collection and ingestion status |
 | `quarry_ingest_text` | Content, optional collection, document type, ID and metadata | Document ID and acceptance status |
 | `quarry_ingest_file` | Local path, optional collection, document type, ID and metadata | Document ID and acceptance status |
-| `quarry_delete_document` | Document ID | Deletion result and document ID |
+| `quarry_delete_document` | Document ID and optional `incarnation` | Deletion result and document ID |
+
+`quarry_delete_document` accepts only `document_id` before the service activates [checkpointed deletion](api.md#checkpointed-deletion). `incarnation` is one canonical UUID read earlier through the API or Go client and sent unchanged on every attempt. An empty, null or malformed value is rejected without a request and never becomes an ID-only deletion.
 
 `QUARRY_MCP_FILE_ROOTS` and `QUARRY_MCP_READ_ONLY` select which tools are registered; see [MCP server environment](configuration.md#mcp-server-environment). See the [HTTP API reference](api.md) for request fields, ingestion lifecycle and error semantics. API errors are tool results marked as errors, including HTTP status, service message and any retry delay. Calls are never retried automatically.
 
