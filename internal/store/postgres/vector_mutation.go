@@ -74,7 +74,8 @@ func (c *Client) claimJobVectorMutation(ctx context.Context, job domain.Job, cla
 		vector_mutation_pending=TRUE,vector_mutation_deletes=$4,vector_mutation_claim=$2,
 		vector_mutation_until=clock_timestamp()+make_interval(secs=>$3)
 		WHERE d.id=$1 AND (d.vector_mutation_until IS NULL OR d.vector_mutation_until<=clock_timestamp())
-		AND EXISTS (SELECT 1 FROM ingest_jobs j WHERE j.document_id=d.id AND j.lease_until>clock_timestamp())`,
+		AND EXISTS (SELECT 1 FROM ingest_jobs j WHERE j.document_id=d.id AND j.lease_until>clock_timestamp())
+		AND NOT document_deletion_reserved(d.id)`,
 		job.Document.ID, claim, remaining.Seconds(), deletes)
 	if err != nil {
 		return err
