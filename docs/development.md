@@ -76,16 +76,18 @@ The advisory-lock count probe counts a fixture-local holder and excludes a sibli
 
 The offline query test ingests through HTTP, polls document status until completion, and verifies cited evidence and document restrictions through the router.
 
-#### Grants-mode router integration
+#### Grants-mode router and MCP integration
 
 The router tests use real PostgreSQL roles, grant imports, token verification,
 ingestion workers, and two independent connection pools. pgvector stores the
 local embeddings. The Pinecone driver uses a local data plane that applies
 metadata filters before ranking. Models and the S3 endpoint use deterministic
-local fixtures.
+local fixtures. The MCP tests start the stdio server in a subprocess and
+connect it to the same fixture.
 
 ```sh
 go test -race -count=1 ./internal/api -run "^TestGrants(Postgres|Pinecone)"
+go test -race -count=1 ./cmd/quarry-mcp -run "^TestMCPStdioGrantsThroughPostgres$"
 ```
 
 ### 3. Smoke Tests
