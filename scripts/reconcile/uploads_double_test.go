@@ -72,6 +72,9 @@ func (b *bucketDouble) Bucket() string { return b.name }
 func (b *bucketDouble) NewKey(documentID, uploadID, docType, fileName string) string {
 	return "documents/" + docType + "/" + documentID + "/" + uploadID + "/" + fileName
 }
+func (*bucketDouble) NewOwnedKey(documentID, incarnation, uploadID, docType, fileName string) string {
+	return "documents/" + docType + "/" + documentID + "/" + incarnation + "/" + uploadID + "/" + fileName
+}
 
 func (b *bucketDouble) Upload(context.Context, string, string, string, extractor.FileType, io.Reader) (string, error) {
 	return "", errors.New("unjournaled uploads are not expected")
@@ -319,6 +322,11 @@ func (r *rig) upload(collection, content string, fields ...string) *httptest.Res
 
 func (r *rig) uploadWithContext(ctx context.Context, collection, content string, fields ...string) *httptest.ResponseRecorder {
 	r.t.Helper()
+	return r.multipartUpload(ctx, collection, content, nil, fields...)
+}
+
+func (r *rig) multipartUpload(ctx context.Context, collection, content string, opts []handler.IngestOption, fields ...string) *httptest.ResponseRecorder {
+	r.t.Helper()
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	part, err := w.CreateFormFile("file", "note.txt")
@@ -333,7 +341,8 @@ func (r *rig) uploadWithContext(ctx context.Context, collection, content string,
 	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/ingest", &body)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	rec := httptest.NewRecorder()
-	handler.IngestHandler(nil, r.store, r.bucket, 1<<20, handler.WithSourceUploadJournal(r.store))(rec, req)
+	opts = append(opts, handler.WithSourceUploadJournal(r.store))
+	handler.IngestHandler(nil, r.store, r.bucket, 1<<20, opts...)(rec, req)
 	return rec
 }
 

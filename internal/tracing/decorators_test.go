@@ -245,6 +245,9 @@ func (fixtureSourceObjects) Bucket() string { return "fixture-bucket" }
 func (fixtureSourceObjects) NewKey(documentID, uploadID, docType, fileName string) string {
 	return strings.Join([]string{docType, documentID, uploadID, fileName}, "/")
 }
+func (fixtureSourceObjects) NewOwnedKey(documentID, incarnation, uploadID, docType, fileName string) string {
+	return strings.Join([]string{docType, documentID, incarnation, uploadID, fileName}, "/")
+}
 func (fixtureSourceObjects) PutSource(_ context.Context, key string, _ extractor.FileType, r io.Reader) (domain.SourceUploadResult, error) {
 	if _, err := io.Copy(io.Discard, r); err != nil {
 		return domain.SourceUploadResult{Settled: true}, err
@@ -277,6 +280,12 @@ func TestSourceObjectStoreDecoratorKeepsKeyAllocation(t *testing.T) {
 		require.Equal(t, "s3", spanAttrs(span)["quarry.storage.system"].AsString())
 	}
 	require.Equal(t, codes.Error, spans[1].Status().Code)
+}
+
+func TestSourceObjectStoreTracingForwardsNewOwnedKey(t *testing.T) {
+	wrapped, ok := WrapObjectStore(fixtureSourceObjects{}).(SourceObjectStore)
+	require.True(t, ok)
+	require.Equal(t, "type/doc/incarnation/upload/name", wrapped.NewOwnedKey("doc", "incarnation", "upload", "type", "name"))
 }
 
 func TestModelDecoratorCapturesGuardedText(t *testing.T) {

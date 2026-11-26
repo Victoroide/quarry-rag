@@ -8,6 +8,7 @@ import (
 	"time"
 
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,16 +60,30 @@ func TestSourceUploadOptionsRejectInvalidCombinations(t *testing.T) {
 
 func TestRecognizedKeyMatchesOnlyGeneratedKeys(t *testing.T) {
 	row := pgstore.SourceUploadRecord{ID: "11111111-1111-4111-8111-111111111111", DocumentID: "22222222-2222-4222-8222-222222222222"}
+	const incarnation = "abcdef42-abcd-4242-abcd-222222222222"
+	base := "documents/reference/" + row.DocumentID + "/"
 	for key, want := range map[string]bool{
-		"documents/reference/" + row.DocumentID + "/" + row.ID + "/report.pdf": true,
-		"documents/reference/" + row.DocumentID + "/" + row.ID + "/a/b.pdf":    false,
-		"documents/reference/" + row.DocumentID + "/" + row.ID:                 false,
-		"documents/reference/" + row.DocumentID + "/other/report.pdf":          false,
-		"documents/reference/other/" + row.ID + "/report.pdf":                  false,
-		"tenant/reference/" + row.DocumentID + "/" + row.ID + "/report.pdf":    false,
-		"documents/" + row.DocumentID + "/" + row.ID + "/report.pdf":           false,
-		"": false,
-		"documents/reference/" + row.DocumentID + "/" + row.ID + "/../x/y.pdf": false,
+		base + row.ID + "/report.pdf":                                                     true,
+		base + incarnation + "/" + row.ID + "/report.pdf":                                 true,
+		base + strings.ToUpper(incarnation) + "/" + row.ID + "/report.pdf":                false,
+		base + strings.ReplaceAll(incarnation, "-", "") + "/" + row.ID + "/report.pdf":    false,
+		base + "other/" + row.ID + "/report.pdf":                                          false,
+		base + incarnation + "/other/report.pdf":                                          false,
+		"documents/reference/other/" + incarnation + "/" + row.ID + "/report.pdf":         false,
+		"documents//" + row.DocumentID + "/" + incarnation + "/" + row.ID + "/report.pdf": false,
+		"documents//" + row.DocumentID + "/" + row.ID + "/report.pdf":                     false,
+		base + row.ID + "/":                                                 false,
+		base + incarnation + "/" + row.ID + "/":                             false,
+		base + incarnation + "/" + row.ID + "/..":                           false,
+		"documents/../" + row.DocumentID + "/" + row.ID + "/report.pdf":     false,
+		base + row.ID + "/a/b.pdf":                                          false,
+		base + row.ID:                                                       false,
+		base + "other/report.pdf":                                           false,
+		"documents/reference/other/" + row.ID + "/report.pdf":               false,
+		"tenant/reference/" + row.DocumentID + "/" + row.ID + "/report.pdf": false,
+		"documents/" + row.DocumentID + "/" + row.ID + "/report.pdf":        false,
+		"":                            false,
+		base + row.ID + "/../x/y.pdf": false,
 	} {
 		row.Key = key
 		require.Equal(t, want, recognizedKey(row), key)
@@ -173,19 +188,27 @@ func TestUnresolvedWriteRechecksBackOff(t *testing.T) {
 }
 
 func FuzzRecognizedKey(f *testing.F) {
-	id, doc := "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+	id, doc, incarnation := "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "abcdef42-abcd-4242-abcd-222222222222"
 	f.Add("documents/reference/"+doc+"/"+id+"/report.pdf", id, doc)
+	f.Add("documents/reference/"+doc+"/"+incarnation+"/"+id+"/report.pdf", id, doc)
+	f.Add("documents/reference/"+doc+"/"+strings.ToUpper(incarnation)+"/"+id+"/report.pdf", id, doc)
 	f.Add("documents/"+doc+"/"+id+"/report.pdf", id, doc)
 	f.Add("documents/a/b/c/d/e", "c", "b")
 	f.Add("", "", "")
 	f.Fuzz(func(t *testing.T, key, uploadID, documentID string) {
 		row := pgstore.SourceUploadRecord{ID: uploadID, DocumentID: documentID, Key: key}
-		if !recognizedKey(row) {
-			return
-		}
 		parts := strings.Split(key, "/")
-		if len(parts) != 5 || parts[0] != "documents" || parts[2] != documentID || parts[3] != uploadID {
-			t.Fatalf("accepted %q for document %q and upload %q", key, documentID, uploadID)
+		var want bool
+		if len(parts) == 5 || len(parts) == 6 {
+			file := parts[len(parts)-1]
+			kind := parts[1]
+			want = parts[0] == "documents" && parts[2] == documentID && parts[len(parts)-2] == uploadID &&
+				kind != "" && kind != "." && kind != ".." && file != "" && file != "." && file != ".."
+			if len(parts) == 6 {
+				parsed, err := uuid.Parse(parts[3])
+				want = want && err == nil && parsed.String() == parts[3]
+			}
 		}
+		require.Equal(t, want, recognizedKey(row), "key %q, document %q, upload %q", key, documentID, uploadID)
 	})
 }
