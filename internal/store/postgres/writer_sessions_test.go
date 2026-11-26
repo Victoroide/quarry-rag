@@ -21,9 +21,6 @@ func sessionTestClient(t *testing.T) (*Client, *pgx.Conn) {
 // maxConns connections, with an independent observer of the server's sessions.
 func sessionTestClientWithPool(t *testing.T, maxConns int) (*Client, *pgx.Conn) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	u, err := url.Parse(pgtest.Start(t))
 	require.NoError(t, err)
 	q := u.Query()

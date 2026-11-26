@@ -14,9 +14,6 @@ import (
 // scope sizes 0, 1, 10,000, and 25,000 comparing service-mode allowlists against
 // grants-mode relation checks without materializing full allowlists.
 func BenchmarkPGVectorAuthzModes(b *testing.B) {
-	if testing.Short() {
-		b.Skip("requires a Docker daemon")
-	}
 	const maxScope = 25000
 
 	c, err := NewClient(b.Context(), pgtest.StartVector(b))

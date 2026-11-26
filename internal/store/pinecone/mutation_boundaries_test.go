@@ -157,9 +157,6 @@ func TestSelectiveCleanupRespectsMetadataResponseBudget(t *testing.T) {
 	require.Empty(t, live)
 }
 func TestRechecksOwnershipBeforeEachUpsertBatch(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	ctx := t.Context()
 	db, err := pg.NewClient(ctx, pgtest.Start(t))
 	require.NoError(t, err)
@@ -195,9 +192,6 @@ func TestRechecksOwnershipBeforeEachUpsertBatch(t *testing.T) {
 	}
 }
 func TestPartitionCandidatesReachVisibilityBeforeTrim(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	ctx := t.Context()
 	db, err := pg.NewClient(ctx, pgtest.Start(t))
 	require.NoError(t, err)
@@ -272,9 +266,6 @@ func TestPartialUpsertAcknowledgmentIsRetryable(t *testing.T) {
 }
 
 func TestTrackedUpsertClaimAndOutcome(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db, err := pg.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(db.Pool.Close)
@@ -352,9 +343,6 @@ func TestTrackedUpsertClaimAndOutcome(t *testing.T) {
 }
 
 func TestUntaggedJobPublicationAfterHTTPWriteRetry(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db, err := pg.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(db.Pool.Close)
@@ -384,9 +372,6 @@ func TestUntaggedJobPublicationAfterHTTPWriteRetry(t *testing.T) {
 }
 
 func TestUntaggedJobPublicationAfterGRPCWriteRetry(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db, err := pg.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(db.Pool.Close)
@@ -468,9 +453,6 @@ func testUntaggedJobPublicationAfterWriteRetry(t *testing.T, db *pg.Client, upse
 }
 
 func TestRechecksOwnershipBeforeDeletingAnotherPage(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	ctx := t.Context()
 	db, err := pg.NewClient(ctx, pgtest.Start(t))
 	require.NoError(t, err)

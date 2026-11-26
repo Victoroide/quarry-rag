@@ -26,9 +26,6 @@ import (
 )
 
 func TestEvidenceRoutingCanonicalizesHostedDocumentAndChunkIDs(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	const docID = "aaaaaaaa-2222-4444-8888-cccccccccccc"
 	first := domain.Chunk{DocumentID: domain.DocumentID(docID), ID: domain.ChunkID(uuid.NewString()), Text: "Cedar Archive opens each morning."}
@@ -223,9 +220,6 @@ func documentLabels(response handler.QueryResponse, names map[string]string) []s
 // document is searched with the spelling the provider stores. A canonical
 // lowercase UUID matches nothing when the stored key has uppercase letters.
 func TestHostedDocumentKeySpellingReachesTargetSearch(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	const first, second = "aaaaaaaa-1111-4222-8333-444444444444", "bbbbbbbb-1111-4222-8333-444444444444"
 	names := map[string]string{first: "A", second: "B"}
@@ -285,9 +279,6 @@ func TestHostedDocumentKeySpellingReachesTargetSearch(t *testing.T) {
 // TestHostedTargetSearchSendsEveryVerifiedSpelling covers one document whose
 // chunks were stored under two spellings of its UUID.
 func TestHostedTargetSearchSendsEveryVerifiedSpelling(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	const first, second = "aaaaaaaa-1111-4222-8333-444444444444", "bbbbbbbb-1111-4222-8333-444444444444"
 	upper := strings.ToUpper(first)
@@ -317,9 +308,6 @@ func TestHostedTargetSearchSendsEveryVerifiedSpelling(t *testing.T) {
 }
 
 func TestHostedTargetSearchRejectsStaleDocumentAttribution(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	const target, other = "aaaaaaaa-1111-4222-8333-444444444444", "bbbbbbbb-1111-4222-8333-444444444444"
 	first := hostedChunk(target, 0, "Cedar Archive opens at ten.")
@@ -370,9 +358,6 @@ func TestHostedTargetSearchRejectsStaleDocumentAttribution(t *testing.T) {
 }
 
 func TestEvidenceRoutingSharesHostedRefillBudget(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	target, other := uuid.NewString(), uuid.NewString()
 	first := hostedChunk(target, 0, "Cedar Archive opens at ten.")
@@ -441,9 +426,6 @@ func TestEvidenceRoutingSharesHostedRefillBudget(t *testing.T) {
 // search is verified in score order before K is applied, so a stale or aliased
 // leading hit cannot hide a current chunk that was already fetched.
 func TestEvidenceCachedGlobalChecksEveryFetchedHit(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	docA, docB := uuid.NewString(), uuid.NewString()
 	a := hostedChunk(docA, 0, "The reading room opens at ten.")
@@ -502,9 +484,6 @@ func TestEvidenceCachedGlobalChecksEveryFetchedHit(t *testing.T) {
 // a wider search the recheck must still accept them, whichever way the provider
 // spells the stored key.
 func TestHostedTargetFallbackKeepsVerifiedChunks(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires PostgreSQL")
-	}
 	db := newEvidenceDatabase(t, pgtest.Start(t))
 	const target, other = "aaaaaaaa-1111-4222-8333-444444444444", "bbbbbbbb-1111-4222-8333-444444444444"
 	rows := []hostedRow{

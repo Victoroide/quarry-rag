@@ -38,9 +38,6 @@ func (d blockingObjectDelete) Delete(ctx context.Context, _ string) error {
 }
 
 func TestFreezeWaitsForAnAdmittedCleanup(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	pg, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(context.Background())) })
@@ -98,9 +95,6 @@ func TestDeleteRefusesWhenStoredFileCannotBeRemoved(t *testing.T) {
 }
 
 func TestPostgresCleanupWithoutPinecone(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	databaseURL := pgtest.StartVector(t)
 	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
 	require.NoError(t, err)
@@ -251,9 +245,6 @@ func TestManifestOperationDeletesExactIDsAndTreatsMissingVectorsAsDeleted(t *tes
 }
 
 func TestPostgresCleanupOnAnActiveDatabaseUsesTheCoordinator(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	databaseURL := pgtest.StartVector(t)
 	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
 	require.NoError(t, err)
@@ -294,9 +285,6 @@ func TestPostgresCleanupOnAnActiveDatabaseUsesTheCoordinator(t *testing.T) {
 }
 
 func TestLegacyPostgresCleanupWithSingleConnection(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	databaseURL := pgtest.StartVector(t)
 	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
 	require.NoError(t, err)
@@ -424,9 +412,6 @@ func (c *cancelAfterBegin) BeginScopedDeletion(ctx context.Context, p domain.Pri
 }
 
 func TestCleanerPausesDuringAVectorMigration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	databaseURL := pgtest.StartVector(t)
 	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
 	require.NoError(t, err)
@@ -456,9 +441,6 @@ func TestCleanerPausesDuringAVectorMigration(t *testing.T) {
 }
 
 func TestCheckpointedCleanerPausesDuringAVectorMigration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	databaseURL := pgtest.StartVector(t)
 	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
 	require.NoError(t, err)
@@ -492,9 +474,6 @@ func TestCheckpointedCleanerPausesDuringAVectorMigration(t *testing.T) {
 }
 
 func TestLegacyReservationCleanerAcquiresWriterBeforeGuard(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	databaseURL := pgtest.StartVector(t)
 	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
 	require.NoError(t, err)
@@ -600,9 +579,6 @@ func TestRemoveTargetsManifestedRevisionWithoutDocWideDelete(t *testing.T) {
 }
 
 func TestRemoveOfAManifestedDocumentHonorsTheDrainWindowAtClaim(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	metadata, err := pgstore.NewClient(t.Context(), pgtest.Start(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
@@ -640,16 +616,17 @@ func TestRemoveOfAManifestedDocumentHonorsTheDrainWindowAtClaim(t *testing.T) {
 }
 
 func TestHeldReleaseHonorsTheWriterGate(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
-	for _, terminatedOffline := range []bool{false, true} {
+	firstDatabaseURL := pgtest.StartVector(t)
+	for i, terminatedOffline := range []bool{false, true} {
 		name := "release_held"
 		if terminatedOffline {
 			name = "release_terminated_offline_held"
 		}
 		t.Run(name, func(t *testing.T) {
-			databaseURL := pgtest.StartVector(t)
+			databaseURL := firstDatabaseURL
+			if i > 0 {
+				databaseURL = pgtest.Sibling(t, firstDatabaseURL)
+			}
 			metadata, err := pgstore.NewClient(t.Context(), databaseURL)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })

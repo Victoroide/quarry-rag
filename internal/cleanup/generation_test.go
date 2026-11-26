@@ -13,9 +13,6 @@ import (
 )
 
 func TestFirstCleanupRequiresExistingPhysicalTarget(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires the PostgreSQL integration harness")
-	}
 	ctx := t.Context()
 	dsn := pgtest.Start(t)
 	owner, err := pg.NewClient(ctx, dsn)
@@ -42,9 +39,6 @@ func TestFirstCleanupRequiresExistingPhysicalTarget(t *testing.T) {
 }
 
 func TestFirstPostgresCleanupBindsExistingChunkVectorsTable(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires the PostgreSQL integration harness")
-	}
 	ctx := t.Context()
 	dsn := pgtest.StartVector(t)
 	owner, err := pg.NewClient(ctx, dsn)
@@ -75,9 +69,6 @@ func TestFirstPostgresCleanupBindsExistingChunkVectorsTable(t *testing.T) {
 }
 
 func TestFirstPostgresCleanupRefusesNonVectorTableAndForeignBinding(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires the PostgreSQL integration harness")
-	}
 	ctx := t.Context()
 	dsn := pgtest.StartVector(t)
 	owner, err := pg.NewClient(ctx, dsn)
@@ -116,9 +107,6 @@ func TestFirstPostgresCleanupRefusesNonVectorTableAndForeignBinding(t *testing.T
 }
 
 func TestDirectRecoverySkipsTargetPinning(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires the PostgreSQL integration harness")
-	}
 	ctx := t.Context()
 	dsn := pgtest.Start(t)
 	owner, err := pg.NewClient(ctx, dsn)

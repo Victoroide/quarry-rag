@@ -16,9 +16,6 @@ import (
 )
 
 func vectorDatabase(t *testing.T) (*Client, *VectorStore) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	t.Helper()
 	c, err := NewClient(t.Context(), pgtest.StartVector(t))
 	require.NoError(t, err)
@@ -127,9 +124,6 @@ func TestFilteredVectorFixtureOptions(t *testing.T) {
 }
 
 func TestVectorFilteredSearchFillsLimit(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires a Docker daemon")
-	}
 	c, err := NewClient(t.Context(), filteredVectorFixtureAddress(t, pgtest.StartVector(t)))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
