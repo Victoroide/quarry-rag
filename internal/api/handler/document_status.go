@@ -130,7 +130,7 @@ func scopedDocumentStatusHandler(cs domain.ChunkStore, opts documentStatusOption
 			writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
 			return
 		}
-		rev := summary.Revision
+		rev := summary.CatalogRevision
 		if summary.Document == nil {
 			recordSecurityAuditBestEffort(r.Context(), opts.audit, &subject, &rev, "document_status", "deny", "not_found", id.String(), "")
 			writeJSONError(w, http.StatusNotFound, "not_found", "document not found")

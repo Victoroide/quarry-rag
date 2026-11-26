@@ -179,7 +179,7 @@ func scopedListDocumentsHandler(cs domain.ChunkStore, opts documentListOptions) 
 			writeJSONError(w, fetchErr.status, fetchErr.errCode, fetchErr.message)
 			return
 		}
-		rev := page.Revision
+		rev := page.CatalogRevision
 		if !requireAuditedAllow(r.Context(), w, opts.audit, &subject, &rev, "document_list", "authorized", "", "") {
 			return
 		}
@@ -216,8 +216,8 @@ func streamScopedDocumentSummaries(
 	after := ""
 	count := 0
 	started := false
-	allowAudited := false
-	for {
+	var streamRevision int64
+	for r.Context().Err() == nil {
 		page, fetchErr := fetchVerifiedScopedPage(r.Context(), lister, subject, now, after, batchSize, collection, projection.incarnation)
 		if fetchErr != nil {
 			if fetchErr.cause != nil {
@@ -229,17 +229,25 @@ func streamScopedDocumentSummaries(
 			}
 			return
 		}
-		if !allowAudited {
-			rev := page.Revision
+		if started && page.Revision != streamRevision {
+			rev := page.CatalogRevision
+			recordSecurityAuditBestEffort(r.Context(), audit, &subject, &rev, "document_list", "deny", "policy_changed", "", "")
+			return
+		}
+		if !started {
+			rev := page.CatalogRevision
 			if !requireAuditedAllow(r.Context(), w, audit, &subject, &rev, "document_list", "authorized", "", "") {
 				return
 			}
-			allowAudited = true
+			streamRevision = page.Revision
 		}
 		if len(page.Documents) == 0 {
 			break
 		}
 		for _, doc := range page.Documents {
+			if r.Context().Err() != nil {
+				return
+			}
 			if !subject.ValidAt(now()) {
 				recordSecurityAuditBestEffort(r.Context(), audit, &subject, nil, "document_list", "deny", "credential_expired", "", "")
 				if !started {
@@ -273,6 +281,9 @@ func streamScopedDocumentSummaries(
 			break
 		}
 		after = page.Documents[len(page.Documents)-1].ID
+	}
+	if r.Context().Err() != nil {
+		return
 	}
 	if !subject.ValidAt(now()) {
 		recordSecurityAuditBestEffort(r.Context(), audit, &subject, nil, "document_list", "deny", "credential_expired", "", "")

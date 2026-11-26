@@ -801,6 +801,13 @@ Optional query parameters:
 
 Without pagination parameters, PostgreSQL streams the full listing without buffering every row. The response writes `documents` before `count`; an empty listing is `{"documents":[],"count":0}`. If a stream fails after it begins, its JSON is incomplete; discard the partial result and retry. Stores without summary support retain the reference listing and return an empty array when no documents exist.
 
+In grants mode, a changed caller policy refreshes a paginated result before
+release. An inactive principal receives `403` before any rows are sent, and
+four consecutive policy mismatches return `503` before the response starts.
+After a stream starts with `200`, a later batch that observes a policy change
+or inactive principal ends the response with partial JSON and no final `count`.
+Unrelated policy commits do not cause retries.
+
 Response fields (200 OK):
 
 | Field | Type | Description |
@@ -882,9 +889,10 @@ Use `include_incarnation=true`, `include_index_visibility=true` and `include_pdf
 |---|---|---|
 | `400 Bad Request` | `validation` | `doc_id` is not a UUID |
 | `401 Unauthorized` | `unauthorized` | Missing or invalid `X-Service-Token` header |
+| `403 Forbidden` | `forbidden` | The verified principal is inactive in grants mode |
 | `404 Not Found` | `not_found` | The document does not exist or its [deletion](#checkpointed-deletion) has begun |
 | `500 Internal Server Error` | `internal` | Database lookup failure |
-| `503 Service Unavailable` | `unavailable` | The requested summary projection is unavailable |
+| `503 Service Unavailable` | `unavailable` | The requested summary projection is unavailable, or the caller's policy changes across four consecutive grants-mode rechecks |
 
 ---
 
