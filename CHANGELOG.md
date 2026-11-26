@@ -21,6 +21,10 @@ Notable changes are grouped by release.
 
 - Unscoped ingestion with hosted vector manifests can recover from an uncertain legacy vector upsert.
 
+### Changed
+
+- Delegated trust-file checks can proceed independently while another check reads unchanged trust data.
+
 ## [0.2.0] - 2026-11-26
 
 ### Upgrade from 0.1.0
