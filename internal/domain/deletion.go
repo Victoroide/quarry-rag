@@ -19,6 +19,9 @@ var (
 	ErrVectorStorageUnavailable = errors.New("vector storage is not configured")
 	// ErrDeletionBusy indicates that another operation still owns the cleanup target.
 	ErrDeletionBusy = errors.New("document cleanup is busy")
+	// ErrTooManyLegacyDeletions indicates that this replica already runs as many
+	// ID-only cleanups as it admits. The request took no lock and no connection.
+	ErrTooManyLegacyDeletions = errors.New("too many concurrent legacy deletions")
 	// ErrDeletionPreconditionRequired protects a live document from an unqualified deletion.
 	ErrDeletionPreconditionRequired = errors.New("document incarnation is required")
 	// ErrDeletionPreconditionFailed indicates that the supplied incarnation is not the stored one.
@@ -172,6 +175,16 @@ type LegacyDeletionGuard interface {
 	// WithLegacyDeletion returns ErrDeletionActivated, without calling remove,
 	// when the database already selected checkpointed deletion.
 	WithLegacyDeletion(ctx context.Context, id DocumentID, remove func(LegacyDocumentStore) error) error
+}
+
+// LegacyDeletionLimiter bounds the ID-only cleanups one replica runs at once.
+// WithLegacyDeletion enforces the same bound for a caller that reserves nothing.
+type LegacyDeletionLimiter interface {
+	// ReserveLegacyDeletion claims one cleanup slot without waiting and returns
+	// ErrTooManyLegacyDeletions when every slot is in use. WithLegacyDeletion
+	// called with the returned context runs in the claimed slot instead of
+	// claiming another. release returns the slot and may be called repeatedly.
+	ReserveLegacyDeletion(ctx context.Context) (reserved context.Context, release func(), err error)
 }
 
 // InMemoryIndex identifies a process-local vector index and serializes its

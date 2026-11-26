@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // legacyBookkeepingLimit bounds a receipt update that must outlive the request.
@@ -24,10 +23,21 @@ var _ domain.LegacyDeletionGuard = (*Client)(nil)
 // has returned. It returns ErrDeletionActivated without calling remove once the
 // database selected checkpointed deletion. A lost session releases the lock, so
 // the reservation that remove commits is what protects the identity afterwards.
+//
+// The lock lives on a session of its own, outside the pool, so that a cleanup
+// waiting on a provider never holds a pooled connection that queries, admissions
+// and worker leases need. Every cleanup holds one of a bounded number of slots,
+// and a call with none free returns ErrTooManyLegacyDeletions before it opens a
+// connection or takes a lock.
 func (c *Client) WithLegacyDeletion(ctx context.Context, id domain.DocumentID, remove func(domain.LegacyDocumentStore) error) error {
-	conn, err := c.Pool.Acquire(ctx)
+	releaseSlot, err := c.claimLegacySlot(ctx)
 	if err != nil {
 		return err
+	}
+	defer releaseSlot()
+	conn, err := pgx.ConnectConfig(ctx, c.Pool.Config().ConnConfig)
+	if err != nil {
+		return fmt.Errorf("open legacy document deletion session: %w", err)
 	}
 	store := &legacyDeletion{client: c, conn: conn}
 	defer store.close(ctx)
@@ -57,17 +67,19 @@ func (c *Client) WithLegacyDeletion(ctx context.Context, id domain.DocumentID, r
 	return remove(store)
 }
 
-// legacyDeletion adapts one guarded connection to the cleanup's store interface.
+// legacyDeletion adapts one guarded session to the cleanup's store interface.
 type legacyDeletion struct {
 	client *Client
-	// conn is nil once the guarded session was found to be lost.
-	conn *pgxpool.Conn
+	// conn is a dedicated connection outside the pool, and nil once the guarded
+	// session was found to be lost.
+	conn *pgx.Conn
 }
 
 var _ domain.LegacyDocumentStore = (*legacyDeletion)(nil)
 
-// close releases every session lock the cleanup took. A connection that cannot
-// prove it released them is closed, which releases them in the server.
+// close releases every session lock the cleanup took and ends the session. The
+// explicit release comes first so that the lock is free when close returns,
+// because the server frees a closed session's locks only once its backend exits.
 func (l *legacyDeletion) close(parent context.Context) {
 	if l.conn == nil {
 		return
@@ -76,11 +88,8 @@ func (l *legacyDeletion) close(parent context.Context) {
 	defer cancel()
 	conn := l.conn
 	l.conn = nil
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_unlock_all()`); err != nil {
-		_ = conn.Hijack().Close(ctx)
-		return
-	}
-	conn.Release()
+	_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock_all()`)
+	_ = conn.Close(ctx)
 }
 
 // sessionLost reports whether err means the guarded session ended, as opposed
@@ -93,8 +102,8 @@ func sessionLost(err error) bool {
 	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
-// discardSession closes the guarded connection so that its pool slot is free
-// for the fresh connection that completes the receipt. The close has its own
+// discardSession closes the guarded connection, which ends its locks, before the
+// pool connection that completes the receipt takes over. The close has its own
 // budget, because the caller's context may already be spent.
 func (l *legacyDeletion) discardSession(parent context.Context) {
 	if l.conn == nil {
@@ -104,7 +113,7 @@ func (l *legacyDeletion) discardSession(parent context.Context) {
 	defer cancel()
 	conn := l.conn
 	l.conn = nil
-	_ = conn.Hijack().Close(ctx)
+	_ = conn.Close(ctx)
 }
 
 // exec runs a receipt update that must succeed even after the guarded session
@@ -117,7 +126,7 @@ func (l *legacyDeletion) exec(parent context.Context, query string, args ...any)
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), legacyBookkeepingLimit)
 		tag, err := l.conn.Exec(ctx, query, args...)
 		cancel()
-		if err == nil || (!sessionLost(err) && !l.conn.Conn().IsClosed()) {
+		if err == nil || (!sessionLost(err) && !l.conn.IsClosed()) {
 			return tag, err
 		}
 		l.discardSession(parent)
