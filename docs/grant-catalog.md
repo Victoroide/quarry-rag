@@ -353,8 +353,8 @@ for accepted documents in the same transaction that completes them.
 
 ## Scoped document operations
 
-In grants mode, scoped document handlers authorize inventory, status,
-original-file signing and deletion for a verified principal. Every scoped response and error sets
+Scoped document handlers authorize inventory, status, original-file signing and
+deletion for a verified principal in grants mode. Every scoped response and error sets
 `Cache-Control: private, no-store`, and handlers refuse to fall back to
 unscoped stores (`503`).
 
@@ -382,8 +382,8 @@ unscoped stores (`503`).
   fewer than one second remains. A missing, unassigned, unverified, denied,
   read-only, deleting, absent-original or storage-disabled lookup returns the
   same `404` envelope with zero signing calls.
-- **Owner-only deletion:** Only the active document owner may delete (`404` for
-  grantees and non-owners). Authorization and the incarnation-pinned
+- **Owner-only deletion:** See [the grants-mode API contract](api.md#delete-documentsdoc_id).
+  Authorization and the incarnation-pinned
   `document_deletions` intent commit atomically under the caller's request and
   credential deadline before detached cross-store cleanup runs; cancellation or
   token expiry before commit leaves the document intact and makes zero vector or
@@ -661,9 +661,9 @@ and creates the append-only security audit log `grant_catalog_security_audit`:
   `AUTHZ_MODE=grants` replicas fail readiness and admissions whenever the replica configuration
   differs from the database corpus marker. Readiness caches the comparison for
   `HEALTH_CACHE_TTL`; data routes and writer gates check it independently.
-- Before running the cutover, fence or drain older binaries that predate migration `029`
-  using network policy and distinct PostgreSQL login credentials so an unfenced legacy process
-  cannot connect after the corpus switches to `grants`.
+- Follow the [grants cutover deployment sequence](deployment.md#grants-cutover)
+  before previewing or activating grants. Migration 038 requires checkpointed
+  deletion to be active for both operations, including a replay.
 - Preview and activate `grants` mode with the operator command (see [Database roles](#database-roles)):
 
 ```sh
@@ -673,21 +673,22 @@ go run ./scripts/grant-catalog -activate-grants
 
 Activating `grants` locks the catalog, advances `grant_catalog_policy_revision`, records a
 `corpus_cutover` row in `grant_catalog_security_audit`, and is idempotent if re-run
-(`already_active: true`). Historical documents without verified ownership remain quarantined
+(`already_active: true`). A failed activation leaves mode, policy revision and
+audit unchanged. Historical documents without verified ownership remain quarantined
 and invisible in `grants` mode until reconciled via [Assign historical documents](#assign-historical-documents).
 
 ### Recovery and retention
 
-For rollback, close ingress and keep `grant_catalog_corpus_mode` at `grants`.
-Redeploy only a grants-capable build with migration 029 and `AUTHZ_MODE=grants`;
-service-mode replicas remain unready. Returning to service-only trust requires a
+For rollback, close ingress and keep both activation markers. Redeploy only a
+build that enforces scoped incarnation-qualified deletion with `AUTHZ_MODE=grants`.
+Service-mode replicas remain unready. Returning to service-only trust requires a
 separately authorized trust-boundary change: an isolated legacy corpus, or an
 operator migration and a trusted gateway enforcing every operation.
 
 A restored backup carries its own marker. A backup from before cutover leaves
 grants replicas unready: re-fence older binaries, re-apply the final ownership
-delta, and rerun `-activate-grants` before reopening ingress. A backup from after
-cutover keeps service replicas fenced. An interrupted cutover rolls back its
+delta, and follow the [grants cutover sequence](deployment.md#grants-cutover)
+before reopening ingress. A backup from after cutover keeps service replicas fenced. An interrupted cutover rolls back its
 single transaction, leaving the marker at `service`; rerunning is idempotent
 and reports `already_active` once committed.
 

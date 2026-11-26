@@ -357,6 +357,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `030_deletion_mode_lock.sql` | Adds an owner-defined function through which admission reads the deletion activation marker while holding it in share mode, so a restricted serving login can select the tagged vector format without access to the marker table. |
 | `031_document_sets.sql` | Adds immutable [document sets](grant-catalog.md#document-sets), their membership with composite tenant constraints, two live relations for the serving login and the owner-defined functions an operator uses to create and purge sets. Service-mode queries and deployments that leave `DOCUMENT_SETS_ENABLED` off do not use them. |
 | `037_inventory_policy_revisions.sql` | Adds per-principal revisions for [scoped inventory and status](grant-catalog.md#scoped-document-operations). |
+| `038_grants_require_deletion_activation.sql` | Requires the checkpointed-deletion marker for grants activation and preview. |
 
 The service can roll back to the previous binary with migration 010 and its
 checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026,
@@ -366,7 +367,8 @@ for restricted logins. For deployments with evaluation fixtures, follow the
 [fixture upgrade and rollback order](development.md#evidence-evaluation).
 See [document deletion](api.md#delete-documentsdoc_id) for fixture reservations.
 
-This release leaves the activation marker null, so admissions keep the untagged format and [document deletion](api.md#checkpointed-deletion) keeps its existing contract until an operator runs the [activation command](deployment.md#activate-checkpointed-deletion). The service never sets the marker. After activation, the admission transaction selects the tagged format from the marker. Drain in-progress worker mutations before rolling back the binary. While production data uses only the untagged format, the additive migrations and their checksums can stay in place. During a vector migration, follow the [rollback rules](deployment.md#changing-models-or-vector-stores). Older binaries ignore the writer freeze and the active-generation pin.
+The activation marker starts unset. See the [checkpointed deletion upgrade order](deployment.md#upgrade-order)
+and the [grants cutover procedure](deployment.md#grants-cutover). The service never sets the marker. After activation, the admission transaction selects the tagged format from the marker. Drain in-progress worker mutations before rolling back the binary. While production data uses only the untagged format, the additive migrations and their checksums can stay in place. During a vector migration, follow the [rollback rules](deployment.md#changing-models-or-vector-stores). Older binaries ignore the writer freeze and the active-generation pin.
 
 The optional vector schema is initialized separately after base migrations, under the same advisory lock; see the [vector data model](architecture.md#postgresql-vector-schema).
 

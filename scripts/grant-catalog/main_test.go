@@ -32,6 +32,11 @@ func TestGrantCatalogActivateGrantsCommand(t *testing.T) {
 	require.NoError(t, c.RunMigrations(t.Context()))
 
 	var dryOut bytes.Buffer
+	require.ErrorContains(t, run(t.Context(), []string{"-activate-grants", "-dry-run"}, databaseURL, strings.NewReader(""), &dryOut),
+		"checkpointed document deletion must be activated first")
+	require.Empty(t, dryOut.String())
+	_, err = c.ActivateDeletion(t.Context())
+	require.NoError(t, err)
 	require.NoError(t, run(t.Context(), []string{"-activate-grants", "-dry-run"}, databaseURL, strings.NewReader(""), &dryOut))
 	var dryRes postgres.GrantsActivationResult
 	require.NoError(t, json.Unmarshal(dryOut.Bytes(), &dryRes))

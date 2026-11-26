@@ -925,11 +925,13 @@ after upgrading to enable collection-filtered retrieval of their existing vector
 
 ## Activating Checkpointed Deletion
 
-This release ships with the database inactive. Deploying it changes no deletion contract: bare `DELETE` requests, `make cleanup <uuid>` and the MCP tool keep deleting the live document by UUID, and an incarnation-qualified request returns `412`. Activating [checkpointed deletion](api.md#checkpointed-deletion) is a separate, one-way, database-wide operation that an operator performs once every mutating executable can honor it and outstanding provider work is settled or quarantined.
+A new database starts with checkpointed deletion inactive. In service mode, bare
+`DELETE` requests, `make cleanup <uuid>` and the MCP tool address the live document
+by UUID until activation. Activating [checkpointed deletion](api.md#checkpointed-deletion) is a separate, one-way, database-wide operation that an operator performs once every mutating executable can honor it and outstanding provider work is settled or quarantined.
 
 ### Upgrade order
 
-1. **Apply the additive schema and prepare callers.** Apply pending migrations as the schema owner and apply the [serving-role upgrade grants](grant-catalog.md#upgrade-an-existing-serving-role) before starting upgraded processes. For hosted and offline vectors, include the migration 030 grant in every authorization mode. Prepare clients to opt in to each document's incarnation with `include_incarnation=true`. Keep using bare deletion until step 4.
+1. **Apply the additive schema and prepare callers.** Apply pending migrations as the schema owner and apply the [serving-role upgrade grants](grant-catalog.md#upgrade-an-existing-serving-role) before starting upgraded processes. For hosted and offline vectors, include the migration 030 grant in every authorization mode. Prepare clients to opt in to each document's incarnation with `include_incarnation=true`. Service-mode callers use bare deletion until step 4.
 2. **Pause and retire pre-upgrade processes.** Pause ingestion, deletion and index maintenance at every entry point. Stop and drain every API, worker, `make cleanup` or `make reconcile` invocation, scheduled job and client that could reissue an operation through an endpoint that predates the marker. Such a process ignores the marker and every receipt, and it can delete by UUID after activation. Reads can stay available where that is safe. Deploy this release with the marker still unset. Keep the old writers away during preparation too, because an old process ignores the SQL hold.
 3. **Account for outstanding provider work.** For every hosted upsert and every hosted delete that a pre-upgrade process issued, including retries by processes that have exited, collect the document UUID, the original index and the namespace. On a Pinecone serverless namespace where a response recorded an `x-pinecone-request-lsn`, query the same namespace until its `x-pinecone-max-indexed-lsn` reaches that value. For a lost reply with no sequence number, obtain independent confirmation from the provider or keep the UUID fenced. An empty read, an elapsed drain interval, a later request's success and a released database lock cannot settle an earlier attempt.
    - While writers are paused, [quarantine](#quarantine-and-hold-release) every known absent UUID with unresolved effects, even when its process left no receipt. Keep writes and deletions paused for live UUIDs with unresolved effects.
@@ -1033,6 +1035,26 @@ The service accepts any token configured in [`SERVICE_TOKENS` or `SERVICE_TOKEN`
 ## Grants Mode Operations and Benchmarks
 
 In `AUTHZ_MODE=grants`, Quarry enforces delegated subject credentials and tenant/document grants inside the service alongside `X-Service-Token`. In `AUTHZ_MODE=service`, authorization scopes (`allowed_document_ids`) remain the caller's responsibility; in `grants` mode, callers present both `X-Service-Token` and a short-lived signed JWT bearer token (`Authorization: Bearer <jwt>`).
+
+### Grants cutover
+
+Before enabling grants, deploy receipt-capable replicas, close mutating ingress
+and fence older executables using network policy and separate PostgreSQL logins.
+Drain in-flight requests, workers and outstanding provider work under the
+[checkpointed deletion upgrade order](#upgrade-order). Complete any required
+vector reindex under [Changing Models or Vector Stores](#changing-models-or-vector-stores)
+before permitting the new replicas to write.
+
+As the schema owner, [activate checkpointed deletion](#activate-checkpointed-deletion)
+and verify that the deletion-mode endpoint reports active. With ingress still
+closed, use the separate [operator preview and activation](grant-catalog.md#corpus-cutover-and-security-audit)
+to switch the corpus to grants. Check grants-mode readiness before reopening
+ingress.
+
+After upgrading an already-grants corpus whose deletion marker is unset, reads
+and queries remain available and live scoped deletion returns `412`. Follow the
+same fencing and drain procedure, then activate and verify checkpointed deletion
+to restore scoped deletion. The corpus stays in grants throughout.
 
 ### Identity, Keys, Retention and Storage Boundaries
 
