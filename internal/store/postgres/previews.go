@@ -15,6 +15,8 @@ type Previews struct {
 	DocType    string
 	// Subject, when set, limits previews to documents it may read now.
 	Subject *domain.Principal
+	// DocumentSetID, with Subject, limits previews to members of that live set.
+	DocumentSetID string
 }
 
 // DocumentPreviews returns previews for completed candidates in its scope.
@@ -23,7 +25,7 @@ func (p Previews) DocumentPreviews(ctx context.Context, ids []string) (map[strin
 	if len(ids) == 0 {
 		return previews, nil
 	}
-	join, args := readableJoin(p.Subject, []any{ids, p.Collection, p.DocType})
+	join, args := readableJoin(p.Subject, p.DocumentSetID, []any{ids, p.Collection, p.DocType})
 	rows, err := p.Pool.Query(ctx, `
 SELECT d.id::text, d.content_preview FROM documents d`+join+`
 WHERE d.id = ANY($1::uuid[]) AND d.status='completed' AND d.content_preview IS NOT NULL

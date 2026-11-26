@@ -155,6 +155,15 @@ type Config struct {
 	MaxAllowedDocumentIDs    int
 	RequireDocumentAllowlist bool
 
+	// DocumentSetsEnabled lets a grants-mode query select documents through an
+	// immutable, expiring set owned by its subject.
+	DocumentSetsEnabled bool
+	// DocumentSetMaxMembers is the most members a set may have and the most
+	// authorized documents one set query may search.
+	DocumentSetMaxMembers int
+	// DocumentSetMaxBatches is the total hosted search attempts of one set query.
+	DocumentSetMaxBatches int
+
 	IngestWorkers      int
 	IngestMaxAttempts  int
 	IngestLease        time.Duration
@@ -278,6 +287,7 @@ func Load() (*Config, error) {
 		{"INGEST_WORKERS", &cfg.IngestWorkers, 2}, {"INGEST_MAX_ATTEMPTS", &cfg.IngestMaxAttempts, 5},
 		{"EXTRACT_CONCURRENCY", &cfg.ExtractConcurrency, 2}, {"EXTRACT_MEMORY_LIMIT_MB", &cfg.ExtractMemoryLimitMB, 512},
 		{"MAX_ALLOWED_DOCUMENT_IDS", &cfg.MaxAllowedDocumentIDs, 25000},
+		{"DOCUMENT_SET_MAX_BATCHES", &cfg.DocumentSetMaxBatches, DocumentSetBatchesLimit},
 		{"PGVECTOR_EXACT_SCOPE_MAX", &cfg.PGVectorExactScopeMax, 0},
 		{"QUERY_CONCURRENCY", &cfg.QueryConcurrency, 32},
 		{"LEGACY_DELETION_CONCURRENCY", &cfg.LegacyDeletionConcurrency, 0},
@@ -349,6 +359,12 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.RequireDocumentAllowlist, err = envBoolOrDefault("REQUIRE_DOCUMENT_ALLOWLIST", false); err != nil {
+		return nil, err
+	}
+	if cfg.DocumentSetsEnabled, err = envBoolOrDefault("DOCUMENT_SETS_ENABLED", false); err != nil {
+		return nil, err
+	}
+	if cfg.DocumentSetMaxMembers, err = envIntOrDefault("DOCUMENT_SET_MAX_MEMBERS", DocumentSetMembersLimit); err != nil {
 		return nil, err
 	}
 
@@ -686,6 +702,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config: LOG_LEVEL must be debug, info, warn or error")
 	}
 	if err := c.validateAuthzMode(); err != nil {
+		return err
+	}
+	if err := c.validateDocumentSets(); err != nil {
 		return err
 	}
 	return c.validateAndResolveRouting()

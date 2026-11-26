@@ -44,6 +44,16 @@ type AuthorizedScope struct {
 	// the incarnation it may read. Membership stores require it. Relation
 	// stores ignore it because their SQL joins the live relation.
 	Incarnations map[string]string
+	// DocumentSet, when set, binds the scope to one immutable membership. A
+	// relation store joins that membership in its ranking statement and refuses
+	// the search unless it implements DocumentSetScopedVectorStore.
+	DocumentSet *DocumentSetRef
+	// Budget, when set, bounds the hosted search attempts of the request. A
+	// hosted store reserves from it before every search and counts retries.
+	Budget *SearchBudget
+	// BeforeSearch, when set, runs before each hosted batch. A failure stops the
+	// search, so a lapsed credential, set or principal never reaches the index.
+	BeforeSearch func(context.Context) error
 }
 
 // IncarnationOf returns the readable incarnation for a document ID in any UUID
@@ -80,6 +90,10 @@ type ReadScopeRequest struct {
 	DocumentIDs []string
 	Collection  string
 	DocType     string
+	// DocumentSetID, when set, also intersects the scope with that immutable
+	// membership. A set the principal cannot use fails the derivation with
+	// ErrDocumentSetNotFound before any listing.
+	DocumentSetID string
 	// Membership is the largest number of documents to list. Zero asks only
 	// whether any document qualifies.
 	Membership int
@@ -95,6 +109,8 @@ type ReadScope struct {
 	// qualify. Documents is then not a complete listing.
 	Exceeded  bool
 	Documents []ReadableDocument
+	// DocumentSet describes the set the scope was intersected with.
+	DocumentSet *DocumentSetRef
 }
 
 // ReadState is the principal's current standing in the policy catalog.

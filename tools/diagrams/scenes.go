@@ -191,7 +191,7 @@ func dataModel() diagram {
 }
 
 func repositoryTree(dirs []string) diagram {
-	d := diagram{Name: "repository-layout", Title: "Repository layout", MaxW: 840, MaxH: 1020}
+	d := diagram{Name: "repository-layout", Title: "Repository layout", MaxW: 840, MaxH: 1050}
 	for _, path := range dirs {
 		n := node{ID: path, Title: filepath.Base(path) + "/", Lines: []string{directoryDescriptions[path]}, Borderless: true}
 		flow := []string{"cmd/server", "internal/api", "internal/pipeline", "internal/retriever", "internal/llm", "internal/store"}

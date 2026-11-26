@@ -113,10 +113,13 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_authorize_ingest(uuid, uuid, text
   public.grant_catalog_read_revision(uuid, uuid),
   public.grant_catalog_corpus_authz_mode(),
   public.grant_catalog_record_security_audit(text, uuid, uuid, bigint, text, text, text, uuid, uuid) TO quarry_service;
-GRANT SELECT ON public.grant_catalog_active_principals, public.grant_catalog_readable_documents TO quarry_service;
+GRANT SELECT ON public.grant_catalog_active_principals, public.grant_catalog_readable_documents,
+  public.grant_catalog_document_sets_live, public.grant_catalog_document_set_readable TO quarry_service;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_backfill_candidates(uuid, integer),
   public.grant_catalog_publish_verified_document(uuid, uuid, text, text),
-  public.grant_catalog_activate_grants(boolean) TO quarry_operator;
+  public.grant_catalog_activate_grants(boolean),
+  public.grant_catalog_create_document_set(uuid, uuid, integer, text, uuid[], integer),
+  public.grant_catalog_purge_document_sets(integer) TO quarry_operator;
 GRANT SELECT ON public.grant_catalog_policy_audit, public.grant_catalog_security_audit TO quarry_auditor;
 ```
 
