@@ -11,6 +11,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -43,6 +44,89 @@ func TestVectorStateDefaultsToOpenLegacy(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, VectorState{Active: LegacyGeneration}, state)
 	require.NoError(t, c.WritersOpen(t.Context()))
+}
+
+const (
+	activeCleanupFrozenConstraint = "vector_state_active_cleanup_frozen"
+	activeCleanupSenderConstraint = "vector_state_active_cleanup_sender"
+)
+
+func requireActiveCleanupConstraint(t *testing.T, err error, constraint string) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "23514", pgErr.Code, pgErr.Message)
+	require.Equal(t, constraint, pgErr.ConstraintName)
+}
+
+func TestMigrateActiveCleanupSender(t *testing.T) {
+	ctx := t.Context()
+	ids := []string{"00000000000040008000000000000002", "00000000000040008000000000000001"}
+	const oldReserve = `UPDATE vector_state SET active_cleanup_ids=$3, active_cleanup_reservation=gen_random_uuid()
+		WHERE ` + activeCleanupEpoch + ` AND active_cleanup_reservation IS NULL RETURNING active_cleanup_reservation`
+	const oldClear = `UPDATE vector_state SET active_cleanup_ids=NULL, active_cleanup_reservation=NULL
+		WHERE ` + activeCleanupEpoch + ` AND active_cleanup_reservation=$3 AND active_cleanup_ids=$4`
+	type fixture struct {
+		client      *Client
+		before      VectorState
+		reservation uuid.UUID
+	}
+	var fixtures []fixture
+	for range 2 {
+		dsn := startTestDatabase(t)
+		admin := migrationTestClient(t, dsn)
+		grantExec(t, admin, `CREATE SCHEMA cleanup_migration`)
+		client, err := NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
+			cfg.ConnConfig.RuntimeParams["search_path"] = "cleanup_migration,public"
+		})
+		require.NoError(t, err)
+		t.Cleanup(client.Pool.Close)
+		applyMigrationsExcept(t, client, 42)
+		grantExec(t, admin, `CREATE TABLE public.vector_state (sentinel INTEGER)`)
+		require.NoError(t, client.PinVectorGeneration(ctx, LegacyGeneration, "pinecone", "corpus", "corpus-host", generationProfile()))
+		require.NoError(t, client.FreezeWriters(ctx, LegacyGeneration))
+		state, err := client.VectorState(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, state.FrozenAt)
+		var reservation uuid.UUID
+		require.NoError(t, client.Pool.QueryRow(ctx, oldReserve, state.Active, *state.FrozenAt, ids).Scan(&reservation))
+		fixtures = append(fixtures, fixture{client, state, reservation})
+	}
+	readSender := func(f fixture) uuid.UUID {
+		t.Helper()
+		var sender, gotReservation uuid.UUID
+		var gotIDs []string
+		require.NoError(t, f.client.Pool.QueryRow(ctx, `SELECT active_cleanup_sender, active_cleanup_reservation,
+			active_cleanup_ids FROM vector_state WHERE singleton`).Scan(&sender, &gotReservation, &gotIDs))
+		require.Equal(t, f.reservation, gotReservation)
+		require.Equal(t, ids, gotIDs)
+		require.NotEqual(t, uuid.Nil, sender)
+		return sender
+	}
+	require.NoError(t, fixtures[0].client.RunMigrations(ctx))
+	_, err := fixtures[1].client.Pool.Exec(ctx, `SELECT active_cleanup_sender FROM vector_state`)
+	requireSQLState(t, err, "42703")
+	require.NoError(t, fixtures[1].client.RunMigrations(ctx))
+	require.NotEqual(t, readSender(fixtures[0]), readSender(fixtures[1]))
+	for _, f := range fixtures {
+		sender := readSender(f)
+		require.NoError(t, f.client.RunMigrations(ctx))
+		require.Equal(t, sender, readSender(f))
+		_, err := f.client.Pool.Exec(ctx, `SELECT active_cleanup_sender FROM public.vector_state`)
+		requireSQLState(t, err, "42703")
+		after, err := f.client.VectorState(ctx)
+		require.NoError(t, err)
+		require.Equal(t, f.before, after)
+		require.NoError(t, f.client.PinExistingVectorGeneration(ctx, LegacyGeneration, "pinecone", "corpus", "corpus-host", generationProfile()))
+		_, err = f.client.Pool.Exec(ctx, oldClear, after.Active, *after.FrozenAt, f.reservation, ids)
+		requireActiveCleanupConstraint(t, err, activeCleanupSenderConstraint)
+		require.ErrorContains(t, f.client.ThawWriters(ctx), "pending active vector cleanup")
+		_, err = f.client.Pool.Exec(ctx, `UPDATE vector_state SET active_cleanup_sender=gen_random_uuid()`)
+		requireSQLState(t, err, "55000")
+		grantExec(t, f.client, `UPDATE vector_state SET active_cleanup_ids=NULL, active_cleanup_reservation=NULL, active_cleanup_sender=NULL`)
+		_, err = f.client.Pool.Exec(ctx, oldReserve, after.Active, *after.FrozenAt, ids)
+		requireActiveCleanupConstraint(t, err, activeCleanupSenderConstraint)
+	}
 }
 
 func TestFrozenActiveCleanupJournal(t *testing.T) {
@@ -846,7 +930,7 @@ func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
 	c := migrationTestClient(t, startTestDatabase(t))
 	// Admission and claims need later migrations. Defer the vector state
 	// and the migrations that depend on it until the upgrade.
-	applyMigrationsExcept(t, c, 16, 33, 39, 41)
+	applyMigrationsExcept(t, c, 16, 33, 39, 41, 42)
 	require.NoError(t, c.WritersOpen(t.Context()), "no record can freeze writers before migration 016")
 	accepted, err := c.AcceptDocument(t.Context(), jobsRequest("accepted before the generation records exist"))
 	require.NoError(t, err)
