@@ -13,6 +13,7 @@ Notable changes are grouped by release.
 
 - With `SOURCE_UPLOAD_JOURNAL=true`, owned multipart uploads journal each incarnation-scoped original before writing it, so reconciliation can reclaim originals that acceptance never adopted.
 - Vector reindex inventory includes documents marked `deleting` or blocked by a deletion receipt in `documents.deleting_or_held`.
+- Grant catalog source versions stay stable across unrelated schema and bookkeeping changes. Migration 043 requires fresh snapshots for unapplied batches and a one-time refresh of pending imported assignments.
 
 ### Fixed
 

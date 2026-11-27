@@ -358,6 +358,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `031_document_sets.sql` | Adds immutable [document sets](grant-catalog.md#document-sets), their membership with composite tenant constraints, two live relations for the serving login and the owner-defined functions an operator uses to create and purge sets. Service-mode queries and deployments that leave `DOCUMENT_SETS_ENABLED` off do not use them. |
 | `037_inventory_policy_revisions.sql` | Adds per-principal revisions for [scoped inventory and status](grant-catalog.md#scoped-document-operations). |
 | `038_grants_require_deletion_activation.sql` | Requires the checkpointed-deletion marker for grants activation and preview. |
+| `043_grant_catalog_stable_source_version.sql` | Replaces the grant source view without scanning or rewriting documents or ownership rows. Follow “Upgrade the source version” in the grant catalog guide before applying it. |
 
 The service can roll back to the previous binary with migration 010 and its
 checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026,
