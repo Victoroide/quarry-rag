@@ -751,7 +751,7 @@ func (f *GenerationFence) Activate(ctx context.Context, corpusDigest string, win
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer f.rollbackActivation(ctx, tx)
 	state, err := lockVectorState(ctx, tx)
 	if err != nil {
 		return err

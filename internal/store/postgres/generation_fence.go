@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"time"
@@ -12,6 +13,7 @@ import (
 )
 
 const reindexLockNamespace = 0x71726569
+const generationActivationRollbackTimeout = 3 * time.Second
 
 // GenerationFence owns the exclusive operation lock for the physical target
 // registered to a generation. A physical target can have only one generation.
@@ -49,10 +51,30 @@ func (c *Client) FenceGeneration(ctx context.Context, name string) (*GenerationF
 
 // Close releases the lock and the dedicated session.
 func (f *GenerationFence) Close(ctx context.Context) {
+	if f.conn.IsClosed() {
+		return
+	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	_, _ = f.conn.Exec(cleanupCtx, `SELECT pg_advisory_unlock($1, hashtext($2))`, reindexLockNamespace, f.name)
 	closeFenceConnection(ctx, f.conn)
+}
+
+func (f *GenerationFence) rollbackActivation(ctx context.Context, tx pgx.Tx) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), generationActivationRollbackTimeout)
+	defer cancel()
+	if err := tx.Rollback(cleanupCtx); err == nil || errors.Is(err, pgx.ErrTxClosed) {
+		return
+	}
+
+	// pgx marks the connection closed on rollback failure, but its
+	// asynchronous cleanup may still hold the socket open.
+	transport := f.conn.PgConn().Conn()
+	if secure, ok := transport.(*tls.Conn); ok {
+		// Closing the TLS connection can write a close notification.
+		transport = secure.NetConn()
+	}
+	_ = transport.Close()
 }
 
 func closeFenceConnection(ctx context.Context, conn *pgx.Conn) {

@@ -26,6 +26,7 @@ Notable changes are grouped by release.
 - The CI race report retains unfinished test output when a compiler failure shares the package name.
 - Vector reindex activation preserves the hosted-manifest refusal when writing its JSON report fails.
 - The CI race report shows package failures even when diagnostics mention `[no test files]`.
+- Vector reindex activation bounds PostgreSQL rollback and preserves the original failure.
 - The CI race report prints each shared compiler diagnostic once, preserves standalone build failures, and flags expected packages with missing results.
 - Vector reindex activation reports unsettled freezes and live ingestion jobs before applying and reflects blockers found under the database lock.
 - The selective Pinecone staging check pins both index descriptions to the public controller.
