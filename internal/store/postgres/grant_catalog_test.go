@@ -525,7 +525,12 @@ func grantPrincipal(tenant, id, subject string, enabled bool) grantEntry {
 
 func grantAssignment(t *testing.T, c *Client, tenant, owner, id string) grantEntry {
 	t.Helper()
-	return grantEntry{"tenant_id": tenant, "principal_id": owner, "collection": "", "document_id": id, "source_version": grantSource(t, c, id)}
+	return grantAssignmentContext(t.Context(), t, c, tenant, owner, id)
+}
+
+func grantAssignmentContext(ctx context.Context, t *testing.T, c *Client, tenant, owner, id string) grantEntry {
+	t.Helper()
+	return grantEntry{"tenant_id": tenant, "principal_id": owner, "collection": "", "document_id": id, "source_version": grantSourceContext(ctx, t, c, id)}
 }
 
 func insertGrantSource(t *testing.T, c *Client, id string) {
@@ -542,8 +547,13 @@ func grantIncarnation(t *testing.T, c *Client, id string) string {
 
 func grantSource(t *testing.T, c *Client, id string) string {
 	t.Helper()
+	return grantSourceContext(t.Context(), t, c, id)
+}
+
+func grantSourceContext(ctx context.Context, t *testing.T, c *Client, id string) string {
+	t.Helper()
 	var version string
-	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT source_version FROM grant_catalog_source_snapshot($1)`, id).Scan(&version))
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT source_version FROM grant_catalog_source_snapshot($1)`, id).Scan(&version))
 	return version
 }
 
@@ -615,8 +625,13 @@ func assertGrantRevision(t *testing.T, c *Client, want int64) {
 
 func assertDocumentAccess(t *testing.T, c *Client, id, principal string, read, download, owner bool) {
 	t.Helper()
+	assertDocumentAccessContext(t.Context(), t, c, id, principal, read, download, owner)
+}
+
+func assertDocumentAccessContext(ctx context.Context, t *testing.T, c *Client, id, principal string, read, download, owner bool) {
+	t.Helper()
 	var actualRead, actualDownload, actualOwner bool
-	err := c.Pool.QueryRow(t.Context(), `SELECT can_read, can_download, is_owner
+	err := c.Pool.QueryRow(ctx, `SELECT can_read, can_download, is_owner
 		FROM grant_catalog_document_access WHERE document_id=$1 AND principal_id=$2`, id, principal).
 		Scan(&actualRead, &actualDownload, &actualOwner)
 	if !read {

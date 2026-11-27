@@ -361,6 +361,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `037_inventory_policy_revisions.sql` | Adds per-principal revisions for [scoped inventory and status](grant-catalog.md#scoped-document-operations). |
 | `038_grants_require_deletion_activation.sql` | Requires the checkpointed-deletion marker for grants activation and preview. |
 | `043_grant_catalog_stable_source_version.sql` | Replaces the grant source view without scanning or rewriting documents or ownership rows. Follow “Upgrade the source version” in the grant catalog guide before applying it. |
+| `044_hosted_backfill_snapshot.sql` | Adds operator entry points for hosted scoped backfill. See “Upgrade hosted scoped backfill” in the grant catalog guide. |
 
 The service can roll back to the previous binary with migration 010 and its
 checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026,

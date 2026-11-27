@@ -123,8 +123,11 @@ GRANT EXECUTE ON FUNCTION public.grant_catalog_authorize_ingest(uuid, uuid, text
   public.grant_catalog_record_security_audit(text, uuid, uuid, bigint, text, text, text, uuid, uuid) TO quarry_service;
 GRANT SELECT ON public.grant_catalog_active_principals, public.grant_catalog_readable_documents,
   public.grant_catalog_document_sets_live, public.grant_catalog_document_set_readable TO quarry_service;
-GRANT EXECUTE ON FUNCTION public.grant_catalog_backfill_candidates(uuid, integer),
+GRANT EXECUTE ON FUNCTION public.vector_writer_state(),
+  public.grant_catalog_backfill_candidates(uuid, integer),
   public.grant_catalog_publish_verified_document(uuid, uuid, text, text),
+  public.grant_catalog_hosted_backfill_candidates(uuid, integer),
+  public.grant_catalog_publish_hosted_backfill(uuid, uuid, uuid, text, text, text),
   public.grant_catalog_activate_grants(boolean),
   public.grant_catalog_create_document_set(uuid, uuid, integer, text, uuid[], integer),
   public.grant_catalog_purge_document_sets(integer) TO quarry_operator;
@@ -675,6 +678,23 @@ Keep migration 043 applied when rolling back the binary. Restoring a database
 backup taken before the migration restores the old digest and policy state.
 Prepare fresh batches for uncommitted work against the restored database. Keep
 the view in place while import or backfill jobs are active.
+
+### Upgrade hosted scoped backfill
+
+Apply migration 044, then run the following grants as the schema owner before
+using the upgraded Pinecone backfill command. Use the upgraded operator binary
+for hosted scoped backfill throughout a mixed-version rollout. Older serving
+binaries and the existing pgvector backfill remain compatible with the migration.
+
+```sql
+GRANT EXECUTE ON FUNCTION public.grant_catalog_hosted_backfill_candidates(uuid, integer),
+  public.grant_catalog_publish_hosted_backfill(uuid, uuid, uuid, text, text, text),
+  public.vector_writer_state() TO quarry_operator;
+```
+
+Keep migration 044 applied when rolling back the binary. Suspend hosted scoped
+backfill on corpora with hosted manifests if the operator binary is rolled back.
+Already verified ownership remains ready.
 
 ### Batch format
 
