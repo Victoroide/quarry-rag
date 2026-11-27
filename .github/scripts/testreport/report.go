@@ -20,26 +20,35 @@ type event struct {
 	Test        string
 	Elapsed     float64
 	Output      string
+	OutputType  string
 	FailedBuild string
 }
 
 type testResult struct {
-	name    string
-	outcome string
-	elapsed float64
-	output  []string
+	name           string
+	outcome        string
+	elapsed        float64
+	output         []outputFragment
+	outputBytes    int
+	hasPrefixedRun bool
+}
+
+type outputFragment struct {
+	text    string
+	ordinal int
 }
 
 type packageResult struct {
-	name        string
-	outcome     string
-	elapsed     float64
-	noTests     bool
-	cached      bool
-	failedBuild string
-	output      []string
-	tests       map[string]*testResult
-	order       []string
+	name          string
+	outcome       string
+	elapsed       float64
+	noTests       bool
+	cached        bool
+	failedBuild   string
+	output        []string
+	currentTest   map[string]*testResult
+	testOrder     []*testResult
+	benchmarkPath []*testResult
 }
 
 // stat accumulates the durations a fixture step reported.
@@ -60,6 +69,7 @@ type run struct {
 	packages    map[string]*packageResult
 	order       []string
 	buildOutput map[string][]string
+	outputOrder int
 	setup       stat
 	cleanup     stat
 }
@@ -80,7 +90,7 @@ func buildPackage(importPath string) string {
 func (r *run) pkg(name string) *packageResult {
 	p, ok := r.packages[name]
 	if !ok {
-		p = &packageResult{name: name, tests: map[string]*testResult{}}
+		p = &packageResult{name: name, currentTest: map[string]*testResult{}}
 		r.packages[name] = p
 		r.order = append(r.order, name)
 	}
@@ -88,13 +98,24 @@ func (r *run) pkg(name string) *packageResult {
 }
 
 func (p *packageResult) test(name string) *testResult {
-	t, ok := p.tests[name]
-	if !ok {
-		t = &testResult{name: name}
-		p.tests[name] = t
-		p.order = append(p.order, name)
+	if t := p.currentTest[name]; t != nil {
+		return t
 	}
+	return p.startTest(name)
+}
+
+func (p *packageResult) startTest(name string) *testResult {
+	t := &testResult{name: name}
+	p.currentTest[name] = t
+	p.testOrder = append(p.testOrder, t)
 	return t
+}
+
+func (p *packageResult) completeBenchmark(t *testResult) {
+	t.outcome = "bench"
+	t.output, t.outputBytes = nil, 0
+	// Repeated benchmark measurements can produce more output without a run event.
+	delete(p.currentTest, t.name)
 }
 
 // add records ev. It returns the package when ev ended it.
@@ -114,12 +135,30 @@ func (r *run) add(ev event) *packageResult {
 	}
 	p := r.pkg(ev.Package)
 	switch ev.Action {
+	case "run":
+		if isBenchmarkName(ev.Test) {
+			p.advanceBenchmarks(ev.Test)
+			p.benchmarkPath = append(p.benchmarkPath, p.startTest(ev.Test))
+		} else if ev.Test != "" {
+			p.startTest(ev.Test)
+		}
+	case "pause", "cont":
+		if ev.Test != "" {
+			p.test(ev.Test)
+		}
 	case "output":
 		r.addOutput(p, ev)
+	case "bench":
+		if t := p.currentTest[ev.Test]; t != nil && t.outcome == "" {
+			p.completeBenchmark(t)
+		}
 	case "pass", "fail", "skip":
 		if ev.Test != "" {
 			t := p.test(ev.Test)
 			t.outcome, t.elapsed = ev.Action, ev.Elapsed
+			if ev.Action != "fail" {
+				t.output, t.outputBytes = nil, 0
+			}
 			return nil
 		}
 		p.outcome, p.elapsed = ev.Action, ev.Elapsed
@@ -132,6 +171,7 @@ func (r *run) add(ev event) *packageResult {
 }
 
 func (r *run) addOutput(p *packageResult, ev event) {
+	r.outputOrder++
 	if match := fixtureStep.FindStringSubmatch(ev.Output); match != nil {
 		if d, err := time.ParseDuration(match[2]); err == nil {
 			if match[1] == "setup" {
@@ -143,8 +183,23 @@ func (r *run) addOutput(p *packageResult, ev event) {
 	}
 	if ev.Test != "" {
 		t := p.test(ev.Test)
-		t.output = append(t.output, ev.Output)
+		if t.outcome != "pass" && t.outcome != "skip" && ev.Output != "" {
+			t.output = append(t.output, outputFragment{text: ev.Output, ordinal: r.outputOrder})
+			t.outputBytes += len(ev.Output)
+			if t.outcome == "" && endsBenchmarkMeasurement(t) {
+				p.completeBenchmark(t)
+			}
+		}
 		return
+	}
+	if ev.OutputType == "frame" {
+		// The testing runner emits a bare result. The go command can also
+		// frame a package summary (FAIL followed by a tab and package name)
+		// after an abrupt exit, so that summary cannot close benchmarks.
+		switch ev.Output {
+		case "PASS\n", "FAIL\n", "PASS\r\n", "FAIL\r\n":
+			p.advanceBenchmarks("")
+		}
 	}
 	p.output = append(p.output, ev.Output)
 	p.noTests = p.noTests || strings.Contains(ev.Output, "[no test files]")
@@ -180,25 +235,22 @@ func (r *run) problems(expected []string) []string {
 			out = append(out, name+" did not build")
 		case p.outcome == "fail":
 			out = append(out, name+" failed")
+		case p.outcome == "":
+			out = append(out, name+" has no result")
 		}
 		if p.cached {
 			out = append(out, name+" reused a cached result")
 		}
 	}
 	for _, name := range expected {
-		if p, ok := r.packages[name]; !ok || p.outcome == "" {
-			if p != nil && p.failedBuild != "" {
-				continue
-			}
+		if _, ok := r.packages[name]; !ok {
 			out = append(out, name+" has no result")
 		}
 	}
 	return out
 }
 
-// failureDetails returns what to show for a package that did not pass: the
-// compiler output, or the output of its failing tests and of the package
-// itself.
+// failureDetails returns diagnostic output for a failed or interrupted package.
 func (r *run) failureDetails(p *packageResult) string {
 	var b strings.Builder
 	if p.failedBuild != "" {
@@ -207,16 +259,16 @@ func (r *run) failureDetails(p *packageResult) string {
 		}
 		return b.String()
 	}
-	for _, name := range p.order {
-		t := p.tests[name]
+	for _, t := range p.testOrder {
 		if t.outcome != "fail" {
 			continue
 		}
 		fmt.Fprintf(&b, "--- FAIL: %s\n", t.name)
-		for _, line := range t.output {
-			b.WriteString(line)
+		for _, fragment := range t.output {
+			b.WriteString(fragment.text)
 		}
 	}
+	writeIncompleteDetails(&b, p.testOrder)
 	for _, line := range p.output {
 		b.WriteString(line)
 	}
@@ -321,9 +373,8 @@ type timedTest struct {
 func (r *run) slowTests(limit int) (top, children []timedTest) {
 	for _, name := range r.order {
 		p := r.packages[name]
-		for _, testName := range p.order {
-			t := p.tests[testName]
-			if t.outcome == "" || t.outcome == "skip" {
+		for _, t := range p.testOrder {
+			if t.outcome != "pass" && t.outcome != "fail" {
 				continue
 			}
 			entry := timedTest{name: t.name, pkg: p.name, elapsed: t.elapsed}
@@ -344,9 +395,9 @@ func (r *run) skippedTests() []string {
 	var out []string
 	for _, name := range r.order {
 		p := r.packages[name]
-		for _, testName := range p.order {
-			if p.tests[testName].outcome == "skip" {
-				out = append(out, p.name+" "+testName)
+		for _, t := range p.testOrder {
+			if t.outcome == "skip" {
+				out = append(out, p.name+" "+t.name)
 			}
 		}
 	}
