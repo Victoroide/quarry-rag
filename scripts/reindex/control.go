@@ -31,6 +31,10 @@ type controlReport struct {
 
 var errActivationNotReady = errors.New("the generation is not ready for activation")
 
+func hostedActivationReportWriteError(refusal error, reasons []string, encodeErr error) error {
+	return errors.Join(fmt.Errorf("%w: %s", refusal, strings.Join(reasons, "; ")), encodeErr)
+}
+
 func (d deps) reportHostedManifestCutover(ctx context.Context, rep *controlReport) (bool, error) {
 	counts, err := d.pg.HostedManifestCutoverCounts(ctx)
 	if err != nil {
@@ -186,7 +190,7 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 			ready := false
 			rep.Ready = &ready
 			if encodeErr := json.NewEncoder(out).Encode(rep); encodeErr != nil {
-				return errors.Join(errActivationNotReady, encodeErr)
+				return hostedActivationReportWriteError(errActivationNotReady, rep.Reasons, encodeErr)
 			}
 			return errActivationNotReady
 		}
@@ -234,6 +238,7 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 		}
 		if err = fence.Activate(ctx, digest, opts.Quiesce); err != nil {
 			ready = false
+			hostedGuard := false
 			var refusal *pgstore.ActivationQuiesceError
 			var pgErr *pgconn.PgError
 			switch {
@@ -242,6 +247,7 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 				appendActivationQuiesceReasons(&rep, refusal.Quiesce, refusal.Window)
 			case row.Store == "postgres" && errors.As(err, &pgErr) && pgErr.Code == "55000" &&
 				pgErr.ConstraintName == "hosted_manifest_cutover_guard":
+				hostedGuard = true
 				if blocked, _ := d.reportHostedManifestCutover(ctx, &rep); !blocked {
 					rep.Reasons = append(rep.Reasons, "hosted manifest work blocked activation; check the original source before retrying")
 				}
@@ -249,6 +255,9 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 				rep.Reasons = append(rep.Reasons, "activation was not confirmed; check the active generation before retrying")
 			}
 			if encodeErr := json.NewEncoder(out).Encode(rep); encodeErr != nil {
+				if hostedGuard {
+					return hostedActivationReportWriteError(err, rep.Reasons, encodeErr)
+				}
 				return errors.Join(err, encodeErr)
 			}
 			return err

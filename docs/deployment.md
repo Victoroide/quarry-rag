@@ -755,8 +755,6 @@ serving and cleanup logins as part of the [serving role setup](grant-catalog.md#
    or the corpus changed, finish catch-up and verify again. If the requested
    generation is already active, continue with deployment in step 6. If
    activation could not be confirmed, check the active generation before retrying.
-   If writing the JSON report fails during a hosted-manifest refusal, the
-   command reports both errors.
 6. Deploy every replica sharing the queue with `VECTOR_GENERATION` set to the new
    generation, the matching embedding deployment and extraction settings, and
    `PINECONE_INDEX_NAME` for a Pinecone target. Apply any [serving grants](grant-catalog.md#database-roles)
@@ -786,6 +784,12 @@ counts and a separate cleanup queue count that can overlap the retired count.
 Activation requires all four counts to be zero. Inventory counts are advisory
 for staging. Completed documents with active hosted revisions still need to
 meet the PostgreSQL corpus compatibility checks before staging.
+
+If the activation report cannot be written during a hosted-manifest refusal,
+stderr includes the drain reason and the write error, plus any counts collected
+for that report. If the database guard blocks activation and its count refresh
+fails or returns zero, check the original source before retrying. Retrying the
+preview with a working output destination produces a fresh JSON snapshot.
 
 Keep the original Pinecone index, host, namespace and credentials available
 until the drain is verified. Resume or settle writing attempts on that source.
