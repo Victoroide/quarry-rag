@@ -126,7 +126,9 @@ type auditExecer interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
-func recordSecurityAuditTx(ctx context.Context, db auditExecer, event domain.SecurityAuditEvent) error {
+const securityAuditSelectExpr = `grant_catalog_record_security_audit($1,$2::uuid,$3::uuid,$4,$5,$6,$7,$8::uuid,$9::uuid)`
+
+func securityAuditArgs(ctx context.Context, event domain.SecurityAuditEvent) []any {
 	requestID := event.RequestID
 	if requestID == "" {
 		requestID = logctx.RequestID(ctx)
@@ -141,8 +143,7 @@ func recordSecurityAuditTx(ctx context.Context, db auditExecer, event domain.Sec
 	if reason == "" {
 		reason = event.Outcome
 	}
-	_, err := db.Exec(ctx,
-		`SELECT grant_catalog_record_security_audit($1,$2::uuid,$3::uuid,$4,$5,$6,$7,$8::uuid,$9::uuid)`,
+	return []any{
 		requestID,
 		nullableAuditUUID(event.TenantID),
 		nullableAuditUUID(event.PrincipalID),
@@ -152,7 +153,11 @@ func recordSecurityAuditTx(ctx context.Context, db auditExecer, event domain.Sec
 		reason,
 		nullableAuditUUID(event.DocumentID),
 		nullableAuditUUID(event.Incarnation),
-	)
+	}
+}
+
+func recordSecurityAuditTx(ctx context.Context, db auditExecer, event domain.SecurityAuditEvent) error {
+	_, err := db.Exec(ctx, `SELECT `+securityAuditSelectExpr, securityAuditArgs(ctx, event)...)
 	if err != nil {
 		return fmt.Errorf("postgres: record security audit: %w", err)
 	}

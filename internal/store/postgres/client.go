@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -27,6 +28,15 @@ type Client struct {
 	writerSlots      chan struct{}
 	legacy           legacySlots
 	hostedManifests  atomic.Bool
+	now              func() time.Time
+	scopedHooks      *scopedDeletionHooks
+}
+
+func (c *Client) currentTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 // EnableHostedVectorManifests enables writing and sweeping hosted revisions.
