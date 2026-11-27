@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
+	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -349,4 +351,102 @@ func TestSupersededFetchWireNamespace(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, defaultVectorNamespace, list.Namespace)
 	})
+}
+
+func TestScopedBackfillManifestFetchTransport(t *testing.T) {
+	for _, mode := range []string{"split", "foreign", "later failure", "single overflow", "quota"} {
+		t.Run(mode, func(t *testing.T) {
+			doc := scopedManifest(1, 2)
+			ids := doc.Hosted.VectorIDs
+			fake := &scopedFakeIndex{}
+			fake.add(doc)
+			var mu sync.Mutex
+			var fetches [][]string
+			var updates []string
+			opts := options{BackfillScoped: true, Apply: true, Limit: 1}
+			index := supersededWireIndex(t, opts, func(method string, fields map[protowire.Number][]string) ([]byte, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch method {
+				case supersededFetchMethod:
+					if !slices.Equal(fields[2], []string{defaultVectorNamespace}) {
+						return nil, status.Error(codes.InvalidArgument, "wrong fetch namespace")
+					}
+					requested := fields[1]
+					fetches = append(fetches, requested)
+					switch {
+					case mode == "quota":
+						return nil, status.Error(codes.ResourceExhausted, "request quota exceeded")
+					case len(requested) == 2 || mode == "single overflow":
+						return supersededWirePad(nil, supersededFetchReceiveLimit+1), nil
+					case requested[0] == ids[1] && mode == "later failure":
+						return nil, status.Error(codes.Unavailable, "right batch unavailable")
+					}
+					namespace := ""
+					if mode == "foreign" && requested[0] == ids[1] {
+						namespace = "foreign"
+					}
+					values := []byte{0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0}
+					md, err := structpb.NewStruct(fake.vectors[requested[0]])
+					if err != nil {
+						return nil, err
+					}
+					metadata, err := proto.Marshal(md)
+					if err != nil {
+						return nil, err
+					}
+					return supersededWireFetch(requested, namespace, values, metadata), nil
+				case "/VectorService/Update":
+					if len(fields[1]) != 1 || len(fields[3]) != 1 || !slices.Equal(fields[4], []string{defaultVectorNamespace}) ||
+						len(fields[2]) != 0 || len(fields[5]) != 0 || len(fields[6]) != 0 {
+						return nil, status.Error(codes.InvalidArgument, "expected an exact metadata-only update")
+					}
+					id := fields[1][0]
+					md := &structpb.Struct{}
+					if err := proto.Unmarshal([]byte(fields[3][0]), md); err != nil {
+						return nil, err
+					}
+					if len(md.Fields) != 2 || md.Fields[domain.VectorTenantKey].GetStringValue() != doc.TenantID ||
+						md.Fields[domain.VectorIncarnationKey].GetStringValue() != doc.Incarnation || fake.vectors[id] == nil {
+						return nil, status.Error(codes.InvalidArgument, "unexpected metadata update")
+					}
+					updates = append(updates, id)
+					for key, value := range md.AsMap() {
+						fake.vectors[id][key] = value
+					}
+					return nil, nil
+				default:
+					return nil, status.Error(codes.Unimplemented, method)
+				}
+			})
+			source := &scopedFakeSource{documents: []pgstore.BackfillDocument{doc}}
+			report, err := backfillScoped(t.Context(), source, hostedVectors{idx: index, dimensions: scopedFixtureDimensions}, opts)
+			mu.Lock()
+			defer mu.Unlock()
+			passes := [][]string{ids, ids[:1], ids[1:]}
+			switch mode {
+			case "split":
+				require.NoError(t, err)
+				require.Equal(t, 1, report.Verified)
+				require.Equal(t, append(slices.Clone(passes), passes...), fetches)
+				require.Equal(t, ids, updates)
+				require.Equal(t, []string{doc.DocumentID}, source.published)
+				return
+			case "foreign":
+				require.Equal(t, codes.DataLoss, status.Code(err))
+			case "later failure":
+				require.Equal(t, codes.Unavailable, status.Code(err))
+			case "single overflow":
+				require.Equal(t, codes.ResourceExhausted, status.Code(err))
+				passes = passes[:2]
+			case "quota":
+				require.Equal(t, codes.ResourceExhausted, status.Code(err))
+				passes = passes[:1]
+			}
+			require.Equal(t, passes, fetches)
+			require.Empty(t, updates)
+			require.Empty(t, source.published)
+			require.Empty(t, report.ResumeAfter)
+		})
+	}
 }

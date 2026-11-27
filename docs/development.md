@@ -540,8 +540,8 @@ isolated namespace, run
 
 Documents assigned through the [grant catalog](grant-catalog.md#assign-historical-documents)
 stay unreadable until their stored data is verified. Pause ingestion and other
-index writers, then run the command with the operator login, which needs
-execution on the two backfill functions:
+index writers, then run the command with the operator login and the backfill
+grants for the configured store:
 
 ```sh
 make reconcile ARGS="-backfill-scoped"
@@ -556,29 +556,33 @@ mutation settles. A dry run reads only PostgreSQL. With `-apply`, both the
 PostgreSQL and hosted paths pin the configured `VECTOR_GENERATION` and target
 profile against PostgreSQL's active binding and hold the writer barrier for the
 pass, refusing while writers are frozen or when the active generation differs.
-Each document is verified from its current stored chunks. On `VECTOR_STORE=postgres`
-the active generation's vector table must hold exactly those chunks. On the hosted index every current chunk
-must exist under its stored identifier with its `doc_id`, `chunk_index`, `text`
-and `token_count`, and in the format the document was written in, without a
-conflicting `document_incarnation`. The command then labels those vectors
-by identifier: `tenant_id` for a document that already carries revision and
-attempt tags, and `tenant_id` plus `document_incarnation` for an untagged one.
-It reads the labels back and publishes readiness only if the document row and
-chunk list still match the verified snapshot. Vectors of stale or replaced
-chunks and legacy namespaces never receive labels, so no scoped search can
-return them.
+On `VECTOR_STORE=postgres`, the pinned vector table must hold exactly the
+current chunks. Pinecone backfill uses only the default namespace. It takes the
+exact vector IDs and their ordered chunk bindings from the active PostgreSQL
+manifest, even if `HOSTED_VECTOR_MANIFEST` is off. With no active manifest
+intent, it uses the historical bare or attempt-tagged IDs. An invalid manifest
+leaves the document quarantined.
 
-A document that fails verification counts as `quarantined` and a document that
-changed after it was read counts as `changed`. Both stay unreadable. Re-ingest a
-quarantined document and refresh its assignment, or refresh the assignment of a
-changed one, then run the mode again. The `-limit` flag bounds documents (100000 by default) and `-page`
-has no effect. Pass `-after` with `resume_after` or the value named in an error
-to continue after an interruption. Labeling and publishing are idempotent, so a
-rerun can repeat any document safely.
+Pinecone apply requires a fresh catalog assignment and verifies all current
+records before labeling any of them. It writes `tenant_id` and
+`document_incarnation` on manifested and bare records, and `tenant_id` on
+attempt-tagged records. It reads back the records and labels, then publishes
+readiness only if the assignment, current chunks and manifest binding still
+match. A replacement during verification can leave labels on a retired
+revision. Scoped reads still require the active revision and incarnation.
 
-An update error stops further updates and returns a nonzero exit status; earlier
-successful updates remain applied. Metadata updates are eventually consistent,
-so allow them to propagate before relying on collection-filtered queries.
+Verification failures count as `quarantined`. A stale assignment or a snapshot
+that changes before publication counts as `changed`. Both stay unreadable.
+Refresh stale assignments using the current catalog source. If readback has yet
+to converge, rerun from before the quarantined document after the metadata
+updates propagate. Re-ingest and refresh the assignment if the stored records
+are incomplete or inconsistent.
+
+The `-limit` flag bounds documents (100000 by default) and `-page` has no effect.
+A provider or database error stops the command with a nonzero exit status and
+reports the previous completed UUID. Pass that UUID to `-after` to retry the
+interrupted document. Successful labels remain applied and the retry repeats
+the same updates safely.
 
 ### Citation Verifier Calibration
 
