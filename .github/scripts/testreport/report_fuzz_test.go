@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -9,6 +10,91 @@ import (
 	"testing"
 	"unicode/utf8"
 )
+
+func FuzzCacheResultFragments(f *testing.F) {
+	const pkg = "probe"
+	const marker = "ok  \t" + pkg + "\t(cached)"
+	longName := strings.Repeat("é", 4096)
+	f.Add(pkg, marker+"\nok  \tprobe\t0.000s\n", []byte{0}, uint16(7))
+	f.Add(pkg, marker+"\r\n", []byte{1, 2}, uint16(1))
+	f.Add(pkg, marker+"\tcoverage: 24.6% of statements [no tests to run]\n", []byte{}, uint16(9))
+	f.Add(pkg, marker+"\tcoverage: [no statements] [no fuzz tests to fuzz]\n", []byte{2}, uint16(4))
+	f.Add(pkg, marker+"\tcoverage: 100.0% of statements in "+strings.Repeat("example.test/path/...,", 128)+"./... [no tests to run]\r\n", []byte{}, uint16(7))
+	f.Add(pkg, marker+"\tcoverage: \n", []byte{}, uint16(2))
+	f.Add(pkg, marker+"\tcoverage: instrument initialized\n", []byte{}, uint16(7))
+	f.Add(pkg, marker+" coverage: arbitrary trailing text\n", []byte{}, uint16(7))
+	f.Add(pkg, "before\n"+marker+"\n", []byte{3, 0, 4, 5, 6, 7, 8, 9}, uint16(2))
+	f.Add(pkg, marker+"\n"+marker, []byte{7, 0, 8}, uint16(1))
+	f.Add(longName, "ok  \t"+longName+"x\t(cached)\nok  \t"+longName+"\t(cached)\n", []byte{1}, uint16(1023))
+	f.Add("bad\tname", "ok  \tbad\tname\t(cached)\n", []byte{}, uint16(3))
+	f.Add("bad\rname", "ok  \tbad\rname\t(cached)\n", []byte{}, uint16(3))
+	f.Add("bad\nname", "ok  \tbad\nname\t(cached)\n", []byte{}, uint16(3))
+	f.Add("", "ok  \t\t(cached)\n", []byte{}, uint16(4))
+
+	suffix := regexp.MustCompile(`^(\tcoverage: [^\n]*| \[no tests to run\]| \[no fuzz tests to fuzz\]|\[-fuzz matches more than one fuzz test, won't fuzz\])?$`)
+	f.Fuzz(func(t *testing.T, name, output string, operations []byte, fragmentSize uint16) {
+		if len(name) > 8*1024 || len(output) > 64*1024 || len(operations) > 256 {
+			t.Skip("input exceeds size limits")
+		}
+		var events []event
+		const maxFragments = 4096
+		width := max(1, int(fragmentSize), (len(output)+maxFragments-1)/maxFragments)
+		for offset := 0; offset < len(output); offset += width {
+			fragment := output[offset:min(offset+width, len(output))]
+			events = append(events, event{Action: "output", Package: name, Output: fragment})
+			if offset/width >= len(operations) {
+				continue
+			}
+			switch operations[offset/width] % 10 {
+			case 1:
+				events = append(events, event{Action: "build-output", ImportPath: name, Output: fragment})
+			case 2:
+				other := name + "/other"
+				events = append(events, event{Action: "output", Package: other, Output: fragment})
+			case 3:
+				events = append(events, event{Action: "output", Package: name, Test: "TestP", Output: fragment})
+			case 4:
+				events = append(events, event{Action: "output", Package: name, OutputType: "frame", Output: fragment})
+			case 5:
+				events = append(events, event{Action: "start", Package: name})
+			case 6:
+				events = append(events, event{Action: "pass", Package: name, Test: "TestP"})
+			case 7:
+				events = append(events, event{Action: "pass", Package: name})
+			case 8:
+				events = append(events, event{Action: "skip", Package: name})
+			case 9:
+				events = append(events, event{Action: "fail", Package: name})
+			}
+		}
+		events = append(events, event{Action: "pass", Package: name})
+
+		r := newRun()
+		var batch bytes.Buffer
+		for _, ev := range events {
+			result := r.add(ev)
+			switch {
+			case name == "" || ev.Package != name:
+				continue
+			case ev.Action == "output" && ev.Test == "" && ev.OutputType == "":
+				batch.WriteString(ev.Output)
+				continue
+			case ev.Test == "" && (ev.Action == "pass" || ev.Action == "skip" || ev.Action == "fail"):
+				lines := strings.Split(batch.String(), "\n")
+				want := false
+				if ev.Action == "pass" && len(lines) > 1 && lines[len(lines)-1] == "" && !strings.ContainsAny(name, "\t\r\n") {
+					line := strings.TrimSuffix(lines[len(lines)-2], "\r")
+					rest, matches := strings.CutPrefix(line, "ok  \t"+name+"\t(cached)")
+					want = matches && suffix.MatchString(rest)
+				}
+				if result == nil || result.cached != want {
+					t.Fatalf("terminal %s for %q on %q in %d-byte fragments, want cached = %t", ev.Action, name, batch.Bytes(), width, want)
+				}
+			}
+			batch.Reset()
+		}
+	})
+}
 
 func FuzzDecodeTestReportEvents(f *testing.F) {
 	f.Add(fixture(f, "timeout.json"))
