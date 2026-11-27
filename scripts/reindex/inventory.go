@@ -27,6 +27,8 @@ type inventoryReport struct {
 	OpenDeletionIDs []string                `json:"open_deletion_ids,omitempty"`
 	Blockers        []string                `json:"blockers"`
 	Writes          int                     `json:"writes"`
+
+	HostedManifestCutover *pgstore.HostedManifestCutoverCounts `json:"hosted_manifest_cutover,omitempty"`
 }
 
 // inventorySource is the read-only part of PostgreSQL that an inventory scans.
@@ -186,6 +188,13 @@ func (d deps) blockers(ctx context.Context, p targetPlan, profile domain.Embeddi
 func (d deps) inventory(ctx context.Context, opts options, p targetPlan, profile domain.EmbeddingProfile) (inventoryReport, error) {
 	rep := inventoryReport{Action: string(actionInventory), Generation: p.generation, Profile: profile, ProfileHash: profile.Hash(), Blockers: []string{}}
 	rep.Target = targetReport{Store: p.store, Target: p.target, State: "unregistered"}
+	if p.store == "postgres" {
+		counts, err := d.pg.HostedManifestCutoverCounts(ctx)
+		if err != nil {
+			return rep, err
+		}
+		rep.HostedManifestCutover = &counts
+	}
 	row, err := d.pg.Generation(ctx, p.generation)
 	if err != nil {
 		return rep, err

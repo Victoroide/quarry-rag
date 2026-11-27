@@ -11,6 +11,7 @@ import (
 	"time"
 
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type controlReport struct {
@@ -23,6 +24,26 @@ type controlReport struct {
 	Quiesce          *pgstore.Quiesce `json:"quiesce,omitempty"`
 	Ready            *bool            `json:"ready,omitempty"`
 	Reasons          []string         `json:"reasons,omitempty"`
+
+	HostedManifestCutover *pgstore.HostedManifestCutoverCounts `json:"hosted_manifest_cutover,omitempty"`
+}
+
+var errActivationNotReady = errors.New("the generation is not ready for activation")
+
+func (d deps) reportHostedManifestCutover(ctx context.Context, rep *controlReport) (bool, error) {
+	counts, err := d.pg.HostedManifestCutoverCounts(ctx)
+	if err != nil {
+		rep.HostedManifestCutover = nil
+		return false, err
+	}
+	rep.HostedManifestCutover = &counts
+	if counts == (pgstore.HostedManifestCutoverCounts{}) {
+		return false, nil
+	}
+	rep.Reasons = append(rep.Reasons, fmt.Sprintf(
+		"drain hosted work on the original source before activation (writing: %d, active: %d, retired: %d, cleanups: %d)",
+		counts.Writing, counts.Active, counts.Retired, counts.Cleanups))
+	return true, nil
 }
 
 func (d deps) state(ctx context.Context, rep *controlReport) error {
@@ -139,6 +160,23 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 	if row == nil {
 		return fmt.Errorf("generation %q is not registered", opts.Generation)
 	}
+	if row.Store == "postgres" {
+		blocked, countErr := d.reportHostedManifestCutover(ctx, &rep)
+		if countErr != nil {
+			return countErr
+		}
+		if blocked {
+			if stateErr := d.state(ctx, &rep); stateErr != nil {
+				return stateErr
+			}
+			ready := false
+			rep.Ready = &ready
+			if encodeErr := json.NewEncoder(out).Encode(rep); encodeErr != nil {
+				return encodeErr
+			}
+			return errActivationNotReady
+		}
+	}
 	digest, err := corpusDigest(ctx, d.pg, opts)
 	if err != nil {
 		return err
@@ -175,6 +213,14 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 			defer closeTarget()
 		}
 		if err = fence.Activate(ctx, digest, opts.Quiesce); err != nil {
+			var pgErr *pgconn.PgError
+			if row.Store == "postgres" && errors.As(err, &pgErr) && pgErr.Code == "55000" &&
+				pgErr.ConstraintName == "hosted_manifest_cutover_guard" {
+				ready = false
+				if blocked, _ := d.reportHostedManifestCutover(ctx, &rep); !blocked {
+					rep.Reasons = append(rep.Reasons, "hosted manifest work blocked activation; check the original source before retrying")
+				}
+			}
 			_ = json.NewEncoder(out).Encode(rep)
 			return err
 		}
@@ -185,8 +231,8 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 	if encodeErr := json.NewEncoder(out).Encode(rep); encodeErr != nil {
 		return encodeErr
 	}
-	if opts.Apply || ready {
+	if rep.Applied || ready {
 		return nil
 	}
-	return errors.New("the generation is not ready for activation")
+	return errActivationNotReady
 }

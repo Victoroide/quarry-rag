@@ -12,7 +12,10 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
+	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -395,6 +398,452 @@ func TestFreezeActivateAndThawLifecycle(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, replica.Close(context.Background())) })
 	require.NoError(t, replica.PinVectorGeneration(t.Context(), "g2", "pinecone", "quarry-g2", "quarry-g2-host", testProfile(sourceModel)))
 	require.NoError(t, replica.WritersOpen(t.Context()))
+}
+
+const insertCutoverManifest = `INSERT INTO hosted_vector_manifests
+	(revision_id, document_id, incarnation, attempt, id_prefix, vector_ids, chunk_ids, state)
+	VALUES ($1, $2, $2, 1, 'cutover', '{}', '{}', $3)`
+
+func TestReindexActivateReportsHostedManifestWork(t *testing.T) {
+	f := &fixture{pg: vectorDB(t)}
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	ctx := t.Context()
+	opts := defaultOptions()
+	opts.Generation, opts.Activate, opts.Quiesce = "g2", true, 0
+	registerGeneration(t, f.pg, opts.Generation, "postgres", pgstore.VectorTable(opts.Generation), sourceModel)
+	require.NoError(t, f.pg.FreezeWriters(ctx, opts.Generation))
+	digest, err := corpusDigest(ctx, f.pg, opts)
+	require.NoError(t, err)
+	verify := func() {
+		require.NoError(t, f.pg.RecordVerification(ctx, opts.Generation, digest, json.RawMessage(`{"passed":true}`)))
+	}
+	verify()
+	profile := h.profileFile("pg.json", testProfile(sourceModel))
+	inventory := options{Generation: opts.Generation, Profile: profile, TargetStore: "postgres"}
+	requireCounts := func(rep map[string]any, writing, active, retired, cleanups float64) {
+		t.Helper()
+		require.Equal(t, map[string]any{"writing": writing, "active": active, "retired": retired, "cleanups": cleanups}, rep["hosted_manifest_cutover"])
+	}
+	seed := func(state string) string {
+		t.Helper()
+		rev := uuid.NewString()
+		_, insertErr := f.pg.Pool.Exec(ctx, insertCutoverManifest, rev, uuid.NewString(), state)
+		require.NoError(t, insertErr)
+		return rev
+	}
+	writing, active, retired := seed("writing"), seed("active"), seed("retired")
+	_, err = f.pg.Pool.Exec(ctx, `INSERT INTO hosted_vector_cleanups
+		(revision_id, document_id, incarnation, id_prefix, vector_ids)
+		SELECT revision_id, document_id, incarnation, id_prefix, vector_ids
+		FROM hosted_vector_manifests WHERE revision_id=$1`, retired)
+	require.NoError(t, err)
+	providerOpens := h.stores.opened
+	rep, err := h.run(inventory)
+	require.NoError(t, err)
+	require.Equal(t, providerOpens, h.stores.opened, "inventory needs no provider")
+	requireCounts(rep, 1, 1, 1, 1)
+	require.Empty(t, rep["blockers"], "unattached manifest counts are advisory during staging")
+	for _, apply := range []bool{false, true} {
+		opts.Apply = apply
+		providerOpens = h.stores.opened
+		rep, err = h.run(opts)
+		require.ErrorContains(t, err, "not ready")
+		require.Equal(t, providerOpens, h.stores.opened, "blocked activation needs no provider")
+		requireCounts(rep, 1, 1, 1, 1)
+		require.Equal(t, false, rep["ready"])
+		require.Equal(t, false, rep["applied"])
+		require.Equal(t, true, rep["frozen"])
+		require.Equal(t, "legacy", rep["active_generation"])
+		require.Equal(t, []any{"drain hosted work on the original source before activation (writing: 1, active: 1, retired: 1, cleanups: 1)"}, rep["reasons"])
+	}
+	_, err = f.pg.Pool.Exec(ctx, `DELETE FROM hosted_vector_cleanups WHERE revision_id=$1`, retired)
+	require.NoError(t, err)
+	_, err = f.pg.Pool.Exec(ctx, `DELETE FROM hosted_vector_manifests WHERE revision_id=ANY($1::uuid[])`, []string{writing, active, retired})
+	require.NoError(t, err)
+
+	// The journal is invisible to the advisory query while its transaction holds
+	// SHARE. Observe the attempted switch waiting before publishing the journal.
+	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	holder, err := f.pg.Pool.Begin(waitCtx)
+	require.NoError(t, err)
+	defer func() { _ = holder.Rollback(ctx) }()
+	pid := holder.Conn().PgConn().PID()
+	late := uuid.NewString()
+	_, err = holder.Exec(waitCtx, insertCutoverManifest, late, uuid.NewString(), "writing")
+	require.NoError(t, err)
+	opts.Apply = true
+	providerOpens = h.stores.opened
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		done <- execute(waitCtx, h.deps, opts, &out, time.Millisecond)
+	}()
+	defer func() {
+		cancel()
+		for range done {
+		}
+	}()
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		var blocked bool
+		require.NoError(collect, f.pg.Pool.QueryRow(waitCtx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))`, pid).Scan(&blocked))
+		require.True(collect, blocked)
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, holder.Commit(waitCtx))
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, <-done, &pgErr)
+	require.Equal(t, "hosted_manifest_cutover_guard", pgErr.ConstraintName)
+	require.Equal(t, providerOpens, h.stores.opened, "raced activation needs no provider")
+	rep = nil
+	require.NoError(t, json.Unmarshal(out.Bytes(), &rep))
+	requireCounts(rep, 1, 0, 0, 0)
+	require.Equal(t, false, rep["applied"])
+	require.Equal(t, false, rep["ready"])
+
+	_, err = h.run(options{Thaw: true, Apply: true})
+	require.NoError(t, err)
+	_, err = f.pg.Pool.Exec(ctx, `DELETE FROM hosted_vector_manifests WHERE revision_id=$1`, late)
+	require.NoError(t, err)
+	require.NoError(t, f.pg.FreezeWriters(ctx, opts.Generation))
+	providerOpens = h.stores.opened
+	_, err = h.run(opts)
+	require.ErrorContains(t, err, "must be verified")
+	require.Equal(t, providerOpens, h.stores.opened, "unverified activation needs no provider")
+	verify()
+	providerOpens = h.stores.opened
+	rep, err = h.run(opts)
+	require.NoError(t, err)
+	requireCounts(rep, 0, 0, 0, 0)
+	require.Equal(t, true, rep["applied"])
+	require.Equal(t, providerOpens, h.stores.opened, "PostgreSQL activation needs neither source nor target provider")
+}
+
+func TestReindexActivateReportsHostedManifestWorkBeyondCorpusLimit(t *testing.T) {
+	bare := newDoc("", "note", "A completed bare document.")
+	tagged := newTaggedDoc("alpha", "report", "A completed tagged document.")
+	f := newTaggedFixture(t, bare, tagged)
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	ctx := t.Context()
+	opts := defaultOptions()
+	opts.Generation, opts.Activate, opts.Quiesce = "g2", true, 0
+	registerGeneration(t, f.pg, opts.Generation, "postgres", pgstore.VectorTable(opts.Generation), sourceModel)
+	require.NoError(t, f.pg.FreezeWriters(ctx, opts.Generation))
+	digest, err := corpusDigest(ctx, f.pg, opts)
+	require.NoError(t, err)
+	require.NoError(t, f.pg.RecordVerification(ctx, opts.Generation, digest, json.RawMessage(`{"passed":true}`)))
+
+	revision := uuid.NewString()
+	_, err = f.pg.Pool.Exec(ctx, insertCutoverManifest, revision, uuid.NewString(), "writing")
+	require.NoError(t, err)
+	opts.MaxDocuments = 1
+	for _, apply := range []bool{false, true} {
+		opts.Apply = apply
+		providerOpens := h.stores.opened
+		rep, runErr := h.run(opts)
+		require.ErrorContains(t, runErr, "not ready")
+		require.Equal(t, providerOpens, h.stores.opened)
+		require.Equal(t, map[string]any{"writing": float64(1), "active": float64(0), "retired": float64(0), "cleanups": float64(0)}, rep["hosted_manifest_cutover"])
+		require.Equal(t, []any{"drain hosted work on the original source before activation (writing: 1, active: 0, retired: 0, cleanups: 0)"}, rep["reasons"])
+		require.Equal(t, false, rep["ready"])
+		require.Equal(t, false, rep["applied"])
+		require.Equal(t, pgstore.LegacyGeneration, rep["active_generation"])
+		require.Equal(t, true, rep["frozen"])
+		require.Equal(t, opts.Generation, rep["freeze_generation"])
+	}
+
+	_, err = f.pg.Pool.Exec(ctx, `DELETE FROM hosted_vector_manifests WHERE revision_id=$1`, revision)
+	require.NoError(t, err)
+	for _, apply := range []bool{false, true} {
+		opts.Apply = apply
+		providerOpens := h.stores.opened
+		rep, runErr := h.run(opts)
+		require.ErrorContains(t, runErr, "activation exceeds -max-documents")
+		require.Nil(t, rep)
+		require.Equal(t, providerOpens, h.stores.opened)
+	}
+	state, err := f.pg.VectorState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, pgstore.LegacyGeneration, state.Active)
+	require.True(t, state.Frozen)
+	require.Equal(t, opts.Generation, state.FreezeGeneration)
+}
+
+func TestHostedManifestCutoverMissingMigration(t *testing.T) {
+	f := &fixture{pg: vectorDB(t)}
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	ctx := t.Context()
+	const destination = "g2"
+	registerGeneration(t, f.pg, destination, "postgres", pgstore.VectorTable(destination), sourceModel)
+	_, err := f.pg.Pool.Exec(ctx, insertCutoverManifest, uuid.NewString(), uuid.NewString(), "writing")
+	require.NoError(t, err)
+	_, err = f.pg.Pool.Exec(ctx, `DROP FUNCTION hosted_manifest_cutover_counts()`)
+	require.NoError(t, err)
+	profile := h.profileFile("pg.json", testProfile(sourceModel))
+	for _, opts := range []options{
+		{Generation: destination, Profile: profile, TargetStore: "postgres"},
+		{Generation: destination, Activate: true},
+		{Generation: destination, Activate: true, Apply: true},
+	} {
+		providerOpens := h.stores.opened
+		rep, runErr := h.run(opts)
+		require.ErrorContains(t, runErr, "apply migration 047")
+		require.Nil(t, rep)
+		require.Equal(t, providerOpens, h.stores.opened, "a missing migration needs no provider")
+	}
+	providerOpens := h.stores.opened
+	rep, err := h.run(options{Generation: "hosted", Profile: profile, TargetStore: "pinecone", TargetIndex: "new-index"})
+	require.NoError(t, err)
+	require.NotContains(t, rep, "hosted_manifest_cutover")
+	require.Equal(t, providerOpens, h.stores.opened, "inventory works with an offline Pinecone source")
+	registerGeneration(t, f.pg, "hosted", "pinecone", "new-index", sourceModel)
+	require.NoError(t, f.pg.FreezeWriters(ctx, "hosted"))
+	digest, err := corpusDigest(ctx, f.pg, defaultOptions())
+	require.NoError(t, err)
+	require.NoError(t, f.pg.RecordVerification(ctx, "hosted", digest, json.RawMessage(`{"passed":true}`)))
+	providerOpens = h.stores.opened
+	rep, err = h.run(options{Generation: "hosted", Activate: true, Apply: true})
+	require.NoError(t, err)
+	require.Equal(t, true, rep["applied"])
+	require.NotContains(t, rep, "hosted_manifest_cutover")
+	require.Equal(t, providerOpens+1, h.stores.opened, "Pinecone activation checks target connectivity")
+}
+
+type cutoverCleanupProvider struct {
+	domain.VectorPresenceChecker
+	delete func(context.Context, string, []string) error
+}
+
+func (p cutoverCleanupProvider) DeleteVectorIDs(ctx context.Context, namespace string, ids []string) error {
+	return p.delete(ctx, namespace, ids)
+}
+
+func TestCutoverAfterHostedManifestDrain(t *testing.T) {
+	bare := newDoc("", "note", "A safe bare document stays in the corpus.")
+	tagged := newTaggedDoc("alpha", "report", "A safe tagged document stays in the corpus.")
+	f := newTaggedFixture(t, tagged, bare)
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	ctx := t.Context()
+	pg := f.pg
+	pg.EnableHostedVectorManifests(true)
+	source := pcstore.NewClientForIndex(h.stores.index("quarry"), testConfig(), "quarry-host")
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		_, err := pg.Pool.Exec(ctx, sql, args...)
+		require.NoError(t, err)
+	}
+	seed := func(namespace string) (domain.Job, string, []domain.Chunk) {
+		t.Helper()
+		doc := domain.DocumentID(uuid.NewString())
+		res, err := pg.AcceptDocument(ctx, domain.AcceptRequest{
+			Document: domain.Document{ID: doc, Content: "interrupted hosted ingestion"}, Fingerprint: string(doc), MaxPending: 10,
+		})
+		require.NoError(t, err)
+		require.Equal(t, domain.AcceptAccepted, res.Outcome)
+		job, err := pg.ClaimJob(ctx, "source-worker", time.Minute, 3)
+		require.NoError(t, err)
+		require.NotNil(t, job)
+		require.Equal(t, doc, job.Document.ID)
+		rev := uuid.NewString()
+		m := domain.VectorManifest{RevisionID: rev, Incarnation: job.Incarnation, Attempt: job.Attempts,
+			LeaseToken: job.LeaseToken, VectorNamespace: namespace, IDPrefix: domain.RevisionVectorPrefix(doc, rev)}
+		var chunks []domain.Chunk
+		for i, content := range []string{"first interrupted chunk", "second interrupted chunk"} {
+			id, key := hexChunkID(string(doc), i), domain.FormatRevisionVectorID(doc, rev, i)
+			m.ChunkIDs, m.VectorIDs = append(m.ChunkIDs, id), append(m.VectorIDs, key)
+			chunks = append(chunks, domain.Chunk{ID: domain.ChunkID(id), DocumentID: doc, Index: i, Text: content,
+				RevisionID: rev, VectorID: key, VectorIncarnation: job.Incarnation, Embedding: embedWith(sourceModel, content)})
+		}
+		require.NoError(t, pg.PersistVectorManifest(ctx, *job, m))
+		require.NoError(t, source.Upsert(ctx, namespace, chunks))
+		return *job, rev, chunks
+	}
+	const namespace = "retired-namespace"
+	failedJob, retired, retiredChunks := seed(namespace)
+	require.NoError(t, pg.FailJob(ctx, failedJob, "interrupted"))
+	abandoned, writing, writingChunks := seed("")
+	exec(`UPDATE ingest_jobs SET lease_until=NOW()-interval '1 second' WHERE document_id=$1`, abandoned.Document.ID)
+
+	checkCounts := func(writing, retired int64) {
+		t.Helper()
+		counts, err := pg.HostedManifestCutoverCounts(ctx)
+		require.NoError(t, err)
+		require.Equal(t, pgstore.HostedManifestCutoverCounts{Writing: writing, Retired: retired, Cleanups: retired}, counts)
+	}
+	checkCounts(1, 1)
+	stage := options{Generation: "g2", Profile: h.profileFile("pg.json", testProfile(sourceModel)), TargetStore: "postgres", Apply: true}
+	_, err := h.run(stage)
+	require.NoError(t, err, "writing and retired work do not block stage")
+	freeze := options{Generation: "g2", Freeze: true, Apply: true}
+	_, err = h.run(freeze)
+	require.NoError(t, err)
+	verify := verifyOptions("g2")
+	verify.SampleSize = f.completedChunks()
+	verify.Apply = true
+	require.Positive(t, verify.SampleSize)
+	verifyCorpus := func() {
+		t.Helper()
+		report, verifyErr := h.run(verify)
+		require.NoError(t, verifyErr, "%v", report["failures"])
+		require.Equal(t, true, report["passed"])
+		require.Equal(t, true, report["recorded"])
+		sample := report["sample"].(map[string]any)
+		require.EqualValues(t, verify.SampleSize, sample["queries"])
+		require.EqualValues(t, 1, sample["self_hit_rate"])
+	}
+	verifyCorpus()
+	activate := options{Generation: "g2", Activate: true, Apply: true}
+	providerOpens := h.stores.opened
+	rep, err := h.run(activate)
+	require.ErrorContains(t, err, "not ready")
+	require.Equal(t, providerOpens, h.stores.opened)
+	require.Equal(t, false, rep["applied"])
+	require.Equal(t, true, rep["frozen"])
+	_, err = h.run(options{Thaw: true, Apply: true})
+	require.NoError(t, err)
+
+	exec(`UPDATE document_deletion_activation SET activated_at=clock_timestamp()`)
+	releaseWriter, err := pg.AcquireWriter(ctx)
+	require.NoError(t, err)
+	defer func() {
+		if releaseWriter != nil {
+			releaseWriter()
+		}
+	}()
+	liveTarget := targetSpec{Store: "pinecone", Target: "quarry", Generation: "legacy", Dimensions: testDims}
+	_, _, _, err = h.deps.openBound(ctx, liveTarget, "different-host")
+	require.ErrorIs(t, err, pgstore.ErrGenerationDrift)
+	outage := errors.New("original provider unavailable")
+	deleteCalls := 0
+	ops := domain.DeleteOperations{
+		ExpectedIncarnation: abandoned.Incarnation, VectorIndex: "quarry",
+		ManifestVectors: func(context.Context, string, string, []string) error {
+			deleteCalls++
+			return outage
+		},
+	}
+	require.ErrorIs(t, pg.DeleteWithCleanup(ctx, abandoned.Document.ID, ops), outage)
+	wrongIndex := ops
+	wrongIndex.VectorIndex = "different-index"
+	require.ErrorIs(t, pg.DeleteWithCleanup(ctx, abandoned.Document.ID, wrongIndex), domain.ErrDeletionTargetMismatch)
+	require.Equal(t, 1, deleteCalls)
+	checkCounts(1, 1)
+	ops.ManifestVectors = source.DeleteByManifestRevision
+	require.NoError(t, pg.DeleteWithCleanup(ctx, abandoned.Document.ID, ops))
+	checkCounts(0, 2)
+	exec(`UPDATE hosted_vector_cleanups SET next_attempt_at=NOW()+interval '1 hour' WHERE revision_id=$1`, writing)
+
+	sweep := func(sweepCtx context.Context, budget int, deleteIDs func(context.Context, string, []string) error) (worker.SweepReport, error) {
+		t.Helper()
+		p := cutoverCleanupProvider{VectorPresenceChecker: source, delete: deleteIDs}
+		return worker.NewSweeper(pg, p, worker.SweepOptions{
+			Owner: "source-sweeper", PageSize: 1, Budget: budget, ConvergenceDelay: time.Hour, RetryBaseDelay: time.Hour, RetryMaxDelay: time.Hour,
+		}).SweepOnce(sweepCtx)
+	}
+	makeReady := func(rev string) {
+		t.Helper()
+		exec(`UPDATE hosted_vector_cleanups SET next_attempt_at=NOW() WHERE revision_id=$1`, rev)
+	}
+	leased, err := pg.ClaimVectorCleanup(ctx, "old-sweeper", time.Minute, 0)
+	require.NoError(t, err)
+	require.NotNil(t, leased)
+	require.Equal(t, retired, leased.RevisionID)
+	swept, err := sweep(ctx, 10, source.DeleteVectorIDs)
+	require.NoError(t, err)
+	require.Zero(t, swept.TasksClaimed)
+	checkCounts(0, 2)
+	exec(`UPDATE hosted_vector_cleanups SET lease_until=NOW()-interval '1 second' WHERE revision_id=$1`, retired)
+
+	for _, providerErr := range []error{outage, errors.New("provider reports a namespace mismatch")} {
+		swept, err = sweep(ctx, 10, func(_ context.Context, gotNamespace string, ids []string) error {
+			require.Equal(t, namespace, gotNamespace)
+			require.Equal(t, []string{retiredChunks[0].VectorID}, ids)
+			return providerErr
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, swept.TasksDeferred)
+		require.Equal(t, providerErr.Error(), swept.LastError)
+		checkCounts(0, 2)
+		noRetry, retryErr := sweep(ctx, 10, source.DeleteVectorIDs)
+		require.NoError(t, retryErr)
+		require.Zero(t, noRetry.TasksClaimed, "existing backoff remains in force")
+		makeReady(retired)
+	}
+	sweepCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	_, err = sweep(sweepCtx, 10, func(callCtx context.Context, _ string, _ []string) error {
+		cancel()
+		return callCtx.Err()
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	checkCounts(0, 2)
+	swept, err = sweep(ctx, 1, source.DeleteVectorIDs)
+	require.NoError(t, err)
+	require.Equal(t, 1, swept.VectorsDeleted)
+	require.Zero(t, swept.TasksCompleted)
+	checkCounts(0, 2)
+	swept, err = sweep(ctx, 10, func(callCtx context.Context, gotNamespace string, ids []string) error {
+		require.Equal(t, namespace, gotNamespace)
+		require.Equal(t, []string{retiredChunks[1].VectorID}, ids)
+		if deleteErr := source.DeleteVectorIDs(callCtx, gotNamespace, ids); deleteErr != nil {
+			return deleteErr
+		}
+		return source.Upsert(callCtx, namespace, retiredChunks[:1]) // An old write arrives late.
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, swept.TasksDeferred)
+	checkCounts(0, 2)
+	makeReady(retired)
+	swept, err = sweep(ctx, 10, source.DeleteVectorIDs)
+	require.NoError(t, err)
+	require.Equal(t, 1, swept.TasksUnresolved)
+	checkCounts(0, 2)
+	makeReady(retired)
+	makeReady(writing)
+	swept, err = sweep(ctx, 10, source.DeleteVectorIDs)
+	require.NoError(t, err)
+	require.Equal(t, 2, swept.TasksDeferred)
+	makeReady(retired)
+	makeReady(writing)
+	swept, err = sweep(ctx, 10, source.DeleteVectorIDs)
+	require.NoError(t, err)
+	require.Equal(t, 2, swept.TasksCompleted)
+	checkCounts(0, 0)
+	for ns, chunks := range map[string][]domain.Chunk{"": writingChunks, namespace: retiredChunks} {
+		residue, fetchErr := source.FetchPresentVectorIDs(ctx, ns, []string{chunks[0].VectorID, chunks[1].VectorID})
+		require.NoError(t, fetchErr)
+		require.Empty(t, residue)
+	}
+	require.Len(t, h.stores.indexes, 1, "all hosted mutations used the original source")
+	releaseWriter()
+	releaseWriter = nil
+
+	_, err = h.run(freeze)
+	require.NoError(t, err)
+	_, err = h.run(stage)
+	require.NoError(t, err)
+	verifyCorpus()
+	providerOpens = h.stores.opened
+	rep, err = h.run(activate)
+	require.NoError(t, err)
+	require.Equal(t, true, rep["applied"])
+	require.Equal(t, "g2", rep["active_generation"])
+	require.Equal(t, providerOpens, h.stores.opened)
+
+	target, err := pgstore.OpenGenerationVectorStore(ctx, pg, testDims, activate.Generation)
+	require.NoError(t, err)
+	for _, doc := range []docSpec{bare, tagged} {
+		hits, queryErr := target.QueryFiltered(ctx, embedWith(sourceModel, doc.Texts[0]), 1,
+			domain.VectorFilter{DocumentIDs: []string{doc.ID}, Collection: doc.Collection, DocType: doc.DocType})
+		require.NoError(t, queryErr)
+		require.Len(t, hits, 1)
+		require.Equal(t, f.chunks[doc.ID][0].ID, hits[0].Chunk.ID)
+	}
 }
 
 func TestFreezeWaitsForRunningJobsAndTimesOut(t *testing.T) {
