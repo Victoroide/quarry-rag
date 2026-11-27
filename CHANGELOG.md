@@ -25,6 +25,7 @@ Notable changes are grouped by release.
 
 ### Fixed
 
+- PostgreSQL vector generation opening rejects missing, invalid, or unenforced layout provenance checks before accepting a target.
 - Unscoped ingestion with hosted vector manifests can recover from an uncertain legacy vector upsert.
 - Grants-mode document listings and status avoid retries for unrelated policy changes. A stream ends before releasing another batch when the caller's policy changes.
 - Release an exact legacy Pinecone hold through the cleanup command without contacting Pinecone.

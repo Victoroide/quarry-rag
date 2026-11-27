@@ -14,7 +14,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
 )
 
 const oldLayoutVectorDDL = `CREATE TABLE %s (
@@ -769,4 +771,308 @@ func TestPostgresLayoutWriterCutoverAndLateGenerationRecovery(t *testing.T) {
 	retained, err := legacy.Fetch(ctx, []string{string(chunk.ID)})
 	require.NoError(t, err)
 	requireLayoutMetadata(t, chunk, retained[string(chunk.ID)])
+}
+
+func publishedLayoutDDL(t *testing.T, generation string) string {
+	t.Helper()
+	return strings.NewReplacer("<generation>", generation, "<dimensions>", "3").
+		Replace(publishedSQL(t, "deployment.md", "CREATE TABLE public.chunk_vectors_<generation>"))
+}
+
+func TestVectorOpenValidatesLayoutConstraints(t *testing.T) {
+	c := preLayoutVectorDatabase(t)
+	grantExec(t, c, fmt.Sprintf(oldLayoutVectorDDL, "chunk_vectors", "documents"))
+	doc := completedDocument(t, c)
+	const historical = "legacy-layout-check"
+	grantExec(t, c, `INSERT INTO chunk_vectors(chunk_id,document_id,chunk_index,doc_type,text,token_count,embedding)
+		VALUES($1,$2,0,'report','body',1,'[1,0,0]')`, historical, string(doc))
+	require.NoError(t, c.RunMigrations(t.Context()))
+
+	grantExec(t, c, publishedLayoutDDL(t, "canonical"))
+	grantExec(t, c, "CREATE SCHEMA layout_custom")
+	qualifiedDDL := strings.NewReplacer(
+		"public.chunk_vectors_qualified", "layout_custom.chunk_vectors_qualified",
+		"cardinality(", "pg_catalog.cardinality ( ",
+		"array_ndims(", `"pg_catalog"."array_ndims" ( `,
+		"array_lower(", "pg_catalog.array_lower ( ",
+		" = ", " OPERATOR(pg_catalog.=) ",
+	).Replace(publishedLayoutDDL(t, "qualified"))
+	grantExec(t, c, qualifiedDDL)
+
+	dsn := c.Pool.Config().ConnString()
+	roles := newGrantRoles(t, dsn, "quarry_layout_reader")
+	role := pgx.Identifier{roles.name("quarry_layout_reader")}.Sanitize()
+	grantExec(t, c, "CREATE ROLE "+role)
+	grantExec(t, c, "GRANT USAGE ON SCHEMA public, layout_custom TO "+role)
+	grantExec(t, c, "GRANT SELECT ON chunk_vectors, chunk_vectors_canonical, layout_custom.chunk_vectors_qualified TO "+role)
+	reader := grantRoleClient(t, dsn, "SET SESSION AUTHORIZATION "+role)
+	custom := grantRoleClient(t, dsn, "SET SESSION AUTHORIZATION "+role+
+		"; SET search_path = layout_custom, public, pg_catalog; SET quote_all_identifiers = on")
+	for _, target := range []struct {
+		client            *Client
+		generation, table string
+	}{
+		{reader, LegacyGeneration, "chunk_vectors"},
+		{reader, "canonical", "chunk_vectors_canonical"},
+		{custom, "qualified", "layout_custom.chunk_vectors_qualified"},
+	} {
+		v, err := OpenGenerationVectorStore(t.Context(), target.client, 3, target.generation)
+		require.NoError(t, err)
+		if target.generation == LegacyGeneration {
+			found, fetchErr := v.Fetch(t.Context(), []string{historical})
+			require.NoError(t, fetchErr)
+			require.Contains(t, found, historical)
+			requireLayoutMetadata(t, domain.Chunk{}, found[historical])
+		}
+		requireVectorLayoutInsertBounds(t, c, target.table, string(doc))
+	}
+	t.Run("column and constraint drift", func(t *testing.T) {
+		const table = "chunk_vectors_drift"
+		for _, col := range []string{"pages", "table_ids", "row_ids"} {
+			t.Run("missing column "+col, func(t *testing.T) {
+				grantExec(t, c, "CREATE TABLE "+table+" (LIKE chunk_vectors_canonical INCLUDING CONSTRAINTS)")
+				defer grantExec(t, c, "DROP TABLE "+table)
+				grantExec(t, c, "ALTER TABLE "+table+" DROP COLUMN "+col)
+				_, err := OpenGenerationVectorStore(t.Context(), reader, 3, "drift")
+				require.ErrorContains(t, err, `missing layout column "`+col+`"`)
+			})
+			t.Run("missing check "+col, func(t *testing.T) {
+				grantExec(t, c, "CREATE TABLE "+table+" (LIKE chunk_vectors_canonical INCLUDING CONSTRAINTS)")
+				defer grantExec(t, c, "DROP TABLE "+table)
+				name := "quarry_layout_" + col + "_check"
+				grantExec(t, c, "ALTER TABLE "+table+" DROP CONSTRAINT "+name)
+				requireLayoutCheckRejected(t, reader, "drift", name)
+			})
+		}
+		for _, tc := range []struct{ name, ddl string }{
+			{"nullable", "ALTER COLUMN pages SET NOT NULL"},
+			{"no default", "ALTER COLUMN pages SET DEFAULT ARRAY[1]"},
+			{"array type", "DROP CONSTRAINT quarry_layout_pages_check, ALTER COLUMN pages TYPE bigint[]"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				grantExec(t, c, "CREATE TABLE "+table+" (LIKE chunk_vectors_canonical INCLUDING CONSTRAINTS)")
+				defer grantExec(t, c, "DROP TABLE "+table)
+				grantExec(t, c, "ALTER TABLE "+table+" "+tc.ddl)
+				_, err := OpenGenerationVectorStore(t.Context(), reader, 3, "drift")
+				require.ErrorContains(t, err, `incompatible layout column "pages"`)
+			})
+		}
+		for _, tc := range []struct{ name, check, clause string }{
+			{"unvalidated", canonicalPagesDeparse, " NOT VALID"},
+			{"weaker", "pages IS NULL OR cardinality(pages) <= 1000", ""},
+			{"stronger", canonicalPagesDeparse + " AND pages <> ARRAY[1]", ""},
+			{"wrong column", "row_ids IS NULL", ""},
+			{"wrong operator", strings.Replace(canonicalPagesDeparse, ">= 1", "> 1", 1), ""},
+			{"wrong limit", strings.Replace(canonicalPagesDeparse, "1000", "1001", 1), ""},
+			{"wrong grouping", strings.Replace(canonicalPagesDeparse, "pages IS NULL OR cardinality(pages) >= 1", "(pages IS NULL OR cardinality(pages) >= 1)", 1), ""},
+			{"no inherit", canonicalPagesDeparse, " NO INHERIT"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				grantExec(t, c, "CREATE TABLE "+table+" (LIKE chunk_vectors_canonical INCLUDING CONSTRAINTS)")
+				defer grantExec(t, c, "DROP TABLE "+table)
+				grantExec(t, c, "ALTER TABLE "+table+" DROP CONSTRAINT quarry_layout_pages_check")
+				if tc.clause == " NOT VALID" {
+					grantExec(t, c, `INSERT INTO chunk_vectors_drift(chunk_id,document_id,chunk_index,doc_type,collection,text,token_count,embedding,pages)
+						VALUES('invalid',$1,0,'report','','body',1,'[1,0,0]','{{1,2},{3,4}}')`, string(doc))
+				}
+				grantExec(t, c, "ALTER TABLE "+table+" ADD CONSTRAINT quarry_layout_pages_check CHECK ("+tc.check+")"+tc.clause)
+				requireLayoutCheckRejected(t, reader, "drift", "quarry_layout_pages_check")
+			})
+		}
+		t.Run("wrong constraint type and stable diagnosis", func(t *testing.T) {
+			grantExec(t, c, "CREATE TABLE "+table+" (LIKE chunk_vectors_canonical INCLUDING CONSTRAINTS)")
+			defer grantExec(t, c, "DROP TABLE "+table)
+			grantExec(t, c, "ALTER TABLE "+table+" DROP CONSTRAINT quarry_layout_pages_check, "+
+				"ADD CONSTRAINT quarry_layout_pages_check UNIQUE (pages), DROP CONSTRAINT quarry_layout_table_ids_check")
+			requireLayoutCheckRejected(t, reader, "drift", "quarry_layout_pages_check")
+		})
+	})
+	t.Run("wrong schema", func(t *testing.T) {
+		grantExec(t, c, "CREATE TABLE public.chunk_vectors_wrong (LIKE chunk_vectors_canonical INCLUDING CONSTRAINTS)")
+		_, err := OpenGenerationVectorStore(t.Context(), custom, 3, "wrong")
+		require.ErrorContains(t, err, `vector table "chunk_vectors_wrong" does not exist`)
+		grantExec(t, c, "CREATE TABLE layout_custom.chunk_vectors_wrong (LIKE chunk_vectors_canonical INCLUDING CONSTRAINTS)")
+		grantExec(t, c, "ALTER TABLE layout_custom.chunk_vectors_wrong DROP CONSTRAINT quarry_layout_pages_check")
+		requireLayoutCheckRejected(t, custom, "wrong", "quarry_layout_pages_check")
+	})
+	t.Run("non-standalone table", func(t *testing.T) {
+		grantExec(t, c, "CREATE TABLE chunk_vectors_child () INHERITS (chunk_vectors_canonical)")
+		requireLayoutCheckRejected(t, reader, "canonical", "quarry_layout_pages_check")
+		requireLayoutCheckRejected(t, reader, "child", "quarry_layout_pages_check")
+		grantExec(t, c, "CREATE TABLE chunk_vectors_partitioned (LIKE chunk_vectors_canonical INCLUDING CONSTRAINTS) PARTITION BY RANGE (chunk_index)")
+		grantExec(t, c, "CREATE TABLE chunk_vectors_part PARTITION OF chunk_vectors_partitioned FOR VALUES FROM (0) TO (10)")
+		requireLayoutCheckRejected(t, reader, "partitioned", "quarry_layout_pages_check")
+		requireLayoutCheckRejected(t, reader, "part", "quarry_layout_pages_check")
+	})
+	t.Run("shadowed functions and operators", func(t *testing.T) {
+		grantExec(t, c, `CREATE FUNCTION layout_custom.cardinality(integer[]) RETURNS integer
+			LANGUAGE sql IMMUTABLE AS 'SELECT 1';
+			CREATE FUNCTION layout_custom.always_true(integer, integer) RETURNS boolean
+			LANGUAGE sql IMMUTABLE AS 'SELECT true';
+			CREATE OPERATOR layout_custom.>= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = layout_custom.always_true)`)
+		plainCustom := grantRoleClient(t, dsn, "SET SESSION AUTHORIZATION "+role+
+			"; SET search_path = layout_custom, public, pg_catalog")
+		_, err := OpenGenerationVectorStore(t.Context(), plainCustom, 3, "qualified")
+		require.NoError(t, err, "genuine builtins can deparse with pg_catalog qualification")
+		const prefix = "ALTER TABLE layout_custom.chunk_vectors_shadow"
+		grantExec(t, c, "CREATE TABLE layout_custom.chunk_vectors_shadow (LIKE layout_custom.chunk_vectors_qualified INCLUDING CONSTRAINTS)")
+		for _, check := range []string{
+			strings.ReplaceAll(canonicalPagesDeparse, ">=", "OPERATOR(pg_catalog.>=)"),
+			strings.ReplaceAll(canonicalPagesDeparse, "cardinality(", "pg_catalog.cardinality("),
+		} {
+			grantExec(t, c, "BEGIN; SET LOCAL search_path = layout_custom, public, pg_catalog; "+
+				prefix+" DROP CONSTRAINT quarry_layout_pages_check, ADD CONSTRAINT quarry_layout_pages_check CHECK ("+check+"); COMMIT")
+			var observed string
+			require.NoError(t, plainCustom.Pool.QueryRow(t.Context(), `SELECT pg_catalog.pg_get_expr(conbin, conrelid, true)
+				FROM pg_catalog.pg_constraint WHERE conrelid='layout_custom.chunk_vectors_shadow'::regclass
+				AND conname='quarry_layout_pages_check'`).Scan(&observed))
+			require.True(t, vectorLayoutFields[0].matches(observed), observed)
+			requireLayoutCheckRejected(t, plainCustom, "shadow", "quarry_layout_pages_check")
+		}
+	})
+}
+
+func requireLayoutCheckRejected(t *testing.T, c *Client, generation, name string) {
+	t.Helper()
+	v, err := OpenGenerationVectorStore(t.Context(), c, 3, generation)
+	require.Nil(t, v)
+	require.ErrorContains(t, err, VectorTable(generation))
+	require.ErrorContains(t, err, name)
+	require.ErrorContains(t, err, "deployment guide")
+	require.NotContains(t, err.Error(), "cardinality(")
+}
+
+func requireVectorLayoutInsertBounds(t *testing.T, c *Client, table, doc string) {
+	t.Helper()
+	insert := "INSERT INTO " + table + "(chunk_id,document_id,chunk_index,doc_type,text,token_count,embedding,pages,table_ids,row_ids)" +
+		" VALUES($1,$2,0,'report','body',1,'[1,0,0]',%s,%s,%s)"
+	grantExec(t, c, fmt.Sprintf(insert, "NULL", "NULL", "NULL"), "null-layout", doc)
+	grantExec(t, c, fmt.Sprintf(insert,
+		fmt.Sprintf("array_fill(1, ARRAY[%d], ARRAY[1])", domain.MaxPDFPages),
+		fmt.Sprintf("array_fill('p1-t1'::text, ARRAY[%d], ARRAY[1])", domain.MaxLayoutProvenanceIDs),
+		fmt.Sprintf("array_fill('p1-t1-r1'::text, ARRAY[%d], ARRAY[1])", domain.MaxLayoutProvenanceIDs)),
+		"max-layout", doc)
+	for i, field := range []struct {
+		name, sqlType, element string
+		limit                  int
+	}{
+		{"pages", "integer", "1", domain.MaxPDFPages},
+		{"table_ids", "text", "'p1-t1'", domain.MaxLayoutProvenanceIDs},
+		{"row_ids", "text", "'p1-t1-r1'", domain.MaxLayoutProvenanceIDs},
+	} {
+		for _, invalid := range []string{
+			fmt.Sprintf("'{}'::%s[]", field.sqlType),
+			fmt.Sprintf("array_fill(%s::%s, ARRAY[2,2])", field.element, field.sqlType),
+			fmt.Sprintf("array_fill(%s::%s, ARRAY[1], ARRAY[0])", field.element, field.sqlType),
+			fmt.Sprintf("array_fill(%s::%s, ARRAY[%d])", field.element, field.sqlType, field.limit+1),
+		} {
+			values := [3]string{"NULL", "NULL", "NULL"}
+			values[i] = invalid
+			_, err := c.Pool.Exec(t.Context(), fmt.Sprintf(insert, values[0], values[1], values[2]), "bad-layout", doc)
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, err, &pgErr)
+			require.Equal(t, "23514", pgErr.Code)
+			require.Equal(t, "quarry_layout_"+field.name+"_check", pgErr.ConstraintName)
+		}
+	}
+}
+
+func TestVectorOpenValidatesLayoutConstraintsPostgres18(t *testing.T) {
+	const image = "pgvector/pgvector:0.8.7-pg18@sha256:38681dc6eaf55308e2a4c6de392d131652dcfac70e1263e35cd9b5ea3fe39782"
+	c := migrationTestClient(t, pgtest.StartIsolated(t, testcontainers.WithImage(image)))
+	require.NoError(t, c.RunMigrations(t.Context()))
+	var version int
+	require.NoError(t, c.Pool.QueryRow(t.Context(), "SELECT current_setting('server_version_num')::integer").Scan(&version))
+	require.Equal(t, 18, version/10000)
+	_, err := CreateGenerationVectorStore(t.Context(), c, 3, "pg18")
+	require.NoError(t, err)
+	_, err = OpenGenerationVectorStore(t.Context(), c, 3, "pg18")
+	require.NoError(t, err)
+	grantExec(t, c, "ALTER TABLE chunk_vectors_pg18 DROP CONSTRAINT quarry_layout_pages_check, "+
+		"ADD CONSTRAINT quarry_layout_pages_check CHECK ("+canonicalPagesDeparse+") NOT ENFORCED")
+	requireLayoutCheckRejected(t, c, "pg18", "quarry_layout_pages_check")
+}
+
+type layoutOpenTracer struct {
+	queries      []string
+	beforeLayout func()
+}
+
+func (tr *layoutOpenTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	tr.queries = append(tr.queries, data.SQL)
+	if tr.beforeLayout != nil && strings.Contains(data.SQL, "pg_get_expr") {
+		tr.beforeLayout()
+	}
+	return ctx
+}
+
+func (*layoutOpenTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestVectorLayoutOpenIsReadOnlyOnConstraintDrift(t *testing.T) {
+	c, _ := vectorDatabase(t)
+	grantExec(t, c, "CREATE TABLE chunk_vectors_drift (LIKE chunk_vectors INCLUDING CONSTRAINTS)")
+	grantExec(t, c, "ALTER TABLE chunk_vectors_drift DROP CONSTRAINT quarry_layout_pages_check")
+	dsn := c.Pool.Config().ConnString()
+	roles := newGrantRoles(t, dsn, "quarry_layout_schema_only")
+	role := pgx.Identifier{roles.name("quarry_layout_schema_only")}.Sanitize()
+	grantExec(t, c, "CREATE ROLE "+role)
+	grantExec(t, c, "GRANT USAGE ON SCHEMA public TO "+role)
+	trace := &layoutOpenTracer{}
+	reader, err := NewClient(t.Context(), dsn, WithQueryTracer(trace), func(cfg *pgxpool.Config) {
+		cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+			_, setErr := conn.Exec(ctx, "SET SESSION AUTHORIZATION "+role)
+			return setErr
+		}
+	})
+	require.NoError(t, err)
+	t.Cleanup(reader.Pool.Close)
+	require.NoError(t, reader.Pool.Ping(t.Context()))
+
+	before := vectorLayoutCatalogDefinitions(t, c)
+	trace.queries = nil
+	requireLayoutCheckRejected(t, reader, "drift", "quarry_layout_pages_check")
+	require.Len(t, trace.queries, 2, "one dimensions request and one layout request")
+	require.Contains(t, trace.queries[1], "pg_get_expr")
+	_, err = CreateGenerationVectorStore(t.Context(), c, 3, "drift", WithExactScopeMax(10))
+	require.ErrorContains(t, err, "quarry_layout_pages_check")
+	require.Equal(t, before, vectorLayoutCatalogDefinitions(t, c))
+
+	// At the start of layout inspection, replace the table after the dimension
+	// query has completed. The single catalog snapshot must see the new OID.
+	grantExec(t, c, "ALTER TABLE chunk_vectors_drift ADD CONSTRAINT quarry_layout_pages_check CHECK ("+canonicalPagesDeparse+")")
+	trace.beforeLayout = func() {
+		grantExec(t, c, `BEGIN; DROP TABLE chunk_vectors_drift;
+			CREATE TABLE chunk_vectors_drift (LIKE chunk_vectors);
+			COMMIT`)
+	}
+	requireLayoutCheckRejected(t, reader, "drift", "quarry_layout_pages_check")
+	trace.beforeLayout = nil
+	grantExec(t, c, `BEGIN; DROP TABLE chunk_vectors_drift;
+		CREATE TABLE chunk_vectors_drift (LIKE chunk_vectors INCLUDING CONSTRAINTS);
+		COMMIT`)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	trace.beforeLayout = cancel
+	_, err = OpenGenerationVectorStore(ctx, reader, 3, "drift")
+	trace.beforeLayout = nil
+	cancel()
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = OpenGenerationVectorStore(t.Context(), reader, 3, "drift")
+	require.NoError(t, err)
+	_, err = reader.Pool.Exec(t.Context(), "SELECT pages FROM chunk_vectors_drift")
+	requireSQLState(t, err, "42501")
+}
+
+func vectorLayoutCatalogDefinitions(t *testing.T, c *Client) []string {
+	t.Helper()
+	rows, err := c.Pool.Query(t.Context(), `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'chunk_vectors_drift'::regclass
+		UNION ALL SELECT pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 'chunk_vectors_drift'::regclass
+		UNION ALL SELECT format('%s %s %s %s %s %s', attname, atttypid, attnotnull, atthasdef, attidentity, attgenerated)
+			FROM pg_attribute WHERE attrelid = 'chunk_vectors_drift'::regclass
+			AND attnum > 0 AND NOT attisdropped
+		ORDER BY 1`)
+	require.NoError(t, err)
+	definitions, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	return definitions
 }
