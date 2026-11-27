@@ -37,7 +37,11 @@ func TestActivationSetsTheMarkerOnceAndReportsTheRecordedValue(t *testing.T) {
 
 	// A later explicit activation, from this or another process, even after the
 	// clock has moved on, changes nothing and reports the same instant.
-	time.Sleep(20 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		var later bool
+		readErr := c.Pool.QueryRow(ctx, `SELECT clock_timestamp() > $1::timestamptz`, first.ActivatedAt).Scan(&later)
+		return readErr == nil && later
+	}, 5*time.Second, 10*time.Millisecond, "the database clock must move past the recorded marker")
 	for _, client := range []*Client{c, other} {
 		again, activateErr := client.ActivateDeletion(ctx)
 		require.NoError(t, activateErr)
@@ -88,11 +92,7 @@ func TestActivationWaitsForAHealthyCleanupAndSetsTheMarkerAfterIt(t *testing.T) 
 			_, err := activator.ActivateDeletion(ctx)
 			activated <- err
 		}()
-		select {
-		case err := <-activated:
-			t.Fatalf("activation committed under a healthy cleanup: %v", err)
-		case <-time.After(750 * time.Millisecond):
-		}
+		waitForAdvisoryKey(ctx, t, c, DeletionActivationLockID)
 		require.Nil(t, recordedMarker(ctx, t, c), "the marker stays unset while the cleanup runs")
 	}))
 	require.NoError(t, <-activated)

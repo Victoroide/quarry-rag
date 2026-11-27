@@ -10,6 +10,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -532,11 +533,7 @@ func TestActivationWaitsForAHealthyCleanup(t *testing.T) {
 			_, activateErr := activator.ActivateDeletion(ctx)
 			activated <- activateErr
 		}()
-		select {
-		case err = <-activated:
-			t.Fatalf("activation committed under a healthy cleanup: %v", err)
-		case <-time.After(750 * time.Millisecond):
-		}
+		waitForAdvisoryKey(ctx, t, c, DeletionActivationLockID)
 	}))
 	require.NoError(t, <-activated, "activation proceeds once the cleanup has returned")
 	active, err := c.DeletionActive(ctx)
@@ -582,22 +579,16 @@ func TestLostSessionReleasesTheLockButNotTheReservation(t *testing.T) {
 
 // holdReceiptLock blocks every update of one receipt until release is called,
 // the way a failover or a lock queue stalls a statement without resetting it.
-func holdReceiptLock(ctx context.Context, t *testing.T, other *Client, id domain.DocumentID) (release func()) {
+func holdReceiptLock(ctx context.Context, t *testing.T, other *Client, id domain.DocumentID) (holderPID uint32, release func() error) {
 	t.Helper()
 	tx, err := other.Pool.Begin(ctx)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	})
 	_, err = tx.Exec(ctx, `SELECT 1 FROM document_deletions WHERE document_id=$1 FOR UPDATE`, string(id))
 	require.NoError(t, err)
-	released := false
-	t.Cleanup(func() {
-		if !released {
-			_ = tx.Rollback(context.WithoutCancel(ctx))
-		}
-	})
-	return func() {
-		released = true
-		require.NoError(t, tx.Commit(ctx))
-	}
+	return tx.Conn().PgConn().PID(), func() error { return tx.Commit(ctx) }
 }
 
 // TestBookkeepingFallbackGetsItsOwnBudgetAfterAHungSession proves that an
@@ -639,14 +630,24 @@ func TestBookkeepingFallbackGetsItsOwnBudgetAfterAHungSession(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, store.RetireLegacyDocument(ctx, doc.id, target))
 
-				release := holdReceiptLock(ctx, t, other, doc.id)
+				holderPID, release := holdReceiptLock(ctx, t, other, doc.id)
+				guardedPID := store.conn.PgConn().PID()
 				done := make(chan error, 1)
 				started := time.Now()
 				go func() { done <- record.call(ctx, store, doc.id, target) }()
-				time.Sleep(legacyBookkeepingLimit + time.Second)
-				release()
-
-				require.NoError(t, <-done, "the fresh connection waits for the lock with a budget of its own")
+				assert.EventuallyWithT(t, func(collect *assert.CollectT) {
+					var waiting bool
+					err := other.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_stat_activity
+						WHERE datname=current_database() AND pid<>$1 AND wait_event_type='Lock'
+						AND starts_with(query, 'UPDATE document_deletions')
+						AND $2=ANY(pg_blocking_pids(pid)))`, int64(guardedPID), int64(holderPID)).Scan(&waiting)
+					assert.NoError(collect, err)
+					assert.True(collect, waiting, "the fresh connection must wait for the receipt lock")
+				}, 2*legacyBookkeepingLimit, 10*time.Millisecond)
+				releaseErr := release()
+				updateErr := <-done
+				require.NoError(t, releaseErr)
+				require.NoError(t, updateErr, "the fresh connection waits for the lock with a budget of its own")
 				require.Greater(t, time.Since(started), legacyBookkeepingLimit, "the guarded session spent its whole budget first")
 			}))
 			record.check(t, readLegacyReceipt(ctx, t, c, doc.id))

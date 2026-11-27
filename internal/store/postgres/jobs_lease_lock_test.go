@@ -44,6 +44,15 @@ func hasAdvisoryWaiter(ctx context.Context, pool *pgxpool.Pool, advisoryKey int6
 	return waiting, err
 }
 
+func waitForAdvisoryKey(ctx context.Context, t *testing.T, c *Client, key int64) {
+	t.Helper()
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		waiting, err := hasAdvisoryWaiter(ctx, c.Pool, key)
+		assert.NoError(collect, err)
+		assert.True(collect, waiting, "advisory lock %d must have a waiter in this database", key)
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
 func TestAdvisoryWaiterIsScopedToFixtureDatabase(t *testing.T) {
 	address := startTestDatabase(t)
 	home, err := NewClient(t.Context(), address)
