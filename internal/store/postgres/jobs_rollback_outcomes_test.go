@@ -131,6 +131,7 @@ func testIngestOCROutcomes(ctx context.Context, t *testing.T, c *Client, observe
 }
 
 func TestIngestRollbackPreservesAdmissionClaimAndOCROutcomes(t *testing.T) {
+	parallelDatabaseTest(t)
 	c, observer, ctx := ingestRollbackDatabase(t, ingestTxTracer{})
 	req := jobsRequest("committed document duplicate")
 	trace := &ingestTxTrace{}

@@ -21,6 +21,7 @@ func recordedMarker(ctx context.Context, t *testing.T, c *Client) *time.Time {
 }
 
 func TestActivationSetsTheMarkerOnceAndReportsTheRecordedValue(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	other := otherConnection(t, c)
 	ctx := t.Context()
@@ -56,6 +57,7 @@ func TestActivationSetsTheMarkerOnceAndReportsTheRecordedValue(t *testing.T) {
 }
 
 func TestConcurrentActivationsRecordOneValue(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := t.Context()
 	const callers = 6
@@ -82,6 +84,7 @@ func TestConcurrentActivationsRecordOneValue(t *testing.T) {
 }
 
 func TestActivationWaitsForAHealthyCleanupAndSetsTheMarkerAfterIt(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	activator := otherConnection(t, c)
 	ctx := legacyContext(t)
@@ -105,6 +108,7 @@ func TestActivationWaitsForAHealthyCleanupAndSetsTheMarkerAfterIt(t *testing.T) 
 }
 
 func TestActivationThatTimesOutLeavesTheMarkerUnset(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	activator := otherConnection(t, c)
 	ctx := legacyContext(t)
@@ -123,6 +127,7 @@ func TestActivationThatTimesOutLeavesTheMarkerUnset(t *testing.T) {
 }
 
 func TestActivationLosesItsConnectionWithoutSettingTheMarker(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	activator := otherConnection(t, c)
 	killer := otherConnection(t, c)
@@ -153,6 +158,7 @@ func TestActivationLosesItsConnectionWithoutSettingTheMarker(t *testing.T) {
 }
 
 func TestActivationRequiresTheMigratedMarker(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := t.Context()
 	_, err := c.Pool.Exec(ctx, `DELETE FROM document_deletion_activation`)
@@ -163,6 +169,7 @@ func TestActivationRequiresTheMigratedMarker(t *testing.T) {
 }
 
 func TestActivationKeepsAnUnfinishedReservationProtectingItsIdentity(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "held across activation", false, false)
@@ -180,6 +187,7 @@ func TestActivationKeepsAnUnfinishedReservationProtectingItsIdentity(t *testing.
 }
 
 func TestRestrictedServingLoginCannotActivate(t *testing.T) {
+	parallelDatabaseTest(t)
 	owner, serving, _ := restrictedDatabase(t)
 	ctx := t.Context()
 	_, err := serving.ActivateDeletion(ctx)

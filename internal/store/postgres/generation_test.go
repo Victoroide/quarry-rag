@@ -41,6 +41,7 @@ func TestGenerationNamesAndTables(t *testing.T) {
 }
 
 func TestVectorStateDefaultsToOpenLegacy(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	state, err := c.VectorState(t.Context())
 	require.NoError(t, err)
@@ -62,6 +63,7 @@ func requireActiveCleanupConstraint(t *testing.T, err error, constraint string) 
 }
 
 func TestMigrateActiveCleanupSender(t *testing.T) {
+	parallelDatabaseTest(t)
 	ctx := t.Context()
 	ids := []string{"00000000000040008000000000000002", "00000000000040008000000000000001"}
 	const oldReserve = `UPDATE vector_state SET active_cleanup_ids=$3, active_cleanup_reservation=gen_random_uuid()
@@ -200,6 +202,7 @@ func checkActiveCleanupJournalConstraints(t *testing.T, operator *Client, ids []
 }
 
 func TestFrozenActiveCleanupJournal(t *testing.T) {
+	parallelDatabaseTest(t)
 	const target, host = "corpus", "corpus-host"
 	profile := generationProfile()
 	ids := []string{"00000000000040008000000000000001", "00000000000040008000000000000002"}
@@ -318,6 +321,7 @@ func TestFrozenActiveCleanupJournal(t *testing.T) {
 }
 
 func TestRegisterGenerationIsIdempotentAndFailsClosed(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	first, err := c.RegisterGeneration(t.Context(), stagingGeneration("g2"))
 	require.NoError(t, err)
@@ -357,6 +361,7 @@ func TestRegisterGenerationIsIdempotentAndFailsClosed(t *testing.T) {
 }
 
 func TestAttestedLegacyGenerationIsActive(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	legacy := Generation{Name: LegacyGeneration, Store: "postgres", Target: VectorTable(LegacyGeneration), Profile: generationProfile(), Origin: OriginAttested}
 	got, err := c.RegisterGeneration(t.Context(), legacy)
@@ -366,6 +371,7 @@ func TestAttestedLegacyGenerationIsActive(t *testing.T) {
 }
 
 func TestFreezeGatesAdmissionClaimsAndDeletes(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	queued := jobsAccept(t, c, "queued before the freeze")
 	require.NoError(t, c.FreezeWriters(t.Context(), "g2"))
@@ -400,6 +406,7 @@ func TestFreezeGatesAdmissionClaimsAndDeletes(t *testing.T) {
 }
 
 func TestFreezeGatesOwnedAcceptanceAndTenantClaims(t *testing.T) {
+	parallelDatabaseTest(t)
 	c, _ := vectorDatabase(t)
 	ctx := t.Context()
 	f := provisionOwnedFixture(t, c)
@@ -461,6 +468,7 @@ func TestFreezeGatesOwnedAcceptanceAndTenantClaims(t *testing.T) {
 }
 
 func TestFreezeWaitsForAdmissionsInFlight(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	tx, err := c.Pool.Begin(t.Context())
 	require.NoError(t, err)
@@ -475,6 +483,7 @@ func TestFreezeWaitsForAdmissionsInFlight(t *testing.T) {
 }
 
 func TestFreezeWaitsForABlockedJobClaim(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	id := jobsAccept(t, c, "queued before freezing")
 	_, err := c.RegisterGeneration(t.Context(), Generation{Name: "g2", Store: "postgres", Target: VectorTable("g2"), Profile: generationProfile(), Origin: OriginRecorded})
@@ -523,6 +532,7 @@ func TestFreezeWaitsForABlockedJobClaim(t *testing.T) {
 }
 
 func TestQuiesceCountsRunningLeases(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	jobsAccept(t, c, "claimed before the freeze")
 	job, err := c.ClaimJob(t.Context(), "worker", time.Minute, 5)
@@ -572,6 +582,7 @@ func TestQuiesceCountsRunningLeases(t *testing.T) {
 }
 
 func TestReplicaOnAnotherGenerationCannotWrite(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	jobsAccept(t, c, "queued")
 	c.SetVectorGeneration("g2")
@@ -586,6 +597,7 @@ func TestReplicaOnAnotherGenerationCannotWrite(t *testing.T) {
 }
 
 func TestPinVectorGeneration(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	want := generationProfile()
 	pin := func(generation, store, target string, profile domain.EmbeddingProfile) error {
@@ -614,6 +626,7 @@ func TestPinVectorGeneration(t *testing.T) {
 }
 
 func TestPinMaintenanceVectorGeneration(t *testing.T) {
+	parallelDatabaseTest(t)
 	c, _ := vectorDatabase(t)
 	ctx := t.Context()
 	want := generationProfile()
@@ -646,6 +659,7 @@ func verifiedGeneration(t *testing.T, c *Client, name, digest string) {
 }
 
 func TestActivationRequiresFrozenVerifiedMatchingCorpus(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	_, err := c.RegisterGeneration(t.Context(), stagingGeneration("g2"))
 	require.NoError(t, err)
@@ -678,6 +692,7 @@ func TestActivationRequiresFrozenVerifiedMatchingCorpus(t *testing.T) {
 }
 
 func TestActivationBlockedByRunningLease(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	jobsAccept(t, c, "claimed")
 	job, err := c.ClaimJob(t.Context(), "worker", time.Minute, 5)
@@ -704,6 +719,7 @@ func requireCutoverRefusal(t *testing.T, err error) {
 }
 
 func TestHostedManifestCutoverGuard(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := t.Context()
 	require.NoError(t, c.PinVectorGeneration(ctx, LegacyGeneration, "pinecone", "source", "source-host", generationProfile()))
@@ -774,6 +790,7 @@ func TestHostedManifestCutoverGuard(t *testing.T) {
 }
 
 func TestHostedManifestCutoverSerializesIntent(t *testing.T) {
+	parallelDatabaseTest(t)
 	for _, tc := range []struct {
 		name                                 string
 		switchFirst, cancel, legacy, unbound bool
@@ -910,6 +927,7 @@ func TestHostedManifestCutoverSerializesIntent(t *testing.T) {
 }
 
 func TestHostedManifestCutoverUpgrade(t *testing.T) {
+	parallelDatabaseTest(t)
 	ctx := t.Context()
 	dsn := startTestDatabase(t)
 	admin := migrationTestClient(t, dsn)
@@ -985,6 +1003,7 @@ func TestHostedManifestCutoverUpgrade(t *testing.T) {
 }
 
 func TestActivationRetiresThePreviousGenerationAndPinsReplicas(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	legacy := Generation{Name: LegacyGeneration, Store: "postgres", Target: "chunk_vectors", Profile: generationProfile(), Origin: OriginAttested}
 	_, err := c.RegisterGeneration(t.Context(), legacy)
@@ -1002,6 +1021,7 @@ func TestActivationRetiresThePreviousGenerationAndPinsReplicas(t *testing.T) {
 }
 
 func TestCheckpointLedger(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	_, err := c.RegisterGeneration(t.Context(), stagingGeneration("g2"))
 	require.NoError(t, err)
@@ -1053,6 +1073,7 @@ func TestCheckpointLedger(t *testing.T) {
 }
 
 func TestCheckpointWritesInvalidateVerificationAndRefuseLiveTargets(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	verifiedGeneration(t, c, "g2", "digest")
 	doc := uuid.NewString()
@@ -1073,6 +1094,7 @@ func TestCheckpointWritesInvalidateVerificationAndRefuseLiveTargets(t *testing.T
 }
 
 func TestSourceCorpusRevisionsFollowStoredContent(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	insert := func(collection, docType, text string) string {
 		id := uuid.NewString()
@@ -1196,6 +1218,7 @@ func TestSourceCorpusRevisionsFollowStoredContent(t *testing.T) {
 }
 
 func TestSourceCorpusIncludesTenantForOwnedDocuments(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newOwnedFixture(t)
 	req := ownedRequest(f.owner, "team", "owned corpus text")
 	require.Equal(t, domain.AcceptAccepted, f.accept(t, req).Outcome)
@@ -1235,6 +1258,7 @@ func TestSourceCorpusIncludesTenantForOwnedDocuments(t *testing.T) {
 }
 
 func TestSourceCorpusSkipsDocumentsBeingDeleted(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	var ids []string
 	for i := range 3 {
@@ -1267,6 +1291,7 @@ func TestSourceCorpusSkipsDocumentsBeingDeleted(t *testing.T) {
 }
 
 func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := migrationTestClient(t, startTestDatabase(t))
 	// Admission and claims need later migrations. Defer the vector state
 	// and the migrations that depend on it until the upgrade.
@@ -1296,6 +1321,7 @@ func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
 }
 
 func TestOrphansFollowSourceEligibility(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	_, err := c.RegisterGeneration(t.Context(), stagingGeneration("g2"))
 	require.NoError(t, err)
@@ -1335,6 +1361,7 @@ func TestOrphansFollowSourceEligibility(t *testing.T) {
 }
 
 func TestVectorRowsMatchUsesPinnedGenerationTable(t *testing.T) {
+	parallelDatabaseTest(t)
 	c, legacy := vectorDatabase(t)
 	ctx := t.Context()
 	g2, err := CreateGenerationVectorStore(ctx, c, 3, "g2")
@@ -1392,6 +1419,7 @@ func TestActivationQuiesceErrorPrioritizesSettling(t *testing.T) {
 }
 
 func TestActivateRefusesAndNamesOpenDeletionReceipts(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	verifiedGeneration(t, c, "g2", "digest")
 
@@ -1412,6 +1440,7 @@ func TestActivateRefusesAndNamesOpenDeletionReceipts(t *testing.T) {
 }
 
 func TestQuiesceAndActivateBoundReportedOpenDeletionIDs(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	verifiedGeneration(t, c, "g2", "digest")
 
@@ -1441,6 +1470,7 @@ func TestQuiesceAndActivateBoundReportedOpenDeletionIDs(t *testing.T) {
 }
 
 func TestQuiesceIgnoresFinalizedHeldReceipts(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	verifiedGeneration(t, c, "g2", "digest")
 
@@ -1456,6 +1486,7 @@ func TestQuiesceIgnoresFinalizedHeldReceipts(t *testing.T) {
 }
 
 func TestUntaggedRevisionIsUnchanged(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := t.Context()
 	docID := uuid.NewString()
@@ -1482,6 +1513,7 @@ func TestUntaggedRevisionIsUnchanged(t *testing.T) {
 }
 
 func TestTaggedRevisionFollowsPublishedAttempt(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := t.Context()
 	docID := uuid.NewString()
@@ -1529,6 +1561,7 @@ func TestTaggedRevisionFollowsPublishedAttempt(t *testing.T) {
 }
 
 func TestUnexpectedTaggedKeys(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := t.Context()
 	doc1, inc1, att1 := uuid.NewString(), uuid.NewString(), uuid.NewString()
@@ -1594,6 +1627,7 @@ func TestUnexpectedTaggedKeys(t *testing.T) {
 }
 
 func TestManifestedDocumentKeepsManifestKeys(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := t.Context()
 	docID, incID, attempt, revID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
@@ -1639,6 +1673,7 @@ func TestManifestedDocumentKeepsManifestKeys(t *testing.T) {
 }
 
 func TestUnexpectedChunkKeysFollowsDocumentFormat(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := t.Context()
 	taggedID, taggedInc, taggedAtt := uuid.NewString(), uuid.NewString(), uuid.NewString()

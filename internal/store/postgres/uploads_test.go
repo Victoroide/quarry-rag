@@ -60,6 +60,7 @@ func documentCount(t *testing.T, c *Client, id domain.DocumentID) (documents, jo
 }
 
 func TestAcceptanceLinksStagedUploadAtomically(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	upload, req := stagedUpload(t, c, "archive")
 	row, ok := readUpload(t, c, upload.ID)
@@ -81,6 +82,7 @@ func TestAcceptanceLinksStagedUploadAtomically(t *testing.T) {
 }
 
 func TestClaimedUploadCannotBecomeAccepted(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	upload, req := stagedUpload(t, c, "")
 	_, err := c.Pool.Exec(t.Context(), `UPDATE source_uploads SET state='claimed',claim=gen_random_uuid(),claimed_at=NOW() WHERE id=$1`, upload.ID)
@@ -97,6 +99,7 @@ func TestClaimedUploadCannotBecomeAccepted(t *testing.T) {
 }
 
 func TestUploadLinkRequiresMatchingOwner(t *testing.T) {
+	parallelDatabaseTest(t)
 	for name, mutate := range map[string]func(*domain.AcceptRequest){
 		"other collection": func(r *domain.AcceptRequest) {
 			r.Collection = "other"
@@ -125,6 +128,7 @@ func TestUploadLinkRequiresMatchingOwner(t *testing.T) {
 }
 
 func TestUploadLinkNeedsAnObjectKey(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	_, req := stagedUpload(t, c, "")
 	req.Document.S3Key = nil
@@ -133,6 +137,7 @@ func TestUploadLinkNeedsAnObjectKey(t *testing.T) {
 }
 
 func TestSameBytesInTwoCollectionsKeepSeparateOwners(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	first, firstReq := stagedUpload(t, c, "alpha")
 	second, secondReq := stagedUpload(t, c, "beta")
@@ -159,6 +164,7 @@ func TestSameBytesInTwoCollectionsKeepSeparateOwners(t *testing.T) {
 }
 
 func TestDuplicateAcceptanceLeavesUploadStagedForReconciliation(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	first, firstReq := stagedUpload(t, c, "")
 	_, err := c.AcceptDocument(t.Context(), firstReq)
@@ -175,6 +181,7 @@ func TestDuplicateAcceptanceLeavesUploadStagedForReconciliation(t *testing.T) {
 }
 
 func TestUploadResultAccountsForDispatchAfterClaim(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	upload, _ := stagedUpload(t, c, "")
 	require.NoError(t, c.BeginSourceUpload(t.Context(), upload.ID))
@@ -195,6 +202,7 @@ func TestUploadResultAccountsForDispatchAfterClaim(t *testing.T) {
 }
 
 func TestStageRejectsDuplicateAndOversizedRecords(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	upload, _ := stagedUpload(t, c, "")
 	again := upload
@@ -213,6 +221,7 @@ func TestStageRejectsDuplicateAndOversizedRecords(t *testing.T) {
 }
 
 func TestStagedUploadLeaseIsBounded(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	upload, _ := stagedUpload(t, c, "")
 	var seconds float64
@@ -221,6 +230,7 @@ func TestStagedUploadLeaseIsBounded(t *testing.T) {
 }
 
 func TestDeletingDocumentRemovesItsLinkedUpload(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	upload, req := stagedUpload(t, c, "")
 	_, err := c.AcceptDocument(t.Context(), req)
@@ -247,6 +257,7 @@ func beforeSourceUploadMigration(t *testing.T) int {
 }
 
 func TestLegacyDocumentsSurviveTheUploadMigration(t *testing.T) {
+	parallelDatabaseTest(t)
 	url := startTestDatabase(t)
 	c := migrationTestClient(t, url)
 	applyMigrationPrefix(t, c, beforeSourceUploadMigration(t))

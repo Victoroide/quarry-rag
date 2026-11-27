@@ -10,12 +10,40 @@ import (
 )
 
 type raceJob struct {
-	Services map[string]struct {
+	TimeoutMinutes int `yaml:"timeout-minutes"`
+	Services       map[string]struct {
 		Image string `yaml:"image"`
 	} `yaml:"services"`
 	Steps []struct {
-		Run string `yaml:"run"`
+		Env map[string]string `yaml:"env"`
+		Run string            `yaml:"run"`
 	} `yaml:"steps"`
+}
+
+func TestWorkflowPinsRaceSuiteBudget(t *testing.T) {
+	job := loadRaceJob(t)
+	if job.TimeoutMinutes != 20 {
+		t.Errorf("race job timeout = %d minutes, want 20", job.TimeoutMinutes)
+	}
+	for _, step := range job.Steps {
+		for line := range strings.Lines(step.Run) {
+			command, _, _ := strings.Cut(line, "|")
+			fields := strings.Fields(command)
+			if len(fields) < 2 || fields[0] != "go" || fields[1] != "test" || !slices.Contains(fields, "./...") {
+				continue
+			}
+			for _, arg := range []string{"-race", "-count=1", "-parallel=4", "-timeout=10m", "-json"} {
+				if !slices.Contains(fields, arg) {
+					t.Errorf("race suite command is missing %s: %s", arg, command)
+				}
+			}
+			if got := step.Env["QUARRY_TEST_SHARED_DB_PARALLEL"]; got != "1" {
+				t.Errorf("race suite parallel opt-in = %q, want 1", got)
+			}
+			return
+		}
+	}
+	t.Error("race job does not run the race suite")
 }
 
 func loadRaceJob(t *testing.T) raceJob {

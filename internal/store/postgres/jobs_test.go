@@ -35,6 +35,7 @@ func jobsAccept(t *testing.T, c *Client, content string) domain.DocumentID {
 }
 
 func TestAcceptCollectionIdentity(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	req := jobsRequest("shared collection content")
 	req.Collection = "a"
@@ -76,6 +77,7 @@ func TestAcceptCollectionIdentity(t *testing.T) {
 }
 
 func TestAcceptCallerIDConflictsAcrossCollections(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	for _, collection := range []string{"", "a"} {
 		req := jobsRequest("caller collection content")
@@ -94,6 +96,7 @@ func TestAcceptCallerIDConflictsAcrossCollections(t *testing.T) {
 	}
 }
 func TestAcceptIsAtomicUnderConcurrency(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	var wg sync.WaitGroup
 	ids := make(chan domain.DocumentID, 20)
@@ -125,6 +128,7 @@ func TestAcceptIsAtomicUnderConcurrency(t *testing.T) {
 }
 
 func TestPrivateIdentitySurvivesPolicySwitchAndLeaseReclaim(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := t.Context()
 	const content = "private report"
@@ -202,6 +206,7 @@ func TestPrivateIdentitySurvivesPolicySwitchAndLeaseReclaim(t *testing.T) {
 	require.Equal(t, public.DocumentID, mapped)
 }
 func TestAcceptCallerIDConflict(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	req := jobsRequest("original")
 	req.CallerSupplied = true
@@ -220,6 +225,7 @@ func TestAcceptCallerIDConflict(t *testing.T) {
 	require.NotEqual(t, a.DocumentID, b.DocumentID)
 }
 func TestAcceptRequeuesFailedDuplicate(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	id := jobsAccept(t, c, "retry content")
 	job, err := c.ClaimJob(t.Context(), "first", time.Minute, 5)
@@ -236,6 +242,7 @@ func TestAcceptRequeuesFailedDuplicate(t *testing.T) {
 }
 
 func TestFailedDuplicateRespectsQueueLimit(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	req := jobsRequest("failed at capacity")
 	req.CallerSupplied = true
@@ -259,6 +266,7 @@ func TestFailedDuplicateRespectsQueueLimit(t *testing.T) {
 	require.Equal(t, 1, pending)
 }
 func TestAcceptQueueFull(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	jobsAccept(t, c, "one")
 	req := jobsRequest("two")
@@ -271,6 +279,7 @@ func TestAcceptQueueFull(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 func TestClaimSkipsLockedJobs(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	first := jobsAccept(t, c, "first")
 	second := jobsAccept(t, c, "second")
@@ -284,6 +293,7 @@ func TestClaimSkipsLockedJobs(t *testing.T) {
 	require.Equal(t, second, job.Document.ID)
 }
 func TestExpiredLeaseIsReclaimed(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	jobsAccept(t, c, "expired")
 	job, err := c.ClaimJob(t.Context(), "old", time.Minute, 5)
@@ -303,6 +313,7 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 func TestCompleteRequiresLeaseAndProcessingStatus(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	id := jobsAccept(t, c, "completion")
 	job, err := c.ClaimJob(t.Context(), "owner", time.Minute, 5)
@@ -334,6 +345,7 @@ func TestCompleteRequiresLeaseAndProcessingStatus(t *testing.T) {
 	require.Equal(t, domain.AcceptDuplicate, duplicate.Outcome)
 }
 func TestReleaseMakesJobClaimable(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	jobsAccept(t, c, "release")
 	job, err := c.ClaimJob(t.Context(), "one", time.Minute, 5)
@@ -344,6 +356,7 @@ func TestReleaseMakesJobClaimable(t *testing.T) {
 	require.Equal(t, 1, next.Attempts)
 }
 func TestClaimFailsJobsBeyondMaxAttempts(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	id := jobsAccept(t, c, "exhausted")
 	_, err := c.Pool.Exec(t.Context(), `UPDATE ingest_jobs SET attempts=5`)
@@ -357,6 +370,7 @@ func TestClaimFailsJobsBeyondMaxAttempts(t *testing.T) {
 	require.Equal(t, "exceeded maximum attempts", message)
 }
 func TestLegacyProcessingRowsAreRequeued(t *testing.T) {
+	parallelDatabaseTest(t)
 	c, err := NewClient(t.Context(), startTestDatabase(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
@@ -396,6 +410,7 @@ func TestLegacyProcessingRowsAreRequeued(t *testing.T) {
 }
 
 func TestConcurrentDuplicateAtQueueCapacity(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	lock, err := c.Pool.Begin(t.Context())
 	require.NoError(t, err)
@@ -427,6 +442,7 @@ func TestConcurrentDuplicateAtQueueCapacity(t *testing.T) {
 }
 
 func TestRetryRecordsErrorAndDefersClaim(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	id := jobsAccept(t, c, "retry later")
 	j, err := c.ClaimJob(t.Context(), "owner", time.Minute, 5)
@@ -445,6 +461,7 @@ func TestRetryRecordsErrorAndDefersClaim(t *testing.T) {
 }
 
 func TestCompleteRollsBackInvalidChunks(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	id := jobsAccept(t, c, "atomic completion")
 	j, err := c.ClaimJob(t.Context(), "owner", time.Minute, 5)
@@ -460,6 +477,7 @@ func TestCompleteRollsBackInvalidChunks(t *testing.T) {
 }
 
 func TestAcceptStoresDocumentFields(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	for _, label := range []string{"", "manual", "custom/type α"} {
 		content := strings.Repeat("界", 150)
@@ -497,6 +515,7 @@ func TestAcceptStoresDocumentFields(t *testing.T) {
 }
 
 func TestFailureTransitionRejectsLostLease(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	jobsAccept(t, c, "lost lease")
 	j, err := c.ClaimJob(t.Context(), "current", time.Minute, 5)
