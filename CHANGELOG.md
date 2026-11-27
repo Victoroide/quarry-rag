@@ -10,6 +10,8 @@ Notable changes are grouped by release.
 
 ### Added
 
+- The hosted race report uses bounded temporary storage to retain full failure diagnostics within its disk budget.
+
 - Read-only PostgreSQL durability preflight for writer sessions and a designated synchronous physical standby.
 
 - Opt-in source line and paragraph boundaries for internal layout-aware retrieval.

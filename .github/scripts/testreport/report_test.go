@@ -607,3 +607,22 @@ func TestDiagnosticSpillInterleavesBuildsAndRepeatedTests(t *testing.T) {
 	}
 	requireOnce(t, stderr, "résultat\n", "second occurrence\n", "other package\n", "package tail\n", "comp\n", "iler late\n")
 }
+
+func TestHostedDiagnosticSpillInvocation(t *testing.T) {
+	input := fixture(t, "healthy.json")
+	packages := []string{module + "/ok", module + "/notests"}
+	cacheFlags := []string{"-module-cache", "exact hit", "-build-cache", "restored from an earlier key"}
+	legacyArgs := append(append([]string(nil), cacheFlags...), packages...)
+	hostedArgs := append([]string{"-diagnostic-spill"}, legacyArgs...)
+	wantCode, wantOut, wantErr := report(t, input, legacyArgs...)
+	code, stdout, stderr := report(t, input, hostedArgs...)
+	if code != 0 || code != wantCode || stdout != wantOut || stderr != wantErr {
+		t.Fatalf("hosted report differed from baseline: exit %d vs %d\n%s\n%s", code, wantCode, stdout, stderr)
+	}
+	requireContains(t, "packages", section(t, stdout, "Packages"),
+		"| "+packages[0]+" | pass |", "| "+packages[1]+" | no test files |")
+	requireContains(t, "fixture timings", section(t, stdout, "Database fixtures"),
+		"| Setup | 1 | 1.50 | 1.50 |", "| Cleanup | 1 | 0.25 | 0.25 |")
+	requireContains(t, "cache states", section(t, stdout, "Caches"),
+		"| Go modules | exact hit |", "| Race build objects | restored from an earlier key |")
+}
