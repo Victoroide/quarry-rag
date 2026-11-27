@@ -74,6 +74,7 @@ func newPineconeClient(ctx context.Context, cfg *config.Config, pc *pinecone.Cli
 		return nil, validationErr
 	}
 	dialOpts = append(dialOpts, grpc.WithStatsHandler(mutationDeliveryObserver{}), grpc.WithChainUnaryInterceptor(classifyMutationDelivery))
+	dialOpts = append(dialOpts, WithSingleWriterTransport())
 	if cfg.HostedVisibilityRefill {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(queryAttemptCredentials{}))
 	}
@@ -378,7 +379,9 @@ func (p *Client) Delete(ctx context.Context, namespace string, ids []string) err
 	for start := 0; start < len(ids); start += 1000 {
 		batch := ids[start:min(start+1000, len(ids))]
 		if err := p.mutate(ctx, true, func(attemptCtx context.Context) error {
-			return ignoreNotFound(conn.DeleteVectorsByID(attemptCtx, batch))
+			return ignoreNotFound(DispatchWriterMutation(attemptCtx, namespace, func(ctx context.Context) error {
+				return conn.DeleteVectorsByID(ctx, batch)
+			}))
 		}); err != nil {
 			return fmt.Errorf("pinecone: delete %d vectors from namespace %q: %w", len(batch), namespace, err)
 		}
@@ -394,7 +397,9 @@ func (p *Client) DeleteAllVectorsInNamespace(ctx context.Context, namespace stri
 	}
 	defer release()
 	if err := p.mutate(ctx, true, func(attemptCtx context.Context) error {
-		return ignoreNotFound(conn.DeleteAllVectorsInNamespace(attemptCtx))
+		return ignoreNotFound(DispatchWriterMutation(attemptCtx, namespace, func(ctx context.Context) error {
+			return conn.DeleteAllVectorsInNamespace(ctx)
+		}))
 	}); err != nil {
 		return fmt.Errorf("pinecone: delete all vectors in namespace %q: %w", namespace, err)
 	}
@@ -485,7 +490,9 @@ func (p *Client) deleteDocumentVectors(ctx context.Context, target vectorTarget)
 	acknowledged := false
 	if exact {
 		filterErr := p.mutate(ctx, true, func(ctx context.Context) error {
-			return ignoreNotFound(p.defaultConn.DeleteVectorsByFilter(ctx, filter))
+			return ignoreNotFound(DispatchWriterMutation(ctx, "", func(ctx context.Context) error {
+				return p.defaultConn.DeleteVectorsByFilter(ctx, filter)
+			}))
 		})
 		switch status.Code(filterErr) {
 		case codes.OK:
@@ -741,7 +748,9 @@ func (p *Client) DeleteByManifestRevision(ctx context.Context, docID, revisionID
 		return fmt.Errorf("pinecone: build revision filter: %w", err)
 	}
 	err = p.mutate(ctx, true, func(attemptCtx context.Context) error {
-		return ignoreNotFound(p.defaultConn.DeleteVectorsByFilter(attemptCtx, filter))
+		return ignoreNotFound(DispatchWriterMutation(attemptCtx, "", func(ctx context.Context) error {
+			return p.defaultConn.DeleteVectorsByFilter(ctx, filter)
+		}))
 	})
 	switch status.Code(err) {
 	case codes.InvalidArgument, codes.Unimplemented, codes.FailedPrecondition:

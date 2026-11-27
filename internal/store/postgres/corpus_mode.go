@@ -116,6 +116,8 @@ func grantActivationError(err error) error {
 	var postgresErr *pgconn.PgError
 	if errors.As(err, &postgresErr) {
 		switch postgresErr.Code {
+		case "QG007":
+			return errors.New("grants activation: writer operations must drain before corpus cutover")
 		case "QG006":
 			return errors.New("grants activation: checkpointed document deletion must be activated first")
 		case "QG001", "QG004", "QG005":

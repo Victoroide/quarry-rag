@@ -30,6 +30,7 @@ type Client struct {
 	hostedManifests  atomic.Bool
 	now              func() time.Time
 	scopedHooks      *scopedDeletionHooks
+	writerEvidence   *writerEvidenceStream
 }
 
 func (c *Client) currentTime() time.Time {
@@ -280,7 +281,7 @@ func (c *Client) CheckLiveVectorRemoval(ctx context.Context, doc *domain.Documen
 	if !allowed {
 		return domain.ErrLiveVectorMutation
 	}
-	return tx.Commit(ctx)
+	return commitWriterSQL(ctx, tx)
 }
 
 // RemoveLiveDocument rechecks the observed row while deleting it. It leaves its

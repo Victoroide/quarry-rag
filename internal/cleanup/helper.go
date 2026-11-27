@@ -442,11 +442,12 @@ func (c *Cleaner) delete(ctx context.Context, docID, incarnation string, qualifi
 	if c.offline != nil {
 		return c.deleteOffline(ctx, docID, incarnation, qualified)
 	}
-	release, err := c.acquireWriter(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
+	return c.runWriter(ctx, domain.WriterOperationDelete, docID, incarnation, func(ctx context.Context) error {
+		return c.deleteDirect(ctx, docID, incarnation, qualified)
+	})
+}
+
+func (c *Cleaner) deleteDirect(ctx context.Context, docID, incarnation string, qualified bool) error {
 	var vectors domain.VectorDeleter
 	if c.vectors != nil {
 		vectors = c.vectors
@@ -455,7 +456,7 @@ func (c *Cleaner) delete(ctx context.Context, docID, incarnation string, qualifi
 	if !qualified && c.reserve {
 		// The activation lock decides the contract, so an activation that wins the
 		// race continues as an activated ID-only request.
-		err = RemoveLegacy(ctx, c.metadata, vectors, c.objects, c.targets, id)
+		err := RemoveLegacy(ctx, c.metadata, vectors, c.objects, c.targets, id)
 		if !errors.Is(err, domain.ErrDeletionActivated) {
 			return err
 		}
@@ -552,12 +553,9 @@ func (c *Cleaner) ReleaseHeld(ctx context.Context, docID, incarnation string) er
 		}
 		return c.metadata.ReleaseLegacyHostedHold(ctx, domain.DocumentID(docID), incarnation, operations(nil, c.objects, c.targets))
 	}
-	release, err := c.acquireWriter(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-	return c.metadata.ReleaseHeldDeletion(ctx, domain.DocumentID(docID), incarnation, operations(c.vectorDeleter(), c.objects, c.targets))
+	return c.runWriter(ctx, domain.WriterOperationHeldRelease, docID, incarnation, func(ctx context.Context) error {
+		return c.metadata.ReleaseHeldDeletion(ctx, domain.DocumentID(docID), incarnation, operations(c.vectorDeleter(), c.objects, c.targets))
+	})
 }
 
 // ReleaseTerminatedOfflineHeld releases an offline hold administratively after
@@ -570,26 +568,34 @@ func (c *Cleaner) ReleaseTerminatedOfflineHeld(ctx context.Context, docID, incar
 	if c.metadata == nil {
 		return errors.New("metadata store is not configured")
 	}
-	release, err := c.acquireWriter(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-	ops := operations(nil, c.objects, Targets{SourceBucket: c.targets.SourceBucket})
-	ops.ConfirmedOfflineOwnerTerminated = true
-	ops.MemoryOwner = owner
-	return c.metadata.ReleaseHeldDeletion(ctx, domain.DocumentID(docID), incarnation, ops)
+	return c.runWriter(ctx, domain.WriterOperationHeldRelease, docID, incarnation, func(ctx context.Context) error {
+		ops := operations(nil, c.objects, Targets{SourceBucket: c.targets.SourceBucket})
+		ops.ConfirmedOfflineOwnerTerminated = true
+		ops.MemoryOwner = owner
+		return c.metadata.ReleaseHeldDeletion(ctx, domain.DocumentID(docID), incarnation, ops)
+	})
 }
 
-func (c *Cleaner) acquireWriter(ctx context.Context) (func(), error) {
-	release, err := c.metadata.AcquireWriter(ctx)
-	if err != nil {
-		if errors.Is(err, domain.ErrWritersFrozen) || errors.Is(err, domain.ErrGenerationMismatch) {
-			return nil, fmt.Errorf("deletions are paused: %w", err)
+func (c *Cleaner) runWriter(ctx context.Context, kind domain.WriterOperationKind, docID, incarnation string, work func(context.Context) error) error {
+	target := "document"
+	if parsed, err := uuid.Parse(docID); err == nil {
+		target = parsed.String()
+		if parsed, err := uuid.Parse(incarnation); err == nil {
+			target += ":" + parsed.String()
 		}
-		return nil, fmt.Errorf("check document writers: %w", err)
 	}
-	return release, nil
+	entered := false
+	err := c.metadata.RunWriterOperation(ctx, kind, target, func(ctx context.Context) error {
+		entered = true
+		return work(ctx)
+	})
+	if err != nil && !entered {
+		if errors.Is(err, domain.ErrWritersFrozen) || errors.Is(err, domain.ErrGenerationMismatch) {
+			return fmt.Errorf("deletions are paused: %w", err)
+		}
+		return fmt.Errorf("check document writers: %w", err)
+	}
+	return err
 }
 
 func (c *Cleaner) vectorDeleter() domain.VectorDeleter {

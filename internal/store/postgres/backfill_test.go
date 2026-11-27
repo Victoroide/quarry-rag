@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -639,4 +641,111 @@ func waitForHostedBackfillPublishers(ctx context.Context, t *testing.T, c *Clien
 			assert.Equal(collect, want, waiting)
 		}
 	}, 4*time.Second, 20*time.Millisecond)
+}
+
+func TestPublishVerifiedDocumentWriterSessionLoss(t *testing.T) {
+	f := newOwnedFixture(t)
+	id, _ := f.legacyDocument(t, 1)
+	ctx := t.Context()
+	docs, err := f.c.BackfillCandidates(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, docs, 1)
+
+	begin := func(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+		return f.c.Pool.BeginTx(ctx, opts)
+	}
+	errLostCommit := errors.New("publication commit reply lost")
+	t.Run("backend termination", func(t *testing.T) {
+		check := func(ctx context.Context, tx pgx.Tx) error {
+			if err := f.c.gateWriter(ctx, tx); err != nil {
+				return err
+			}
+			var terminated bool
+			return f.c.Pool.QueryRow(ctx, `SELECT pg_terminate_backend($1,5000)`, tx.Conn().PgConn().PID()).Scan(&terminated)
+		}
+		ok, err := publishVerifiedDocument(ctx, docs[0], begin, check)
+		require.Error(t, err)
+		require.False(t, ok)
+		assertDocumentAccessContext(ctx, t, f.c, id, f.owner.ID, false, false, false)
+	})
+	t.Run("idle transaction timeout", func(t *testing.T) {
+		check := func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SET LOCAL idle_in_transaction_session_timeout='100ms'`); err != nil {
+				return err
+			}
+			if err := f.c.gateWriter(ctx, tx); err != nil {
+				return err
+			}
+			pid := tx.Conn().PgConn().PID()
+			require.Eventually(t, func() bool {
+				var gone bool
+				err := f.c.Pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)`, pid).Scan(&gone)
+				return err == nil && gone
+			}, 5*time.Second, 25*time.Millisecond)
+			return nil
+		}
+		ok, err := publishVerifiedDocument(ctx, docs[0], begin, check)
+		require.Error(t, err)
+		require.False(t, ok)
+		assertDocumentAccessContext(ctx, t, f.c, id, f.owner.ID, false, false, false)
+	})
+	t.Run("commit reply lost", func(t *testing.T) {
+		beginWithLostReply := func(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+			tx, err := begin(ctx, opts)
+			if err != nil {
+				return nil, err
+			}
+			return backfillLostCommit{Tx: tx, reply: errLostCommit}, nil
+		}
+		ok, err := publishVerifiedDocument(ctx, docs[0], beginWithLostReply, f.c.gateWriter)
+		require.ErrorIs(t, err, errLostCommit)
+		require.False(t, ok)
+		assertDocumentAccessContext(ctx, t, f.c, id, f.owner.ID, true, true, true)
+		ok, err = f.c.PublishVerifiedDocument(ctx, docs[0])
+		require.NoError(t, err)
+		require.True(t, ok)
+	})
+}
+
+type backfillLostCommit struct {
+	pgx.Tx
+	reply error
+}
+
+func (tx backfillLostCommit) Commit(ctx context.Context) error {
+	if err := tx.Tx.Commit(ctx); err != nil {
+		return err
+	}
+	return tx.reply
+}
+
+func TestPublishVerifiedDocumentSerializesWithFreeze(t *testing.T) {
+	f := newOwnedFixture(t)
+	first, _ := f.legacyDocument(t, 1)
+	second, _ := f.legacyDocument(t, 1)
+	ctx := t.Context()
+	docs, err := f.c.BackfillCandidates(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, docs, 2)
+	if docs[0].DocumentID != first {
+		docs[0], docs[1] = docs[1], docs[0]
+	}
+
+	tx, err := beginFencedWriterTx(ctx, f.c.Pool.BeginTx, f.c.gateWriter)
+	require.NoError(t, err)
+	defer rollbackFencedWriterTx(ctx, tx)
+	short, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	require.Error(t, f.c.FreezeWriters(short, "g2"))
+	var published bool
+	require.NoError(t, tx.QueryRow(ctx, publishVerifiedDocumentSQL, first, docs[0].Incarnation,
+		docs[0].SourceVersion, docs[0].ChunkDigest).Scan(&published))
+	require.True(t, published)
+	require.NoError(t, tx.Commit(ctx))
+	require.NoError(t, f.c.FreezeWriters(ctx, "g2"))
+	published, err = f.c.PublishVerifiedDocument(ctx, docs[1])
+	require.ErrorIs(t, err, domain.ErrWritersFrozen)
+	require.False(t, published)
+	assertDocumentAccess(t, f.c, first, f.owner.ID, true, true, true)
+	assertDocumentAccess(t, f.c, second, f.owner.ID, false, false, false)
 }

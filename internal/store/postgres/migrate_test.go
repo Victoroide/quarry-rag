@@ -350,9 +350,9 @@ func (c *migrationCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, dat
 
 func (*migrationCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
-func migrationTestClient(t testing.TB, url string) *Client {
+func migrationTestClient(t testing.TB, url string, opts ...Option) *Client {
 	t.Helper()
-	client, err := NewClient(t.Context(), url)
+	client, err := NewClient(t.Context(), url, opts...)
 	require.NoError(t, err)
 	t.Cleanup(client.Pool.Close)
 	return client

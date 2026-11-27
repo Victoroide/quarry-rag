@@ -1,6 +1,6 @@
 {
   "Width": 840,
-  "Height": 1248,
+  "Height": 1288,
   "Nodes": {
     "document_deletions": {
       "X": 16,
@@ -24,7 +24,7 @@
       "X": 16,
       "Y": 928,
       "W": 352,
-      "H": 258
+      "H": 276
     },
     "documents-ref": {
       "X": 484,
@@ -49,6 +49,12 @@
       "Y": 526,
       "W": 340,
       "H": 114
+    },
+    "vector_writer_operations": {
+      "X": 484,
+      "Y": 1022,
+      "W": 340,
+      "H": 204
     },
     "hosted_vector_cleanups": {
       "X": 484,

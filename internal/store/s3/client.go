@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -27,10 +28,11 @@ import (
 
 // Client wraps the AWS S3 SDK for file storage.
 type Client struct {
-	s3Client  *s3.Client
-	presigner *s3.PresignClient
-	bucket    string
-	owner     *string
+	s3Client           *s3.Client
+	presigner          *s3.PresignClient
+	bucket             string
+	owner              *string
+	writerDeleteClient func() aws.HTTPClient
 }
 
 // ErrBucketUnavailable indicates an inaccessible or missing configured bucket.
@@ -58,6 +60,9 @@ func newClient(awsCfg aws.Config, bucket, owner string, optFns ...func(*s3.Optio
 		presigner: s3.NewPresignClient(s3Client),
 		bucket:    bucket,
 		owner:     expectedOwner,
+		writerDeleteClient: sync.OnceValue(func() aws.HTTPClient {
+			return writerDeleteHTTPClient(s3Client.Options().HTTPClient, bucket)
+		}),
 	}
 }
 
@@ -199,11 +204,21 @@ func (c *Client) deleteObject(ctx context.Context, s3Key string, versionID *stri
 		VersionId:           versionID,
 		ExpectedBucketOwner: c.owner,
 	}
-	if _, err := c.s3Client.DeleteObject(ctx, input); err != nil {
+	var options []func(*s3.Options)
+	enrolled := domain.HasExternalWriterDispatch(ctx)
+	if enrolled {
+		options = append(options, func(o *s3.Options) {
+			o.HTTPClient = c.writerDeleteClient()
+		})
+	}
+	if _, err := c.s3Client.DeleteObject(ctx, input, options...); err != nil {
 		if tracing.RedactIdentifiers(ctx) {
 			return fmt.Errorf("s3: delete failed: %w", err)
 		}
 		return fmt.Errorf("s3: delete %s: %w", s3Key, err)
+	}
+	if enrolled {
+		return nil
 	}
 	if tracing.RedactIdentifiers(ctx) {
 		slog.DebugContext(ctx, "s3 object deleted")
@@ -211,6 +226,69 @@ func (c *Client) deleteObject(ctx context.Context, s3Key string, versionID *stri
 		slog.DebugContext(ctx, "s3 object deleted", "key", s3Key)
 	}
 	return nil
+}
+
+type writerDeleteTransport struct {
+	send   func(*http.Request) (*http.Response, error)
+	bucket string
+}
+
+// RoundTrip observes each signed SDK retry and each redirected request.
+func (transport writerDeleteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return domain.DispatchExternalWriterResult(req.Context(), func(ctx context.Context) (*http.Response, bool, error) {
+		evidence := domain.ExternalWriterEvidence{Provider: "s3", Namespace: transport.bucket, Outcome: "started"}
+		if err := domain.RecordExternalWriterEvidence(ctx, evidence); err != nil {
+			return nil, true, err
+		}
+		return transport.sendObserved(req.WithContext(ctx), evidence)
+	})
+}
+
+// sendObserved transfers response body ownership to the caller.
+func (transport writerDeleteTransport) sendObserved(req *http.Request, evidence domain.ExternalWriterEvidence) (*http.Response, bool, error) {
+	attempts := putAttempts{inner: writerDeleteHTTPFunc(transport.send)}
+	response, err := attempts.Do(req)
+	settled := attempts.settled(response != nil && err == nil)
+	evidence.Outcome = "unconfirmed"
+	if response != nil {
+		evidence.RequestID = response.Header.Get("X-Amz-Request-Id")
+	}
+	if settled {
+		evidence.Outcome = "no_send"
+		if response != nil && err == nil {
+			evidence.Outcome = "rejected"
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				evidence.Outcome = "acknowledged"
+			}
+		}
+	}
+	evidenceErr := domain.RecordExternalWriterEvidence(req.Context(), evidence)
+	return response, settled && evidenceErr == nil, err
+}
+
+type writerDeleteHTTPFunc func(*http.Request) (*http.Response, error)
+
+func (send writerDeleteHTTPFunc) Do(req *http.Request) (*http.Response, error) {
+	return send(req)
+}
+
+func writerDeleteHTTPClient(client aws.HTTPClient, bucket string) aws.HTTPClient {
+	if buildable, ok := client.(*awshttp.BuildableClient); ok {
+		client = buildable.Freeze()
+	}
+	httpClient, ok := client.(*http.Client)
+	if !ok {
+		return writerDeleteHTTPFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("s3: writer delete requires an observable HTTP transport")
+		})
+	}
+	clone := *httpClient
+	transport := clone.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	clone.Transport = writerDeleteTransport{send: transport.RoundTrip, bucket: bucket}
+	return &clone
 }
 
 // Ping verifies bucket access by issuing a HeadBucket call.

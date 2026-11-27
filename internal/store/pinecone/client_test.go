@@ -1070,3 +1070,27 @@ func TestDeleteByRevisionAndPresenceChecks(t *testing.T) {
 		t.Fatalf("unexpected present IDs: %v err=%v", present, err)
 	}
 }
+
+func TestWriterDeleteTracksPineconeRetriesAndBatches(t *testing.T) {
+	var outcomes []bool
+	calls := 0
+	adapter := testClient(&fakeIndexConn{deleteIDs: func(_ context.Context, ids []string) error {
+		calls++
+		if calls == 1 {
+			return status.Error(codes.Unavailable, "provider reply unavailable")
+		}
+		if len(ids) == 1 {
+			return status.Error(codes.PermissionDenied, "provider rejected batch")
+		}
+		return nil
+	}})
+	ctx := domain.WithExternalWriterDispatch(t.Context(), func(ctx context.Context, attempt domain.ExternalWriterAttempt) error {
+		settled, err := attempt(ctx)
+		outcomes = append(outcomes, settled)
+		return err
+	})
+	err := adapter.Delete(ctx, "", make([]string, 1001))
+	require.Equal(t, codes.PermissionDenied, status.Code(err))
+	require.Equal(t, 3, calls)
+	require.Equal(t, []bool{false, false, true}, outcomes, "SDK acknowledgments lack an indexed watermark")
+}

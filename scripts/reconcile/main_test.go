@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
@@ -68,7 +69,10 @@ type reconcileFakeIndex struct {
 	deleteSize []int
 	deleted    []string
 	namespaces []string
+	namespace  string
 }
+
+func (f *reconcileFakeIndex) Namespace() string { return f.namespace }
 
 func (f *reconcileFakeIndex) ListVectors(_ context.Context, req *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error) {
 	f.listCalls++
@@ -131,6 +135,95 @@ func (f *reconcileFakeIndex) deleteNamespace(_ context.Context, name string) err
 }
 
 func noDocuments(context.Context, []string) (map[string]documentState, error) { return nil, nil }
+
+func TestReconcileOrphanDeletesRequireConfirmedMark(t *testing.T) {
+	for _, refusal := range []error{errors.New("dispatch mark commit reply lost"), errors.New("writer operation reservation missing")} {
+		t.Run(refusal.Error(), func(t *testing.T) {
+			idx := &reconcileFakeIndex{refs: []vectorRef{{ID: "orphan"}}}
+			var marks int
+			ctx := domain.WithExternalWriterDispatch(t.Context(), func(context.Context, domain.ExternalWriterAttempt) error {
+				marks++
+				return refusal
+			})
+			_, err := reconcile(ctx, idx, idx.deleteNamespace, noDocuments, options{Apply: true, Limit: 1, Page: 1}, &bytes.Buffer{})
+			require.ErrorIs(t, err, refusal)
+			require.Equal(t, 1, marks)
+			require.Empty(t, idx.deleted)
+		})
+	}
+}
+
+func TestReconcileOrphanDeleteFragmentEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		apply     bool
+		lostReply bool
+	}{
+		{name: "dry run"},
+		{name: "mixed apply", apply: true},
+		{name: "lost reply stops further batches", apply: true, lostReply: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			idx := &reconcileFakeIndex{namespace: "legacy", counts: map[string]uint32{missingID: 1}}
+			for i := range 1001 {
+				idx.refs = append(idx.refs, vectorRef{ID: fmt.Sprint(i)})
+			}
+			var evidence []domain.ExternalWriterEvidence
+			var batches []int
+			lost := status.Error(codes.Unavailable, "reply lost")
+			if test.lostReply {
+				idx.deleteHook = func(ids []string) error {
+					batches = append(batches, len(ids))
+					return lost
+				}
+			}
+			ctx := domain.WithExternalWriterDispatch(t.Context(), func(ctx context.Context, send domain.ExternalWriterAttempt) error {
+				ctx = domain.WithExternalWriterEvidence(ctx, func(_ context.Context, event domain.ExternalWriterEvidence) error {
+					evidence = append(evidence, event)
+					return nil
+				})
+				settled, err := send(ctx)
+				require.False(t, settled)
+				return err
+			})
+			deleteNamespace := func(ctx context.Context, namespace string) error {
+				return pcstore.DispatchWriterMutation(ctx, namespace, func(ctx context.Context) error {
+					return idx.deleteNamespace(ctx, namespace)
+				})
+			}
+			result, err := reconcile(ctx, idx, deleteNamespace, noDocuments, options{Apply: test.apply, Limit: 1002, Page: 1000}, &bytes.Buffer{})
+			require.Equal(t, 1001, result.OrphanVectors)
+			require.Equal(t, 1, result.OrphanNamespaces)
+			if test.lostReply {
+				require.ErrorIs(t, err, lost)
+				require.Equal(t, []int{1000}, batches)
+				require.Empty(t, idx.namespaces)
+				require.Equal(t, []domain.ExternalWriterEvidence{
+					{Provider: "pinecone", Namespace: "legacy", Outcome: "started"},
+					{Provider: "pinecone", Namespace: "legacy", Outcome: "unconfirmed"},
+				}, evidence)
+				return
+			}
+			require.NoError(t, err)
+			if !test.apply {
+				require.Empty(t, idx.deleted)
+				require.Empty(t, idx.namespaces)
+				require.Empty(t, evidence)
+				return
+			}
+			require.Equal(t, []int{1000, 1}, idx.deleteSize)
+			require.Equal(t, []string{missingID}, idx.namespaces)
+			require.Equal(t, []domain.ExternalWriterEvidence{
+				{Provider: "pinecone", Namespace: "legacy", Outcome: "started"},
+				{Provider: "pinecone", Namespace: "legacy", Outcome: "acknowledged_pending_indexing"},
+				{Provider: "pinecone", Namespace: "legacy", Outcome: "started"},
+				{Provider: "pinecone", Namespace: "legacy", Outcome: "acknowledged_pending_indexing"},
+				{Provider: "pinecone", Namespace: missingID, Outcome: "started"},
+				{Provider: "pinecone", Namespace: missingID, Outcome: "acknowledged_pending_indexing"},
+			}, evidence)
+		})
+	}
+}
 
 func TestReconcileDryRunAndApply(t *testing.T) {
 	for _, apply := range []bool{false, true} {
@@ -302,8 +395,8 @@ func TestFreezeWaitsForAnAppliedReconcilePass(t *testing.T) {
 	deleted := make(chan error, 1)
 	opts := options{Apply: true, Limit: 10, Page: 1}
 	go func() {
-		deleted <- runMaintenance(t.Context(), pg, opts, func() error {
-			_, err := reconcile(t.Context(), index, func(ctx context.Context, name string) error {
+		deleted <- runMaintenance(t.Context(), pg, opts, func(ctx context.Context) error {
+			_, err := reconcile(ctx, index, func(ctx context.Context, name string) error {
 				close(started)
 				select {
 				case <-finish:
@@ -340,7 +433,7 @@ func (g *countingGate) AcquireWriter(context.Context) (func(), error) {
 func TestDryRunMaintenanceTakesNoWriterSession(t *testing.T) {
 	gate := &countingGate{}
 	worked := 0
-	work := func() error { worked++; return nil }
+	work := func(context.Context) error { worked++; return nil }
 	require.NoError(t, runMaintenance(t.Context(), gate, options{}, work))
 	require.Equal(t, 1, worked)
 	require.Equal(t, 0, gate.calls)
@@ -377,4 +470,39 @@ func TestSelectOrphanVectorsProtectsManifestedRevisions(t *testing.T) {
 		missingID + "#rev-deleted-untracked#0",
 		"legacy-missing",
 	}, got)
+}
+
+type maintenanceOperationGate struct {
+	countingGate
+	actions []string
+}
+
+func (g *maintenanceOperationGate) RunWriterOperation(ctx context.Context, kind domain.WriterOperationKind, action string, work func(context.Context) error) error {
+	if kind != domain.WriterOperationReconcile {
+		return errors.New("unexpected maintenance operation")
+	}
+	g.actions = append(g.actions, action)
+	return work(domain.WithExternalWriterDispatch(ctx, func(ctx context.Context, attempt domain.ExternalWriterAttempt) error {
+		_, err := attempt(ctx)
+		return err
+	}))
+}
+
+func TestGuardedReconcileUsesWriterOperation(t *testing.T) {
+	gate := new(maintenanceOperationGate)
+	ctx := t.Context()
+	for _, opts := range []options{
+		{},
+		{Apply: true},
+		{Apply: true, BackfillScoped: true},
+		{Apply: true, BackfillCollections: true},
+		{Apply: true, CanonicalDocumentIDs: true},
+	} {
+		require.NoError(t, runMaintenance(ctx, gate, opts, func(ctx context.Context) error {
+			require.Equal(t, opts.Apply, domain.HasExternalWriterDispatch(ctx))
+			return nil
+		}))
+	}
+	require.Zero(t, gate.calls)
+	require.Equal(t, []string{"orphans", "scoped", "collections", "canonical-document-ids"}, gate.actions)
 }

@@ -23,8 +23,12 @@ import (
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -121,13 +125,13 @@ func (b *blockingScopedVectors) Verify(ctx context.Context, _ pgstore.BackfillDo
 	close(b.started)
 	select {
 	case <-b.finish:
-		return false, nil
+		return true, nil
 	case <-ctx.Done():
 		return false, ctx.Err()
 	}
 }
 
-func TestScopedBackfillApplyAcquiresWriterAndRefusesGenerationMismatch(t *testing.T) {
+func TestScopedLocalBackfillCannotPublishAfterFreeze(t *testing.T) {
 	ctx := t.Context()
 	pg, err := pgstore.NewClient(ctx, pgtest.StartVector(t))
 	require.NoError(t, err)
@@ -184,16 +188,15 @@ func TestScopedBackfillApplyAcquiresWriterAndRefusesGenerationMismatch(t *testin
 	case <-time.After(5 * time.Second):
 		t.Fatal("scoped backfill did not enter verification")
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	freezeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	require.Error(t, pg.FreezeWriters(waitCtx, "g2"), "freeze must wait for an in-flight applied scoped backfill")
+	require.NoError(t, pg.FreezeWriters(freezeCtx, "g2"))
 	close(blocker.finish)
-	require.NoError(t, <-done)
-
-	require.NoError(t, pg.FreezeWriters(ctx, "g2"))
+	require.ErrorIs(t, <-done, domain.ErrWritersFrozen)
+	candidates, err := pg.BackfillCandidates(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1, "verification that resumes after freeze must leave the document quarantined")
 	var out bytes.Buffer
-	err = runScopedLocal(ctx, cfg, pg, pgvectorVectors{pg}, opts, &out)
-	require.ErrorIs(t, err, domain.ErrWritersFrozen)
 
 	g2Store, err := pgstore.CreateGenerationVectorStore(ctx, pg, 3, "g2")
 	require.NoError(t, err)
@@ -332,7 +335,7 @@ func TestRevisionSweepApplyPinsGenerationAndHoldsWriterBarrier(t *testing.T) {
 	opts := options{Apply: true, Limit: 10, Page: 5}
 	done := make(chan error, 1)
 	go func() {
-		done <- pinAndRunMaintenance(ctx, ctx, cfg, pg, "quarry-g1-host", opts, func() error {
+		done <- pinAndRunMaintenance(ctx, ctx, cfg, pg, "quarry-g1-host", opts, func(ctx context.Context) error {
 			_, runErr := reconcileRevisions(ctx, pg, blocker, idx, idx.deleteNamespace, noDocuments, opts, sweepSettings{DrainDelay: time.Minute}, &bytes.Buffer{})
 			return runErr
 		})
@@ -369,7 +372,7 @@ func TestRevisionSweepApplyPinsGenerationAndHoldsWriterBarrier(t *testing.T) {
 	sweepG2 := func() (report, error) {
 		var rep report
 		var sweepErr error
-		sweepErr = pinAndRunMaintenance(ctx, ctx, cfg, pg, cfg.PineconeIndexName+"-host", opts, func() error {
+		sweepErr = pinAndRunMaintenance(ctx, ctx, cfg, pg, cfg.PineconeIndexName+"-host", opts, func(ctx context.Context) error {
 			rep, sweepErr = reconcileRevisions(ctx, pg, &blockingSweepVectors{}, idx, idx.deleteNamespace, noDocuments, opts, sweepSettings{DrainDelay: time.Minute}, &bytes.Buffer{})
 			return sweepErr
 		})
@@ -596,7 +599,7 @@ func TestScopedBackfillPublishesHistoricalHostedRevision(t *testing.T) {
 		t.Helper()
 		var report scopedReport
 		opts.After = after
-		err := pinAndRunMaintenance(ctx, ctx, cfg, pg, host, opts, func() error {
+		err := pinAndRunMaintenance(ctx, ctx, cfg, pg, host, opts, func(ctx context.Context) error {
 			var applyErr error
 			report, applyErr = backfillScoped(ctx, hostedScopedSource{pg: pg}, hostedVectors{idx: conn, dimensions: cfg.EmbeddingDimensions}, opts)
 			return applyErr
@@ -641,7 +644,7 @@ func TestScopedBackfillPublishesHistoricalHostedRevision(t *testing.T) {
 	fixture.mu.Unlock()
 	wrong := *cfg
 	wrong.VectorGeneration = "g2"
-	err = pinAndRunMaintenance(ctx, ctx, &wrong, pg, "other-host", opts, func() error {
+	err = pinAndRunMaintenance(ctx, ctx, &wrong, pg, "other-host", opts, func(context.Context) error {
 		return fmt.Errorf("generation mismatch reached provider work")
 	})
 	require.ErrorIs(t, err, domain.ErrGenerationMismatch)
@@ -713,5 +716,89 @@ func TestScopedBackfillPublishesHistoricalHostedRevision(t *testing.T) {
 		assign(control, "", false)
 		require.Equal(t, scopedReport{Examined: 1, Verified: 1, ResumeAfter: control.DocumentID}, apply(racing.DocumentID))
 		visible(&subject, keys, 1)
+	}
+}
+
+func TestHostedMaintenanceRestrictedWriterOperationModes(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.Start(t)
+	owner, err := pgstore.NewClient(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(owner.Pool.Close)
+	require.NoError(t, owner.RunMigrations(ctx))
+	login := pgtest.Role(t, dsn, "hosted_writer")
+	role := pgx.Identifier{login}.Sanitize()
+	_, err = owner.Pool.Exec(ctx, `CREATE ROLE `+role+` LOGIN PASSWORD 'fixture-password';
+		GRANT EXECUTE ON FUNCTION vector_writer_state() TO `+role)
+	require.NoError(t, err)
+	writer, err := pgstore.NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
+		cfg.ConnConfig.User, cfg.ConnConfig.Password = login, "fixture-password"
+	})
+	require.NoError(t, err)
+	t.Cleanup(writer.Pool.Close)
+	index := &collectionFakeIndex{}
+	opts := options{Apply: true, BackfillCollections: true, Limit: 1}
+	work := func(ctx context.Context) error {
+		_, backfillErr := backfillCollections(ctx, index, []collectionDocument{{ID: uuid.NewString(), Collection: "archive"}}, opts)
+		return backfillErr
+	}
+	require.NoError(t, runMaintenance(ctx, writer, opts, work))
+	require.Len(t, index.requests, 1)
+	_, err = owner.Pool.Exec(ctx, `UPDATE vector_state SET writer_operations_enabled=TRUE`)
+	require.NoError(t, err)
+	require.ErrorContains(t, runMaintenance(ctx, writer, opts, work), "writer operation privileges are required")
+	require.Len(t, index.requests, 1, "a failed enrollment never reaches metadata updates")
+	_, err = owner.Pool.Exec(ctx, `GRANT EXECUTE ON FUNCTION vector_writer_operation_begin(uuid,uuid,text,text,text),
+		vector_writer_operation_mark(uuid,uuid), vector_writer_operation_finish(uuid,uuid) TO `+role)
+	require.NoError(t, err)
+	require.NoError(t, runMaintenance(ctx, writer, opts, work))
+	require.Len(t, index.requests, 2)
+	var marked bool
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT pending_provider FROM vector_writer_operations WHERE kind='reconcile'`).Scan(&marked))
+	require.True(t, marked)
+}
+
+func TestHostedOrphanReconcileRetainsUnsettledOperations(t *testing.T) {
+	ctx := t.Context()
+	owner, err := pgstore.NewClient(ctx, pgtest.Start(t))
+	require.NoError(t, err)
+	t.Cleanup(owner.Pool.Close)
+	require.NoError(t, owner.RunMigrations(ctx))
+	_, err = owner.Pool.Exec(ctx, `UPDATE vector_state SET writer_operations_enabled=TRUE`)
+	require.NoError(t, err)
+	lost := status.Error(codes.Unavailable, "reply lost")
+	for _, name := range []string{"acknowledged", "lost reply", "earlier lost reply followed by acknowledgment"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			index := &reconcileFakeIndex{refs: []vectorRef{{ID: "orphan"}}}
+			opts := options{Apply: true, Limit: 1, Page: 1}
+			if name == "lost reply" {
+				index.deleteErr = lost
+			}
+			err := runMaintenance(ctx, owner, opts, func(ctx context.Context) error {
+				if name == "earlier lost reply followed by acknowledgment" {
+					index.deleteErr = lost
+					require.ErrorIs(t, deleteReconcileVectorIDs(ctx, index, []string{"earlier-orphan"}), lost)
+					index.deleteErr = nil
+				}
+				_, reconcileErr := reconcile(ctx, index, index.deleteNamespace, noDocuments, opts, &bytes.Buffer{})
+				return reconcileErr
+			})
+			if name == "lost reply" {
+				require.ErrorIs(t, err, lost)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Contains(t, index.deleted, "orphan")
+			var pending *pgstore.ErrWriterOperationsPending
+			require.ErrorAs(t, owner.FreezeWriters(ctx, "next"), &pending)
+			require.Len(t, pending.OperationIDs, 1)
+			var marked bool
+			require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT pending_provider FROM vector_writer_operations WHERE operation_id=$1`,
+				pending.OperationIDs[0]).Scan(&marked))
+			require.True(t, marked)
+			_, err = owner.Pool.Exec(ctx, `DELETE FROM vector_writer_operations WHERE operation_id=$1`, pending.OperationIDs[0])
+			require.NoError(t, err)
+		})
 	}
 }

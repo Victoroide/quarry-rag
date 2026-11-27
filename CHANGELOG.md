@@ -11,6 +11,7 @@ Notable changes are grouped by release.
 ### Added
 
 - Opt-in source line and paragraph boundaries for internal layout-aware retrieval.
+- Added an opt-in durable maintenance writer barrier that prevents vector freeze while deletion or hosted reconciliation operations are unsettled.
 
 - Added an opt-in pgvector document-set recall evaluation for precomputed embeddings, with HNSW and IVFFlat comparisons and an exact-scope threshold rule.
 
@@ -20,6 +21,8 @@ Notable changes are grouped by release.
 ### Fixed
 
 - The selective Pinecone staging check pins both index descriptions to the public controller.
+- pgvector scoped backfill takes the writer barrier in each publication transaction.
+
 - Held deletion release recovers claims left by lost commit replies.
 - Vector reindex validates Pinecone chunk positions before copying vectors or accepting verification evidence.
 - Vector reindex rejects same-space verification seeds whose source identity disagrees with the canonical chunk.

@@ -362,6 +362,7 @@ When `sslcert` and `sslkey` point to files, keep both files readable after start
 | `038_grants_require_deletion_activation.sql` | Requires the checkpointed-deletion marker for grants activation and preview. |
 | `043_grant_catalog_stable_source_version.sql` | Replaces the grant source view without scanning or rewriting documents or ownership rows. Follow “Upgrade the source version” in the grant catalog guide before applying it. |
 | `044_hosted_backfill_snapshot.sql` | Adds operator entry points for hosted scoped backfill. See “Upgrade hosted scoped backfill” in the grant catalog guide. |
+| `045_vector_writer_operations.sql` | Adds the maintenance writer journal and per-database `vector_state.writer_operations_enabled` switch, which defaults to false. See [activation and recovery](deployment.md#durable-maintenance-writer-barrier). |
 
 The service can roll back to the previous binary with migration 010 and its
 checksum still recorded. After applying migration 019, 020, 023, 024, 025, 026,

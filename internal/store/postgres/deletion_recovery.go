@@ -274,15 +274,21 @@ func (c *Client) ReleaseLegacyHostedHold(ctx context.Context, id domain.Document
 	}
 	ctx, cancel, _ := deletionDeadline(ctx)
 	defer cancel()
-	guard, release, err := c.AcquireHeldRecoveryWriter(ctx)
-	if err != nil {
+	entered := false
+	err = c.runWriterOperation(ctx, domain.WriterOperationLegacyHostedRelease, string(id)+":"+incarnation,
+		c.gateHeldRecoveryWriterInSchema, func(ctx context.Context, guard pgx.Tx) error {
+			entered = true
+			return c.releaseLegacyHostedHold(ctx, guard, id, incarnation, ops)
+		})
+	if err != nil && !entered {
 		return fmt.Errorf("check document writers: %w", err)
 	}
-	defer release()
+	return err
+}
 
-	// Freeze can hold the only pooled connection while waiting for the guard.
-	// Claim, checkpoint and finalize in a separate session so the release can
-	// still finish and let freeze proceed.
+func (c *Client) releaseLegacyHostedHold(ctx context.Context, guard pgx.Tx, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
+	// Use an independent mutation connection while the legacy guard is live.
+	// With a reservation, a lost commit is read back through the pool.
 	config := c.Pool.Config().ConnConfig
 	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
@@ -293,8 +299,12 @@ func (c *Client) ReleaseLegacyHostedHold(ctx context.Context, id domain.Document
 		defer cancel()
 		_ = conn.Close(closeCtx)
 	}()
+	var outcome queryRower = c.Pool
+	if guard != nil {
+		outcome = guard
+	}
 	sourceOnly := domain.DeleteOperations{VectorIndex: ops.VectorIndex, SourceBucket: ops.SourceBucket, Source: ops.Source}
-	return (heldRelease{db: conn, outcome: guard, legacyOnly: true, claimConnConfig: config}).release(ctx, id, incarnation, sourceOnly)
+	return (heldRelease{db: conn, outcome: outcome, legacyOnly: true, claimConnConfig: config}).release(ctx, id, incarnation, sourceOnly)
 }
 
 func (h heldRelease) release(ctx context.Context, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
@@ -328,7 +338,7 @@ func (h heldRelease) releaseClaim(ctx context.Context, id domain.DocumentID, inc
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deletionClaimReleaseTimeout)
 	err := clearHeldDeletionClaim(releaseCtx, h.db, id, incarnation, claim)
 	cancel()
-	if err == nil || h.claimConnConfig == nil {
+	if err == nil || h.claimConnConfig == nil || !retryWriterSQL(releaseCtx, err) {
 		return
 	}
 
@@ -349,7 +359,7 @@ func (h heldRelease) releaseClaim(ctx context.Context, id domain.DocumentID, inc
 }
 
 func clearHeldDeletionClaim(ctx context.Context, db deletionExecer, id domain.DocumentID, incarnation, claim string) error {
-	_, err := db.Exec(ctx, `UPDATE document_deletions SET claim=NULL,claim_until=NULL
+	_, err := execWriterSQL(ctx, db, `UPDATE document_deletions SET claim=NULL,claim_until=NULL
 		WHERE document_id=$1 AND incarnation=$2 AND claim=$3`, string(id), incarnation, claim)
 	return err
 }
@@ -401,8 +411,8 @@ func (h heldRelease) claimHeldDeletion(ctx context.Context, id domain.DocumentID
 	if tag.RowsAffected() != 1 {
 		return releaseReceipt{}, false, domain.ErrDeletionBusy
 	}
-	if commitErr := tx.Commit(ctx); commitErr != nil {
-		return releaseReceipt{}, !errors.Is(commitErr, pgx.ErrTxCommitRollback), commitErr
+	if commitErr := commitWriterSQL(ctx, tx); commitErr != nil {
+		return releaseReceipt{}, sqlMutationUnconfirmed(commitErr), commitErr
 	}
 	return r, false, nil
 }
@@ -561,7 +571,7 @@ func (h heldRelease) executeReleaseCleanup(ctx context.Context, id domain.Docume
 func (h heldRelease) checkpointReleaseStep(ctx context.Context, id domain.DocumentID, incarnation, claim string, nextStep int) error {
 	checkpointCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
-	tag, err := h.db.Exec(checkpointCtx, `UPDATE document_deletions SET step=$4
+	tag, err := execWriterSQL(checkpointCtx, h.db, `UPDATE document_deletions SET step=$4
 		WHERE document_id=$1 AND incarnation=$2 AND claim=$3 AND step<$4 AND claim_until>clock_timestamp()`,
 		string(id), incarnation, claim, nextStep)
 	if err != nil {
@@ -608,7 +618,7 @@ func (h heldRelease) finalizeRelease(ctx context.Context, id domain.DocumentID, 
 		if checkErr == nil && released {
 			return nil
 		}
-		return commitErr
+		return observeWriterSQL(ctx, commitErr)
 	}
 	return nil
 }

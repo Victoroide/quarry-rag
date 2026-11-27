@@ -984,13 +984,18 @@ func TestLegacyHostedReleaseSerializesWithFreezeAndAdmission(t *testing.T) {
 	defer cancelWaiter()
 	require.ErrorIs(t, c.ReleaseLegacyHostedHold(waiter, doc.id, doc.incarnation, ops), context.DeadlineExceeded)
 
+	var guardPID uint32
+	require.NoError(t, observer.QueryRow(ctx, `SELECT pid FROM pg_stat_activity
+		WHERE datname=current_database() AND application_name=current_setting('application_name')
+		AND state='idle in transaction' AND query LIKE '%vector_writer_operations_enabled()%'`).Scan(&guardPID))
 	go func() { frozen <- c.FreezeWriters(ctx, "next") }()
 	require.Eventually(t, func() bool {
 		var blocked bool
 		err := observer.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
 			WHERE datname=current_database() AND application_name=current_setting('application_name')
 			AND wait_event_type='Lock'
-			AND query LIKE 'UPDATE vector_state SET frozen=TRUE%')`).Scan(&blocked)
+			AND query LIKE '%vector_state s WHERE singleton FOR UPDATE%'
+			AND $1::integer = ANY(pg_blocking_pids(pid)))`, guardPID).Scan(&blocked)
 		return err == nil && blocked
 	}, 5*time.Second, 10*time.Millisecond)
 	admitErr := make(chan error, 1)
@@ -1127,12 +1132,17 @@ func TestLegacyHostedReleaseFinalizeRollbackUnblocksFreeze(t *testing.T) {
 		string(id), incarnation, stepSource).Scan(&originalClaim))
 	_, err := uuid.Parse(originalClaim)
 	require.NoError(t, err)
+	var guardPID uint32
+	require.NoError(t, observer.QueryRow(watchdog, `SELECT pid FROM pg_stat_activity
+		WHERE datname=current_database() AND application_name=current_setting('application_name')
+		AND state='idle in transaction' AND query LIKE '%vector_writer_operations_enabled()%'`).Scan(&guardPID))
 	go func() { frozen <- c.FreezeWriters(watchdog, "next") }()
 	require.Eventually(t, func() bool {
 		var blocked bool
 		err := observer.QueryRow(watchdog, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
 			WHERE datname=current_database() AND application_name=current_setting('application_name')
-			AND wait_event_type='Lock' AND query LIKE 'UPDATE vector_state SET frozen=TRUE%')`).Scan(&blocked)
+			AND wait_event_type='Lock' AND query LIKE '%vector_state s WHERE singleton FOR UPDATE%'
+			AND $1::integer=ANY(pg_blocking_pids(pid)))`, guardPID).Scan(&blocked)
 		return err == nil && blocked
 	}, 5*time.Second, 10*time.Millisecond)
 	require.EqualValues(t, 1, c.Pool.Stat().AcquiredConns())

@@ -60,7 +60,7 @@ func backfillCollections(ctx context.Context, idx collectionIndex, docs []collec
 		}
 		filter := &structpb.Struct{Fields: map[string]*structpb.Value{"doc_id": structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$eq": structpb.NewStringValue(doc.ID)}})}}
 		metadata := &structpb.Struct{Fields: map[string]*structpb.Value{"collection": structpb.NewStringValue(doc.Collection)}}
-		if _, err := idx.UpdateVectorsByMetadata(ctx, &pinecone.UpdateVectorsByMetadataRequest{Filter: filter, Metadata: metadata}); err != nil {
+		if _, err := updateReconcileMetadata(ctx, idx, &pinecone.UpdateVectorsByMetadataRequest{Filter: filter, Metadata: metadata}); err != nil {
 			return result, fmt.Errorf("backfill document %s: %w; resume with -after=%q", doc.ID, err, last)
 		}
 		result.Updated++

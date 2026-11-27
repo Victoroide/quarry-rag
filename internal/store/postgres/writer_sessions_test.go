@@ -34,9 +34,14 @@ func sessionTestClientWithPool(t *testing.T, maxConns int, opts ...Option) (*Cli
 
 func requireDedicatedSessions(t *testing.T, c *Client, observer *pgx.Conn, want int) {
 	t.Helper()
+	requireDedicatedSessionsContext(t.Context(), t, c, observer, want)
+}
+
+func requireDedicatedSessionsContext(ctx context.Context, t *testing.T, c *Client, observer *pgx.Conn, want int) {
+	t.Helper()
 	require.Eventually(t, func() bool {
 		var count int
-		err := observer.QueryRow(t.Context(), `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+		err := observer.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
 			AND application_name = current_setting('application_name') AND backend_type = 'client backend'`).Scan(&count)
 		return err == nil && count-1-int(c.Pool.Stat().TotalConns()) == want
 	}, 5*time.Second, 10*time.Millisecond)

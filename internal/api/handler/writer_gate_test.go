@@ -278,3 +278,52 @@ func TestReleaseHeldHonorsTheWriterGate(t *testing.T) {
 		})
 	}
 }
+
+type operationScopedStore struct {
+	*gatedScopedStore
+	calls     int
+	kind      domain.WriterOperationKind
+	target    string
+	protected bool
+}
+
+func (s *operationScopedStore) RunWriterOperation(ctx context.Context, kind domain.WriterOperationKind, target string, work func(context.Context) error) error {
+	s.calls++
+	s.kind, s.target = kind, target
+	if s.gate != nil {
+		return s.gate
+	}
+	ctx = domain.WithExternalWriterDispatch(ctx, func(ctx context.Context, call domain.ExternalWriterAttempt) error {
+		_, err := call(ctx)
+		return err
+	})
+	return work(ctx)
+}
+
+func (s *operationScopedStore) ResumeScopedDeletion(ctx context.Context, id domain.DocumentID, incarnation string, ops domain.DeleteOperations) error {
+	s.protected = domain.HasExternalWriterDispatch(ctx)
+	return s.gatedScopedStore.ResumeScopedDeletion(ctx, id, incarnation, ops)
+}
+
+func TestGuardedDeleteUsesWriterOperation(t *testing.T) {
+	owner := domain.Principal{ID: uuid.NewString(), TenantID: uuid.NewString()}
+	id, incarnation := uuid.NewString(), uuid.NewString()
+	store := &operationScopedStore{gatedScopedStore: &gatedScopedStore{scopedMockStore: newScopedMockStore(owner)}}
+	store.docs[id] = &scopedMemoryEntry{owner: owner, summary: domain.DocumentSummary{ID: id, Incarnation: incarnation, Status: "completed"}}
+	h := DeleteHandler(store, nil, nil, WithScopedDeletion())
+	expiry := time.Now().Add(time.Minute)
+	path := "/documents/" + id
+	require.Equal(t, http.StatusUnauthorized, serveScoped(h, http.MethodDelete, path, nil, expiry, incarnation).Code)
+	require.Equal(t, http.StatusBadRequest, serveScoped(h, http.MethodDelete, path, &owner, expiry, "invalid").Code)
+	require.Zero(t, store.calls)
+	store.gate = domain.ErrWritersFrozen
+	require.Equal(t, http.StatusServiceUnavailable, serveScoped(h, http.MethodDelete, path, &owner, expiry, incarnation).Code)
+	require.Empty(t, store.events)
+	store.gate = nil
+	require.Equal(t, http.StatusOK, serveScoped(h, http.MethodDelete, path, &owner, expiry, incarnation).Code)
+	require.Equal(t, 2, store.calls)
+	require.Equal(t, domain.WriterOperationDelete, store.kind)
+	require.Equal(t, id+":"+incarnation, store.target)
+	require.Equal(t, []string{"begin", "resume"}, store.events)
+	require.True(t, store.protected, "provider context survives the detached receipt path")
+}

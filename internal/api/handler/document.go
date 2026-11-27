@@ -96,77 +96,90 @@ func DeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, objects 
 			}
 			defer releaseSlot()
 		}
-		release, gateErr := acquireDeleteWriter(ctx, cs)
-		if gateErr != nil {
-			writeDeleteGateError(ctx, w, docIDStr, gateErr)
-			return
-		}
-		if release != nil {
-			defer release()
-		}
-		docID := domain.DocumentID(docIDStr)
+		canonical := parsedID.String()
+		kind := domain.WriterOperationDelete
 		if releaseHeld {
-			if !valid {
-				writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
-				return
-			}
-			if !qualified {
-				writeJSONError(r.Context(), w, http.StatusPreconditionRequired, "precondition", incarnationHeaderName+" is required to release a held deletion")
-				return
-			}
-			canonical := parsedID.String()
-			err = cleanup.ReleaseOfflineHold(ctx, cs, pcDriver, objects, options.targets, domain.DocumentID(canonical), incarnation)
-			writeDeleteResult(ctx, w, canonical, err)
-			return
+			kind = domain.WriterOperationHeldRelease
 		}
-		if guarded {
-			// The activation lock decides the contract. A request that loses the race
-			// to an activation continues below as an activated ID-only request.
-			err = cleanup.RemoveLegacy(legacyCtx, guard, pcDriver, objects, options.targets, docID)
-			releaseSlot()
-			if !errors.Is(err, domain.ErrDeletionActivated) {
-				writeDeleteResult(ctx, w, docIDStr, err)
-				return
-			}
-		}
-		if deleter, ok := cs.(domain.DocumentDeleter); ok {
-			active, modeErr := deleter.DeletionActive(ctx)
-			if modeErr != nil {
-				slog.ErrorContext(ctx, "read deletion mode", "document_id", docIDStr, "error", tracing.ErrorForTelemetry(ctx, modeErr))
-				writeJSONError(r.Context(), w, http.StatusServiceUnavailable, "unavailable", "document deletion mode is unavailable")
-				return
-			}
-			if active {
+		responseID := docIDStr
+		entered, err := runDeleteWriter(legacyCtx, cs, kind, writerDeleteTarget(canonical, incarnation), func(ctx context.Context) error {
+			if releaseHeld {
 				if !valid {
-					writeJSONError(r.Context(), w, http.StatusBadRequest, "validation", incarnationHeaderName+" must be exactly one canonical UUID")
-					return
+					return deleteIncarnationHeaderError()
 				}
-				// External stores and receipts key the document by its canonical form.
-				canonical := parsedID.String()
-				err = cleanup.RemoveIncarnation(ctx, deleter, pcDriver, objects, options.targets, domain.DocumentID(canonical), incarnation)
-				writeDeleteResult(ctx, w, canonical, err)
-				return
+				if !qualified {
+					return &deleteHTTPError{http.StatusPreconditionRequired, "precondition",
+						incarnationHeaderName + " is required to release a held deletion"}
+				}
+				responseID = canonical
+				return cleanup.ReleaseOfflineHold(ctx, cs, pcDriver, objects, options.targets, domain.DocumentID(canonical), incarnation)
 			}
-		}
-		if qualified {
-			writeJSONError(r.Context(), w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
+			docID := domain.DocumentID(docIDStr)
+			if guarded {
+				// A request that loses the activation race continues as an activated ID-only request.
+				removeErr := cleanup.RemoveLegacy(ctx, guard, pcDriver, objects, options.targets, docID)
+				releaseSlot()
+				if !errors.Is(removeErr, domain.ErrDeletionActivated) {
+					return removeErr
+				}
+			}
+			if deleter, ok := cs.(domain.DocumentDeleter); ok {
+				active, modeErr := deleter.DeletionActive(ctx)
+				if modeErr != nil {
+					slog.ErrorContext(ctx, "read deletion mode", "document_id", docIDStr, "error", tracing.ErrorForTelemetry(ctx, modeErr))
+					return &deleteHTTPError{http.StatusServiceUnavailable, "unavailable", "document deletion mode is unavailable"}
+				}
+				if active {
+					if !valid {
+						return deleteIncarnationHeaderError()
+					}
+					responseID = canonical
+					return cleanup.RemoveIncarnation(ctx, deleter, pcDriver, objects, options.targets, domain.DocumentID(canonical), incarnation)
+				}
+			}
+			if qualified {
+				return domain.ErrDeletionInactive
+			}
+			doc, lookupErr := cs.GetDocument(ctx, docID)
+			if lookupErr != nil {
+				slog.ErrorContext(ctx, "look up document", "document_id", docIDStr, "error", tracing.ErrorForTelemetry(ctx, lookupErr))
+				return &deleteHTTPError{http.StatusInternalServerError, "internal", "failed to look up document"}
+			}
+			if doc == nil {
+				return domain.ErrDocumentNotFound
+			}
+			return cleanup.Remove(ctx, cs, pcDriver, objects, doc)
+		})
+		if !entered {
+			writeDeleteGateError(ctx, w, docIDStr, err)
 			return
 		}
-
-		// 1. Check document exists and get s3_key.
-		doc, err := cs.GetDocument(ctx, docID)
-		if err != nil {
-			slog.ErrorContext(ctx, "look up document", "document_id", docIDStr, "error", tracing.ErrorForTelemetry(ctx, err))
-			writeJSONError(r.Context(), w, http.StatusInternalServerError, "internal", "failed to look up document")
+		var httpErr *deleteHTTPError
+		if errors.As(err, &httpErr) {
+			writeJSONError(ctx, w, httpErr.status, httpErr.code, httpErr.message)
 			return
 		}
-		if doc == nil {
-			writeJSONError(r.Context(), w, http.StatusNotFound, "not_found", "document not found")
-			return
-		}
-		err = cleanup.Remove(ctx, cs, pcDriver, objects, doc)
-		writeDeleteResult(ctx, w, docIDStr, err)
+		writeDeleteResult(ctx, w, responseID, err)
 	}
+}
+
+type deleteHTTPError struct {
+	status  int
+	code    string
+	message string
+}
+
+func (e *deleteHTTPError) Error() string { return e.message }
+
+func deleteIncarnationHeaderError() error {
+	return &deleteHTTPError{http.StatusBadRequest, "validation", incarnationHeaderName + " must be exactly one canonical UUID"}
+}
+
+func writerDeleteTarget(id, incarnation string) string {
+	if incarnation != "" {
+		return id + ":" + incarnation
+	}
+	return id
 }
 
 // parseReleaseHeld accepts zero or one literal "true" or "false" value.
@@ -246,6 +259,8 @@ func writeDeleteResult(ctx context.Context, w http.ResponseWriter, docID string,
 		writeJSONError(ctx, w, http.StatusServiceUnavailable, "busy", "too many concurrent deletions; retry later")
 	case errors.Is(err, domain.ErrDeletionInactive):
 		writeJSONError(ctx, w, http.StatusPreconditionFailed, "precondition", "incarnation-qualified deletion and hold release are unavailable")
+	case errors.Is(err, domain.ErrWriterEvidenceUnavailable):
+		writeJSONError(ctx, w, http.StatusInternalServerError, "internal", "failed to delete document")
 	default:
 		if tracing.RedactIdentifiers(ctx) {
 			slog.ErrorContext(ctx, "delete document", "error", tracing.ErrorForTelemetry(ctx, err))
@@ -267,6 +282,25 @@ func acquireDeleteWriter(ctx context.Context, cs domain.ChunkStore) (func(), err
 	}
 }
 
+func runDeleteWriter(ctx context.Context, cs domain.ChunkStore, kind domain.WriterOperationKind, target string, work func(context.Context) error) (bool, error) {
+	if runner, ok := cs.(domain.WriterOperationRunner); ok {
+		entered := false
+		err := runner.RunWriterOperation(ctx, kind, target, func(ctx context.Context) error {
+			entered = true
+			return work(ctx)
+		})
+		return entered, err
+	}
+	release, err := acquireDeleteWriter(ctx, cs)
+	if err != nil {
+		return false, err
+	}
+	if release != nil {
+		defer release()
+	}
+	return true, work(ctx)
+}
+
 func writeDeleteGateError(ctx context.Context, w http.ResponseWriter, docIDStr string, gateErr error) {
 	switch {
 	case errors.Is(gateErr, domain.ErrWritersFrozen):
@@ -274,6 +308,9 @@ func writeDeleteGateError(ctx context.Context, w http.ResponseWriter, docIDStr s
 	case errors.Is(gateErr, domain.ErrGenerationMismatch):
 		w.Header().Set("Retry-After", "30")
 		writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "this replica does not serve the active vector generation")
+	case errors.Is(gateErr, domain.ErrWriterEvidenceUnavailable):
+		w.Header().Set("Retry-After", "30")
+		writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "document store unavailable")
 	default:
 		if tracing.RedactIdentifiers(ctx) {
 			slog.ErrorContext(ctx, "check document writers", "error", tracing.ErrorForTelemetry(ctx, gateErr))
@@ -322,21 +359,21 @@ func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, ob
 			writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "document deletion is unavailable")
 			return
 		}
-		release, gateErr := acquireDeleteWriter(ctx, cs)
-		if gateErr != nil {
-			if (errors.Is(gateErr, context.Canceled) || errors.Is(gateErr, context.DeadlineExceeded)) && !subject.ValidAt(now()) {
+		entered, err := runDeleteWriter(ctx, cs, domain.WriterOperationDelete, writerDeleteTarget(canonical, incarnation),
+			func(ctx context.Context) error {
+				return cleanup.RemoveScoped(ctx, deleter, pcDriver, objects, options.targets, subject.Principal,
+					subject.ExpiresAt, domain.DocumentID(canonical), incarnation)
+			})
+		if !entered {
+			if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && !subject.ValidAt(now()) {
 				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "deny", "credential_expired", canonical, incarnation)
 				writeDeleteResult(ctx, w, canonical, domain.ErrUnauthorized)
 				return
 			}
 			recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "error", "writer_gate_unavailable", canonical, incarnation)
-			writeDeleteGateError(ctx, w, docIDStr, gateErr)
+			writeDeleteGateError(ctx, w, docIDStr, err)
 			return
 		}
-		if release != nil {
-			defer release()
-		}
-		err = cleanup.RemoveScoped(ctx, deleter, pcDriver, objects, options.targets, subject.Principal, subject.ExpiresAt, domain.DocumentID(canonical), incarnation)
 		if errors.Is(err, cleanup.ErrScopedDeletionCanceled) {
 			if !subject.ValidAt(now()) {
 				err = domain.ErrUnauthorized

@@ -338,6 +338,26 @@ enabled.
 GRANT EXECUTE ON FUNCTION public.grant_catalog_inventory_policy_state(uuid, uuid) TO quarry_service;
 ```
 
+### Writer operation grants
+
+Migration 045 lets logins with the existing vector writer barrier read the
+current setting. With the barrier disabled, these logins need no new grants.
+Before enabling it, grant the following functions to the logins that already
+perform the protected workflows. Substitute your corpus schema and login
+names. Grant drain diagnostics only to the login authorized to freeze writers.
+
+```sql
+GRANT EXECUTE ON FUNCTION public.vector_writer_operation_begin(uuid, uuid, text, text, text),
+  public.vector_writer_operation_mark(uuid, uuid),
+  public.vector_writer_operation_finish(uuid, uuid)
+  TO quarry_service, quarry_operator, quarry_reindex, quarry_cleanup;
+GRANT EXECUTE ON FUNCTION public.vector_writer_operation_drain_status()
+  TO quarry_reindex;
+```
+
+Keep the journal table owner-only. The [deployment procedure](deployment.md#durable-maintenance-writer-barrier)
+requires the owner login for mode changes and abandoned operations.
+
 ## Owned ingestion
 
 In `AUTHZ_MODE=grants`, `POST /ingest` uses owned ingestion for a verified

@@ -13,6 +13,8 @@ import (
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -784,6 +786,57 @@ func TestFailedModeLookupNeverFallsBackToIDOnlyDeletion(t *testing.T) {
 			require.Equal(t, 1, remaining)
 
 			require.NoError(t, cleaner.Delete(t.Context(), string(id)), "the same request succeeds once the lookup answers")
+		})
+	}
+}
+
+func TestDirectCleanupRestrictedWriterOperationModes(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.Start(t)
+	owner, err := pgstore.NewClient(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(owner.Pool.Close)
+	require.NoError(t, owner.RunMigrations(ctx))
+	login := pgtest.Role(t, dsn, "cleanup_writer")
+	role := pgx.Identifier{login}.Sanitize()
+	_, err = owner.Pool.Exec(ctx, `CREATE ROLE `+role+` LOGIN PASSWORD 'fixture-password';
+		GRANT SELECT, DELETE, UPDATE ON documents TO `+role+`;
+		GRANT EXECUTE ON FUNCTION vector_writer_state(), document_deletion_active() TO `+role)
+	require.NoError(t, err)
+	writer, err := pgstore.NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
+		cfg.ConnConfig.User, cfg.ConnConfig.Password = login, "fixture-password"
+	})
+	require.NoError(t, err)
+	t.Cleanup(writer.Pool.Close)
+	cleaner := &Cleaner{metadata: writer, pinnedPostgres: true}
+	for _, test := range []struct {
+		name                    string
+		enabled, grant, removed bool
+	}{
+		{name: "disabled", removed: true},
+		{name: "enabled without grants", enabled: true},
+		{name: "enabled with grants", enabled: true, grant: true, removed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			id := uuid.NewString()
+			_, err := owner.Pool.Exec(ctx, `UPDATE vector_state SET writer_operations_enabled=$1`, test.enabled)
+			require.NoError(t, err)
+			_, err = owner.Pool.Exec(ctx, `INSERT INTO documents(id,content,status) VALUES($1,'cleanup fixture','completed')`, id)
+			require.NoError(t, err)
+			if test.grant {
+				_, err = owner.Pool.Exec(ctx, `GRANT EXECUTE ON FUNCTION vector_writer_operation_begin(uuid,uuid,text,text,text),
+					vector_writer_operation_mark(uuid,uuid), vector_writer_operation_finish(uuid,uuid) TO `+role)
+				require.NoError(t, err)
+			}
+			err = cleaner.Delete(ctx, id)
+			if test.removed {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "writer operation privileges are required")
+			}
+			var live bool
+			require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM documents WHERE id=$1)`, id).Scan(&live))
+			require.Equal(t, !test.removed, live)
 		})
 	}
 }

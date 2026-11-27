@@ -8,7 +8,6 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -398,7 +397,7 @@ func UpgradedServingRoleDatabase(t *testing.T) (owner, serving *Client) {
 	owner = jobsDatabase(t)
 	roles := newGrantRoles(t, owner.Pool.Config().ConnString(), "quarry_service")
 	grantExec(t, owner, roles.sql(`
-		CREATE ROLE {quarry_service};
+		CREATE ROLE {quarry_service} LOGIN PASSWORD 'fixture-password';
 		GRANT USAGE ON SCHEMA public TO {quarry_service};
 		GRANT SELECT ON public.schema_migrations TO {quarry_service};
 		GRANT SELECT, INSERT, UPDATE, DELETE ON public.documents, public.chunks,
@@ -415,12 +414,7 @@ func UpgradedServingRoleDatabase(t *testing.T) (owner, serving *Client) {
 	} {
 		grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", marker))
 	}
-	var err error
-	serving, err = NewClient(t.Context(), owner.Pool.Config().ConnString(), func(config *pgxpool.Config) {
-		config.ConnConfig.RuntimeParams["role"] = roles.name("quarry_service")
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, serving.Close(context.Background())) })
+	serving = writerLogin(t, owner.Pool.Config().ConnString(), roles.name("quarry_service"))
 	serving.SetAuthzMode("service")
 	return owner, serving
 }

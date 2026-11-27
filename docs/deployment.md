@@ -1148,7 +1148,94 @@ before resuming service. Reindex from a fresh checkpoint
 or re-ingest affected documents if an older upsert may already have retained
 stale provenance.
 
+## Durable Maintenance Writer Barrier
+
+Apply migration `045_vector_writer_operations.sql` and the
+[writer operation grants](grant-catalog.md#writer-operation-grants). The barrier
+covers document deletion, held deletion release, and applied hosted
+reconciliation. Deploy compatible binaries before enabling it. Put the intended
+metadata schema first in the database search path, ahead of schemas the
+runtime can write to. Writer admission checks the gate and document table
+against the migration history in that corpus.
+
+### Enable the barrier
+
+Stop and drain all serving and maintenance processes that predate the barrier,
+including scheduled jobs. Withdraw their database access and credentials if
+they could reconnect. Before resuming, confirm that prior provider requests
+have settled. Capture and retain the process stderr stream for every serving
+replica and maintenance invocation, including after exit or replacement.
+Verify that the collector retains records with `"stream":"writer_recovery"`
+at every `LOG_LEVEL` before admitting production traffic in this mode. Keep
+those records under the same access controls as the journal. The admission
+transaction rolls back if its enrollment record cannot be confirmed. If the
+stream stalls, it can also prevent a provider request from starting or leave
+an attempt pending when the result record cannot be confirmed.
+
+As the metadata schema owner, use the schema-qualified names for
+your corpus and run the following transaction.
+
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SELECT singleton FROM public.vector_state WHERE singleton FOR UPDATE;
+SELECT operation_id, sender_id, generation, kind, target_reference, pending_provider
+FROM public.vector_writer_operations ORDER BY started_at, operation_id;
+-- Proceed after confirming there are no outstanding operations.
+UPDATE public.vector_state SET writer_operations_enabled=TRUE WHERE singleton;
+COMMIT;
+```
+
+### Resolve an abandoned operation
+
+A refused freeze reports the pending count and up to 20 operation IDs. Grants
+activation also refuses while operations remain. As the metadata owner, inspect
+the journal using the query above. Match the operation and sender IDs to the
+`writer operation enrollment started` entry in the retained stderr stream.
+Match its process host and PID with the deployment's process or pod records
+and verify that the exact sender stopped and cannot resume. Keep these logs
+available even after a process has exited.
+
+Collect every `writer provider attempt` entry for that operation and sender,
+including retries and batch fragments. Check the pinned vector target and
+each attempt's provider, namespace, outcome, and available request ID or
+sequence. A started attempt with no closing entry may have reached the provider.
+For S3, confirm the deletion acknowledgment or rejection using the request ID
+when available. For Pinecone, confirm indexing using the same namespace's
+watermark at or beyond the recorded request sequence. If a request lacks this
+evidence, obtain settlement confirmation from the provider. Independently
+verify the settlement or termination of any database mutation whose reply
+was lost. If an attempt is missing, the request set cannot be bounded, or an
+outcome remains unconfirmed, leave the exact row pending.
+
+Once confirmed, execute the following as a parameterized transaction with the
+reported operation and sender UUIDs. Confirm that it returns exactly one row.
+
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SELECT singleton FROM public.vector_state WHERE singleton FOR UPDATE;
+DELETE FROM public.vector_writer_operations
+WHERE operation_id=$1 AND sender_id=$2 RETURNING operation_id;
+COMMIT;
+```
+
+### Roll back or recover a database
+
+Stop all barrier-aware writers. Under the singleton lock, confirm that the
+journal is empty and that provider work has settled. Set
+`writer_operations_enabled=FALSE` in the locked transaction before allowing
+earlier binaries to start. Disabling the barrier with outstanding operations
+is refused.
+
+Use synchronous replication and fence the former primary so that failover
+preserves every acknowledged journal commit. After a restore or loss of
+acknowledged commits, treat the journal as incomplete. Stop all senders and
+settle their provider requests before allowing writers or freeze operations.
+
 ## Vector Index Maintenance
+
+For PostgreSQL, [scoped metadata backfill](development.md#scoped-metadata-backfill)
+can finish verification during a freeze. Resume the pass after thaw to publish
+documents that stayed quarantined.
 
 For a Pinecone deployment, use `make reconcile` during a maintenance window to
 inspect orphaned vectors and legacy document namespaces. Configure the same
