@@ -262,6 +262,99 @@ records, ingestion status, chunk text and token counts, and SHA-256 content
 fingerprints. [Startup migrations](configuration.md#schema-migrations) create
 the schema and enable `pgcrypto`.
 
+#### PostgreSQL writer journal durability
+
+Quarry commits deletion receipts, upload intents, worker claims, hosted
+manifests, staging write reservations and exact cleanup batches before the
+corresponding provider work. A crash can lose these records when PostgreSQL
+acknowledges a commit before flushing WAL. Losing an acknowledged record can
+make a retry unsafe, even when the provider completed the request.
+
+Use the [DSN setting](configuration.md#schema-migrations) on every server,
+worker and journal-writing maintenance process, including cleanup, reconciliation,
+and reindex. Enable `fsync` and `full_page_writes` on the primary and every
+eligible standby. Storage must honor flush requests. The setting covers future
+commits, including single statements outside explicit transactions. Keep the
+same connection settings and provider shutdown procedure across a mixed-version
+rollout or supported executable rollback. Previously acknowledged commits keep
+the guarantees of the configuration under which they completed.
+
+- **Primary-only durability** accepts `on`, `remote_apply`, `remote_write` and
+  `local`. Each waits for local WAL flush. A primary-only check leaves candidate
+  durability unverified.
+- **Synchronous standby durability** uses `on` to wait for remote WAL flush
+  or `remote_apply` to wait for standby replay and query visibility. Use direct
+  PostgreSQL connections and put `statement_timeout=0` in every writer DSN in
+  this profile. Keep the application operation deadlines. PostgreSQL can end a
+  synchronous replication wait on query cancellation after locally committing
+  and return a warning alongside a successful command. A client deadline can
+  also leave the commit outcome ambiguous. Avoid operator query cancellation
+  during journal writes and treat interrupted waits as recovery events.
+
+For the synchronous preflight, designate one directly connected physical
+standby with a permanent replication slot and a unique `application_name`.
+Configure `synchronous_standby_names` with that name alone, as
+`FIRST 1 (name)` or as `1 (name)`. Use 1–63 ASCII letters, digits or underscores,
+beginning with a letter or underscore. The reserved names `first` and `any`
+are excluded. Match the exact application name supplied by the failover
+controller. Multiple candidates, cascading replicas, wildcard configurations
+and managed failover topologies require their own equivalent evidence.
+
+Set `DATABASE_URL` to the exact writing role, database and connection settings
+for each deployed writer. Run the applicable check with that login.
+
+```sh
+go run ./scripts/postgres-durability -mode local
+go run ./scripts/postgres-durability -mode ha-session
+```
+
+For the topology check, set `DATABASE_URL` to a separate monitoring login on
+the intended primary with effective `pg_read_all_stats` access. Supply the
+actual promotion candidate. This checks the observed stream and the active
+physical slot. Verify WAL settings and storage on the candidate independently.
+
+```sh
+go run ./scripts/postgres-durability -mode ha-topology -standby quarry_standby
+```
+
+The ten-second command deadline covers connection settings, startup and
+read-only observations. The check uses at most one connection at a time and
+prints one JSON object with `mode`, `status` and `reason`. The executable exits
+0 when the selected check passes, 1 for a failed or unavailable observation,
+and 2 for invalid invocation. Build the executable when automation needs its
+exact exit status.
+Repeat after topology or connection changes. A pass describes the sampled
+session or stream at that moment. Promotion still requires confirming the
+intended cluster, timeline and candidate through the failover controller. A
+successful ping or a journal row visible on the old primary proves nothing
+about its presence on the candidate.
+
+Remote flush adds storage and network wait. Replay acknowledgment can also
+wait for standby apply. Without the eligible standby, synchronous commits can
+wait until it returns. Fence all senders before disabling synchronous
+replication, replacing the eligible standby, canceling a wait, or changing
+write routing to work around an outage.
+
+1. For controlled failover, stop writers and capture the primary WAL flush
+   position. Fence the former primary and verify that the named candidate
+   replayed through that position on the same timeline before promotion.
+2. After primary loss, fence it before permitting reconnection. Promote only
+   the designated standby whose policy preserved acknowledged commits.
+   Where available, verify that its WAL position covers the last acknowledged
+   deployment journal watermark on the same lineage.
+3. Before allowing provider writes, restore and verify the synchronous
+   topology. When a canceled wait, failed drill, stale replica, restore or
+   uncertain WAL history could have lost a commit, stop all dispatchers.
+   Inventory the original provider targets and outstanding sends, verify
+   provider and SQL outcomes, and reconcile the exact receipts before resuming
+   writers or freeze and cutover. Follow the recovery commands in the relevant
+   journal section. Preserve journal state until its outcome is known.
+
+In staging, rehearse a provider-free mixed-version rollout and primary loss
+before the new DSNs reach every process. Measure p50 and p95 for the same
+provider-free journal write before and after enabling verified standby flush.
+Record the topology, settings and measured latency with the release evidence.
+
 ### Pinecone Vector Index
 
 - Set `PINECONE_API_KEY` and `PINECONE_INDEX_NAME` for the hosted index.
@@ -390,6 +483,9 @@ GOMAXPROCS=4 go test -p 2 -count=1 -v ./internal/store/pinecone -run '^TestStagi
 ```
 
 #### Hosted Vector Manifest Rollout
+
+See [writer journal durability](#postgresql-writer-journal-durability) before
+enabling synchronous failover for hosted manifests.
 
 Apply migration 025 and the `hosted_vector_revision_visible` grant before
 starting upgraded processes, whether or not `HOSTED_VECTOR_MANIFEST` is enabled:
@@ -528,6 +624,9 @@ with `DROP INDEX CONCURRENTLY` and run the matching create statement as a
 separate command. Repeat the catalog check before enabling exact search.
 
 ### Changing Models or Vector Stores
+
+The [writer journal durability policy](#postgresql-writer-journal-durability)
+covers staging writes and exact active cleanup batches.
 
 A chat model change can reuse the existing vectors when the embedding model and
 its output dimensions stay the same. Changing the embedding model, its revision
@@ -952,6 +1051,9 @@ OpenAI-compatible tracing sets `gen_ai.system` and `gen_ai.provider.name` to `op
 
 ### Source Upload Journal
 
+Verify [writer journal durability](#postgresql-writer-journal-durability)
+for deployments that require upload intents to survive primary loss.
+
 By default an original is written to S3 before PostgreSQL accepts its document.
 A process that stops between the two steps, or a compensating delete that
 fails, leaves an object that no document references. The service cannot tell it
@@ -1204,6 +1306,9 @@ after upgrading to enable collection-filtered retrieval of their existing vector
 
 ## Activating Checkpointed Deletion
 
+See [writer journal durability](#postgresql-writer-journal-durability) for
+the deployment settings that protect checkpointed deletion receipts.
+
 A new database starts with checkpointed deletion inactive. In service mode, bare
 `DELETE` requests, `make cleanup <uuid>` and the MCP tool address the live document
 by UUID until activation. Activating [checkpointed deletion](api.md#checkpointed-deletion) is a separate, one-way, database-wide operation that an operator performs once every mutating executable can honor it and outstanding provider work is settled or quarantined.
@@ -1266,6 +1371,9 @@ The tests that write documents ask the target service for its mode before their 
 - **SDK rollback.** Reverting the Pinecone SDK dependency is supported only inside a deletion-aware service build. The rebuilt image keeps the activated contract, so a bare `DELETE` of a live UUID still returns `428` and leaves its row, source object and vectors in place.
 
 ## Legacy Deletion Reservations
+
+The [writer journal durability policy](#postgresql-writer-journal-durability)
+also applies to dedicated legacy cleanup sessions.
 
 ID-only deletion keeps working while the database has not activated [checkpointed deletion](api.md#checkpointed-deletion). The [reservation behavior](api.md#id-only-deletion-across-activation) closes the window in which an activation, or a lost database session, lets a replacement UUID overtake the last external call of a legacy cleanup. The server entry point and `make cleanup` enable it, and a hosted reservation is released with the [quarantine and release procedure](#quarantine-and-hold-release) below.
 

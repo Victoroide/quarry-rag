@@ -10,6 +10,8 @@ Notable changes are grouped by release.
 
 ### Added
 
+- Read-only PostgreSQL durability preflight for writer sessions and a designated synchronous physical standby.
+
 - Opt-in source line and paragraph boundaries for internal layout-aware retrieval.
 
 - Added an opt-in pgvector document-set recall evaluation for precomputed embeddings, with HNSW and IVFFlat comparisons and an exact-scope threshold rule.
