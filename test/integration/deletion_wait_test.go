@@ -3,12 +3,36 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSmallPoolReplyRejectsUnauthorizedTraffic(t *testing.T) {
+	server := deletionServer(t, nil, "token", deletionRoutes{})
+	for _, route := range []struct {
+		method     string
+		path       string
+		wantStatus int
+	}{
+		{http.MethodPost, "/ingest", http.StatusAccepted},
+		{http.MethodGet, "/documents?limit=100", http.StatusOK},
+		{http.MethodGet, "/documents/" + uuid.NewString(), http.StatusNotFound},
+	} {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			reply, err := readHTTPReply(ctx, server, route.method, route.path, "wrong-token", nil, "")
+			require.NoError(t, err)
+			require.Equal(t, http.StatusUnauthorized, reply.code, reply.body)
+			require.ErrorContains(t, checkSmallPoolReply(reply, route.wantStatus), "HTTP 401")
+		})
+	}
+}
 
 func testAbandonedQualifiedDeletionBatch(t *testing.T) {
 	t.Helper()
@@ -67,4 +91,11 @@ func TestQualifiedDeletionShutdownWaits(t *testing.T) {
 			require.Equal(t, 1, stores.count("source"))
 		})
 	}
+}
+
+func checkSmallPoolReply(reply httpReply, wantStatus int) error {
+	if reply.code != wantStatus {
+		return fmt.Errorf("got HTTP %d, want HTTP %d: %s", reply.code, wantStatus, reply.body)
+	}
+	return nil
 }

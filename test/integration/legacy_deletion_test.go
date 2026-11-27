@@ -710,29 +710,50 @@ func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
 	cancelEntry()
 	require.NoError(t, err)
 
+	const batches = 2
+	type request struct {
+		operation  string
+		method     string
+		path       string
+		payload    string
+		wantStatus int
+		result     chan deletionHTTPResult
+	}
+	requests := make([]request, 0, 3*batches)
+	for i := range batches {
+		requests = append(requests,
+			request{
+				operation: fmt.Sprintf("POST /ingest %d", i+1), method: http.MethodPost, path: "/ingest",
+				payload: `{"content":"admitted during slow deletions ` + uuid.NewString() + `"}`, wantStatus: http.StatusAccepted,
+			},
+			request{
+				operation: fmt.Sprintf("GET /documents %d", i+1), method: http.MethodGet, path: "/documents?limit=100",
+				wantStatus: http.StatusOK,
+			},
+			request{
+				operation: fmt.Sprintf("GET document status %d", i+1), method: http.MethodGet, path: "/documents/" + uuid.NewString(),
+				wantStatus: http.StatusNotFound,
+			},
+		)
+	}
+
 	// Both guarded deletions are inside a provider call. Other traffic on the
 	// same two-connection pool shares one deadline across requests and replies.
 	trafficCtx, cancelTraffic := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelTraffic()
-	const batches = 2
-	results := make(chan deletionHTTPResult, 3*batches)
-	for i := range batches {
-		startDeletionRequest(results, fmt.Sprintf("POST /ingest %d", i+1), func() (httpReply, error) {
-			return readHTTPReply(trafficCtx, server, http.MethodPost, "/ingest", "token", nil, `{"content":"admitted during slow deletions `+uuid.NewString()+`"}`)
-		})
-		startDeletionRequest(results, fmt.Sprintf("GET /documents %d", i+1), func() (httpReply, error) {
-			return readHTTPReply(trafficCtx, server, http.MethodGet, "/documents", "token", nil, "")
-		})
-		startDeletionRequest(results, fmt.Sprintf("GET document status %d", i+1), func() (httpReply, error) {
-			return readHTTPReply(trafficCtx, server, http.MethodGet, "/documents/"+uuid.NewString(), "token", nil, "")
+	for i := range requests {
+		request := &requests[i]
+		request.result = make(chan deletionHTTPResult, 1)
+		startDeletionRequest(request.result, request.operation, func() (httpReply, error) {
+			return readHTTPReply(trafficCtx, server, request.method, request.path, "token", nil, request.payload)
 		})
 	}
-	for range 3 * batches {
-		reply, err := waitDeletionReply(trafficCtx, results, "while the small-pool DELETE providers are paused")
-		require.NoError(t, err)
-		require.Less(t, reply.code, http.StatusInternalServerError, reply.body)
-		require.NotEqual(t, http.StatusServiceUnavailable, reply.code, reply.body)
+	for _, request := range requests {
+		reply, err := waitDeletionReply(trafficCtx, request.result, "while the small-pool DELETE providers are paused")
+		require.NoError(t, err, request.operation)
+		require.NoError(t, checkSmallPoolReply(reply, request.wantStatus), request.operation)
 	}
+	require.NoError(t, context.Cause(trafficCtx), "small-pool traffic exceeded its deadline")
 	cancelTraffic()
 	require.Zero(t, c.Pool.Stat().AcquiredConns(), "the guarded deletions hold no pooled connection")
 
