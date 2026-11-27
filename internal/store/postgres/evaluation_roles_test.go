@@ -36,12 +36,17 @@ func restrictedDatabase(t *testing.T) (owner, serving *Client, roles grantRoles)
 
 func publishedServingClient(t *testing.T, owner *Client) (*Client, grantRoles) {
 	t.Helper()
+	return publishedServingClientContext(t.Context(), t, owner)
+}
+
+func publishedServingClientContext(ctx context.Context, t *testing.T, owner *Client) (*Client, grantRoles) {
+	t.Helper()
 	roles := newGrantRoles(t, owner.Pool.Config().ConnString(), servingRoles...)
 	for _, purpose := range servingRoles {
-		grantExec(t, owner, "CREATE ROLE "+pgx.Identifier{roles.name(purpose)}.Sanitize())
+		grantExecContext(ctx, t, owner, "CREATE ROLE "+pgx.Identifier{roles.name(purpose)}.Sanitize())
 	}
-	grantExec(t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "GRANT USAGE ON SCHEMA public"))
-	return roleClient(t, owner, roles.name("quarry_service")), roles
+	grantExecContext(ctx, t, owner, publishedServingSQL(t, roles, "grant-catalog.md", "GRANT USAGE ON SCHEMA public"))
+	return roleClientContext(ctx, t, owner, roles.name("quarry_service")), roles
 }
 
 func publishedServingSQL(t *testing.T, roles grantRoles, guide, marker string) string {
@@ -51,9 +56,14 @@ func publishedServingSQL(t *testing.T, roles grantRoles, guide, marker string) s
 
 func roleClient(t *testing.T, owner *Client, role string) *Client {
 	t.Helper()
+	return roleClientContext(t.Context(), t, owner, role)
+}
+
+func roleClientContext(ctx context.Context, t *testing.T, owner *Client, role string) *Client {
+	t.Helper()
 	config := owner.Pool.Config()
 	config.ConnConfig.RuntimeParams["role"] = role
-	pool, err := pgxpool.NewWithConfig(t.Context(), config)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return &Client{Pool: pool}

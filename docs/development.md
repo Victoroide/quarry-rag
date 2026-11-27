@@ -90,6 +90,92 @@ go test -race -count=1 ./internal/api -run "^TestGrants(Postgres|Pinecone)"
 go test -race -count=1 ./cmd/quarry-mcp -run "^TestMCPStdioGrantsThroughPostgres$"
 ```
 
+### pgvector document-set recall
+
+The opt-in evaluation uses precomputed embeddings and an empty, isolated
+pgvector test database. It makes no embedding or retrieval-provider calls.
+Allow up to two hours, several gigabytes of scratch storage, and enough
+database memory for a serial index build with a 1 GiB maintenance budget.
+Use a disposable fixture or the test services described above. The fixture
+owner loads data and builds the indexes. A restricted serving role runs
+the comparisons.
+
+#### Prepare the reference inputs
+
+1. Use Qdrant-FineWeb-10B v1.1 (catalog ID `Qdrant/FineWeb-10B`),
+   published by Qdrant under ODC-BY-1.0, at
+   revision `3aea0b8d5f98741e343d07f067ce0f49dca1ccd2`. Resolve Parquet files
+   under `data/` at that revision, sort their paths lexicographically
+   (starting with `data/00/train-part0__0047.parquet`), and read in physical
+   row order. Project only `id` and `dense_embedding`. Keep the first
+   occurrence of each ID.
+2. Take the first 200,000 distinct rows for the corpus and the next 32 for
+   the held-out query file. Keep the original component values and their
+   order. Use the first held-out row to select correlated document sets
+   and the remaining 31 to measure them. These are document-shaped queries.
+3. Write each file as UTF-8 JSON Lines. Write the same header in both
+   files with `version` set to 1, `source` set to `Qdrant-FineWeb-10B`,
+   `source_revision` set to the full revision above, `encoder` set to
+   `Alibaba-NLP/gte-multilingual-base`, and `dimensions` set to 768. Each
+   subsequent object has only `key` (the string ID, 1–256 UTF-8 bytes) and
+   `embedding` (768 finite float32 numbers). The squared norm in each file
+   must be between 768 times the smallest normal float32 and one quarter of
+   the largest float32, inclusive. This keeps pgvector's float32 cosine
+   accumulators in range without changing the supplied components.
+   Use one LF or CRLF between objects and keep each line within 128 KiB.
+   For byte-for-byte repetition, use the stated field order, compact JSON
+   with Unicode preserved, and a final LF.
+4. Keep both JSONL files outside the checkout. Each input must resolve to a
+   regular file. A symlink in the filename must be relative and stay inside
+   the selected directory. Record the dataset
+   attribution, revision, paths of the source shards used, export settings,
+   and the SHA-256 digest of each JSONL file alongside the report.
+
+#### Run the evaluation
+
+```sh
+QUARRY_DOCUMENT_SET_RECALL=1 \
+QUARRY_DOCUMENT_SET_RECALL_CORPUS=/absolute/path/corpus.jsonl \
+QUARRY_DOCUMENT_SET_RECALL_QUERIES=/absolute/path/queries.jsonl \
+QUARRY_DOCUMENT_SET_RECALL_REPORT=/absolute/path/recall-report.json \
+go test ./internal/store/postgres -run '^TestDocumentSetRecallReport$' -count=1 -timeout=135m -v
+```
+
+Use a new destination on a local filesystem that supports exclusive rename
+(Linux and macOS) or hard links (other platforms). Omit the report variable
+for a test-log summary. The JSON is published only after the evaluation
+finishes and an existing destination is preserved. Repeat
+with a different destination and compare the input digests and the layout,
+index, sample, set size, k and setting labels. Builds, timings and approximate
+recall can vary. The report identifies the database build, extension version
+and effective SQL settings. On a separate database host, record its CPU and
+memory alongside the report.
+
+The reference starts with one chunk per document. In a second layout the
+first document of each block of ten receives another chunk using the next
+document's embedding. Zero-based ordinal groups 0 and 1 modulo 4 go to the
+evaluated owner, group 2 to a different owner in the same tenant, and group
+3 to a different tenant. The matrix covers an empty set and sets of 1, 100,
+200, 2,000, 10,000, 20,000 and 100,000 members. Each nonempty size uses a
+SHA-256 sample of source keys and a cosine-correlated sample ordered by
+distance to the first held-out query and then ordinal. Member ratios use
+the document count. Eligible-chunk ratios use the indexed live chunk count.
+
+The report compares recall at 5, 10 and 50 against exhaustive cosine order
+over the same scope. Strict recall uses chunk ID to break exact ties.
+Tie-aware recall credits interchangeable chunks only in slots at the raw
+cutoff distance. Both use the smaller of k and the eligible chunk count as
+the denominator. Empty scopes have null recall. The report records returned
+counts, fill rates, query status, timeouts and the observed access path.
+An unavailable forced path or timed-out sample has no metric. Each held-out
+query has five minutes of cumulative time to prepare or reopen its shared
+exhaustive snapshot, with one retry per preparation. If preparation times
+out, the remaining comparisons for that query are recorded as timeouts.
+Configured strategy timings include the probe when used, omit one warm-up and use
+nearest-rank p50 and p95 from the held-out queries. The fixture uses fresh
+bound plans for the timed SQL and matching EXPLAIN. All thresholds share a
+fixture with the exact-scope support indexes installed.
+
 ### 3. Smoke Tests
 
 Smoke tests run against live, deployed instances and external cloud services (AWS Bedrock, Pinecone, PostgreSQL, and S3). Smoke tests are excluded by default to avoid unexpected cloud consumption or accidental mutation of configured datasets. The checks that write documents need a target that has activated checkpointed deletion, and they clean up through the service. The [staging procedure](deployment.md#smoke-testing-a-staging-deployment) owns the prerequisites and the invocation, including the read-only checks that run before activation.

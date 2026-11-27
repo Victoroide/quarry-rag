@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -56,9 +57,14 @@ func (f *retrievalFixture) complete(t *testing.T, owner domain.Principal, text s
 
 func (f *retrievalFixture) grantRead(t *testing.T, owner domain.Principal, document string, reader domain.Principal, read bool) {
 	t.Helper()
+	f.grantReadContext(t.Context(), t, owner, document, reader, read)
+}
+
+func (f *retrievalFixture) grantReadContext(ctx context.Context, t *testing.T, owner domain.Principal, document string, reader domain.Principal, read bool) {
+	t.Helper()
 	var incarnation string
-	require.NoError(t, f.c.Pool.QueryRow(t.Context(), `SELECT COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, document).Scan(&incarnation))
-	f.importBatch(t, func(b map[string]any) {
+	require.NoError(t, f.c.Pool.QueryRow(ctx, `SELECT COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, document).Scan(&incarnation))
+	f.importBatchContext(ctx, t, func(b map[string]any) {
 		b["grants"] = []grantEntry{{"tenant_id": owner.TenantID, "principal_id": reader.ID, "document_id": document, "incarnation": incarnation, "can_read": read, "can_download": false}}
 	})
 }

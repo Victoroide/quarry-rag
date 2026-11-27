@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -28,7 +29,12 @@ func (f *retrievalFixture) setRef(set DocumentSet) *domain.DocumentSetRef {
 // expire moves the set's whole lifetime into the past while keeping its constraints.
 func (f *retrievalFixture) expire(t *testing.T, set DocumentSet) {
 	t.Helper()
-	grantExec(t, f.c, `UPDATE grant_catalog_document_sets SET created_at=created_at-interval '3 hours', expires_at=expires_at-interval '3 hours' WHERE set_id=$1`, set.ID)
+	f.expireContext(t.Context(), t, set)
+}
+
+func (f *retrievalFixture) expireContext(ctx context.Context, t *testing.T, set DocumentSet) {
+	t.Helper()
+	grantExecContext(ctx, t, f.c, `UPDATE grant_catalog_document_sets SET created_at=created_at-interval '3 hours', expires_at=expires_at-interval '3 hours' WHERE set_id=$1`, set.ID)
 }
 
 func (f *retrievalFixture) memberCount(t *testing.T, set string) int {

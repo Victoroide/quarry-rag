@@ -589,7 +589,12 @@ func (r grantRoles) name(purpose string) string {
 
 func grantExec(t *testing.T, c *Client, query string, args ...any) {
 	t.Helper()
-	_, err := c.Pool.Exec(t.Context(), query, args...)
+	grantExecContext(t.Context(), t, c, query, args...)
+}
+
+func grantExecContext(ctx context.Context, t *testing.T, c *Client, query string, args ...any) {
+	t.Helper()
+	_, err := c.Pool.Exec(ctx, query, args...)
 	require.NoError(t, err)
 }
 
