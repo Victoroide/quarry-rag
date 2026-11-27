@@ -236,8 +236,13 @@ func (s *diagnosticStore) copyPayload(w io.Writer, offset uint64, start, limit i
 			// A later read can fail. Leave any partial rune for the next chunk.
 			if last := len(data) - 1; data[last] >= utf8.RuneSelf {
 				if _, size := utf8.DecodeLastRune(data); size == 1 {
-					for last > 0 && !utf8.RuneStart(data[last]) {
+					first := max(0, len(data)-utf8.UTFMax+1)
+					for last > first && !utf8.RuneStart(data[last]) {
 						last--
+					}
+					if last == 0 || !utf8.RuneStart(data[last]) {
+						s.fail("read invalid payload")
+						return written, errSpoolRecord
 					}
 					data = data[:last]
 				}
