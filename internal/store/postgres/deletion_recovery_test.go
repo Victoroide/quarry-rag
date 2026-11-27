@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -55,6 +56,227 @@ func TestHeldReleaseFinalizeSkipsCanceledContext(t *testing.T) {
 	cancel()
 	release := heldRelease{db: refusedReleaseBegin{}}
 	require.ErrorIs(t, release.finalizeRelease(ctx, domain.DocumentID(uuid.NewString()), uuid.NewString(), uuid.NewString()), context.Canceled)
+}
+
+type heldReleaseTestRow func(...any) error
+
+func (row heldReleaseTestRow) Scan(dest ...any) error { return row(dest...) }
+
+type heldReleaseTestQuery func(context.Context, string, ...any) pgx.Row
+
+func (q heldReleaseTestQuery) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return q(ctx, sql, args...)
+}
+
+type heldReleaseTestTx struct {
+	heldClaimTestTx
+	query    heldReleaseTestQuery
+	rollback func(context.Context) error
+}
+
+func (tx heldReleaseTestTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return tx.query(ctx, sql, args...)
+}
+
+func (tx heldReleaseTestTx) Rollback(ctx context.Context) error { return tx.rollback(ctx) }
+
+func newHeldReleaseClaimTx(t *testing.T, id domain.DocumentID, incarnation, index string, claim *string, afterCommit func()) pgx.Tx {
+	t.Helper()
+	return heldReleaseTestTx{
+		heldClaimTestTx: heldClaimTestTx{
+			commit: func(context.Context, pgx.Tx) error { return nil },
+			exec: func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				if strings.HasPrefix(sql, "SELECT pg_advisory_xact_lock(") {
+					return pgconn.NewCommandTag("SELECT 1"), nil
+				}
+				require.Contains(t, sql, "UPDATE document_deletions SET claim=")
+				require.Equal(t, []any{string(id), incarnation}, args[:2])
+				*claim = args[2].(string)
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			},
+		},
+		query: func(_ context.Context, sql string, _ ...any) pgx.Row {
+			return heldReleaseTestRow(func(dest ...any) error {
+				if strings.HasPrefix(sql, "SELECT id::text FROM documents") {
+					return pgx.ErrNoRows
+				}
+				require.Contains(t, sql, releaseReceiptColumns)
+				*dest[0].(*string), *dest[1].(*string) = "quarantine", legacyVectors
+				*dest[4].(**string) = &index
+				*dest[6].(*int), *dest[7].(*bool), *dest[8].(*bool) = stepDone, true, true
+				return nil
+			})
+		},
+		rollback: func(context.Context) error {
+			afterCommit()
+			return pgx.ErrTxClosed
+		},
+	}
+}
+
+func TestHeldReleaseFinalizeRollbackContext(t *testing.T) {
+	queryErr := errors.New("finalization query failed")
+	beginErr := errors.New("finalization begin failed")
+	commitErr := errors.New("finalization commit reply lost")
+	probeErr := errors.New("finalization outcome unavailable")
+	for _, tc := range []struct {
+		name                string
+		cancelAt            string
+		expire              bool
+		absentErr, beginErr error
+		tag                 string
+		commitErr, probeErr error
+		released            bool
+		want                error
+	}{
+		{name: "canceled before begin", cancelAt: "claim", want: context.Canceled},
+		{name: "begin error", beginErr: beginErr, want: beginErr},
+		{name: "canceled at absence query", cancelAt: "absence", want: context.Canceled},
+		{name: "canceled at update", cancelAt: "update", absentErr: pgx.ErrNoRows, want: context.Canceled},
+		{name: "expired at update", expire: true, absentErr: pgx.ErrNoRows, want: context.DeadlineExceeded},
+		{name: "query error with live parent", absentErr: queryErr, want: queryErr},
+		{name: "live replacement", want: domain.ErrDeletionPreconditionFailed},
+		{name: "missing or changed claim", absentErr: pgx.ErrNoRows, tag: "UPDATE 0", want: domain.ErrDeletionBusy},
+		{name: "successful commit", absentErr: pgx.ErrNoRows, tag: "UPDATE 1"},
+		{name: "lost commit reply confirmed", absentErr: pgx.ErrNoRows, tag: "UPDATE 1", commitErr: commitErr, released: true},
+		{name: "lost commit reply unconfirmed", absentErr: pgx.ErrNoRows, tag: "UPDATE 1", commitErr: commitErr, want: commitErr},
+		{name: "lost commit reply probe error", absentErr: pgx.ErrNoRows, tag: "UPDATE 1", commitErr: commitErr, probeErr: probeErr, released: true, want: commitErr},
+	} {
+		for _, path := range []struct {
+			name       string
+			legacyOnly bool
+		}{{name: "pooled"}, {name: "hosted", legacyOnly: true}} {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					parentBudget := 10 * time.Second
+					if tc.expire {
+						parentBudget = time.Second
+					}
+					parent := context.WithValue(t.Context(), heldClaimContextKey{}, "release attempt")
+					ctx, cancel := context.WithTimeout(parent, parentBudget)
+					defer cancel()
+					watchdog := time.NewTimer(2 * deletionClaimReleaseTimeout)
+					defer watchdog.Stop()
+
+					id, incarnation := domain.DocumentID(uuid.NewString()), uuid.NewString()
+					const index = "retired-index"
+					var claim string
+					var cleanupCount, begins, finalRollbacks, outcomeReads, commits int
+					wantBegins, wantRollbacks := 2, 1
+					switch {
+					case tc.cancelAt == "claim":
+						wantBegins, wantRollbacks = 1, 0
+					case tc.beginErr != nil:
+						wantRollbacks = 0
+					}
+
+					release := heldRelease{legacyOnly: path.legacyOnly}
+					release.db = heldClaimTestDB{
+						begin: func(_ context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+							begins++
+							require.Equal(t, pgx.ReadCommitted, opts.IsoLevel)
+							if begins == 1 {
+								return newHeldReleaseClaimTx(t, id, incarnation, index, &claim, func() {
+									if tc.cancelAt == "claim" {
+										cancel()
+									}
+								}), nil
+							}
+							if tc.beginErr != nil {
+								return nil, tc.beginErr
+							}
+							return heldReleaseTestTx{
+								heldClaimTestTx: heldClaimTestTx{
+									exec: func(execCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+										if strings.HasPrefix(sql, "SELECT pg_advisory_xact_lock(") {
+											return pgconn.NewCommandTag("SELECT 1"), nil
+										}
+										require.Equal(t, []any{string(id), incarnation, claim, stepDone}, args)
+										if tc.cancelAt == "update" {
+											cancel()
+										}
+										if tc.expire {
+											<-execCtx.Done()
+										}
+										return pgconn.NewCommandTag(tc.tag), execCtx.Err()
+									},
+									commit: func(context.Context, pgx.Tx) error {
+										commits++
+										return tc.commitErr
+									},
+								},
+								query: func(queryCtx context.Context, _ string, _ ...any) pgx.Row {
+									return heldReleaseTestRow(func(...any) error {
+										if tc.cancelAt == "absence" {
+											cancel()
+											return queryCtx.Err()
+										}
+										return tc.absentErr
+									})
+								},
+								rollback: func(rollbackCtx context.Context) error {
+									defer func() { finalRollbacks++ }()
+									start := time.Now()
+									deadline, ok := rollbackCtx.Deadline()
+									require.True(t, ok)
+									require.Equal(t, deletionClaimReleaseTimeout, deadline.Sub(start))
+									require.NoError(t, rollbackCtx.Err())
+									require.Equal(t, "release attempt", rollbackCtx.Value(heldClaimContextKey{}))
+									if commits != 0 {
+										return pgx.ErrTxClosed
+									}
+									select {
+									case <-rollbackCtx.Done():
+										require.ErrorIs(t, rollbackCtx.Err(), context.DeadlineExceeded)
+										require.Equal(t, deletionClaimReleaseTimeout, time.Since(start))
+									case <-watchdog.C:
+										t.Error("finalization rollback exceeded the test watchdog")
+									}
+									return errors.New("rollback failed")
+								},
+							}, nil
+						},
+						exec: func(clearCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+							cleanupCount++
+							require.Equal(t, wantRollbacks, finalRollbacks, "claim cleanup preceded rollback completion")
+							require.NoError(t, clearCtx.Err())
+							require.Contains(t, sql, "WHERE document_id=$1 AND incarnation=$2 AND claim=$3")
+							require.Equal(t, []any{string(id), incarnation, claim}, args)
+							require.NotEmpty(t, claim)
+							return pgconn.NewCommandTag("UPDATE 1"), nil
+						},
+					}
+					release.outcome = heldReleaseTestQuery(func(probeCtx context.Context, sql string, args ...any) pgx.Row {
+						outcomeReads++
+						require.NoError(t, probeCtx.Err())
+						require.Contains(t, sql, "r.finalized AND NOT r.held")
+						require.Equal(t, []any{string(id), incarnation}, args)
+						return heldReleaseTestRow(func(dest ...any) error {
+							*dest[0].(*bool) = tc.released
+							return tc.probeErr
+						})
+					})
+					require.ErrorIs(t, release.release(ctx, id, incarnation, domain.DeleteOperations{VectorIndex: index}), tc.want)
+					require.Equal(t, wantBegins, begins)
+					require.Equal(t, wantRollbacks, finalRollbacks)
+					require.Equal(t, 1, cleanupCount)
+					if tc.tag == "UPDATE 1" {
+						require.Equal(t, 1, commits)
+					} else {
+						require.Zero(t, commits)
+					}
+					if errors.Is(tc.absentErr, queryErr) {
+						require.NoError(t, ctx.Err())
+					}
+					if tc.commitErr != nil {
+						require.Equal(t, 1, outcomeReads)
+					} else {
+						require.Zero(t, outcomeReads)
+					}
+				})
+			})
+		}
+	}
 }
 
 func TestCheckReleaseTargetRejectsMismatchedStores(t *testing.T) {

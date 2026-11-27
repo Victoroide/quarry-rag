@@ -354,6 +354,12 @@ func clearHeldDeletionClaim(ctx context.Context, db deletionExecer, id domain.Do
 	return err
 }
 
+func rollbackHeldReleaseTx(ctx context.Context, tx pgx.Tx) {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deletionClaimReleaseTimeout)
+	defer cancel()
+	_ = tx.Rollback(rollbackCtx)
+}
+
 // claimHeldDeletion reports whether COMMIT returned an error that leaves
 // ownership of the claim uncertain.
 func (h heldRelease) claimHeldDeletion(ctx context.Context, id domain.DocumentID, incarnation, claim string, remaining time.Duration, ops domain.DeleteOperations) (releaseReceipt, bool, error) {
@@ -361,11 +367,7 @@ func (h heldRelease) claimHeldDeletion(ctx context.Context, id domain.DocumentID
 	if err != nil {
 		return releaseReceipt{}, false, err
 	}
-	defer func() {
-		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deletionClaimReleaseTimeout)
-		defer cancel()
-		_ = tx.Rollback(rollbackCtx)
-	}()
+	defer rollbackHeldReleaseTx(ctx, tx)
 	// An unfinished or held exact legacy receipt already blocks admission.
 	// Taking the admission lock here would invert the order used by freeze.
 	if !h.legacyOnly {
@@ -579,7 +581,7 @@ func (h heldRelease) finalizeRelease(ctx context.Context, id domain.DocumentID, 
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer rollbackHeldReleaseTx(ctx, tx)
 	if !h.legacyOnly {
 		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 			return err
