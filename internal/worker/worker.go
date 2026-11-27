@@ -145,11 +145,21 @@ func (w *Worker) loop(ctx context.Context) {
 func (w *Worker) claim(ctx context.Context) (*domain.Job, error) {
 	_, hasDetector := w.opts.OCR.(pdfDetector)
 	_, hasAnalyzer := w.opts.OCR.(pdfAnalyzer)
-	if hasDetector || hasAnalyzer {
+	if store, ok := w.store.(interface {
+		ClaimPDFProfilesForFixtureStore(context.Context, string, time.Duration, int, string, bool, bool) (*domain.Job, error)
+	}); ok {
+		return store.ClaimPDFProfilesForFixtureStore(ctx, w.opts.Owner, w.opts.Lease, w.opts.MaxAttempts, w.opts.FixtureVectorIdentity, hasDetector, hasAnalyzer)
+	}
+	if hasDetector {
 		if store, ok := w.store.(interface {
 			ClaimPDFJobForFixtureStore(context.Context, string, time.Duration, int, string) (*domain.Job, error)
 		}); ok {
 			return store.ClaimPDFJobForFixtureStore(ctx, w.opts.Owner, w.opts.Lease, w.opts.MaxAttempts, w.opts.FixtureVectorIdentity)
+		}
+		if store, ok := w.store.(interface {
+			ClaimPDFJob(context.Context, string, time.Duration, int) (*domain.Job, error)
+		}); ok {
+			return store.ClaimPDFJob(ctx, w.opts.Owner, w.opts.Lease, w.opts.MaxAttempts)
 		}
 	}
 	if store, ok := w.store.(domain.FixtureJobStore); ok {
