@@ -101,6 +101,9 @@ type QueryContext struct {
 	// EvidenceVisibility checks vector candidates against current stored chunks.
 	EvidenceVisibility domain.EvidenceVisibility
 	untaggedSnapshot   string
+	// vectorObservesIncarnation identifies a search that reads the lifetime
+	// with the hit, before a separate evidence check can supply an observation.
+	vectorObservesIncarnation bool
 	// Authorization, when set, binds the query to a verified principal. Every
 	// search carries its scope and every disclosure boundary rechecks it.
 	Authorization *ReadAuthorization

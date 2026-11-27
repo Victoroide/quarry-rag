@@ -767,6 +767,7 @@ func (s *RetrievalStage) ID() StageID { return StageRetrieval }
 // embedding the routing stage already produced for the same query
 // to skip one Bedrock embed call per request.
 func (s *RetrievalStage) Run(ctx context.Context, qc *QueryContext) error {
+	qc.vectorObservesIncarnation = false
 	if qc.SkipRetrieval {
 		qc.RetrievedChunks = nil
 		qc.TopScore = 0
@@ -792,6 +793,7 @@ func (s *RetrievalStage) Run(ctx context.Context, qc *QueryContext) error {
 		return fmt.Errorf("retrieval_stage: %w", err)
 	}
 	qc.RetrievedChunks = result.Chunks
+	qc.vectorObservesIncarnation = s.ret.ObservesVectorIncarnation()
 	qc.releaseCandidates = slices.Clone(result.Chunks)
 	qc.RetrievalMode = string(result.Mode)
 	if len(result.Chunks) > 0 {
@@ -1014,6 +1016,7 @@ func trimChunksForSynthesis(ctx context.Context, in []domain.ScoredChunk, budget
 	usable := make([]domain.ScoredChunk, 0, len(in))
 	for _, sc := range in {
 		sc.Chunk.Text = sanitizeExcerpt(sc.Chunk.Text)
+		sc.Chunk.SourceLineBoundaries = nil
 		if strings.TrimSpace(sc.Chunk.Text) != "" {
 			usable = append(usable, sc)
 		}
@@ -1810,6 +1813,11 @@ func (s *SynthesisStage) Run(ctx context.Context, qc *QueryContext) error {
 	if len(chunks) == 0 {
 		qc.RetrievedChunks = nil
 		return s.finishWithoutEvidence(synthesisCtx, qc)
+	}
+	if s.cfg != nil && s.cfg.PreserveSourceLineBoundaries {
+		if err := hydrateSourceLineBoundaries(synthesisCtx, qc, chunks); err != nil {
+			return fmt.Errorf("synthesis_stage: %w", err)
+		}
 	}
 	qc.ContextChunks = len(chunks)
 	qc.Truncated = truncated

@@ -141,13 +141,27 @@ func (a *ReadAuthorization) Check(ctx context.Context) error {
 // then ends the request instead of leaving a path that could widen the scope.
 func FailClosedChecks(checks domain.SubjectEvidence) domain.SubjectEvidence {
 	wrapped := failClosedChecks{evidence: checks.Visibility, documents: checks.Documents, previews: checks.Previews}
-	return domain.SubjectEvidence{Visibility: wrapped, Documents: wrapped, Previews: wrapped}
+	var visibility domain.EvidenceVisibility = wrapped
+	if reader, ok := checks.Visibility.(domain.SourceLineBoundaryVisibility); ok {
+		visibility = failClosedLineBoundaryChecks{failClosedChecks: wrapped, reader: reader}
+	}
+	return domain.SubjectEvidence{Visibility: visibility, Documents: wrapped, Previews: wrapped}
 }
 
 type failClosedChecks struct {
 	evidence  domain.EvidenceVisibility
 	documents domain.DocumentVisibility
 	previews  domain.DocumentPreviewer
+}
+
+type failClosedLineBoundaryChecks struct {
+	failClosedChecks
+	reader domain.SourceLineBoundaryVisibility
+}
+
+func (f failClosedLineBoundaryChecks) VisibleEvidenceWithLineBoundaries(ctx context.Context, candidates []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+	hits, err := f.reader.VisibleEvidenceWithLineBoundaries(ctx, candidates)
+	return hits, unavailable(ctx, err)
 }
 
 func unavailable(ctx context.Context, err error) error {

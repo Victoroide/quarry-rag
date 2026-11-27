@@ -10,6 +10,8 @@ Notable changes are grouped by release.
 
 ### Added
 
+- Opt-in source line and paragraph boundaries for internal layout-aware retrieval.
+
 - Added an opt-in pgvector document-set recall evaluation for precomputed embeddings, with HNSW and IVFFlat comparisons and an exact-scope threshold rule.
 
 - Vector reindex supports tagged documents in both directions between Pinecone and PostgreSQL, including retrieval and checkpointed deletion after PostgreSQL cutover.

@@ -808,6 +808,24 @@ func TestRollbackTaggedDocumentAfterPostgresRepublication(t *testing.T) {
 	h := newHarness(t, f, "pinecone")
 	h.attestSource()
 	ctx := t.Context()
+	canonical := f.chunks[plain.ID][0]
+	mark := domain.SourceLineBoundary{Offset: strings.IndexByte(canonical.Text, ' '), Kind: domain.SourceLineBreak}
+	canonical.SourceLineBoundaries = []domain.SourceLineBoundary{mark}
+	require.NoError(t, f.pg.InsertChunks(ctx, []domain.Chunk{canonical}))
+	var beforeWrite string
+	require.NoError(t, f.pg.Pool.QueryRow(ctx, `SELECT xmin::text FROM chunks WHERE id=$1`, canonical.ID).Scan(&beforeWrite))
+	checkBoundaries := func(search domain.FilteredVectorStore) {
+		t.Helper()
+		query := sourceChunks(plain, []domain.Chunk{canonical}, sourceModel)[0].Embedding
+		hits, err := search.QueryFiltered(ctx, query, 2, domain.VectorFilter{Collection: plain.Collection})
+		require.NoError(t, err)
+		require.Len(t, hits, 1)
+		require.Nil(t, hits[0].Chunk.SourceLineBoundaries)
+		rows, err := (pgstore.Visibility{Pool: f.pg.Pool, Collection: plain.Collection}).VisibleEvidenceWithLineBoundaries(ctx, hits)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.Equal(t, canonical.SourceLineBoundaries, rows[0].Chunk.SourceLineBoundaries)
+	}
 	profile := h.profileFile("same.json", testProfile(sourceModel))
 	_, err := h.run(options{Generation: "g2", Profile: profile, TargetStore: "postgres", Apply: true})
 	require.NoError(t, err)
@@ -817,6 +835,7 @@ func TestRollbackTaggedDocumentAfterPostgresRepublication(t *testing.T) {
 	target, err := pgstore.OpenGenerationVectorStore(ctx, f.pg, testDims, "g2")
 	require.NoError(t, err)
 	target.RouteCompletion()
+	checkBoundaries(target)
 	before, err := f.pg.LoadDocumentSnapshotBounded(ctx, plain.ID, 2, 4096)
 	require.NoError(t, err)
 
@@ -852,6 +871,10 @@ func TestRollbackTaggedDocumentAfterPostgresRepublication(t *testing.T) {
 	key, err := pcstore.TaggedVectorID(doc.ID, doc.Incarnation, job.LeaseToken, string(f.chunks[doc.ID][0].ID))
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{key, string(f.chunks[plain.ID][0].ID)}, h.stores.index("quarry").IDs())
+	checkBoundaries(pcstore.NewClientForIndex(h.stores.index("quarry"), testConfig(), ""))
+	var afterWrite string
+	require.NoError(t, f.pg.Pool.QueryRow(ctx, `SELECT xmin::text FROM chunks WHERE id=$1`, canonical.ID).Scan(&afterWrite))
+	require.Equal(t, beforeWrite, afterWrite)
 	after, err := f.pg.LoadDocumentSnapshotBounded(ctx, plain.ID, 2, 4096)
 	require.NoError(t, err)
 	require.Equal(t, before, after)
