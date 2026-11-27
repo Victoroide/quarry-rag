@@ -1387,6 +1387,14 @@ func TestFormatOpenDeletions(t *testing.T) {
 	require.Contains(t, string(withIDsJSON), `"open_deletion_ids":["doc-1"]`)
 }
 
+func TestActivationQuiesceErrorPrioritizesSettling(t *testing.T) {
+	err := &ActivationQuiesceError{
+		Quiesce: Quiesce{Frozen: true, RunningJobs: 3, OpenDeletions: 2},
+		Window:  time.Minute,
+	}
+	require.EqualError(t, err, "postgres: the freeze is still settling; wait 1m0s after freezing")
+}
+
 func TestActivateRefusesAndNamesOpenDeletionReceipts(t *testing.T) {
 	c := jobsDatabase(t)
 	verifiedGeneration(t, c, "g2", "digest")
@@ -1396,7 +1404,11 @@ func TestActivateRefusesAndNamesOpenDeletionReceipts(t *testing.T) {
 	require.NoError(t, err)
 
 	err = c.ActivateGeneration(t.Context(), "g2", "digest", 0)
-	require.ErrorContains(t, err, fmt.Sprintf("0 in-flight jobs and 1 open deletions (%s) must finish before activation", openID))
+	var refusal *ActivationQuiesceError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, Quiesce{Frozen: true, Settled: true, OpenDeletions: 1, OpenDeletionIDs: []string{openID}}, refusal.Quiesce)
+	require.Zero(t, refusal.Window)
+	require.EqualError(t, err, fmt.Sprintf("postgres: 0 in-flight jobs and 1 open deletions (%s) must finish before activation", openID))
 
 	_, err = c.Pool.Exec(t.Context(), `UPDATE document_deletions SET finalized=TRUE WHERE document_id=$1`, openID)
 	require.NoError(t, err)
@@ -1423,7 +1435,10 @@ func TestQuiesceAndActivateBoundReportedOpenDeletionIDs(t *testing.T) {
 	require.Equal(t, " ("+strings.Join(ids[:maxReportedOpenDeletions], ", ")+", +5 more)", FormatOpenDeletions(q.OpenDeletions, q.OpenDeletionIDs))
 
 	err = c.ActivateGeneration(t.Context(), "g2", "digest", 0)
-	require.ErrorContains(t, err, fmt.Sprintf("0 in-flight jobs and 25 open deletions (%s, +5 more) must finish before activation", strings.Join(ids[:maxReportedOpenDeletions], ", ")))
+	var refusal *ActivationQuiesceError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, q, refusal.Quiesce)
+	require.EqualError(t, err, fmt.Sprintf("postgres: 0 in-flight jobs and 25 open deletions (%s, +5 more) must finish before activation", strings.Join(ids[:maxReportedOpenDeletions], ", ")))
 	for _, omitted := range ids[maxReportedOpenDeletions:] {
 		require.NotContains(t, err.Error(), omitted)
 	}
