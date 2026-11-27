@@ -27,12 +27,13 @@ import (
 )
 
 const (
-	selectiveIncludedEnv = "QUARRY_PINECONE_SELECTIVE_INCLUDED_INDEX"
-	selectiveExcludedEnv = "QUARRY_PINECONE_SELECTIVE_EXCLUDED_INDEX"
-	selectiveNamespace   = "__default__"
-	selectiveDescribeAPI = "2026-07"
-	selectiveMaxTopK     = 10_000
-	selectiveDescribeMax = 64 << 10
+	selectiveIncludedEnv    = "QUARRY_PINECONE_SELECTIVE_INCLUDED_INDEX"
+	selectiveExcludedEnv    = "QUARRY_PINECONE_SELECTIVE_EXCLUDED_INDEX"
+	selectiveNamespace      = "__default__"
+	selectiveControllerHost = "api.pinecone.io"
+	selectiveDescribeAPI    = "2026-07"
+	selectiveMaxTopK        = 10_000
+	selectiveDescribeMax    = 64 << 10
 )
 
 type selectiveStagingConfig struct {
@@ -190,7 +191,7 @@ func TestStagingSelectiveMetadataIndexing(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	httpClient := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	httpClient := newSelectiveStagingHTTPClient(nil)
 	defer httpClient.CloseIdleConnections()
 	sdk, err := newSelectiveStagingSDK(httpClient, cfg.key)
 	require.True(t, err == nil, "could not configure the Pinecone SDK")
@@ -235,6 +236,13 @@ func TestStagingSelectiveMetadataIndexing(t *testing.T) {
 		fixture.checkFilters(ctx, t, connections)
 	})
 	require.NoError(t, err)
+}
+
+func newSelectiveStagingHTTPClient(transport http.RoundTripper) *http.Client {
+	return &http.Client{
+		Transport:     transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 func newSelectiveStagingSDK(client *http.Client, key string) (*pc.Client, error) {
@@ -283,7 +291,7 @@ func newSelectiveStagingSDK(client *http.Client, key string) (*pc.Client, error)
 		resp.Body = io.NopCloser(bytes.NewReader(data))
 		return resp, nil
 	})
-	return pc.NewClient(pc.NewClientParams{ApiKey: key, RestClient: &sdkClient})
+	return pc.NewClient(pc.NewClientParams{ApiKey: key, Host: "https://" + selectiveControllerHost, RestClient: &sdkClient})
 }
 
 func describeSelectiveStagingTarget(ctx context.Context, sdk *pc.Client, client *http.Client, key, name string) (*pc.Index, *pc.MetadataSchema, error) {
@@ -314,7 +322,7 @@ func describeSelectiveStagingTarget(ctx context.Context, sdk *pc.Client, client 
 		schema, schemaErr := namespace.metadataSchema(false)
 		return idx, schema, schemaErr
 	}
-	endpoint = url.URL{Scheme: "https", Host: "api.pinecone.io", Path: "/indexes/" + name, RawPath: "/indexes/" + url.PathEscape(name)}
+	endpoint = url.URL{Scheme: "https", Host: selectiveControllerHost, Path: "/indexes/" + name, RawPath: "/indexes/" + url.PathEscape(name)}
 	index, err := getSelectiveDescription(ctx, client, key, endpoint)
 	if err != nil {
 		return nil, nil, selectiveDiscoveryError("describe index: " + err.Error())
