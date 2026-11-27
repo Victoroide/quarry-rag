@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -90,10 +92,6 @@ func TestRecallInputValidation(t *testing.T) {
 	_, err = readRecallInput(ctx, strings.NewReader(valid+recallTestRecord("next")), 2,
 		func(_ int, _ [32]byte, _ []float32) error { cancel(); return nil })
 	require.ErrorIs(t, err, context.Canceled)
-	_, err = readRecallFile(t.Context(), filepath.Join(t.TempDir(), "missing"), 1, nil)
-	require.Error(t, err)
-	_, err = readRecallFile(t.Context(), t.TempDir(), 1, nil)
-	require.Error(t, err)
 }
 
 func TestRecallCosineInputRange(t *testing.T) {
@@ -139,27 +137,195 @@ func TestRecallCosineInputRange(t *testing.T) {
 
 func TestRecallInputPath(t *testing.T) {
 	dir := t.TempDir()
-	root, err := os.OpenRoot(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, root.Close()) })
-	content := []byte(recallTestHeader() + "\n" + recallTestRecord("example"))
-	require.NoError(t, root.WriteFile("valid.jsonl", content, 0o600))
-	_, err = readRecallFile(t.Context(), filepath.Join(dir, "valid.jsonl"), 1, nil)
-	require.NoError(t, err)
-	_, err = readRecallFile(t.Context(), dir+string(filepath.Separator), 1, nil)
-	require.Error(t, err)
+	const (
+		name       = "input.jsonl"
+		invalid    = "invalid recall input filename"
+		notRegular = "recall input must be a readable regular file"
+		openFailed = "cannot open recall input"
+	)
+	path := filepath.Join(dir, name)
+	digest := writeRecallTestInput(t, path, "example")
+
+	t.Run("absolute", func(t *testing.T) {
+		got, err := readRecallFile(t.Context(), path, 1, nil)
+		require.NoError(t, err)
+		require.Equal(t, digest, got.Digest)
+	})
+	t.Run("relative", func(t *testing.T) {
+		t.Chdir(dir)
+		got, err := readRecallFile(t.Context(), name, 1, nil)
+		require.NoError(t, err)
+		require.Equal(t, digest, got.Digest)
+	})
+
 	outside := filepath.Join(t.TempDir(), "outside.jsonl")
-	require.NoError(t, os.WriteFile(outside, content, 0o600))
-	if linkErr := root.Symlink("valid.jsonl", "inside-link"); linkErr != nil {
-		t.Skipf("symlinks unavailable: %v", linkErr)
+	writeRecallTestInput(t, outside, "outside")
+	escape, err := filepath.Rel(dir, outside)
+	require.NoError(t, err)
+	for _, test := range []struct {
+		name   string
+		target string
+	}{
+		{"inside", name},
+		{"escape", escape},
+		{"absolute", path},
+		{"dangling", "missing.jsonl"},
+		{"loop", "loop-link"},
+	} {
+		t.Run("symlink/"+test.name, func(t *testing.T) {
+			link := filepath.Join(dir, test.name+"-link")
+			err := os.Symlink(test.target, link)
+			if errors.Is(err, errors.ErrUnsupported) || (runtime.GOOS == "windows" && err != nil) {
+				t.Skipf("cannot create symlink: %v", err)
+			}
+			require.NoError(t, err)
+			got, err := readRecallFile(t.Context(), link, 1, nil)
+			if test.name != "inside" {
+				require.EqualError(t, err, notRegular)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, digest, got.Digest)
+		})
 	}
-	_, err = readRecallFile(t.Context(), filepath.Join(dir, "inside-link"), 1, nil)
-	require.NoError(t, err)
-	relativeOutside, err := filepath.Rel(dir, outside)
-	require.NoError(t, err)
-	require.NoError(t, root.Symlink(relativeOutside, "outside-link"))
-	_, err = readRecallFile(t.Context(), filepath.Join(dir, "outside-link"), 1, nil)
-	require.Error(t, err)
+
+	for _, test := range []struct {
+		name, path, wantErr string
+	}{
+		{"empty", "", invalid},
+		{"dot", ".", invalid},
+		{"trailing separator", path + string(filepath.Separator), invalid},
+		{"directory", dir, notRegular},
+		{"missing file", filepath.Join(dir, "absent.jsonl"), notRegular},
+		{"missing directory", filepath.Join(dir, "missing", name), "cannot open recall input directory"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := readRecallFile(t.Context(), test.path, 1, nil)
+			require.EqualError(t, err, test.wantErr)
+		})
+	}
+
+	t.Run("permission denial", func(t *testing.T) {
+		_, err := readRecallFileWithOpener(t.Context(), path, 1, nil, func(_ *os.Root, _ string) (*os.File, error) {
+			return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrPermission}
+		})
+		require.EqualError(t, err, openFailed)
+	})
+	t.Run("directory replacement", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), name)
+		writeRecallTestInput(t, path, "example")
+		_, err := readRecallFileWithOpener(t.Context(), path, 1, nil, func(root *os.Root, name string) (*os.File, error) {
+			require.NoError(t, root.Remove(name))
+			require.NoError(t, root.Mkdir(name, 0o700))
+			return openRecallInput(root, name)
+		})
+		require.EqualError(t, err, notRegular)
+	})
+	t.Run("socket replacement", func(t *testing.T) {
+		switch runtime.GOOS {
+		case "js", "plan9", "wasip1", "windows":
+			t.Skip("Unix filesystem socket replacement is tested on Unix")
+		}
+		dir := t.TempDir()
+		t.Chdir(dir) // Keep the address within the Unix socket path limit.
+		writeRecallTestInput(t, filepath.Join(dir, name), "example")
+		_, err := readRecallFileWithOpener(t.Context(), name, 1, nil, func(root *os.Root, name string) (*os.File, error) {
+			require.NoError(t, root.Remove(name))
+			listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", name)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, listener.Close()) })
+			return openRecallInput(root, name)
+		})
+		require.EqualError(t, err, openFailed)
+	})
+
+	t.Run("parent replacement", func(t *testing.T) {
+		switch runtime.GOOS {
+		case "js", "plan9", "windows":
+			t.Skip("platform cannot track or rename an open root directory")
+		}
+		parent := t.TempDir()
+		dir := filepath.Join(parent, "original")
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.Mkdir(dir, 0o700))
+		want := writeRecallTestInput(t, path, "original")
+		got, err := readRecallFileWithOpener(t.Context(), path, 1, nil, func(root *os.Root, name string) (*os.File, error) {
+			require.NoError(t, os.Rename(dir, filepath.Join(parent, "moved")))
+			require.NoError(t, os.Mkdir(dir, 0o700))
+			writeRecallTestInput(t, path, "replacement")
+			return openRecallInput(root, name)
+		})
+		require.NoError(t, err)
+		require.Equal(t, want, got.Digest)
+	})
+	t.Run("opened descriptor survives rename", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, name)
+		want := writeRecallTestInput(t, path, "original")
+		writeRecallTestInput(t, filepath.Join(dir, "replacement.jsonl"), "replacement")
+		var keys [][32]byte
+		got, err := readRecallFileWithOpener(t.Context(), path, 1, func(_ int, key [32]byte, _ []float32) error {
+			keys = append(keys, key)
+			return nil
+		}, func(root *os.Root, name string) (*os.File, error) {
+			file, err := openRecallInput(root, name)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = file.Close() })
+			require.NoError(t, root.Rename(name, "moved.jsonl"))
+			require.NoError(t, root.Rename("replacement.jsonl", name))
+			return file, nil
+		})
+		require.NoError(t, err)
+		require.Equal(t, want, got.Digest)
+		require.Equal(t, [][32]byte{sha256.Sum256([]byte("original"))}, keys)
+	})
+}
+
+func TestRecallInputOpenCancellation(t *testing.T) {
+	rejectRows := func(t *testing.T) recallInputRow {
+		return func(_ int, _ [32]byte, _ []float32) error {
+			t.Fatal("unexpected parser callback")
+			return nil
+		}
+	}
+	t.Run("pre-canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := readRecallFileWithOpener(ctx, "", 1, rejectRows(t), func(_ *os.Root, _ string) (*os.File, error) {
+			t.Fatal("unexpected open")
+			return nil, nil
+		})
+		require.Equal(t, context.Canceled, err)
+	})
+	t.Run("canceled at opener", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "input.jsonl")
+		writeRecallTestInput(t, path, "example")
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		var openedRoot *os.Root
+		var openedFile *os.File
+		_, err := readRecallFileWithOpener(ctx, path, 1, rejectRows(t), func(root *os.Root, _ string) (*os.File, error) {
+			file, err := openRecallInput(root, ".")
+			require.NoError(t, err)
+			openedRoot, openedFile = root, file
+			cancel()
+			return file, nil
+		})
+		require.Equal(t, context.Canceled, err)
+		_, err = openedFile.Stat()
+		require.ErrorIs(t, err, os.ErrClosed)
+		_, err = openedRoot.Stat(".")
+		require.ErrorIs(t, err, os.ErrClosed)
+	})
+}
+
+func writeRecallTestInput(t *testing.T, path, key string) string {
+	t.Helper()
+	content := []byte(recallTestHeader() + "\n" + recallTestRecord(key))
+	require.NoError(t, os.WriteFile(path, content, 0o600))
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
 }
 
 type recallFailReader struct{}

@@ -125,11 +125,14 @@ the comparisons.
    Use one LF or CRLF between objects and keep each line within 128 KiB.
    For byte-for-byte repetition, use the stated field order, compact JSON
    with Unicode preserved, and a final LF.
-4. Keep both JSONL files outside the checkout. Each input must resolve to a
-   regular file. A symlink in the filename must be relative and stay inside
-   the selected directory. Record the dataset
-   attribution, revision, paths of the source shards used, export settings,
-   and the SHA-256 digest of each JSONL file alongside the report.
+4. Keep both JSONL files in trusted local directories outside the checkout.
+   Each input must be a readable regular file. The loader pins the parent
+   directory where supported and follows only relative symlinks that stay
+   within it. On Unix, it rejects a substituted named pipe (FIFO) without
+   waiting for a writer. Filesystem calls and regular-file reads are subject
+   to ordinary OS I/O. Record the dataset attribution, revision, paths of the
+   source shards used, export settings, and the SHA-256 digest of each JSONL
+   file alongside the report.
 
 #### Run the evaluation
 
