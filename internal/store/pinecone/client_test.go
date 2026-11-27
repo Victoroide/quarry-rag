@@ -1,11 +1,13 @@
 package pinecone
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -565,6 +567,285 @@ func TestDeleteRetriesAndMissingVectors(t *testing.T) {
 	})
 }
 
+func layoutStringList(items ...string) *structpb.Value {
+	values := make([]*structpb.Value, len(items))
+	for i, item := range items {
+		values[i] = structpb.NewStringValue(item)
+	}
+	return structpb.NewListValue(&structpb.ListValue{Values: values})
+}
+
+func layoutMetadataFixture(vectorID string) (*structpb.Struct, domain.Chunk) {
+	md := &structpb.Struct{Fields: map[string]*structpb.Value{
+		"chunk_id":               structpb.NewStringValue("chunk"),
+		"doc_id":                 structpb.NewStringValue("doc"),
+		"revision_id":            structpb.NewStringValue("revision"),
+		"chunk_index":            structpb.NewNumberValue(3),
+		"text":                   structpb.NewStringValue("table content"),
+		"token_count":            structpb.NewNumberValue(2),
+		"doc_type":               structpb.NewStringValue("report"),
+		domain.VectorTenantKey:   structpb.NewStringValue("tenant"),
+		domain.LayoutPagesKey:    layoutStringList("5", "2", "5"),
+		domain.LayoutTableIDsKey: layoutStringList("p1-t2", "p1-t1", "p1-t2"),
+		domain.LayoutRowIDsKey:   layoutStringList("p1-t2-r8", "p1-t2-r7", "p1-t2-r8"),
+	}}
+	want := domain.Chunk{
+		ID: "chunk", VectorID: vectorID, DocumentID: "doc", RevisionID: "revision",
+		Index: 3, Text: "table content", TokenCount: 2,
+		Metadata: map[string]any{
+			"doc_type":               "report",
+			domain.VectorTenantKey:   "tenant",
+			domain.LayoutPagesKey:    []int{5, 2},
+			domain.LayoutTableIDsKey: []string{"p1-t2", "p1-t1"},
+			domain.LayoutRowIDsKey:   []string{"p1-t2-r8", "p1-t2-r7"},
+		},
+	}
+	return md, want
+}
+
+func TestChunkFromMetadataValidatesWholeLayoutFields(t *testing.T) {
+	for _, md := range []*structpb.Struct{nil, {}} {
+		got, ok := chunkFromMetadata("vector", md)
+		require.True(t, ok)
+		require.Equal(t, domain.ChunkID("vector"), got.ID)
+		require.Equal(t, "vector", got.VectorID)
+		require.Empty(t, got.Metadata)
+	}
+
+	md, want := layoutMetadataFixture("vector")
+	before := proto.CloneOf(md)
+	got, ok := chunkFromMetadata("vector", md)
+	require.True(t, ok)
+	require.Equal(t, want, got)
+	require.True(t, proto.Equal(before, md), "metadata was mutated")
+
+	maxPage := strconv.Itoa(domain.MaxPDFPages)
+	md.Fields[domain.LayoutPagesKey] = layoutStringList("1", maxPage, "1")
+	want.Metadata[domain.LayoutPagesKey] = []int{1, domain.MaxPDFPages}
+	got, ok = chunkFromMetadata("vector", md)
+	require.True(t, ok)
+	require.Equal(t, want, got)
+
+	maxTable := "p" + maxPage + "-t"
+	maxTable += strings.Repeat("9", domain.MaxLayoutProvenanceIDBytes-len(maxTable))
+	maxRow := "p" + maxPage + "-t1-r"
+	maxRow += strings.Repeat("9", domain.MaxLayoutProvenanceIDBytes-len(maxRow))
+	for _, field := range []struct {
+		key      string
+		valid    string
+		boundary string
+		want     any
+		limit    int
+		invalid  []string
+	}{
+		{domain.LayoutPagesKey, "2", maxPage, []int{domain.MaxPDFPages}, domain.MaxPDFPages,
+			[]string{"", "-2", "0", strconv.Itoa(domain.MaxPDFPages + 1), "65536", "18446744073709551616", "02", "+2", " 2", "2 ", "2\n", "0x2", "2e0", "2.0", "٢", "２"}},
+		{domain.LayoutTableIDsKey, "p2-t1", maxTable, []string{maxTable}, domain.MaxLayoutProvenanceIDs,
+			[]string{"", " ", "p2-t1-r7", "p02-t1", "p2-t01", "p0-t1", "p2-t0", "p" + strconv.Itoa(domain.MaxPDFPages+1) + "-t1", maxTable + "9"}},
+		{domain.LayoutRowIDsKey, "p2-t1-r7", maxRow, []string{maxRow}, domain.MaxLayoutProvenanceIDs,
+			[]string{"", " ", "p2-t1", "p02-t1-r7", "p2-t01-r7", "p2-t1-r07", "p2-t1-r0", "p" + strconv.Itoa(domain.MaxPDFPages+1) + "-t1-r7", maxRow + "9"}},
+	} {
+		t.Run(field.key, func(t *testing.T) {
+			check := func(t *testing.T, value *structpb.Value, present bool, expected any) {
+				t.Helper()
+				md, want := layoutMetadataFixture("vector")
+				delete(want.Metadata, field.key)
+				if expected != nil {
+					want.Metadata[field.key] = expected
+				}
+				if present {
+					md.Fields[field.key] = value
+				} else {
+					delete(md.Fields, field.key)
+				}
+				got, ok := chunkFromMetadata("vector", md)
+				require.True(t, ok)
+				require.Equal(t, want, got)
+			}
+			t.Run("absent", func(t *testing.T) { check(t, nil, false, nil) })
+			for name, value := range map[string]*structpb.Value{
+				"nil_value": nil, "unset_kind": {}, "nil_list": structpb.NewListValue(nil),
+				"nil_list_wrapper": {Kind: (*structpb.Value_ListValue)(nil)},
+				"empty_list":       layoutStringList(), "scalar": structpb.NewStringValue(field.valid),
+			} {
+				t.Run(name, func(t *testing.T) { check(t, value, true, nil) })
+			}
+			for name, bad := range map[string]*structpb.Value{
+				"number": structpb.NewNumberValue(12), "bool": structpb.NewBoolValue(false),
+				"null": structpb.NewNullValue(), "object": structpb.NewStructValue(&structpb.Struct{}),
+				"nested_list": layoutStringList(field.valid), "nil_item": nil, "unset_item": {},
+				"nil_string_wrapper": {Kind: (*structpb.Value_StringValue)(nil)},
+			} {
+				for position := range 3 {
+					t.Run(fmt.Sprintf("%s_at_%d", name, position), func(t *testing.T) {
+						list := layoutStringList(field.valid, field.valid, field.valid)
+						list.GetListValue().Values[position] = bad
+						check(t, list, true, nil)
+					})
+				}
+			}
+			for _, bad := range field.invalid {
+				t.Run(fmt.Sprintf("malformed_%q", bad), func(t *testing.T) {
+					check(t, layoutStringList(field.valid, bad), true, nil)
+				})
+			}
+			t.Run("length_limits", func(t *testing.T) {
+				item := structpb.NewStringValue(field.boundary)
+				values := make([]*structpb.Value, field.limit+1)
+				for i := range values {
+					values[i] = item
+				}
+				check(t, structpb.NewListValue(&structpb.ListValue{Values: values[:field.limit]}), true, field.want)
+				check(t, structpb.NewListValue(&structpb.ListValue{Values: values}), true, nil)
+			})
+		})
+	}
+}
+
+func layoutResponseFixtures() ([]*pinecone.Vector, []domain.Chunk) {
+	records := []struct {
+		omit string
+		bad  *structpb.Value
+	}{
+		{domain.LayoutPagesKey, structpb.NewListValue(&structpb.ListValue{
+			Values: []*structpb.Value{structpb.NewStringValue("2"), structpb.NewBoolValue(false)},
+		})},
+		{domain.LayoutTableIDsKey, structpb.NewListValue(&structpb.ListValue{
+			Values: []*structpb.Value{structpb.NewStringValue("p2-t1"), structpb.NewNumberValue(12)},
+		})},
+		{domain.LayoutRowIDsKey, layoutStringList("p2-t1-r7", "")},
+		{},
+	}
+	vectors := make([]*pinecone.Vector, 0, len(records))
+	chunks := make([]domain.Chunk, 0, len(records))
+	for i, record := range records {
+		id := fmt.Sprintf("vector-%d", i)
+		md, chunk := layoutMetadataFixture(id)
+		if record.omit != "" {
+			md.Fields[record.omit] = record.bad
+			delete(chunk.Metadata, record.omit)
+		}
+		values := []float32{float32(i), 1}
+		vectors = append(vectors, &pinecone.Vector{Id: id, Metadata: md, Values: &values})
+		chunks = append(chunks, chunk)
+	}
+	return vectors, chunks
+}
+
+func TestPineconeQueryOmitsMalformedLayoutFields(t *testing.T) {
+	const namespace = "scoped"
+	vectors, chunks := layoutResponseFixtures()
+	matches := make([]*pinecone.ScoredVector, 0, len(vectors))
+	want := make([]domain.ScoredChunk, 0, len(vectors))
+	for i, vector := range vectors {
+		score := 1 - float32(i)/8
+		matches = append(matches, &pinecone.ScoredVector{Vector: vector, Score: score})
+		want = append(want, domain.ScoredChunk{Chunk: chunks[i], Score: float64(score), Namespace: namespace})
+	}
+	conn := &fakeIndexConn{query: func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
+		if !req.IncludeMetadata {
+			return nil, errors.New("metadata missing from request")
+		}
+		return &pinecone.QueryVectorsResponse{Matches: matches}, nil
+	}}
+	client := testClient(conn)
+	client.dial = func(ns string) (indexConn, error) {
+		if ns != namespace {
+			return nil, fmt.Errorf("unexpected namespace %q", ns)
+		}
+		return conn, nil
+	}
+	for i := range 8 {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			t.Parallel()
+			got, err := client.Query(t.Context(), namespace, []float32{1, 2}, len(want), "")
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+		})
+	}
+}
+
+func FuzzChunkFromMetadataLayoutLists(f *testing.F) {
+	f.Add(uint8(0), []byte(""))
+	f.Add(uint8(0), []byte("s18446744073709551616"))
+	f.Add(uint8(0), []byte("s5\x00s2\x00s5"))
+	f.Add(uint8(1), []byte("sp1-t2\x00sp1-t1\x00sp1-t2"))
+	f.Add(uint8(2), []byte("sp1-t2-r8\x00sp1-t2-r7\x00sp1-t2-r8"))
+	f.Add(uint8(0), []byte(strings.Repeat("s2\x00", 48)+"b"))
+	f.Add(uint8(1), []byte("sp2-t1\x00n\x00b\x00z\x00o\x00l\x00i\x00u"))
+
+	keys := []string{domain.LayoutPagesKey, domain.LayoutTableIDsKey, domain.LayoutRowIDsKey}
+	f.Fuzz(func(t *testing.T, field uint8, input []byte) {
+		key := keys[int(field)%len(keys)]
+		md, want := layoutMetadataFixture("vector")
+		delete(want.Metadata, key)
+		parts := bytes.SplitN(input[:min(len(input), 4096)], []byte{0}, 64)
+		values := make([]*structpb.Value, 0, len(parts))
+		stringsInList := make([]string, 0, len(parts))
+		if len(input) > 0 {
+			for _, part := range parts {
+				if len(part) == 0 {
+					values = append(values, nil)
+					continue
+				}
+				var value *structpb.Value
+				switch part[0] {
+				case 'n':
+					value = structpb.NewNumberValue(2)
+				case 'b':
+					value = structpb.NewBoolValue(false)
+				case 'z':
+					value = structpb.NewNullValue()
+				case 'o':
+					value = structpb.NewStructValue(&structpb.Struct{})
+				case 'l':
+					value = layoutStringList(string(part[1:]))
+				case 'i':
+					value = nil
+				case 'u':
+					value = &structpb.Value{}
+				default:
+					item := string(part[1:])
+					value = structpb.NewStringValue(item)
+					stringsInList = append(stringsInList, item)
+				}
+				values = append(values, value)
+			}
+		}
+		md.Fields[key] = structpb.NewListValue(&structpb.ListValue{Values: values})
+		if len(values) == len(stringsInList) {
+			switch key {
+			case domain.LayoutPagesKey:
+				var pages []int
+				for _, item := range stringsInList {
+					page, err := strconv.Atoi(item)
+					if err != nil || strconv.Itoa(page) != item {
+						pages = nil
+						break
+					}
+					pages = append(pages, page)
+				}
+				if valid, err := domain.ValidateLayoutPages(pages); err == nil && len(valid) > 0 {
+					want.Metadata[key] = valid
+				}
+			case domain.LayoutTableIDsKey:
+				if valid, err := domain.ValidateLayoutTableIDs(stringsInList); err == nil && len(valid) > 0 {
+					want.Metadata[key] = valid
+				}
+			case domain.LayoutRowIDsKey:
+				if valid, err := domain.ValidateLayoutRowIDs(stringsInList); err == nil && len(valid) > 0 {
+					want.Metadata[key] = valid
+				}
+			}
+		}
+		before := proto.CloneOf(md)
+		got, ok := chunkFromMetadata("vector", md)
+		require.True(t, ok)
+		require.Equal(t, want, got)
+		require.True(t, proto.Equal(before, proto.CloneOf(md)), "metadata was mutated")
+	})
+}
+
 func TestRoundTripsLayoutProvenanceMetadata(t *testing.T) {
 	var stored []*pinecone.Vector
 	conn := &fakeIndexConn{
@@ -649,7 +930,7 @@ func TestRoundTripsLayoutProvenanceMetadata(t *testing.T) {
 	require.Contains(t, fetched, "c1")
 	assertProvenance(fetched["c1"].Metadata)
 
-	// Unparseable or non-string entries in pages are skipped on both Query and Fetch.
+	// Two malformed fields are omitted independently of the valid row IDs.
 	malformed := &pinecone.Vector{
 		Id:     "c2",
 		Values: &[]float32{1},
@@ -665,18 +946,18 @@ func TestRoundTripsLayoutProvenanceMetadata(t *testing.T) {
 				structpb.NewStringValue(""),
 				structpb.NewStringValue("p1-t1"),
 			}}),
+			"row_ids": layoutStringList("p1-t1-r2"),
 		}},
 	}
 	matches := matchesToScoredChunks([]*pinecone.ScoredVector{{Vector: malformed}}, "")
 	require.Len(t, matches, 1)
-	require.Equal(t, []int{1, 4}, matches[0].Chunk.Metadata["pages"])
-	require.Equal(t, []string{"p1-t1"}, matches[0].Chunk.Metadata["table_ids"])
+	wantMalformed := map[string]any{domain.LayoutRowIDsKey: []string{"p1-t1-r2"}}
+	require.Equal(t, wantMalformed, matches[0].Chunk.Metadata)
 
 	stored = append(stored, malformed)
 	fetchedMalformed, err := client.Fetch(t.Context(), []string{"c2"})
 	require.NoError(t, err)
-	require.Equal(t, []int{1, 4}, fetchedMalformed["c2"].Metadata["pages"])
-	require.Equal(t, []string{"p1-t1"}, fetchedMalformed["c2"].Metadata["table_ids"])
+	require.Equal(t, wantMalformed, fetchedMalformed["c2"].Metadata)
 }
 
 func TestRevisionedUpsertAndMatchRestoration(t *testing.T) {

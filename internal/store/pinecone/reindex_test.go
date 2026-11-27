@@ -60,6 +60,37 @@ func TestFetchBatchesKeysAndMapsStoredVectors(t *testing.T) {
 	require.Equal(t, map[string]any{"doc_type": "report", "collection": "archive", domain.VectorTenantKey: "tenant-1", "kind": "paragraph", "quality": "high"}, chunk.Metadata)
 }
 
+func TestPineconeFetchOmitsMalformedLayoutFields(t *testing.T) {
+	vectors, chunks := layoutResponseFixtures()
+	want := make(map[string]domain.Chunk, len(chunks))
+	records := make(map[string]*pinecone.Vector, len(vectors)+1)
+	ids := []string{"missing", "inconsistent"}
+	for i, vector := range vectors {
+		chunk := chunks[i]
+		chunk.Embedding = *vector.Values
+		want[vector.Id] = chunk
+		records[vector.Id] = vector
+		ids = append(ids, vector.Id)
+	}
+	records["inconsistent"] = fetchedVector(t, "inconsistent", []float32{1}, map[string]any{
+		domain.VectorAttemptKey: "attempt-with-no-revision",
+	})
+	conn := &fakeIndexConn{fetch: func(_ context.Context, keys []string) (*pinecone.FetchVectorsResponse, error) {
+		require.Equal(t, ids, keys)
+		return &pinecone.FetchVectorsResponse{Vectors: records}, nil
+	}}
+	client := testClient(conn)
+	got, err := client.Fetch(t.Context(), ids)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got, err = client.Fetch(ctx, ids)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, got)
+}
+
 func TestFetchWithoutValuesIsAnError(t *testing.T) {
 	conn := &fakeIndexConn{fetch: func(_ context.Context, ids []string) (*pinecone.FetchVectorsResponse, error) {
 		return &pinecone.FetchVectorsResponse{Vectors: map[string]*pinecone.Vector{ids[0]: {Id: ids[0]}}}, nil

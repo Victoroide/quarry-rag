@@ -233,7 +233,7 @@ func (p *Client) UpsertWithVisibility(ctx context.Context, namespace string, chu
 			mdMap["revision_id"] = c.RevisionID
 			mdMap["chunk_id"] = string(c.ID)
 		}
-		for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey, "pages", "table_ids", "row_ids"} {
+		for _, key := range []string{"doc_type", "kind", "quality", "collection", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey, domain.LayoutPagesKey, domain.LayoutTableIDsKey, domain.LayoutRowIDsKey} {
 			if value, ok := c.Metadata[key]; ok {
 				mdMap[key] = pineconeMetadataValue(value)
 			}
@@ -989,31 +989,68 @@ func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
 	} else if _, hasAttempt := fields[domain.VectorAttemptKey]; hasAttempt {
 		return chunk, false
 	}
-	if v, ok := fields["pages"]; ok && v.GetListValue() != nil {
-		pages := make([]int, 0, len(v.GetListValue().GetValues()))
-		for _, item := range v.GetListValue().GetValues() {
-			if p, err := strconv.Atoi(item.GetStringValue()); err == nil {
-				pages = append(pages, p)
-			}
-		}
-		if len(pages) > 0 {
-			chunk.Metadata["pages"] = pages
-		}
+	if pages := layoutPagesFromMetadata(fields[domain.LayoutPagesKey]); len(pages) > 0 {
+		chunk.Metadata[domain.LayoutPagesKey] = pages
 	}
-	for _, key := range []string{"table_ids", "row_ids"} {
-		if v, ok := fields[key]; ok && v.GetListValue() != nil {
-			items := make([]string, 0, len(v.GetListValue().GetValues()))
-			for _, item := range v.GetListValue().GetValues() {
-				if s := item.GetStringValue(); s != "" {
-					items = append(items, s)
-				}
-			}
-			if len(items) > 0 {
-				chunk.Metadata[key] = items
-			}
-		}
+	if ids := layoutIDsFromMetadata(fields[domain.LayoutTableIDsKey], domain.ValidateLayoutTableIDs); len(ids) > 0 {
+		chunk.Metadata[domain.LayoutTableIDsKey] = ids
+	}
+	if ids := layoutIDsFromMetadata(fields[domain.LayoutRowIDsKey], domain.ValidateLayoutRowIDs); len(ids) > 0 {
+		chunk.Metadata[domain.LayoutRowIDsKey] = ids
 	}
 	return chunk, true
+}
+
+func layoutListFromMetadata(value *structpb.Value) []*structpb.Value {
+	list, ok := value.GetKind().(*structpb.Value_ListValue)
+	if !ok || list == nil {
+		return nil
+	}
+	return list.ListValue.GetValues()
+}
+
+func layoutPagesFromMetadata(value *structpb.Value) []int {
+	items := layoutListFromMetadata(value)
+	if len(items) == 0 || len(items) > domain.MaxPDFPages {
+		return nil
+	}
+	pages := make([]int, len(items))
+	for i, item := range items {
+		text, ok := item.GetKind().(*structpb.Value_StringValue)
+		if !ok || text == nil {
+			return nil
+		}
+		page, err := strconv.ParseUint(text.StringValue, 10, 16)
+		if err != nil || page < 1 || page > domain.MaxPDFPages || strconv.FormatUint(page, 10) != text.StringValue {
+			return nil
+		}
+		pages[i] = int(page)
+	}
+	valid, err := domain.ValidateLayoutPages(pages)
+	if err != nil {
+		return nil
+	}
+	return valid
+}
+
+func layoutIDsFromMetadata(value *structpb.Value, validate func([]string) ([]string, error)) []string {
+	items := layoutListFromMetadata(value)
+	if len(items) == 0 || len(items) > domain.MaxLayoutProvenanceIDs {
+		return nil
+	}
+	ids := make([]string, len(items))
+	for i, item := range items {
+		text, ok := item.GetKind().(*structpb.Value_StringValue)
+		if !ok || text == nil || text.StringValue == "" {
+			return nil
+		}
+		ids[i] = text.StringValue
+	}
+	valid, err := validate(ids)
+	if err != nil {
+		return nil
+	}
+	return valid
 }
 
 func matchesToScoredChunks(matches []*pinecone.ScoredVector, namespace string) []domain.ScoredChunk {
