@@ -26,6 +26,10 @@ type profileCapableStore struct {
 	calls []profileClaimCall
 }
 
+func newProfileCapableStore(base *leaseTestStore) *profileCapableStore {
+	return &profileCapableStore{pdfTestStore: &pdfTestStore{ocrLeaseStore: &ocrLeaseStore{leaseTestStore: base}}}
+}
+
 func (s *profileCapableStore) ClaimPDFProfilesForFixtureStore(_ context.Context, owner string, _ time.Duration, _ int, vectorIdentity string, mixed, layout bool) (*domain.Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -156,7 +160,7 @@ func TestWorkerClaimsPDFProfilesFromOCRCapabilities(t *testing.T) {
 
 	for _, tc := range capabilities {
 		t.Run("profile-store/"+tc.name, func(t *testing.T) {
-			s := &profileCapableStore{pdfTestStore: &pdfTestStore{ocrLeaseStore: &ocrLeaseStore{leaseTestStore: leaseStore(0)}}}
+			s := newProfileCapableStore(leaseStore(0))
 			w := New(s, nil, nil, Options{Owner: "w", FixtureVectorIdentity: "postgres", OCR: tc.extractor})
 			job, err := w.claim(t.Context())
 			require.NoError(t, err)
@@ -231,7 +235,7 @@ func TestWorkerClaimsPDFProfilesFromOCRCapabilities(t *testing.T) {
 				Pages:    domain.PDFPages{{Number: 1, Evidence: domain.PDFImage}},
 			},
 		}
-		s := &profileCapableStore{pdfTestStore: &pdfTestStore{ocrLeaseStore: &ocrLeaseStore{leaseTestStore: leaseStore(0)}}}
+		s := newProfileCapableStore(leaseStore(0))
 		s.jobs = []domain.Job{layoutJob, mixedJob}
 		var processed []domain.DocumentID
 		w := New(s, []pipeline.Stage{ocrStage{func(ic *pipeline.IngestContext) error {

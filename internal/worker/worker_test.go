@@ -567,7 +567,7 @@ func TestManifestedWorkerAbortsUpsertWhenManifestLeaseCheckFails(t *testing.T) {
 }
 
 type modeFencedLeaseStore struct {
-	*leaseTestStore
+	*profileCapableStore
 	completed  domain.Job
 	released   domain.Job
 	exists     bool
@@ -606,19 +606,26 @@ func TestCorpusModeMismatchReleasesOwnedLease(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := leaseStore(1)
-			store := &modeFencedLeaseStore{leaseTestStore: base, exists: !tc.deleted, releaseErr: tc.releaseErr}
-			job := base.jobs[0]
-			job.LeaseOwner, job.Incarnation, job.LeaseToken, job.Attempts = "test", "inc-1", "lease-1", tc.attempt
+			store := &modeFencedLeaseStore{profileCapableStore: newProfileCapableStore(base), exists: !tc.deleted, releaseErr: tc.releaseErr}
+			queued := &base.jobs[0]
+			queued.Document.ID = domain.DocumentID(uuid.NewString())
+			queued.Incarnation, queued.LeaseToken, queued.Attempts = uuid.NewString(), uuid.NewString(), tc.attempt
 
 			var vectors domain.VectorDeleter
 			var recorder *revisionVectorRecorder
+			opts := Options{HostedVectorManifest: tc.hosted, Owner: "test", MaxAttempts: 5, Lease: time.Minute, JobTimeout: time.Second}
 			if tc.hosted {
+				queued.PDF = &domain.PDFExtraction{Profile: domain.LayoutPDFProfile, Coverage: domain.PDFComplete}
+				opts.OCR = analyzerOnlyOCR{}
 				recorder = &revisionVectorRecorder{activeChunks: make(map[string]domain.Chunk)}
 				vectors = recorder
 			}
-			w := New(store, []pipeline.Stage{leaseTestStage{func(context.Context) error { return nil }}}, vectors, Options{
-				HostedVectorManifest: tc.hosted, Owner: "test", MaxAttempts: 5, Lease: time.Minute, JobTimeout: time.Second,
-			})
+			w := New(store, []pipeline.Stage{leaseTestStage{func(context.Context) error { return nil }}}, vectors, opts)
+			claimed, err := w.claim(t.Context())
+			require.NoError(t, err)
+			require.NotNil(t, claimed)
+			require.Equal(t, []profileClaimCall{{method: "profiles", layout: tc.hosted}}, store.calls)
+			job := *claimed
 			w.process(t.Context(), job)
 			require.Equal(t, job.LeaseToken, store.completed.LeaseToken)
 			require.Equal(t, store.completed, store.released, "release must retain the exact attempt identity")
