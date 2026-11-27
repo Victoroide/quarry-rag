@@ -272,7 +272,7 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 		switch {
 		case validVector(record.Embedding, v.profile.Dimensions) != nil:
 			rep.Coverage.BadVectors++
-		case record.DocumentID != want.DocumentID || record.ID != want.ID || record.Index != want.Index || record.Text != want.Text ||
+		case record.Index < 0 || record.Index != want.Index || record.DocumentID != want.DocumentID || record.ID != want.ID || record.Text != want.Text ||
 			record.TokenCount != want.TokenCount || collection != snap.Collection || docType != snap.DocType ||
 			v.taggedTarget && (record.VectorIncarnation != snap.Incarnation || tenant != snap.TenantID || record.RevisionID != snap.ActiveRevisionID) ||
 			tagged && (revision != snap.Incarnation || attempt != snap.VectorAttempt):

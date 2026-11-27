@@ -14,6 +14,7 @@ Notable changes are grouped by release.
 ### Fixed
 
 - Held deletion release recovers claims left by lost commit replies.
+- Vector reindex validates Pinecone chunk positions before copying vectors or accepting verification evidence.
 - Superseded Pinecone vector cleanup splits oversized exact-ID fetches and checks the namespace of each reply before deleting vectors from the page.
 - Superseded vector cleanup recovery requires confirmation that the recorded sender has stopped and that the provider requests for the matching reservation have settled.
 - With `SOURCE_UPLOAD_JOURNAL=true`, owned multipart uploads journal each incarnation-scoped original before writing it, so reconciliation can reclaim originals that acceptance never adopted.

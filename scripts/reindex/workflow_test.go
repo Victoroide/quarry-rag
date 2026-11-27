@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // stores serves PostgreSQL generation tables and named in-memory Pinecone indexes.
@@ -420,6 +422,63 @@ func TestStageCopiesWithoutProviderCallsAfterAttestation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, pgstore.StateStaging, row.State)
 	require.Equal(t, pgstore.OriginRecorded, row.Origin)
+}
+
+func TestReindexHostedChunkPositionPostgresSnapshot(t *testing.T) {
+	ctx := t.Context()
+	doc := newDoc("alpha", "report", "Canonical zero.", "Canonical one.", "Canonical PostgreSQL integer maximum.")
+	f := newTaggedFixture(t, doc)
+	chunks := f.chunks[doc.ID]
+	chunks[2].Index = math.MaxInt32
+	_, err := f.pg.Pool.Exec(ctx, `UPDATE chunks SET chunk_index = $1 WHERE id = $2::uuid`, chunks[2].Index, string(chunks[2].ID))
+	require.NoError(t, err)
+	// The serving PostgreSQL store and the corpus snapshot must agree before copying.
+	require.NoError(t, f.legacy.Upsert(ctx, "", sourceChunks(doc, chunks, sourceModel)))
+	snap, err := f.pg.LoadDocumentSnapshotBounded(ctx, doc.ID, 3, 1024)
+	require.NoError(t, err)
+	require.NotNil(t, snap)
+	require.Equal(t, chunks, snap.Chunks)
+
+	h := newHarness(t, f, "postgres")
+	h.attestSource()
+	staged, err := h.run(options{
+		Generation: "g2", Profile: h.profileFile("target.json", testProfile(sourceModel)),
+		TargetStore: "pinecone", TargetIndex: "quarry-g2", Apply: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, true, staged["complete"])
+	require.EqualValues(t, len(chunks), staged["copied_chunks"])
+	require.Zero(t, h.embedCalls())
+
+	index := h.stores.index("quarry-g2")
+	client := pcstore.NewClientForIndex(index, testConfig(), "")
+	keys := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		keys[i] = string(chunk.ID)
+	}
+	stored, err := client.Fetch(ctx, keys)
+	require.NoError(t, err)
+	require.Len(t, stored, len(chunks))
+	for i, chunk := range snap.Chunks {
+		require.Equal(t, chunk.Index, stored[keys[i]].Index)
+		require.Equal(t, chunk.Text, stored[keys[i]].Text)
+	}
+
+	opts := verifyOptions("g2")
+	opts.SampleSize, opts.TopK, opts.ScopeDocuments, opts.MinRecall = 3, 3, 1, 1
+	setHostedPosition(t, index, keys[0], structpb.NewNumberValue(0.5))
+	verification, err := h.run(opts)
+	require.ErrorIs(t, err, errNotVerified)
+	coverage := verification["coverage"].(map[string]any)
+	require.Equal(t, 1.0, coverage["key_coverage"])
+	require.EqualValues(t, 1, coverage["mismatched_records"])
+
+	setHostedPosition(t, index, keys[0], structpb.NewNumberValue(0))
+	verification, err = h.run(opts)
+	require.NoError(t, err)
+	require.Equal(t, true, verification["passed"])
+	coverage = verification["coverage"].(map[string]any)
+	require.Equal(t, 1.0, coverage["profile_coverage"])
 }
 
 func TestStageWithAnUnknownProfileRecomputesWithinTheBudget(t *testing.T) {
