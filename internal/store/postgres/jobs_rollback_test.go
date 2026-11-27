@@ -33,6 +33,7 @@ type ingestTxTrace struct {
 	cancelOperation context.CancelFunc
 	operationPaused chan ingestQueryObservation
 	continueQuery   chan struct{}
+	rollbackEntered chan time.Time
 	watchdog        context.Context
 
 	rollbacks   []ingestQueryObservation
@@ -54,6 +55,12 @@ func (ingestTxTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data 
 	switch {
 	case data.SQL == "rollback":
 		trace.rollbacks = append(trace.rollbacks, observation)
+		if trace.rollbackEntered != nil {
+			select {
+			case trace.rollbackEntered <- observation.startedAt:
+			default:
+			}
+		}
 		if trace.watchdog != nil {
 			select {
 			case <-ctx.Done():
@@ -67,8 +74,8 @@ func (ingestTxTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data 
 		observation.args = append([]any(nil), data.Args...)
 		trace.operation = observation
 		if trace.cancelOperation != nil {
-			// Interrupt before pgx dispatches the first write. Both locks stay
-			// held while the separate observer checks them.
+			// Interrupt before pgx dispatches the statement. The transaction
+			// keeps its locks while the separate observer checks them.
 			trace.cancelOperation()
 			trace.operationPaused <- observation
 			select {
@@ -89,7 +96,17 @@ func (ingestTxTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.T
 
 func ingestRollbackDatabase(t *testing.T, tracer pgx.QueryTracer) (*Client, *pgx.Conn, context.Context) {
 	t.Helper()
-	c := jobsDatabase(t, WithQueryTracer(tracer), func(cfg *pgxpool.Config) { cfg.MaxConns = 1 })
+	c := jobsDatabase(t, WithQueryTracer(tracer), configureIngestRollbackPool)
+	observer, ctx := ingestRollbackObserver(t, c)
+	return c, observer, ctx
+}
+
+func configureIngestRollbackPool(cfg *pgxpool.Config) {
+	cfg.MaxConns = 1
+}
+
+func ingestRollbackObserver(t *testing.T, c *Client) (*pgx.Conn, context.Context) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	cfg := c.Pool.Config().ConnConfig.Copy()
@@ -101,7 +118,7 @@ func ingestRollbackDatabase(t *testing.T, tracer pgx.QueryTracer) (*Client, *pgx
 		defer cancel()
 		require.NoError(t, observer.Close(closeCtx))
 	})
-	return c, observer, ctx
+	return observer, ctx
 }
 
 const (

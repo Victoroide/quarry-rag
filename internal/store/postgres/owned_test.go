@@ -95,11 +95,16 @@ func (f *ownedFixture) setEnabled(t *testing.T, p domain.Principal, subject stri
 
 func (f *ownedFixture) reserve(t testing.TB, p domain.Principal, collection string) (id, incarnation string) {
 	t.Helper()
+	return f.reserveContext(t.Context(), t, p, collection)
+}
+
+func (f *ownedFixture) reserveContext(ctx context.Context, t testing.TB, p domain.Principal, collection string) (id, incarnation string) {
+	t.Helper()
 	id = uuid.NewString()
-	f.importBatch(t, func(b map[string]any) {
+	f.importBatchContext(ctx, t, func(b map[string]any) {
 		b["reservations"] = []grantEntry{{"tenant_id": p.TenantID, "principal_id": p.ID, "collection": collection, "document_id": id}}
 	})
-	require.NoError(t, f.c.Pool.QueryRow(t.Context(), `SELECT incarnation::text FROM grant_catalog_document_reservations WHERE document_id=$1`, id).Scan(&incarnation))
+	require.NoError(t, f.c.Pool.QueryRow(ctx, `SELECT incarnation::text FROM grant_catalog_document_reservations WHERE document_id=$1`, id).Scan(&incarnation))
 	return id, incarnation
 }
 

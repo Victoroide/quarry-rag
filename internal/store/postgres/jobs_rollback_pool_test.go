@@ -41,11 +41,22 @@ func requireRecoveredIngestPool(ctx context.Context, t *testing.T, c *Client, ob
 		require.NotEqual(t, pid, recoveredPID)
 		// PostgreSQL can finish handling the disconnect after the pool has
 		// removed the connection. Wait before probing the released locks.
-		require.Eventually(t, func() bool {
+		pollCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
 			var disconnected bool
-			err := c.Pool.QueryRow(ctx, `SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE pid=$1)`, pid).Scan(&disconnected)
-			return err == nil && disconnected
-		}, 3*time.Second, 10*time.Millisecond, "PostgreSQL must release the discarded session")
+			require.NoError(t, observer.QueryRow(pollCtx, `SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE pid=$1)`, pid).Scan(&disconnected))
+			if disconnected {
+				break
+			}
+			select {
+			case <-ticker.C:
+			case <-pollCtx.Done():
+				t.Fatal("PostgreSQL did not release the discarded session before the watchdog")
+			}
+		}
 	} else {
 		require.Equal(t, pid, recoveredPID)
 	}

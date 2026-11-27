@@ -71,7 +71,7 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 	if err != nil {
 		return result, err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer rollbackIngestTx(ctx, tx)
 	// Serialize admission so concurrent requests cannot overfill the durable queue.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
 		return result, err
@@ -667,7 +667,7 @@ func (c *Client) claimJobLease(ctx context.Context, statement string, args []any
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer rollbackIngestTx(ctx, tx)
 	if gateErr := c.gateWriter(ctx, tx); gateErr != nil {
 		return gateErr
 	}
@@ -1026,7 +1026,7 @@ func (c *Client) StoreOCRText(ctx context.Context, j domain.Job, text string) er
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer rollbackIngestTx(ctx, tx)
 	if lockErr := lockLiveJob(ctx, tx, j); lockErr != nil {
 		return lockErr
 	}
