@@ -15,6 +15,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -161,6 +162,11 @@ func runManifestCorpusQuery(t *testing.T, c *Client, vectors manifestQueryVector
 		for id, preview := range wantPreviews {
 			require.Equal(t, preview, visible.previews[id])
 		}
+		if len(want) == 0 {
+			require.Zero(t, qc.TopScore)
+		} else {
+			require.InDelta(t, 0.7071, qc.TopScore, 0.001, "obsolete vectors with score 1 do not affect routing or retrieval")
+		}
 	}
 	if len(want) == 0 {
 		require.Zero(t, gen.calls)
@@ -211,11 +217,13 @@ func testManifestQueryCorpus(t *testing.T, backend, mode string) {
 	_, deletionErr := c.ActivateDeletion(ctx)
 	require.NoError(t, deletionErr)
 	var subject *domain.Principal
+	var outsider *domain.Principal
 	if mode == "grants" {
 		f := provisionOwnedFixture(t, c)
-		_, err := c.ActivateGrants(ctx, false)
-		require.NoError(t, err)
+		_, grantsErr := c.ActivateGrants(ctx, false)
+		require.NoError(t, grantsErr)
 		subject = &f.owner
+		outsider = &f.outsider
 	}
 	c.SetAuthzMode(mode)
 
@@ -246,6 +254,11 @@ func testManifestQueryCorpus(t *testing.T, backend, mode string) {
 	require.False(t, plain.scoped)
 	if hosted != nil {
 		require.NotEmpty(t, plain.revision)
+	}
+	if outsider != nil {
+		other := ownedRequest(*outsider, "", manifest.Document.Content)
+		other.SupportsScopedVectors = true
+		publishQueryDocument(t, c, vectors, other, true, hosted != nil)
 	}
 
 	want := map[domain.DocumentID]manifestQueryPublication{
@@ -289,6 +302,9 @@ func replaceHostedQueryDocument(t *testing.T, c *Client, hosted *pcstore.Client,
 	require.NoError(t, err)
 	require.Len(t, hits, 3)
 	current := hits[domain.FormatRevisionVectorID(id, active.revision, 0)]
+	require.Equal(t, active.incarnation, current.VectorIncarnation)
+	require.Equal(t, first.incarnation, hits[oldIDs[0]].VectorIncarnation)
+	require.Equal(t, second.incarnation, hits[oldIDs[1]].VectorIncarnation)
 	for _, oldID := range oldIDs {
 		stale := hits[oldID]
 		require.Equal(t, current.ID, stale.ID)
@@ -300,4 +316,102 @@ func replaceHostedQueryDocument(t *testing.T, c *Client, hosted *pcstore.Client,
 		require.NoError(t, hosted.Upsert(ctx, "", []domain.Chunk{stale}))
 	}
 	return active
+}
+
+func TestManifestVisibilityChecksIncarnationAndActiveRevision(t *testing.T) {
+	ctx := t.Context()
+	owner, serving, _ := restrictedDatabase(t)
+	owner.EnableHostedVectorManifests(true)
+	f := provisionOwnedFixture(t, owner)
+	_, deletionErr := owner.ActivateDeletion(ctx)
+	require.NoError(t, deletionErr)
+	_, grantsErr := owner.ActivateGrants(ctx, false)
+	require.NoError(t, grantsErr)
+	owner.SetAuthzMode("grants")
+
+	req := ownedRequest(f.owner, "", "An archive retains the same content after republication.")
+	id := req.Document.ID
+	accept := func() {
+		t.Helper()
+		result, acceptErr := owner.AcceptDocument(ctx, req)
+		require.NoError(t, acceptErr)
+		require.Equal(t, domain.AcceptAccepted, result.Outcome)
+	}
+	chunkID := uuid.NewString()
+	publish := func(stamped bool) domain.ScoredChunk {
+		t.Helper()
+		job, claimErr := owner.ClaimJob(ctx, "incarnation-visibility", time.Minute, 5)
+		require.NoError(t, claimErr)
+		require.NotNil(t, job)
+		attempt := persistManifestAttemptWithChunk(ctx, t, owner, id, *job, chunkID)
+		chunks := attempt.chunks(id, req.Document.Content)
+		chunks[0].RevisionID = attempt.revision
+		chunks[0].VectorID = attempt.vectorID
+		chunks[0].Metadata = map[string]any{"doc_type": domain.DefaultDocType}
+		if stamped {
+			chunks[0].VectorIncarnation = job.Incarnation
+		}
+		ok, completeErr := owner.CompleteJob(ctx, attempt.job, chunks, domain.IndexObservation{})
+		require.NoError(t, completeErr)
+		require.True(t, ok)
+		return domain.ScoredChunk{Chunk: chunks[0]}
+	}
+	var canSelect bool
+	require.NoError(t, serving.Pool.QueryRow(ctx,
+		`SELECT has_table_privilege(current_user, 'hosted_vector_revisions', 'SELECT')`).Scan(&canSelect))
+	require.False(t, canSelect)
+	check := func(candidates, want []domain.ScoredChunk) {
+		t.Helper()
+		for _, subject := range []*domain.Principal{nil, &f.owner, &f.outsider} {
+			vis := Visibility{Pool: serving.Pool, Subject: subject}
+			hits, previews, visibilityErr := vis.VisibleEvidenceWithPreviews(ctx, candidates, []string{string(id)})
+			require.NoError(t, visibilityErr)
+			if len(want) == 0 || subject == &f.outsider {
+				require.Empty(t, hits)
+				require.Empty(t, previews)
+				continue
+			}
+			require.Len(t, hits, len(want))
+			for i, hit := range hits {
+				require.Equal(t, want[i].Chunk, hit.Chunk)
+				require.Equal(t, req.Owner.Incarnation, hit.ObservedIncarnation)
+			}
+			require.Equal(t, map[string]string{string(id): req.Document.Content}, previews)
+		}
+	}
+
+	accept()
+	first := publish(true)
+	check([]domain.ScoredChunk{first}, []domain.ScoredChunk{first})
+	require.NoError(t, owner.DeleteDocument(ctx, id))
+	req.Owner.Incarnation = uuid.NewString()
+	accept()
+	historical := publish(false)
+	check([]domain.ScoredChunk{first, historical}, []domain.ScoredChunk{historical})
+
+	// Hold a read snapshot across a publication and verify the same hit against
+	// a fresh snapshot afterward, as a query does before releasing evidence.
+	snapshot, err := serving.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	require.NoError(t, err)
+	defer func() { _ = snapshot.Rollback(context.WithoutCancel(ctx)) }()
+	visibility := Visibility{Pool: serving.Pool, Subject: &f.owner}
+	hits, _, err := visibility.visibleEvidence(ctx, snapshot, []domain.ScoredChunk{historical}, nil)
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	grantExec(t, owner, `WITH reopened AS (UPDATE documents SET status='processing' WHERE id=$1 RETURNING id)
+		INSERT INTO ingest_jobs (document_id) SELECT id FROM reopened`, id)
+	current := publish(true)
+	hits, _, err = visibility.visibleEvidence(ctx, snapshot, []domain.ScoredChunk{historical}, nil)
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	require.NoError(t, snapshot.Commit(ctx))
+
+	missing, wrong, wrongText, retired := current, current, current, historical
+	missing.Chunk.VectorIncarnation = ""
+	wrong.Chunk.VectorIncarnation = first.Chunk.VectorIncarnation
+	wrongText.Chunk.Text += " stale"
+	retired.Chunk.VectorIncarnation = current.Chunk.VectorIncarnation
+	rejected := []domain.ScoredChunk{first, historical, retired, missing, wrong, wrongText}
+	check(rejected, nil)
+	check(append(rejected, current), []domain.ScoredChunk{current})
 }

@@ -175,6 +175,7 @@ func TestManifestedSnapshotStagesAndVerifiesOnPinecone(t *testing.T) {
 			require.Len(t, queried, 2)
 			for _, chunk := range []domain.Chunk{fetched[live[0].VectorID], queried[0].Chunk, queried[1].Chunk} {
 				require.Equal(t, revID, chunk.RevisionID)
+				require.Equal(t, snap.Incarnation, chunk.VectorIncarnation)
 				require.Equal(t, snap.Chunks[chunk.Index].ID, chunk.ID)
 				require.Equal(t, "tenant-1", chunk.Metadata[domain.VectorTenantKey])
 				require.Equal(t, []int{2, 5}, chunk.Metadata["pages"])
@@ -273,6 +274,9 @@ func TestManifestedSnapshotStagesAndVerifiesOnPinecone(t *testing.T) {
 		}
 		for _, c := range snap.Chunks {
 			vecID := domain.FormatRevisionVectorID(domain.DocumentID(doc.ID), revID, c.Index)
+			fetched, fetchErr := dst.Fetch(ctx, []string{vecID})
+			require.NoError(t, fetchErr)
+			require.Equal(t, snap.Incarnation, fetched[vecID].VectorIncarnation)
 			sum := sha256.Sum256([]byte(c.Text))
 			fixtures.Queries[vecID] = queryVectors{
 				TextHash: fmt.Sprintf("%x", sum),

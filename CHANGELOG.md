@@ -21,6 +21,7 @@ Notable changes are grouped by release.
 ### Fixed
 
 - Pinecone queries in grants and service mode can retrieve scoped documents with an active hosted vector revision without reindexing.
+- Scoped Pinecone queries exclude hosted manifest vectors stamped with an unauthorized document incarnation before ranking.
 
 ### Fixed
 

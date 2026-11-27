@@ -17,7 +17,7 @@ const VectorTenantKey = "tenant_id"
 // VectorAttemptKey identifies the tagged worker attempt that wrote a vector.
 const VectorAttemptKey = "vector_attempt"
 
-// VectorIncarnationKey records read provenance on an untagged hosted vector.
+// VectorIncarnationKey records read provenance on hosted vectors without a tagged revision.
 const VectorIncarnationKey = "document_incarnation"
 
 // ValidManifestIncarnation reports whether a manifest stamp is a nonzero,
@@ -32,6 +32,13 @@ func ValidManifestIncarnation(incarnation string) bool {
 func ManifestIdentity(chunk Chunk) bool {
 	return chunk.RevisionID != "" && emptyVectorTag(chunk.Metadata, VectorRevisionKey) &&
 		emptyVectorTag(chunk.Metadata, VectorAttemptKey)
+}
+
+// ManifestMatchesIncarnation permits a historical manifest without a stamp.
+// A stamped manifest must name the exact member's incarnation.
+func ManifestMatchesIncarnation(chunk Chunk, incarnation string) bool {
+	return ManifestIdentity(chunk) && incarnation != "" &&
+		(chunk.VectorIncarnation == "" || chunk.VectorIncarnation == incarnation)
 }
 
 func emptyVectorTag(metadata map[string]any, key string) bool {

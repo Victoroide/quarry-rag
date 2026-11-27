@@ -40,15 +40,15 @@ func startManifestAttempt(t *testing.T, c *Client, docID domain.DocumentID, owne
 // persistManifestAttempt records the write intent of a revision for a leased job.
 func persistManifestAttempt(t *testing.T, c *Client, docID domain.DocumentID, job domain.Job) manifestAttempt {
 	t.Helper()
-	return persistManifestAttemptWithChunk(t, c, docID, job, uuid.NewString())
+	return persistManifestAttemptWithChunk(t.Context(), t, c, docID, job, uuid.NewString())
 }
 
-func persistManifestAttemptWithChunk(t *testing.T, c *Client, docID domain.DocumentID, job domain.Job, chunkID string) manifestAttempt {
+func persistManifestAttemptWithChunk(ctx context.Context, t *testing.T, c *Client, docID domain.DocumentID, job domain.Job, chunkID string) manifestAttempt {
 	t.Helper()
 	a := manifestAttempt{job: job, revision: uuid.NewString(), chunkID: chunkID}
 	a.job.RevisionID = a.revision
 	a.vectorID = domain.FormatRevisionVectorID(docID, a.revision, 0)
-	require.NoError(t, c.PersistVectorManifest(t.Context(), a.job, domain.VectorManifest{
+	require.NoError(t, c.PersistVectorManifest(ctx, a.job, domain.VectorManifest{
 		RevisionID: a.revision, DocumentID: docID, Incarnation: job.Incarnation, Attempt: job.Attempts, LeaseToken: job.LeaseToken,
 		IDPrefix: domain.RevisionVectorPrefix(docID, a.revision), VectorIDs: []string{a.vectorID}, ChunkIDs: []string{a.chunkID},
 	}))
@@ -967,7 +967,7 @@ func TestVisibleEvidenceManifestAfterPublicationRace(t *testing.T) {
 	// Reopen the fixture while preserving its active pointer, chunk identity and incarnation.
 	grantExec(t, c, `WITH reopened AS (UPDATE documents SET status='processing' WHERE id=$1 RETURNING id)
 		INSERT INTO ingest_jobs (document_id) SELECT id FROM reopened`, id)
-	next := persistManifestAttemptWithChunk(t, c, id, *f.claim(t), first.chunkID)
+	next := persistManifestAttemptWithChunk(ctx, t, c, id, *f.claim(t), first.chunkID)
 	require.NotEqual(t, first.job.LeaseToken, next.job.LeaseToken)
 	current := completeManifestHit(t, c, next, 0.8)
 	require.Equal(t, "retired", manifestState(t, c, first.revision))

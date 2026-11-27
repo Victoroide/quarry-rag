@@ -72,10 +72,14 @@ func TestGrantsPineconeFiltersBeforeRanking(t *testing.T) {
 					map[string]any{"doc_type": map[string]any{"$eq": grantse2e.FileType}},
 					map[string]any{"$or": []any{
 						map[string]any{domain.VectorRevisionKey: map[string]any{"$in": []any{docs.First.Incarnation}}},
-						map[string]any{
-							"revision_id":            map[string]any{"$exists": true},
-							domain.VectorRevisionKey: map[string]any{"$exists": false},
-						},
+						map[string]any{"$and": []any{
+							map[string]any{"revision_id": map[string]any{"$exists": true}},
+							map[string]any{domain.VectorRevisionKey: map[string]any{"$exists": false}},
+							map[string]any{"$or": []any{
+								map[string]any{domain.VectorIncarnationKey: map[string]any{"$exists": false}},
+								map[string]any{domain.VectorIncarnationKey: map[string]any{"$in": []any{docs.First.Incarnation}}},
+							}},
+						}},
 					}},
 				},
 			}, call.Filter)

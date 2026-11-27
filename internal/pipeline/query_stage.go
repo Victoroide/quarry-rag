@@ -574,7 +574,7 @@ func filterAuthorizedHits(scope *domain.AuthorizedScope, chunks []domain.ScoredC
 			incarnation, member := scope.IncarnationOf(string(sc.Chunk.DocumentID))
 			revision, _ := sc.Chunk.Metadata[domain.VectorRevisionKey].(string)
 			tagged := sc.Chunk.RevisionID == "" && revision == incarnation
-			identityMatches := tagged || domain.ManifestIdentity(sc.Chunk)
+			identityMatches := tagged || domain.ManifestMatchesIncarnation(sc.Chunk, incarnation)
 			if !member || !scope.SameTenant(sc.Chunk.Metadata) || !identityMatches {
 				continue
 			}
