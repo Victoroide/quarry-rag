@@ -472,18 +472,14 @@ func TestMigrationsWaitForAdvisoryLock(t *testing.T) {
 	tx, err := client.Pool.Begin(t.Context())
 	require.NoError(t, err)
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	_, err = tx.Exec(t.Context(), `SELECT pg_advisory_xact_lock($1)`, int64(0x7175617272790001))
+	_, err = tx.Exec(t.Context(), `SELECT pg_advisory_xact_lock($1)`, migrationLockID)
 	require.NoError(t, err)
 	waiter := migrationTestClient(t, withFixtureOptions(t, client.Pool.Config().ConnString(), migrationWaiterOptions))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- waiter.RunMigrations(ctx) }()
-	select {
-	case err = <-done:
-		t.Fatalf("migration returned while advisory lock was held: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
+	waitForAdvisoryKey(ctx, t, client, migrationLockID)
 	require.NoError(t, tx.Rollback(t.Context()))
 	require.NoError(t, <-done)
 	conn, err := waiter.Pool.Acquire(t.Context())

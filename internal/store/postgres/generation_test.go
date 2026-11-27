@@ -469,11 +469,7 @@ func TestFreezeWaitsForAdmissionsInFlight(t *testing.T) {
 	require.NoError(t, err)
 	done := make(chan error, 1)
 	go func() { done <- c.FreezeWriters(t.Context(), "g2") }()
-	select {
-	case freezeErr := <-done:
-		t.Fatalf("freeze returned while an admission held the lock: %v", freezeErr)
-	case <-time.After(500 * time.Millisecond):
-	}
+	waitForAdvisoryKey(t.Context(), t, c, ingestAdmissionLock)
 	require.NoError(t, tx.Commit(t.Context()))
 	require.NoError(t, <-done)
 }
