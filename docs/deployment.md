@@ -647,6 +647,11 @@ CREATE INDEX idx_chunk_vectors_<generation>_collection_doc_type ON public.chunk_
 CREATE INDEX idx_chunk_vectors_<generation>_doc_type_document_id ON public.chunk_vectors_<generation> (doc_type, document_id);
 ```
 
+Use a standalone table and retain the three named layout checks exactly as
+shown, validated and enforced. Opening a vector generation checks this schema
+using PostgreSQL catalog metadata. Initialization checks it before preparing
+indexes.
+
 ```sql
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.chunk_vectors_<generation> TO quarry_reindex;
 ```
@@ -970,13 +975,16 @@ older writer binaries. To fill in provenance, stage a fresh target generation
 or re-ingest the source documents. Completed reindex checkpoints can skip
 unchanged documents.
 
-If an older generation creator already produced a table after migration 039
-was recorded, stop and retire the old writer credentials as above. From the
-release tree, connect as schema owner to the affected database and run the
-following in a single session. Set the search path to the affected metadata
-schema followed by the extension schema if they differ. This reapplies the
-same repair under the migration lock, preserves compatible data, and leaves
-migration history intact.
+If an older creator produced a table after migration 039 was recorded, or a
+custom table has missing or incompatible layout checks, pause generation
+creation and table changes for a maintenance window. Retire any old writer
+credentials as above. As table owner, correct malformed arrays, and restore
+the named checks from the generation DDL. Move inherited or partitioned
+targets to standalone tables. To reapply the migration's repair under the
+migration lock, connect as schema owner from the release tree and run the
+following in one session. Set the search path to the affected metadata
+schema followed by the extension schema if they differ. This preserves
+compatible data and leaves migration history intact.
 
 ```sql
 \set ON_ERROR_STOP on
@@ -988,7 +996,9 @@ COMMIT;
 
 If validation fails, roll back the transaction and repair the reported
 definition or invalid data before retrying. Open the repaired generation with
-the upgraded binary before resuming writes. Reindex from a fresh checkpoint
+the upgraded binary before resuming writes. The catalog check runs when the
+generation opens. Apply later owner DDL in a maintenance window and reopen
+before resuming service. Reindex from a fresh checkpoint
 or re-ingest affected documents if an older upsert may already have retained
 stale provenance.
 

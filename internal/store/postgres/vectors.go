@@ -163,7 +163,7 @@ func OpenGenerationVectorStore(ctx context.Context, client *Client, dimensions i
 	if !vectorType || stored != dimensions {
 		return nil, fmt.Errorf("%w: postgres embedding dimension mismatch: existing %d, configured %d", ErrGenerationDrift, stored, dimensions)
 	}
-	if layoutErr := validateVectorLayoutColumns(ctx, client.Pool, table); layoutErr != nil {
+	if layoutErr := validateVectorLayoutSchema(ctx, client.Pool, table); layoutErr != nil {
 		return nil, layoutErr
 	}
 	return store, nil
@@ -221,7 +221,7 @@ func (c *Client) initVectors(ctx context.Context, dimensions int, table string) 
 	if !vectorType || storedDimensions != dimensions {
 		return fmt.Errorf("embedding dimension mismatch: existing %d, configured %d", storedDimensions, dimensions)
 	}
-	if layoutErr := validateVectorLayoutColumns(ctx, tx, table); layoutErr != nil {
+	if layoutErr := validateVectorLayoutSchema(ctx, tx, table); layoutErr != nil {
 		return layoutErr
 	}
 	if indexErr := ensureVectorIndexes(ctx, tx, table); indexErr != nil {
