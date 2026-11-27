@@ -329,17 +329,17 @@ func TestReindexManifestWithDocumentedGrants(t *testing.T) {
 	require.Equal(t, true, verified["passed"])
 }
 
-func newHostedCutoverReindexRole(t *testing.T, owner *pgstore.Client) (*pgstore.Client, string) {
+func newHostedCutoverReindexRole(t *testing.T, owner *pgstore.Client) (restricted *pgstore.Client, role string) {
 	t.Helper()
 	ctx := t.Context()
 	dsn := owner.Pool.Config().ConnString()
-	role := pgtest.Role(t, dsn, "hosted_cutover_reindex")
+	role = pgtest.Role(t, dsn, "hosted_cutover_reindex")
 	ident := pgx.Identifier{role}.Sanitize()
 	_, err := owner.Pool.Exec(ctx, `CREATE ROLE `+ident+` LOGIN PASSWORD 'fixture-password'`)
 	require.NoError(t, err)
 	_, err = owner.Pool.Exec(ctx, `GRANT USAGE ON SCHEMA public TO `+ident)
 	require.NoError(t, err)
-	restricted, err := pgstore.NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
+	restricted, err = pgstore.NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
 		cfg.ConnConfig.User = role
 		cfg.ConnConfig.Password = "fixture-password"
 	})

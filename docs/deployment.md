@@ -755,6 +755,8 @@ serving and cleanup logins as part of the [serving role setup](grant-catalog.md#
    or the corpus changed, finish catch-up and verify again. If the requested
    generation is already active, continue with deployment in step 6. If
    activation could not be confirmed, check the active generation before retrying.
+   If writing the JSON report fails during a hosted-manifest refusal, the
+   command reports both errors.
 6. Deploy every replica sharing the queue with `VECTOR_GENERATION` set to the new
    generation, the matching embedding deployment and extraction settings, and
    `PINECONE_INDEX_NAME` for a Pinecone target. Apply any [serving grants](grant-catalog.md#database-roles)

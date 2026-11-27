@@ -186,7 +186,7 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 			ready := false
 			rep.Ready = &ready
 			if encodeErr := json.NewEncoder(out).Encode(rep); encodeErr != nil {
-				return encodeErr
+				return errors.Join(errActivationNotReady, encodeErr)
 			}
 			return errActivationNotReady
 		}
