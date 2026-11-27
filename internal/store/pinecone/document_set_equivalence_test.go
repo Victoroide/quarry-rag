@@ -20,9 +20,8 @@ type hostedRecord struct {
 	score                                float32
 }
 
-// exactHostedIndex answers a request the way the hosted index must: it applies
-// every equality and membership predicate to the whole corpus, then ranks the
-// matches by score and identifier. It keeps no state between requests.
+// exactHostedIndex applies the tenant and membership predicates to the whole
+// tagged corpus, then ranks the matches by score and identifier.
 type exactHostedIndex struct {
 	t       *testing.T
 	records []hostedRecord
@@ -31,10 +30,8 @@ type exactHostedIndex struct {
 }
 
 func (x *exactHostedIndex) query(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
-	fields := req.MetadataFilter.GetFields()
-	tenant := fields[domain.VectorTenantKey].GetStructValue().GetFields()["$eq"].GetStringValue()
-	documents := listValues(x.t, req.MetadataFilter, "doc_id")
-	incarnations := listValues(x.t, req.MetadataFilter, domain.VectorRevisionKey)
+	tenant := hostedFilterEquality(req.MetadataFilter, domain.VectorTenantKey)
+	documents, incarnations := hostedFilterMembership(x.t, req.MetadataFilter)
 	x.predicates = append(x.predicates, [2]int{len(documents), len(incarnations)})
 	documentSet, incarnationSet := map[string]bool{}, map[string]bool{}
 	for _, id := range documents {
@@ -181,10 +178,9 @@ func TestHostedSetSearchKeepsTenantAndLabelsOnEveryRequestAt100000Members(t *tes
 	var seen []string
 	index := &exactHostedIndex{t: t}
 	driver := NewTestDriver(func(ctx context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
-		fields := req.MetadataFilter.GetFields()
-		require.Equal(t, scopeTenant, fields[domain.VectorTenantKey].GetStructValue().GetFields()["$eq"].GetStringValue())
-		require.Equal(t, "team", fields["collection"].GetStructValue().GetFields()["$eq"].GetStringValue())
-		require.Equal(t, "report", fields["doc_type"].GetStructValue().GetFields()["$eq"].GetStringValue())
+		require.Equal(t, scopeTenant, hostedFilterEquality(req.MetadataFilter, domain.VectorTenantKey))
+		require.Equal(t, "team", hostedFilterEquality(req.MetadataFilter, "collection"))
+		require.Equal(t, "report", hostedFilterEquality(req.MetadataFilter, "doc_type"))
 		seen = append(seen, structpb.NewStructValue(req.MetadataFilter).String())
 		return index.query(ctx, req)
 	})
