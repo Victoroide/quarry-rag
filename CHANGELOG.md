@@ -39,6 +39,7 @@ Notable changes are grouped by release.
 - Held deletion release bounds finalization rollback so a stalled database connection cannot indefinitely delay claim cleanup and writer freeze.
 - The CI race report preserves test-attributed timeout stacks and diagnostics from interrupted packages.
 - PostgreSQL vector cutover reports outstanding hosted manifests and cleanups and waits for them to drain on the original Pinecone source.
+- Serving startup, cleanup startup, and registration refuse to first route the legacy generation to PostgreSQL until outstanding hosted manifests and cleanups drain.
 - Superseded Pinecone vector cleanup splits oversized exact-ID fetches and checks the namespace of each reply before deleting vectors from the page.
 - Superseded vector cleanup recovery requires confirmation that the recorded sender has stopped and that the provider requests for the matching reservation have settled.
 - With `SOURCE_UPLOAD_JOURNAL=true`, owned multipart uploads journal each incarnation-scoped original before writing it, so reconciliation can reclaim originals that acceptance never adopted.

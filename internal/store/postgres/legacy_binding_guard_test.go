@@ -21,6 +21,16 @@ const registerLegacyPostgres = `INSERT INTO vector_generations
 	(name, store, target, profile, profile_hash, profile_origin, state, ever_active)
 	VALUES ('legacy','postgres','chunk_vectors',$1,$2,'recorded','active',TRUE)
 	ON CONFLICT (name) DO NOTHING`
+const insertLegacyPostgres = `INSERT INTO vector_generations
+	(name, store, target, profile, profile_hash, profile_origin)
+	VALUES ('legacy', 'postgres', 'chunk_vectors', '{}', 'test', 'recorded')`
+const registerLegacyPinecone = `INSERT INTO vector_generations
+	(name, store, target, host, profile, profile_hash, profile_origin)
+	VALUES ('legacy', 'pinecone', 'source', 'source-host', '{}', 'test', 'recorded')`
+const updateLegacyPostgres = `UPDATE vector_generations
+	SET store='postgres', target='chunk_vectors', host='' WHERE name='legacy'`
+const upsertLegacyPostgres = insertLegacyPostgres + ` ON CONFLICT (name) DO UPDATE
+	SET store=EXCLUDED.store, target=EXCLUDED.target, host=EXCLUDED.host`
 
 func requireLegacyBindRefusal(t *testing.T, err error) {
 	t.Helper()
@@ -141,6 +151,7 @@ type bindingRace struct {
 	name                string
 	bindFirst, rollback bool
 	isolation           pgx.TxIsoLevel
+	registration        string
 }
 
 func TestLegacyPostgresBindingSerializesWithHostedInsert(t *testing.T) {
@@ -188,6 +199,26 @@ func TestLegacyPostgresBindingSerializesWithHostedInsert(t *testing.T) {
 			testLegacyBindingRace(t, registerLegacyStatement, tc)
 		})
 	}
+	for _, route := range []struct{ name, setup, statement string }{
+		{name: "default-state registration", statement: insertLegacyPostgres},
+		{name: "registered store update", setup: registerLegacyPinecone, statement: updateLegacyPostgres},
+		{name: "registry upsert", setup: registerLegacyPinecone, statement: upsertLegacyPostgres},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			for _, tc := range []bindingRace{
+				{name: "manifest wins", registration: route.setup},
+				{name: "binding wins", bindFirst: true, registration: route.setup},
+				{name: "stale manifest loses", bindFirst: true, isolation: pgx.RepeatableRead, registration: route.setup},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					testLegacyBindingRace(t, func(ctx context.Context, db bindingExecutor) error {
+						_, err := db.Exec(ctx, route.statement)
+						return err
+					}, tc)
+				})
+			}
+		})
+	}
 	t.Run("owned manifest waits for binding", testOwnedManifestWaitsForLegacyBinding)
 }
 
@@ -196,6 +227,9 @@ func testLegacyBindingRace(t *testing.T, bind bindingStatement, tc bindingRace) 
 	c := jobsDatabase(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
+	if tc.registration != "" {
+		grantExecContext(ctx, t, c, tc.registration)
+	}
 	holder, err := c.Pool.Begin(ctx)
 	require.NoError(t, err)
 	defer func() { _ = holder.Rollback(context.WithoutCancel(ctx)) }()
@@ -331,6 +365,193 @@ func testOwnedManifestWaitsForLegacyBinding(t *testing.T) {
 	require.Equal(t, before, after)
 }
 
+func TestEffectiveLegacyRegistrationRequiresHostedDrain(t *testing.T) {
+	for _, tc := range []struct{ name, setup, statement string }{
+		{name: "default staging", statement: insertLegacyPostgres},
+		{name: "explicit verified", statement: `INSERT INTO vector_generations
+			(name, store, target, profile, profile_hash, profile_origin, state)
+			VALUES ('legacy','postgres','chunk_vectors','{}','test','recorded','verified')`},
+		{name: "explicit retired", statement: `INSERT INTO vector_generations
+			(name, store, target, profile, profile_hash, profile_origin, state)
+			VALUES ('legacy','postgres','chunk_vectors','{}','test','recorded','retired')`},
+		{name: "store update", setup: registerLegacyPinecone, statement: updateLegacyPostgres},
+		{name: "rename", setup: `INSERT INTO vector_generations
+			(name, store, target, profile, profile_hash, profile_origin)
+			VALUES ('g2','postgres','chunk_vectors','{}','test','recorded')`,
+			statement: `UPDATE vector_generations SET name='legacy' WHERE name='g2'`},
+		{name: "upsert store", setup: registerLegacyPinecone, statement: upsertLegacyPostgres},
+		{name: "upsert rename", setup: `INSERT INTO vector_generations
+			(name, store, target, profile, profile_hash, profile_origin)
+			VALUES ('g2','postgres','chunk_vectors','{}','test','recorded')`,
+			statement: `INSERT INTO vector_generations
+			(name, store, target, profile, profile_hash, profile_origin)
+			VALUES ('g2','postgres','chunk_vectors','{}','test','recorded')
+			ON CONFLICT (name) DO UPDATE SET name='legacy'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dsn := startTestDatabase(t)
+			c := migrationTestClient(t, dsn)
+			require.NoError(t, c.RunMigrations(t.Context()))
+			roles := newGrantRoles(t, dsn, "reindex")
+			grantExec(t, c, roles.sql(`CREATE ROLE {reindex};
+				GRANT SELECT, INSERT, UPDATE ON vector_generations TO {reindex};
+				GRANT SELECT, UPDATE ON vector_state TO {reindex}`))
+			reindex := grantRoleClient(t, dsn, roles.sql(`SET ROLE {reindex}`))
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			if tc.setup != "" {
+				grantExecContext(ctx, t, c, tc.setup)
+			}
+			seedLegacyBindingManifest(ctx, t, c, "north", "writing", "")
+			before := vectorBindingSnapshot(ctx, t, c.Pool)
+			var beforeStore string
+			require.NoError(t, c.Pool.QueryRow(ctx, `SELECT store FROM vector_writer_state()`).Scan(&beforeStore))
+			_, err := reindex.Pool.Exec(ctx, tc.statement)
+			requireLegacyBindRefusal(t, err)
+			require.Equal(t, before, vectorBindingSnapshot(ctx, t, c.Pool))
+			var store string
+			require.NoError(t, c.Pool.QueryRow(ctx, `SELECT store FROM vector_writer_state()`).Scan(&store))
+			require.Equal(t, beforeStore, store)
+			counts, err := c.HostedManifestCutoverCounts(ctx)
+			require.NoError(t, err)
+			require.Equal(t, HostedManifestCutoverCounts{Writing: 1}, counts)
+
+			grantExecContext(ctx, t, c, `DELETE FROM hosted_vector_manifests`)
+			tag, err := reindex.Pool.Exec(ctx, tc.statement)
+			require.NoError(t, err)
+			require.EqualValues(t, 1, tag.RowsAffected())
+			require.NoError(t, c.Pool.QueryRow(ctx, `SELECT store FROM vector_writer_state()`).Scan(&store))
+			require.Equal(t, "postgres", store)
+			err = insertBindingManifest(ctx, c.Pool)
+			requireLegacyBindingSQLState(t, err, "55000")
+		})
+	}
+}
+
+func TestLegacyRegistrationNoOpsPreserveHostedJournal(t *testing.T) {
+	for _, tc := range []struct{ name, setup, statement string }{
+		{name: "conflict on name", setup: registerLegacyPinecone,
+			statement: insertLegacyPostgres + ` ON CONFLICT (name) DO NOTHING`},
+		{name: "conflict on target", setup: `INSERT INTO vector_generations
+			(name, store, target, profile, profile_hash, profile_origin)
+			VALUES ('g2','postgres','chunk_vectors','{}','test','recorded')`,
+			statement: insertLegacyPostgres + ` ON CONFLICT (store, target) DO NOTHING`},
+		{name: "existing postgres route", setup: insertLegacyPostgres,
+			statement: `UPDATE vector_generations SET name=name, store=store WHERE name='legacy'`},
+		{name: "unchanged postgres upsert", setup: insertLegacyPostgres, statement: upsertLegacyPostgres},
+		{name: "existing pinecone route", setup: registerLegacyPinecone,
+			statement: `UPDATE vector_generations SET store=store WHERE name='legacy'`},
+		{name: "inactive postgres name", setup: registerLegacyPinecone,
+			statement: `INSERT INTO vector_generations
+			(name, store, target, profile, profile_hash, profile_origin)
+			VALUES ('g2','postgres','chunk_vectors_g2','{}','test','recorded')`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := migrationTestClient(t, startTestDatabase(t))
+			applyMigrationPrefix(t, c, 46)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			seedLegacyBindingManifest(ctx, t, c, "north", "retired", "unresolved")
+			grantExecContext(ctx, t, c, tc.setup)
+			require.NoError(t, c.RunMigrations(ctx))
+			const routeQuery = `SELECT w.store, w.target, s.xmin::text FROM vector_writer_state() w CROSS JOIN vector_state s`
+			var before, after [3]string
+			require.NoError(t, c.Pool.QueryRow(ctx, routeQuery).Scan(&before[0], &before[1], &before[2]))
+			journal := legacyBindingJournal(ctx, t, c)
+			grantExecContext(ctx, t, c, tc.statement)
+			require.NoError(t, c.Pool.QueryRow(ctx, routeQuery).Scan(&after[0], &after[1], &after[2]))
+			require.Equal(t, before, after)
+			require.Equal(t, journal, legacyBindingJournal(ctx, t, c))
+		})
+	}
+}
+
+func TestLegacyBindingCannotProduceHostedManifest(t *testing.T) {
+	const manifestInsert = `INSERT INTO hosted_vector_manifests
+		(revision_id, document_id, incarnation, attempt, id_prefix, vector_ids, chunk_ids)
+		SELECT gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, `
+	const manifestIDs = `, ARRAY['vector'], '{}'::uuid[]`
+	for _, tc := range []struct {
+		name, statement string
+		bind            bindingStatement
+	}{
+		{name: "writable registry CTE", statement: `WITH binding AS (
+			INSERT INTO vector_generations
+				(name, store, target, profile, profile_hash, profile_origin, state)
+			VALUES ('legacy','postgres','chunk_vectors','{}','test','recorded','active')
+			RETURNING name
+		) ` + manifestInsert + `name` + manifestIDs + ` FROM binding`, bind: registerLegacyStatement},
+		{name: "materialized binder CTE", statement: `WITH binding AS MATERIALIZED (` + bindLegacyPostgres + `) ` +
+			manifestInsert + `'physical'` + manifestIDs + ` FROM binding`, bind: bindLegacyStatement},
+		{name: "binder in the manifest input", statement: manifestInsert +
+			`COALESCE((` + bindLegacyPostgres + `)::text, '') || 'physical'` + manifestIDs,
+			bind: bindLegacyStatement},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := jobsDatabase(t)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			before := vectorBindingSnapshot(ctx, t, c.Pool)
+			_, err := c.Pool.Exec(ctx, tc.statement)
+			requireLegacyBindingSQLState(t, err, "55000")
+			require.Equal(t, before, vectorBindingSnapshot(ctx, t, c.Pool))
+
+			require.NoError(t, insertBindingManifest(ctx, c.Pool))
+			counts, err := c.HostedManifestCutoverCounts(ctx)
+			require.NoError(t, err)
+			require.Equal(t, HostedManifestCutoverCounts{Writing: 1}, counts)
+			grantExecContext(ctx, t, c, `DELETE FROM hosted_vector_manifests`)
+			require.NoError(t, tc.bind(ctx, c.Pool))
+			var store string
+			require.NoError(t, c.Pool.QueryRow(ctx, `SELECT store FROM vector_writer_state()`).Scan(&store))
+			require.Equal(t, "postgres", store)
+			err = insertBindingManifest(ctx, c.Pool)
+			requireLegacyBindingSQLState(t, err, "55000")
+		})
+	}
+}
+
+func TestLegacyRegistrationCannotMaskFirstPhysicalBinding(t *testing.T) {
+	for _, tc := range []struct{ name, setup, registration string }{
+		{name: "insert", registration: insertLegacyPostgres},
+		{name: "update", setup: registerLegacyPinecone, registration: updateLegacyPostgres},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := jobsDatabase(t)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			if tc.setup != "" {
+				grantExecContext(ctx, t, c, tc.setup)
+			}
+			seedLegacyBindingManifest(ctx, t, c, "north", "retired", "unresolved")
+			before := vectorBindingSnapshot(ctx, t, c.Pool)
+			statement := `WITH registration AS (` + tc.registration + ` RETURNING name)
+				SELECT vector_bind_legacy('postgres','chunk_vectors','') FROM registration`
+			_, err := c.Pool.Exec(ctx, statement)
+			requireLegacyBindRefusal(t, err)
+			require.Equal(t, before, vectorBindingSnapshot(ctx, t, c.Pool))
+
+			grantExecContext(ctx, t, c, `DELETE FROM hosted_vector_cleanups; DELETE FROM hosted_vector_manifests`)
+			grantExecContext(ctx, t, c, statement)
+			var store, physicalStore string
+			require.NoError(t, c.Pool.QueryRow(ctx, `SELECT w.store, s.legacy_store
+				FROM vector_writer_state() w CROSS JOIN vector_state s`).Scan(&store, &physicalStore))
+			require.Equal(t, "postgres", store)
+			require.Equal(t, "postgres", physicalStore)
+		})
+	}
+}
+
+func legacyBindingJournal(ctx context.Context, t *testing.T, c *Client) string {
+	t.Helper()
+	var journal string
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT jsonb_build_array(
+		(SELECT jsonb_agg(m ORDER BY m.revision_id) FROM hosted_vector_manifests m),
+		(SELECT jsonb_agg(c ORDER BY c.revision_id) FROM hosted_vector_cleanups c)
+	)::text`).Scan(&journal))
+	return journal
+}
+
 func TestLegacyBindingGuardPreservesExistingRoutes(t *testing.T) {
 	t.Run("serving", func(t *testing.T) {
 		c := jobsDatabase(t)
@@ -439,6 +660,67 @@ func TestLegacyBindingGuardPreservesExistingRoutes(t *testing.T) {
 			VALUES ($1,$2,$3,'cutover',ARRAY['vector'])`, uuid.NewString(), uuid.NewString(), uuid.NewString())
 		requireLegacyBindingSQLState(t, err, "23503")
 	})
+}
+
+func TestRegisteredLegacyPostgresAllowsStartupWithHistoricalJournal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pin  func(*Client, context.Context, string, string, string, string, domain.EmbeddingProfile) error
+	}{
+		{name: "serving", pin: (*Client).PinVectorGeneration},
+		{name: "cleanup", pin: (*Client).PinCleanupVectorGeneration},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dsn := pgtest.StartVector(t)
+			owner := migrationTestClient(t, dsn)
+			applyMigrationPrefix(t, owner, 46)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			_, err := NewVectorStore(ctx, owner, 3)
+			require.NoError(t, err)
+			seedLegacyBindingManifest(ctx, t, owner, "north", "retired", "unresolved")
+			legacy := stagingGeneration(LegacyGeneration)
+			_, err = owner.RegisterGeneration(ctx, legacy)
+			require.NoError(t, err)
+			journal := legacyBindingJournal(ctx, t, owner)
+			const routeQuery = `SELECT w.store, w.target, w.profile_hash, s.legacy_store, s.legacy_target
+				FROM vector_writer_state() w CROSS JOIN vector_state s`
+			var store, target, profile string
+			var physicalStore, physicalTarget *string
+			require.NoError(t, owner.Pool.QueryRow(ctx, routeQuery).Scan(&store, &target, &profile, &physicalStore, &physicalTarget))
+			require.Equal(t, legacy.Store, store)
+			require.Equal(t, legacy.Target, target)
+			require.Equal(t, legacy.Profile.Hash(), profile)
+			require.Nil(t, physicalStore)
+			require.Nil(t, physicalTarget)
+			before := vectorBindingSnapshot(ctx, t, owner.Pool)
+			require.NoError(t, owner.RunMigrations(ctx))
+			require.Equal(t, before, vectorBindingSnapshot(ctx, t, owner.Pool))
+
+			startup := migrationTestClient(t, dsn)
+			require.NoError(t, tc.pin(startup, ctx, legacy.Name, legacy.Store, legacy.Target, "", legacy.Profile))
+			require.NoError(t, owner.Pool.QueryRow(ctx, routeQuery).Scan(&store, &target, &profile, &physicalStore, &physicalTarget))
+			require.Equal(t, legacy.Store, store)
+			require.Equal(t, legacy.Target, target)
+			require.Equal(t, legacy.Profile.Hash(), profile)
+			require.NotNil(t, physicalStore)
+			require.NotNil(t, physicalTarget)
+			require.Equal(t, legacy.Store, *physicalStore)
+			require.Equal(t, legacy.Target, *physicalTarget)
+			require.Equal(t, journal, legacyBindingJournal(ctx, t, owner))
+
+			bound := vectorBindingSnapshot(ctx, t, owner.Pool)
+			retry := migrationTestClient(t, dsn)
+			require.NoError(t, tc.pin(retry, ctx, legacy.Name, legacy.Store, legacy.Target, "", legacy.Profile))
+			drift := migrationTestClient(t, dsn)
+			other := legacy.Profile
+			other.ModelRevision = "different"
+			require.ErrorIs(t, tc.pin(drift, ctx, legacy.Name, legacy.Store, legacy.Target, "", other), ErrGenerationDrift)
+			require.ErrorIs(t, tc.pin(drift, ctx, legacy.Name, legacy.Store, "chunk_vectors_g2", "", legacy.Profile), ErrGenerationDrift)
+			require.Nil(t, drift.vectorPin.Load())
+			require.Equal(t, bound, vectorBindingSnapshot(ctx, t, owner.Pool))
+		})
+	}
 }
 
 func requireLegacyBindingSQLState(t *testing.T, err error, code string) {

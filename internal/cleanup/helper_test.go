@@ -17,6 +17,7 @@ import (
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -121,6 +122,58 @@ func TestPostgresCleanupWithoutPinecone(t *testing.T) {
 	var remaining int
 	require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT count(*) FROM chunk_vectors WHERE document_id=$1`, string(id)).Scan(&remaining))
 	require.Zero(t, remaining)
+}
+
+func TestPostgresCleanupRefusesUnboundHostedJournal(t *testing.T) {
+	databaseURL := pgtest.StartVector(t)
+	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
+	require.NoError(t, metadata.RunMigrations(t.Context()))
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	_, err = pgstore.NewVectorStore(ctx, metadata, 3)
+	require.NoError(t, err)
+	revision, doc, incarnation := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	_, err = metadata.Pool.Exec(ctx, `INSERT INTO hosted_vector_manifests
+		(revision_id, document_id, incarnation, attempt, id_prefix, vector_ids, chunk_ids)
+		VALUES ($1,$2,$3,1,'legacy-cleanup',ARRAY['vector'],'{}')`, revision, doc, incarnation)
+	require.NoError(t, err)
+
+	cfg := &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL, EmbeddingDimensions: 3}
+	before, err := metadata.VectorState(ctx)
+	require.NoError(t, err)
+	require.Empty(t, before.LegacyStore)
+	manifest, err := metadata.GetVectorManifest(ctx, revision)
+	require.NoError(t, err)
+	require.NotNil(t, manifest)
+	cleaner, err := New(ctx, cfg)
+	require.Nil(t, cleaner)
+	require.ErrorContains(t, err, "pin the cleanup target: postgres: bind existing legacy vector table")
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "55000", pgErr.Code)
+	require.Equal(t, "hosted_manifest_cutover_guard", pgErr.ConstraintName)
+	after, err := metadata.VectorState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	unchanged, err := metadata.GetVectorManifest(ctx, revision)
+	require.NoError(t, err)
+	require.Equal(t, manifest, unchanged)
+	counts, err := metadata.HostedManifestCutoverCounts(ctx)
+	require.NoError(t, err)
+	require.Equal(t, pgstore.HostedManifestCutoverCounts{Writing: 1}, counts)
+
+	// Clear the synthetic fixture before opening a fresh cleanup client.
+	_, err = metadata.Pool.Exec(ctx, `DELETE FROM hosted_vector_manifests WHERE revision_id=$1`, revision)
+	require.NoError(t, err)
+	cleaner, err = New(ctx, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
+	after, err = metadata.VectorState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "postgres", after.LegacyStore)
+	require.Equal(t, "chunk_vectors", after.LegacyTarget)
 }
 
 type recordingVectors struct {
