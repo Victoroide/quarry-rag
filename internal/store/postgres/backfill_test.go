@@ -1,11 +1,13 @@
 package postgres
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
@@ -96,14 +98,17 @@ func TestPublishVerifiedDocumentMakesOnlyTheVerifiedSnapshotReadable(t *testing.
 	require.True(t, published, "publishing twice is idempotent")
 }
 
-func TestPublishVerifiedDocumentRefusesChangedData(t *testing.T) {
+func TestGrantSourceVersionRetainsPublicationGuards(t *testing.T) {
 	for name, change := range map[string]string{
-		"chunk replaced":     `DELETE FROM chunks WHERE document_id=$1 AND chunk_index=1`,
-		"chunk added":        `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES(gen_random_uuid(),$1,2,'new',1)`,
-		"chunk text changed": `UPDATE chunks SET text='changed chunk text' WHERE document_id=$1 AND chunk_index=0`,
-		"chunk size changed": `UPDATE chunks SET token_count=99 WHERE document_id=$1 AND chunk_index=0`,
-		"row changed":        `UPDATE documents SET content='changed content', updated_at=NOW() WHERE id=$1`,
-		"document reset":     `UPDATE documents SET status='processing' WHERE id=$1`,
+		"chunk replaced":      `DELETE FROM chunks WHERE document_id=$1 AND chunk_index=1`,
+		"chunk added":         `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES(gen_random_uuid(),$1,2,'new',1)`,
+		"chunk text changed":  `UPDATE chunks SET text='changed chunk text' WHERE document_id=$1 AND chunk_index=0`,
+		"chunk size changed":  `UPDATE chunks SET token_count=99 WHERE document_id=$1 AND chunk_index=0`,
+		"row changed":         `UPDATE documents SET content='changed content', updated_at=NOW() WHERE id=$1`,
+		"document reset":      `UPDATE documents SET status='processing' WHERE id=$1`,
+		"document moved":      `UPDATE documents SET collection='team' WHERE id=$1`,
+		"retry completed":     `UPDATE documents SET completed_at=statement_timestamp() WHERE id=$1`,
+		"chunk count changed": `UPDATE documents SET chunk_count=1 WHERE id=$1`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newOwnedFixture(t)
@@ -137,20 +142,51 @@ func TestPublishVerifiedDocumentRefusesChangedData(t *testing.T) {
 		assertDocumentAccess(t, f.c, id, f.owner.ID, false, false, false)
 	})
 	t.Run("unresolved vector mutations block listing and publication", func(t *testing.T) {
+		c, _ := vectorDatabase(t)
+		f := provisionOwnedFixture(t, c)
 		for _, column := range []string{"vector_mutation_pending", "vector_mutation_uncertain"} {
-			f := newOwnedFixture(t)
-			id, _ := f.legacyDocument(t, 1)
+			id, ids := f.legacyDocument(t, 1)
+			version := grantSource(t, f.c, id)
 			candidates, err := f.c.BackfillCandidates(t.Context(), "", 10)
 			require.NoError(t, err)
 			require.Len(t, candidates, 1)
-			grantExec(t, f.c, `UPDATE documents SET `+column+`=TRUE WHERE id=$1`, id)
+			writer, err := f.c.Pool.Acquire(t.Context())
+			require.NoError(t, err)
+			t.Cleanup(writer.Release)
+			tx, err := writer.Begin(t.Context())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) })
+			_, err = tx.Exec(t.Context(), `UPDATE documents SET `+column+`=TRUE WHERE id=$1`, id)
+			require.NoError(t, err)
+			require.NoError(t, tx.Commit(t.Context()))
+			require.Equal(t, version, grantSource(t, f.c, id), column)
 			listed, err := f.c.BackfillCandidates(t.Context(), "", 10)
 			require.NoError(t, err)
 			require.Empty(t, listed, column)
 			published, err := f.c.PublishVerifiedDocument(t.Context(), candidates[0])
 			require.NoError(t, err)
 			require.False(t, published, column)
+			assertDocumentAccess(t, f.c, id, f.owner.ID, false, false, false)
+			grantExec(t, f.c, `UPDATE documents SET `+column+`=FALSE WHERE id=$1`, id)
+			chunk := domain.Chunk{ID: domain.ChunkID(ids[0]), DocumentID: domain.DocumentID(id), Embedding: []float32{1, 0, 0}}
+			verifyGrantSourceBackfill(t, f.c, id, chunk)
+			assertDocumentAccess(t, f.c, id, f.owner.ID, true, true, true)
 		}
+	})
+	t.Run("count guard after the assignment is refreshed", func(t *testing.T) {
+		f := newOwnedFixture(t)
+		id, _ := f.legacyDocument(t, 1)
+		grantExec(t, f.c, `UPDATE documents SET chunk_count=2 WHERE id=$1`, id)
+		f.importBatch(t, func(b map[string]any) {
+			b["assignments"] = []grantEntry{grantAssignment(t, f.c, f.tenant, f.owner.ID, id)}
+		})
+		candidates, err := f.c.BackfillCandidates(t.Context(), "", 10)
+		require.NoError(t, err)
+		require.Len(t, candidates, 1)
+		published, err := f.c.PublishVerifiedDocument(t.Context(), candidates[0])
+		require.NoError(t, err)
+		require.False(t, published)
+		assertDocumentAccess(t, f.c, id, f.owner.ID, false, false, false)
 	})
 	t.Run("accepted documents publish through completion only", func(t *testing.T) {
 		f := newOwnedFixture(t)
@@ -162,6 +198,61 @@ func TestPublishVerifiedDocumentRefusesChangedData(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, published)
 	})
+	t.Run("assignment waits for the source writer", testGrantSourceImportLock)
+}
+
+func testGrantSourceImportLock(t *testing.T) {
+	f := newOwnedFixture(t)
+	c := f.c
+	ctx := t.Context()
+	id := uuid.NewString()
+	insertGrantSource(t, c, id)
+	batch := testGrantBatch(f.revision)
+	batch["assignments"] = []grantEntry{grantAssignment(t, c, f.tenant, f.owner.ID, id)}
+
+	for _, commit := range []bool{false, true} {
+		writer, err := c.Pool.Acquire(ctx)
+		require.NoError(t, err)
+		t.Cleanup(writer.Release)
+		tx, err := writer.Begin(ctx)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = tx.Rollback(context.WithoutCancel(ctx)) })
+		_, err = tx.Exec(ctx, `UPDATE documents SET content='changed source' WHERE id=$1`, id)
+		require.NoError(t, err)
+
+		importCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		t.Cleanup(cancel)
+		result := make(chan error, 1)
+		go func() {
+			_, importErr := importTestBatch(importCtx, c, batch, false)
+			result <- importErr
+		}()
+		waitForGrantSourceBlocker(t, c, writer.Conn().PgConn().PID())
+		if commit {
+			require.NoError(t, tx.Commit(ctx))
+			require.ErrorContains(t, <-result, "invalid or conflicting assignments entry")
+		} else {
+			cancel()
+			require.ErrorIs(t, <-result, context.Canceled)
+			require.NoError(t, tx.Rollback(ctx))
+			_, err = importTestBatch(ctx, c, batch, true)
+			require.NoError(t, err)
+		}
+		cancel()
+		assertGrantRevision(t, c, f.revision)
+		assertGrantCount(t, c, "document_ownership", 0)
+	}
+}
+
+func waitForGrantSourceBlocker(t *testing.T, c *Client, blocker uint32) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var blocked bool
+		err := c.Pool.QueryRow(t.Context(), `SELECT EXISTS (
+			SELECT FROM pg_stat_activity WHERE datname=current_database()
+				AND $1::bigint = ANY(pg_blocking_pids(pid)))`, blocker).Scan(&blocked)
+		return err == nil && blocked
+	}, 4*time.Second, 20*time.Millisecond)
 }
 
 func TestVectorRowsMatchRequiresExactlyTheCurrentChunks(t *testing.T) {
