@@ -222,7 +222,7 @@ The race job runs `go test -race -count=1 -json ./...` against a PostgreSQL serv
 
 When a package fails or the event stream ends before its result, the reporter writes diagnostics for unfinished tests to standard error. It labels a nested benchmark `UNRESOLVED` when a later run shares its name prefix and the event stream leaves its completion ambiguous. The reporter lists up to 128 unfinished or unresolved tests and benchmarks per package in the order it first saw them. The 512 KiB per-package limit includes their headings, their most recent output fragments and any marker counting omitted output bytes and tests.
 
-For direct use, pipe Go's JSONL output into the reporter with `-diagnostic-spill`. The flag defaults to false and the legacy decoder accepts a stream of JSON values. Spill mode accepts one object per nonblank LF or CRLF line, including a final line without a newline. It limits each record to 4 MiB including its line ending, individual names to 8 KiB, package and build identities to 8,192 combined, test occurrences to 65,536, and distinct retained name bytes to 16 MiB.
+The hosted race job enables diagnostic spooling. For direct use, pipe Go's JSONL output into the reporter with `-diagnostic-spill`. The flag defaults to false and the legacy decoder accepts a stream of JSON values. Spill mode accepts one object per nonblank LF or CRLF line, including a final line without a newline. It limits each record to 4 MiB including its line ending, individual names to 8 KiB, package and build identities to 8,192 combined, test occurrences to 65,536, and distinct retained name bytes to 16 MiB.
 
 ```bash
 set -o pipefail

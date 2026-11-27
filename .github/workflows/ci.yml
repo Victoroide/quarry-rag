@@ -108,7 +108,9 @@ jobs:
           docker exec "$PGVECTOR_CONTAINER" psql -U rag -d postgres -v ON_ERROR_STOP=1 -tAc "SELECT name || ' ' || default_version FROM pg_available_extensions WHERE name = 'vector'" | grep -Fx 'vector 0.8.7'
           docker exec --user root "$PGVECTOR_CONTAINER" localedef --no-archive -i es_ES -f UTF-8 es_ES.utf8
       - name: Test the report tool
-        run: go test -race -count=1 ./.github/scripts/testreport
+        run: |
+          go test -race -count=1 ./.github/scripts/testreport
+          go test -run '^$' -bench '^BenchmarkDiagnosticSpillPeakRSS$' -benchtime=1x ./.github/scripts/testreport
       - name: Build the report tool
         run: go build -o "$RUNNER_TEMP/testreport" ./.github/scripts/testreport
       - name: Run unit and integration tests
@@ -121,7 +123,7 @@ jobs:
         run: |
           mapfile -t packages < <(go list ./...)
           go test -race -count=1 -json ./... |
-            "$RUNNER_TEMP/testreport" -module-cache "$MODULE_CACHE" -build-cache "$BUILD_CACHE" "${packages[@]}" >> "$GITHUB_STEP_SUMMARY"
+            "$RUNNER_TEMP/testreport" -diagnostic-spill -module-cache "$MODULE_CACHE" -build-cache "$BUILD_CACHE" "${packages[@]}" >> "$GITHUB_STEP_SUMMARY"
       - name: Save Go modules
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.modules.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
