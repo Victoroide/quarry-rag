@@ -87,9 +87,9 @@ func (ingestTxTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.T
 	}
 }
 
-func ingestRollbackDatabase(t *testing.T) (*Client, *pgx.Conn, context.Context) {
+func ingestRollbackDatabase(t *testing.T, tracer pgx.QueryTracer) (*Client, *pgx.Conn, context.Context) {
 	t.Helper()
-	c := jobsDatabase(t, WithQueryTracer(ingestTxTracer{}), func(cfg *pgxpool.Config) { cfg.MaxConns = 1 })
+	c := jobsDatabase(t, WithQueryTracer(tracer), func(cfg *pgxpool.Config) { cfg.MaxConns = 1 })
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	cfg := c.Pool.Config().ConnConfig.Copy()
@@ -178,7 +178,8 @@ func requireIngestRowLocks(ctx context.Context, t *testing.T, observer *pgx.Conn
 }
 
 func TestIngestCompletionRollbackDeadlineAfterCorpusCutover(t *testing.T) {
-	service, observer, ctx := ingestRollbackDatabase(t)
+	releaseTrace := &ingestPoolReleaseTracer{}
+	service, observer, ctx := ingestRollbackDatabase(t, releaseTrace)
 	service.SetAuthzMode("service")
 	job := acceptIngestRollbackJob(ctx, t, service, jobsRequest("leased before grants activation"))
 	_, err := service.ActivateDeletion(ctx)
@@ -186,6 +187,7 @@ func TestIngestCompletionRollbackDeadlineAfterCorpusCutover(t *testing.T) {
 	_, err = service.ActivateGrants(ctx, false)
 	require.NoError(t, err)
 	before := publicationStateContext(ctx, t, service, job.Document.ID)
+	releaseTrace.closedPID.Store(0)
 
 	watchdog, stopWatchdog := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer stopWatchdog()
@@ -200,6 +202,7 @@ func TestIngestCompletionRollbackDeadlineAfterCorpusCutover(t *testing.T) {
 	rollback := requireIngestRollback(opCtx, t, trace)
 	require.Equal(t, trace.operation.pid, rollback.pid)
 	require.ErrorIs(t, trace.rollbackErr, context.DeadlineExceeded)
+	require.Equal(t, rollback.pid, releaseTrace.closedPID.Load(), "rollback must release the closed connection before returning")
 	requireRecoveredIngestPool(ctx, t, service, observer, rollback.pid, true)
 	require.Equal(t, before, publicationStateContext(ctx, t, service, job.Document.ID))
 	requireIngestRowLocks(ctx, t, observer, job.Document.ID, false)
@@ -228,11 +231,13 @@ func TestIngestTransitionRollbackDeadlineAfterLeaseLocks(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, observer, ctx := ingestRollbackDatabase(t)
+			releaseTrace := &ingestPoolReleaseTracer{}
+			c, observer, ctx := ingestRollbackDatabase(t, releaseTrace)
 			c.EnableHostedVectorManifests(true)
 			job := acceptIngestRollbackJob(ctx, t, c, jobsRequest("hosted lease transition "+tc.name))
 			attempt := persistManifestAttemptWithChunk(ctx, t, c, job.Document.ID, *job, uuid.NewString())
 			before := publicationStateContext(ctx, t, c, job.Document.ID)
+			releaseTrace.closedPID.Store(0)
 
 			watchdog, stopWatchdog := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			parent, cancel := context.WithCancel(ctx)
@@ -278,6 +283,7 @@ func TestIngestTransitionRollbackDeadlineAfterLeaseLocks(t *testing.T) {
 			rollback := requireIngestRollback(opCtx, t, trace)
 			require.Equal(t, trace.operation.pid, rollback.pid)
 			require.ErrorIs(t, trace.rollbackErr, context.DeadlineExceeded)
+			require.Equal(t, rollback.pid, releaseTrace.closedPID.Load(), "rollback must release the closed connection before returning")
 			requireRecoveredIngestPool(ctx, t, c, observer, rollback.pid, true)
 			require.Equal(t, before, publicationStateContext(ctx, t, c, job.Document.ID))
 			requireIngestRowLocks(ctx, t, observer, job.Document.ID, false)
@@ -342,7 +348,7 @@ func requireNoIngestClaim(ctx context.Context, t *testing.T, c *Client) {
 }
 
 func TestIngestRollbackPreservesLeaseRefusals(t *testing.T) {
-	c, observer, ctx := ingestRollbackDatabase(t)
+	c, observer, ctx := ingestRollbackDatabase(t, ingestTxTracer{})
 	const content = "same content in distinct collections"
 	job := acceptIngestRollbackJob(ctx, t, c, jobsRequest(content))
 	otherReq := jobsRequest(content)
