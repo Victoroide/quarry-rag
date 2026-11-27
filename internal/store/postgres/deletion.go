@@ -681,16 +681,25 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 	if err != nil {
 		return "", false, err
 	}
-	if !time.Now().Before(validUntil) {
+	if !c.currentTime().Before(validUntil) {
 		return "", false, domain.ErrUnauthorized
 	}
 	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return "", false, err
 	}
+	if c.scopedHooks != nil && c.scopedHooks.wrapTx != nil {
+		tx = c.scopedHooks.wrapTx(tx)
+	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if hookErr := c.scopedStage("lock"); hookErr != nil {
+		return "", false, hookErr
+	}
 	if lockErr := lockDocumentIntent(ctx, tx, id); lockErr != nil {
 		return "", false, lockErr
+	}
+	if hookErr := c.scopedStage("authorize"); hookErr != nil {
+		return "", false, hookErr
 	}
 
 	var state string
@@ -714,7 +723,7 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 		if !finalizedMatch {
 			return "", false, domain.ErrDocumentNotFound
 		}
-		if !time.Now().Before(validUntil) {
+		if !c.currentTime().Before(validUntil) {
 			return "", false, domain.ErrUnauthorized
 		}
 		return expected, true, nil
@@ -722,7 +731,7 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 	if !authorized {
 		return "", false, domain.ErrDocumentNotFound
 	}
-	if !time.Now().Before(validUntil) {
+	if !c.currentTime().Before(validUntil) {
 		return "", false, domain.ErrUnauthorized
 	}
 	// The active marker is monotone. An absent row also refuses live deletion.
@@ -751,41 +760,74 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 	if source != nil && ops.Source == nil {
 		return "", false, domain.ErrFileStorageUnavailable
 	}
-	if state == "deleting" {
-		if _, recErr := tx.Exec(ctx, `SELECT grant_catalog_record_deletion_owner($1::uuid,$2::uuid,$3::uuid,$4::uuid)`,
-			principal.TenantID, principal.ID, string(id), incarnation); recErr != nil {
-			return "", false, recErr
+	if state != "deleting" {
+		manifested, err := c.ownsManifests(ctx, tx, id, incarnation, scoped, ops)
+		if err != nil {
+			return "", false, err
 		}
-		if auditErr := recordSecurityAuditTx(ctx, tx, domain.SecurityAuditEvent{
-			RequestID:   logctx.RequestID(ctx),
-			TenantID:    principal.TenantID,
-			PrincipalID: principal.ID,
-			Action:      "document_delete",
-			Outcome:     "allow",
-			Reason:      "intent_recorded",
-			DocumentID:  string(id),
-			Incarnation: incarnation,
-		}); auditErr != nil {
-			return "", false, auditErr
+		mode, err := vectorMode(scoped, manifested, ops)
+		if err != nil {
+			return "", false, err
 		}
-		return incarnation, false, tx.Commit(ctx)
+		if hookErr := c.scopedStage("intent"); hookErr != nil {
+			return "", false, hookErr
+		}
+		if intentErr := insertDeletionIntentTx(ctx, tx, id, incarnation, source, mode, ops); intentErr != nil {
+			return "", false, intentErr
+		}
 	}
-	manifested, err := c.ownsManifests(ctx, tx, id, incarnation, scoped, ops)
-	if err != nil {
-		return "", false, err
+	if hookErr := c.scopedStage("owner"); hookErr != nil {
+		return "", false, hookErr
 	}
-	mode, err := vectorMode(scoped, manifested, ops)
-	if err != nil {
-		return "", false, err
+	if _, recErr := tx.Exec(ctx, `SELECT grant_catalog_record_deletion_owner($1::uuid,$2::uuid,$3::uuid,$4::uuid)`,
+		principal.TenantID, principal.ID, string(id), incarnation); recErr != nil {
+		return "", false, recErr
 	}
-	if intentErr := insertDeletionIntentTx(ctx, tx, id, incarnation, source, mode, ops); intentErr != nil {
-		return "", false, intentErr
+	return c.commitScopedDeletionIntent(ctx, tx, principal, validUntil, id, incarnation)
+}
+
+type scopedDeletionHooks struct {
+	wrapTx      func(pgx.Tx) pgx.Tx
+	beforeStage func(stage string) error
+	wrapProbe   func(scopedCommitProbeFunc) scopedCommitProbeFunc
+}
+
+type scopedCommitProbeFunc func(ctx context.Context, id domain.DocumentID, incarnation, xid string) (scopedCommitProbeResult, error)
+
+type scopedCommitIdentity struct {
+	xid                 string
+	postmasterStartTime time.Time
+	serverAddr          *string
+	serverPort          *int32
+}
+
+type scopedCommitProbeResult struct {
+	xactStatus *string
+	instance   scopedCommitIdentity
+	inRecovery bool
+	receipt    bool
+}
+
+type scopedProbeOutcome int
+
+const (
+	scopedProbeUnconfirmed scopedProbeOutcome = iota
+	scopedProbeCommitted
+	scopedProbeAborted
+)
+
+func (c *Client) scopedStage(stage string) error {
+	if c.scopedHooks != nil && c.scopedHooks.beforeStage != nil {
+		return c.scopedHooks.beforeStage(stage)
 	}
-	if _, err = tx.Exec(ctx, `SELECT grant_catalog_record_deletion_owner($1::uuid,$2::uuid,$3::uuid,$4::uuid)`,
-		principal.TenantID, principal.ID, string(id), incarnation); err != nil {
-		return "", false, err
+	return nil
+}
+
+func (c *Client) commitScopedDeletionIntent(ctx context.Context, tx pgx.Tx, principal domain.Principal, validUntil time.Time, id domain.DocumentID, incarnation string) (resolvedIncarnation string, complete bool, err error) {
+	if hookErr := c.scopedStage("audit"); hookErr != nil {
+		return "", false, hookErr
 	}
-	if auditErr := recordSecurityAuditTx(ctx, tx, domain.SecurityAuditEvent{
+	args := securityAuditArgs(ctx, domain.SecurityAuditEvent{
 		RequestID:   logctx.RequestID(ctx),
 		TenantID:    principal.TenantID,
 		PrincipalID: principal.ID,
@@ -794,10 +836,138 @@ func (c *Client) BeginScopedDeletion(ctx context.Context, principal domain.Princ
 		Reason:      "intent_recorded",
 		DocumentID:  string(id),
 		Incarnation: incarnation,
-	}); auditErr != nil {
-		return "", false, auditErr
+	})
+	var auditIgnored *string
+	var identity scopedCommitIdentity
+	err = tx.QueryRow(ctx,
+		`SELECT `+securityAuditSelectExpr+`, pg_current_xact_id()::text, pg_postmaster_start_time(), inet_server_addr()::text, inet_server_port()`,
+		args...,
+	).Scan(&auditIgnored, &identity.xid, &identity.postmasterStartTime, &identity.serverAddr, &identity.serverPort)
+	if err != nil {
+		return "", false, fmt.Errorf("postgres: record security audit: %w", err)
 	}
-	return incarnation, false, tx.Commit(ctx)
+	if hookErr := c.scopedStage("precommit"); hookErr != nil {
+		return "", false, hookErr
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", false, ctxErr
+	}
+	if !c.currentTime().Before(validUntil) {
+		return "", false, domain.ErrUnauthorized
+	}
+	commitErr := tx.Commit(ctx)
+	if commitErr == nil {
+		return incarnation, false, nil
+	}
+	if errors.Is(commitErr, pgx.ErrTxCommitRollback) {
+		return "", false, commitErr
+	}
+	return c.probeScopedDeletionCommit(ctx, id, incarnation, identity, commitErr)
+}
+
+func (c *Client) probeScopedDeletionCommit(ctx context.Context, id domain.DocumentID, incarnation string, expected scopedCommitIdentity, commitErr error) (resolvedIncarnation string, complete bool, err error) {
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+
+	readProbe := c.readScopedCommitProbe
+	if c.scopedHooks != nil && c.scopedHooks.wrapProbe != nil {
+		readProbe = c.scopedHooks.wrapProbe(readProbe)
+	}
+	probe, probeErr := readProbe(probeCtx, id, incarnation, expected.xid)
+	if probeErr != nil {
+		if errors.Is(probeErr, context.DeadlineExceeded) {
+			return "", false, unconfirmedCommitError("probe_timeout")
+		}
+		return "", false, unconfirmedCommitError("probe_unavailable")
+	}
+	outcome, evaluatedErr := evaluateScopedCommitProbe(expected, probe, commitErr)
+	if outcome == scopedProbeCommitted {
+		return incarnation, false, nil
+	}
+	return "", false, evaluatedErr
+}
+
+func (c *Client) readScopedCommitProbe(ctx context.Context, id domain.DocumentID, incarnation, xid string) (scopedCommitProbeResult, error) {
+	if xid == "" {
+		return scopedCommitProbeResult{}, errors.New("missing transaction id")
+	}
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return scopedCommitProbeResult{}, err
+	}
+	defer func() {
+		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		defer cancel()
+		_ = tx.Rollback(rbCtx)
+	}()
+	if lockErr := lockDocumentIntent(ctx, tx, id); lockErr != nil {
+		return scopedCommitProbeResult{}, lockErr
+	}
+	var res scopedCommitProbeResult
+	err = tx.QueryRow(ctx, `SELECT pg_xact_status($1::text::xid8),
+		pg_postmaster_start_time(),
+		inet_server_addr()::text,
+		inet_server_port(),
+		pg_is_in_recovery(),
+		EXISTS(SELECT 1 FROM document_deletions WHERE document_id=$2 AND incarnation=$3 AND kind='qualified_intent')`,
+		xid, string(id), incarnation,
+	).Scan(&res.xactStatus, &res.instance.postmasterStartTime, &res.instance.serverAddr, &res.instance.serverPort, &res.inRecovery, &res.receipt)
+	if err != nil {
+		return scopedCommitProbeResult{}, err
+	}
+	return res, nil
+}
+
+func evaluateScopedCommitProbe(expected scopedCommitIdentity, probe scopedCommitProbeResult, commitErr error) (scopedProbeOutcome, error) {
+	if probe.inRecovery {
+		return scopedProbeUnconfirmed, unconfirmedCommitError("replica_recovery")
+	}
+	if !sameServerInstance(expected, probe.instance) {
+		return scopedProbeUnconfirmed, unconfirmedCommitError("instance_mismatch")
+	}
+	if probe.xactStatus == nil {
+		return scopedProbeUnconfirmed, unconfirmedCommitError("xact_status_unknown")
+	}
+	switch *probe.xactStatus {
+	case "committed":
+		if !probe.receipt {
+			return scopedProbeUnconfirmed, unconfirmedCommitError("receipt_missing")
+		}
+		return scopedProbeCommitted, nil
+	case "aborted":
+		return scopedProbeAborted, commitErr
+	case "in progress":
+		return scopedProbeUnconfirmed, unconfirmedCommitError("xact_in_progress")
+	default:
+		return scopedProbeUnconfirmed, unconfirmedCommitError("xact_status_unrecognized")
+	}
+}
+
+func sameServerInstance(a, b scopedCommitIdentity) bool {
+	if a.postmasterStartTime.IsZero() || b.postmasterStartTime.IsZero() {
+		return false
+	}
+	return a.postmasterStartTime.Equal(b.postmasterStartTime) &&
+		sameNullableString(a.serverAddr, b.serverAddr) &&
+		sameNullableInt32(a.serverPort, b.serverPort)
+}
+
+func sameNullableString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func sameNullableInt32(a, b *int32) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func unconfirmedCommitError(reason string) error {
+	return fmt.Errorf("%w: %s", domain.ErrScopedDeletionCommitUnconfirmed, reason)
 }
 
 // ResumeScopedDeletion finishes detached cross-store cleanup for an already

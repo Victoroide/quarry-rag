@@ -30,6 +30,10 @@ var (
 	ErrDeletionInactive = errors.New("checkpointed deletion is not active")
 	// ErrDeletionTargetMismatch indicates that the configured stores differ from the recorded cleanup target.
 	ErrDeletionTargetMismatch = errors.New("configured stores differ from the recorded cleanup target")
+	// ErrScopedDeletionCommitUnconfirmed indicates that a scoped deletion intent
+	// commit lost its response and the bounded outcome check could not confirm
+	// whether it committed or rolled back.
+	ErrScopedDeletionCommitUnconfirmed = errors.New("scoped deletion commit outcome unconfirmed")
 )
 
 // DeleteOperations supplies the configured external operations for one deletion.
