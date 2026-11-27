@@ -41,6 +41,10 @@ type recallInput struct {
 type recallInputRow func(ordinal int, key [32]byte, embedding []float32) error
 
 func readRecallFile(ctx context.Context, path string, count int, accept recallInputRow) (recallInput, error) {
+	return readRecallFileWithOpener(ctx, path, count, accept, openRecallInput)
+}
+
+func readRecallFileWithOpener(ctx context.Context, path string, count int, accept recallInputRow, open func(*os.Root, string) (*os.File, error)) (recallInput, error) {
 	if err := ctx.Err(); err != nil {
 		return recallInput{}, err
 	}
@@ -54,14 +58,20 @@ func readRecallFile(ctx context.Context, path string, count int, accept recallIn
 	}
 	defer func() { _ = root.Close() }()
 	info, err := root.Stat(name)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return recallInput{}, ctxErr
+	}
 	if err != nil || !info.Mode().IsRegular() {
 		return recallInput{}, errors.New("recall input must be a readable regular file")
 	}
-	file, err := root.Open(name)
+	file, err := open(root, name)
 	if err != nil {
 		return recallInput{}, errors.New("cannot open recall input")
 	}
 	defer func() { _ = file.Close() }()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return recallInput{}, ctxErr
+	}
 	info, err = file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return recallInput{}, errors.New("recall input must be a readable regular file")
