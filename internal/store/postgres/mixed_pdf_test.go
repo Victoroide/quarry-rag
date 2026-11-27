@@ -107,8 +107,9 @@ func testMixedPDFServingRoleGrants(t *testing.T, upgrade bool) grantRoles {
 	require.NoError(t, err)
 	require.NotNil(t, job)
 	require.Equal(t, accepted.DocumentID, job.Document.ID)
-	_, err = serving.BeginPDFOCR(ctx, *job)
+	window, err := serving.BeginPDFOCR(ctx, *job)
 	require.NoError(t, err)
+	require.NoError(t, serving.RecordPDFOCRStart(ctx, *job, window.ID))
 	checkpoint := domain.PDFResult{Text: "Recovered line\n\nRepeated archive header", Coverage: domain.PDFComplete, Pages: []domain.PDFPageResult{
 		{Number: 1, Source: "ocr", State: "text"}, {Number: 2, Source: "parser", State: "text"},
 	}}

@@ -294,7 +294,7 @@ func (c *Client) withPDFLease(ctx context.Context, job domain.Job, write func(pg
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer rollbackIngestTx(ctx, tx)
 	var owned bool
 	err = tx.QueryRow(ctx, `SELECT TRUE FROM documents d JOIN ingest_jobs j ON j.document_id=d.id
 		WHERE d.id=$1 AND d.s3_key=$2 AND d.status='processing' AND j.lease_owner=$3 AND j.attempts=$4 AND COALESCE(d.incarnation,d.id)=$5
