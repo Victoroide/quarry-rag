@@ -2,12 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"testing/iotest"
+	"time"
 	"unicode/utf8"
 )
 
@@ -187,6 +194,329 @@ func TestACachedResultFails(t *testing.T) {
 		t.Fatalf("exit status = %d, want 1", code)
 	}
 	requireContains(t, "diagnostics", stderr, "testreport: "+module+"/ok reused a cached result")
+}
+
+func TestCacheResultUsesFinalPackageLine(t *testing.T) {
+	const pkg = "example.test/cache"
+	const marker = "ok  \t" + pkg + "\t(cached)"
+	const elapsed = "ok  \t" + pkg + "\t0.000s\n"
+	for _, tc := range []struct {
+		name, output, terminal string
+		cached                 bool
+	}{
+		{"diagnostic", "normal diagnostic (cached)\n" + elapsed, "pass", false},
+		{"exact imitation", marker + "\n" + elapsed, "pass", false},
+		{"prefixed", "diagnostic: " + marker + "\n", "pass", false},
+		{"suffixed", marker + " extra\n", "pass", false},
+		{"other package", "ok  \tother\t(cached)\n", "pass", false},
+		{"spacing", "ok   \t" + pkg + "\t(cached)\n", "pass", false},
+		{"case", "OK  \t" + pkg + "\t(cached)\n", "pass", false},
+		{"terminal", marker + "\n", "pass", true},
+		{"CRLF", marker + "\r\n", "pass", true},
+		{"bare CR", marker + "\r", "pass", false},
+		{"extra CR", marker + "\r\r\n", "pass", false},
+		{"missing LF", marker, "pass", false},
+		{"blank after", marker + "\n\n", "pass", false},
+		{"partial after", marker + "\npartial", "pass", false},
+		{"coverage", marker + "\tcoverage: 0.0% of statements\n", "pass", true},
+		{"coverage no statements", marker + "\tcoverage: [no statements]\n", "pass", true},
+		{"coverage patterns", marker + "\tcoverage: 100.0% of statements in ./...,example.test/cache\n", "pass", true},
+		{"copied coverage", marker + "\tcoverage: instrument initialized\n", "pass", true},
+		{"empty coverage", marker + "\tcoverage: \n", "pass", true},
+		{"no tests", marker + " [no tests to run]\n", "pass", true},
+		{"no fuzz tests", marker + " [no fuzz tests to fuzz]\n", "pass", true},
+		{"ambiguous fuzz", marker + "[-fuzz matches more than one fuzz test, won't fuzz]\n", "pass", true},
+		{"coverage and no tests", marker + "\tcoverage: 100.0% of statements [no tests to run]\r\n", "pass", true},
+		{"coverage and ambiguous fuzz", marker + "\tcoverage: [no statements][-fuzz matches more than one fuzz test, won't fuzz]\n", "pass", true},
+		{"coverage missing tab", marker + " coverage: instrument initialized\n", "pass", false},
+		{"coverage missing space", marker + "\tcoverage:\n", "pass", false},
+		{"coverage missing LF", marker + "\tcoverage: instrument initialized", "pass", false},
+		{"coverage with later elapsed line", marker + "\tcoverage: instrument initialized\n" + elapsed, "pass", false},
+		{"bad warning", marker + "[no tests to run]\n", "pass", false},
+		{"repeated warning", marker + " [no tests to run] [no fuzz tests to fuzz]\n", "pass", false},
+		{"trailing whitespace", marker + " \n", "pass", false},
+		{"skip", marker + "\n", "skip", false},
+		{"failure", marker + "\n", "fail", false},
+		{"missing result", marker + "\n", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := []event{{Action: "output", Package: pkg, Output: tc.output}}
+			if tc.terminal != "" {
+				events = append(events, event{Action: tc.terminal, Package: pkg})
+			}
+			code, stdout, stderr := reportInBothModes(t, stream(t, events...))
+			wantCode, row := 0, tc.terminal
+			switch tc.terminal {
+			case "":
+				wantCode, row = 1, "no result"
+				requireOnce(t, stderr, "testreport: "+pkg+" has no result\n")
+			case "fail":
+				wantCode = 1
+				requireOnce(t, stderr, "testreport: "+pkg+" failed\n")
+			}
+			if tc.cached {
+				wantCode = 1
+			}
+			if code != wantCode {
+				t.Errorf("exit = %d, want %d\n%s", code, wantCode, stderr)
+			}
+			requireOnce(t, stdout, "| "+pkg+" | "+row+" | 0.00 |")
+			requireCacheProblem(t, pkg, stdout, stderr, tc.cached)
+		})
+	}
+}
+
+func requireCacheProblem(t *testing.T, pkg, stdout, stderr string, cached bool) {
+	t.Helper()
+	problem := pkg + " reused a cached result\n"
+	if cached {
+		requireOnce(t, stdout, "- "+problem)
+		requireOnce(t, stderr, "testreport: "+problem)
+	} else {
+		requireAbsent(t, stdout, "reused a cached result")
+		requireAbsent(t, stderr, "reused a cached result")
+	}
+}
+
+func TestCacheResultRespectsOutputBoundaries(t *testing.T) {
+	const pkg = "p"
+	const marker = "ok  \tp\t(cached)\r\n"
+	out := func(output string) event { return event{Action: "output", Package: pkg, Output: output} }
+	pass := event{Action: "pass", Package: pkg}
+
+	t.Run("every byte boundary", func(t *testing.T) {
+		for _, line := range []string{marker, "ok  \tp\t(cached)\tcoverage: copied field\r\n"} {
+			for i := range len(line) + 1 {
+				input := stream(t, out("earlier line\n"+line[:i]), out(""), out(line[i:]), pass)
+				code, stdout, stderr := reportInBothModes(t, input)
+				if code != 1 {
+					t.Errorf("%q split at byte %d gives exit %d, want 1", line, i, code)
+				}
+				requireCacheProblem(t, pkg, stdout, stderr, true)
+			}
+		}
+	})
+	t.Run("fragmented long coverage with warning", func(t *testing.T) {
+		const prefix = "ok  \tp\t(cached)\tcov"
+		patterns := strings.Repeat("example.test/long/path/...,", 128) + "./..."
+		input := stream(t, out(prefix), out("erage: 100.0% of statements in "+patterns),
+			out(" [no tests to run]\r"), out("\n"), pass)
+		code, stdout, stderr := reportInBothModes(t, input)
+		if code != 1 {
+			t.Errorf("%d bytes of coverage patterns gives exit %d, want 1", len(patterns), code)
+		}
+		requireCacheProblem(t, pkg, stdout, stderr, true)
+	})
+	for _, tc := range []struct {
+		name   string
+		events []event
+		cached bool
+		code   int
+	}{
+		{"coalesced logical lines", []event{out("earlier\n\n" + marker), pass}, true, 1},
+		{"interleaved", []event{out(marker[:6]),
+			{Action: "start", Package: "other"},
+			{Action: "build-output", Package: pkg, ImportPath: pkg, Output: "compiler\n"},
+			{Action: "build-fail", Package: pkg, ImportPath: pkg},
+			{Action: "output", Package: "other", Output: marker},
+			{Action: "fail", Package: "other", FailedBuild: pkg},
+			out(marker[6:]), pass}, true, 1},
+		{"named output", []event{out(marker), {Action: "output", Package: pkg, Test: "TestP", Output: marker}, pass}, false, 0},
+		{"named terminal", []event{out(marker), {Action: "pass", Package: pkg, Test: "TestP"}, pass}, false, 0},
+		{"typed output", []event{out(marker), {Action: "output", Package: pkg, OutputType: "frame", Output: marker}, pass}, false, 0},
+		{"start after line", []event{out(marker), {Action: "start", Package: pkg}, pass}, false, 0},
+		{"start within line", []event{out(marker[:6]), {Action: "start", Package: pkg}, out(marker[6:]), pass}, false, 0},
+		{"unknown action", []event{out(marker), {Action: "unknown", Package: pkg}, pass}, false, 0},
+		{"repeated pass consumes candidate", []event{out(marker), pass, pass}, false, 0},
+		{"later cached pass", []event{pass, out(marker), pass}, true, 1},
+		{"two cached passes report once", []event{out(marker), pass, out(marker), pass}, true, 1},
+		{"later skip", []event{out(marker), pass, {Action: "skip", Package: pkg}}, false, 0},
+		{"later fail", []event{out(marker), pass, {Action: "fail", Package: pkg}}, false, 1},
+		{"skip consumes candidate", []event{out(marker), {Action: "skip", Package: pkg}, pass}, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := reportInBothModes(t, stream(t, tc.events...))
+			if code != tc.code {
+				t.Errorf("exit = %d, want %d\n%s", code, tc.code, stderr)
+			}
+			requireCacheProblem(t, pkg, stdout, stderr, tc.cached)
+		})
+	}
+	t.Run("long multibyte name", func(t *testing.T) {
+		pkg := strings.Repeat("界", maxNameBytes/3) + "ab"
+		line := "ok  \t" + pkg + "\t(cached)\n"
+		events := []event{}
+		for len(line) > 1024 {
+			at := 1024
+			for !utf8.RuneStart(line[at]) {
+				at--
+			}
+			events = append(events, event{Action: "output", Package: pkg, Output: line[:at]})
+			line = line[at:]
+		}
+		events = append(events, event{Action: "output", Package: pkg, Output: line}, event{Action: "pass", Package: pkg})
+		code, stdout, stderr := reportInBothModes(t, stream(t, events...))
+		if code != 1 {
+			t.Errorf("exit = %d, want 1", code)
+		}
+		requireCacheProblem(t, pkg, stdout, stderr, true)
+	})
+	t.Run("large allowed spill event", func(t *testing.T) {
+		input := stream(t, out(marker[:len(marker)-2]+strings.Repeat("x", maxEventBytes-256)+"\n"+marker), pass)
+		code, stdout, stderr := reportInBothModes(t, input)
+		if code != 1 {
+			t.Errorf("exit = %d, want 1", code)
+		}
+		requireCacheProblem(t, pkg, stdout, stderr, true)
+	})
+	t.Run("interrupted input", func(t *testing.T) {
+		input := stream(t, out(marker))
+		for _, spill := range []bool{false, true} {
+			for _, suffix := range []io.Reader{strings.NewReader("{"), iotest.ErrReader(io.ErrClosedPipe)} {
+				var stdout, stderr bytes.Buffer
+				code := runReport(options{spill: spill}, io.MultiReader(strings.NewReader(input), suffix), &stdout, &stderr, createDiagnosticSpool)
+				if code != 1 || stdout.Len() != 0 {
+					t.Errorf("spill %t gives exit %d and summary %q", spill, code, stdout.String())
+				}
+				requireContains(t, "diagnostics", stderr.String(), "read go test events:")
+				requireCacheProblem(t, pkg, stdout.String(), stderr.String(), false)
+			}
+		}
+	})
+}
+
+func TestGoTestCacheResultFixture(t *testing.T) {
+	const pkg = "example.test/cachefixture"
+	const marker = "ok  \t" + pkg + "\t(cached)"
+	dir, cache := t.TempDir(), t.TempDir()
+	mod, err := os.ReadFile("../../../go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goDirective := regexp.MustCompile(`(?m)^go [^\r\n]+$`).Find(mod)
+	if goDirective == nil {
+		t.Fatal("repository go.mod has no Go directive")
+	}
+	source := `package cachefixture
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+func TestMain(m *testing.M) {
+	fmt.Println("normal diagnostic (cached)")
+	fmt.Println(` + fmt.Sprintf("%q", marker) + `)
+	os.Exit(m.Run())
+}
+func TestPass(t *testing.T) {
+	if answer() != 42 {
+		t.Fatal("unexpected answer")
+	}
+}
+`
+	for name, data := range map[string]string{
+		"go.mod":        "module " + pkg + "\n\n" + string(goDirective) + "\n",
+		"cache.go":      "package cachefixture\n\nfunc answer() int { return 42 }\n",
+		"cache_test.go": source,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	for _, tc := range []struct {
+		name, coverage string
+		cached         bool
+	}{
+		{"forced", "", false}, {"cold", "", false}, {"warm", "", true},
+		{"coverage cold", "\tcoverage: 100.0% of statements in ./...", false},
+		{"coverage warm", "\tcoverage: 100.0% of statements in ./...", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cmd *exec.Cmd
+			switch {
+			case tc.name == "forced":
+				cmd = exec.CommandContext(ctx, "go", "test", "-p", "2", "-short", "-json", "-count=1", ".")
+			case tc.coverage != "":
+				cmd = exec.CommandContext(ctx, "go", "test", "-p", "2", "-short", "-json", "-coverpkg=./...", ".")
+			default:
+				cmd = exec.CommandContext(ctx, "go", "test", "-p", "2", "-short", "-json", ".")
+			}
+			cmd.Dir = dir
+			cmd.Env = append(cmd.Environ(), "GOWORK=off", "GOENV=off", "GOFLAGS=", "GODEBUG=", "GOCACHEPROG=", "GOCACHE="+cache)
+			var childErr bytes.Buffer
+			cmd.Stderr = &childErr
+			raw, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("go test: %v\n%s", err, &childErr)
+			}
+			verifyGoCacheFixture(t, string(raw), pkg, marker, tc.coverage, tc.cached)
+			code, stdout, stderr := reportInBothModes(t, string(raw), pkg)
+			wantCode := 0
+			if tc.cached {
+				wantCode = 1
+			}
+			if code != wantCode {
+				t.Errorf("exit = %d, want %d\n%s", code, wantCode, stderr)
+			}
+			requireCacheProblem(t, pkg, stdout, stderr, tc.cached)
+		})
+	}
+}
+
+func TestCacheResultMatcherDoesNotAllocatePerLine(t *testing.T) {
+	name := strings.Repeat("a", maxNameBytes)
+	marker := "ok  \t" + name + "\t(cached)"
+	line := marker + "\tcoverage: 100.0% of statements in " + strings.Repeat("example.test/p,...,", 256) + "./... [no tests to run]\r\n"
+	overlong := marker + strings.Repeat("x", 4096) + "\n"
+	allocs := testing.AllocsPerRun(100, func() {
+		var match cacheResultMatch
+		match.add(name, overlong)
+		if match.lastMatched {
+			t.Fatal("overlong suffix matched without a coverage delimiter")
+		}
+		match.add(name, line[:1024])
+		match.add(name, line[1024:])
+		if !match.lastMatched || match.lineOpen {
+			t.Fatal("valid result did not match after an overlong line")
+		}
+	})
+	if allocs != 0 {
+		t.Errorf("allocations per match = %v, want zero", allocs)
+	}
+}
+
+func verifyGoCacheFixture(t *testing.T, input, pkg, marker, coverage string, cached bool) {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(input))
+	var output strings.Builder
+	for {
+		var ev event
+		if err := dec.Decode(&ev); err != nil {
+			t.Fatalf("read fixture package pass: %v\n%s", err, input)
+		}
+		if ev.Package != pkg || ev.Test != "" {
+			continue
+		}
+		if ev.Action == "pass" {
+			break
+		}
+		if ev.Action == "output" && ev.OutputType == "" {
+			output.WriteString(ev.Output)
+		}
+	}
+	plain := output.String()
+	if !cached {
+		requireContains(t, "fixture output", plain, "normal diagnostic (cached)\n", marker+"\n")
+	}
+	beforeLF, complete := strings.CutSuffix(plain, "\n")
+	summary := beforeLF[strings.LastIndexByte(beforeLF, '\n')+1:]
+	elapsed := regexp.MustCompile(`^ok  \t` + regexp.QuoteMeta(pkg) + `\t[0-9]+\.[0-9]+s` + regexp.QuoteMeta(coverage) + `$`)
+	if !complete || cached && summary != marker+coverage || !cached && !elapsed.MatchString(summary) {
+		t.Fatalf("unexpected final Go summary (want cached = %t and coverage %q): %q\n%s", cached, coverage, summary, input)
+	}
 }
 
 func TestNoTestResultUsesPackageTerminalOutcome(t *testing.T) {

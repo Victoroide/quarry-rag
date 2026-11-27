@@ -42,6 +42,7 @@ type packageResult struct {
 	noTestResultLine bool
 	noTests          bool
 	hasNamedTests    bool
+	cacheResult      cacheResultMatch
 	cached           bool
 	failedBuild      string
 	observed         bool
@@ -176,6 +177,11 @@ func (r *run) add(ev event) *packageResult {
 	p.observed = true
 	p.hasNamedTests = p.hasNamedTests || ev.Test != ""
 	switch ev.Action {
+	case "output", "pass", "fail", "skip":
+	default:
+		p.cacheResult = cacheResultMatch{}
+	}
+	switch ev.Action {
 	case "run":
 		if isBenchmarkName(ev.Test) {
 			p.advanceBenchmarks(ev.Test)
@@ -195,6 +201,7 @@ func (r *run) add(ev event) *packageResult {
 		}
 	case "pass", "fail", "skip":
 		if ev.Test != "" {
+			p.cacheResult = cacheResultMatch{}
 			t := p.test(ev.Test)
 			t.outcome, t.elapsed = ev.Action, ev.Elapsed
 			if ev.Action != "fail" {
@@ -203,6 +210,8 @@ func (r *run) add(ev event) *packageResult {
 			return nil
 		}
 		p.outcome, p.elapsed = ev.Action, ev.Elapsed
+		p.cached = ev.Action == "pass" && p.cacheResult.lastMatched && !p.cacheResult.lineOpen
+		p.cacheResult = cacheResultMatch{}
 		p.noTests = ev.Action == "skip" && p.noTestResultLine && !p.hasNamedTests
 		p.noTestResultLine = false
 		p.noTestLineMatch = 0
@@ -257,8 +266,10 @@ func (r *run) addOutput(p *packageResult, ev event) {
 	}
 	if ev.Test == "" && ev.OutputType == "" {
 		p.matchNoTestOutput(ev.Output)
+		p.cacheResult.add(p.name, ev.Output)
 	} else {
 		p.noTestLineMatch = 0
+		p.cacheResult = cacheResultMatch{}
 	}
 	if ev.Test != "" {
 		t := p.test(ev.Test)
@@ -280,7 +291,6 @@ func (r *run) addOutput(p *packageResult, ev event) {
 		}
 	}
 	r.appendOutput(&p.output, ev.Output)
-	p.cached = p.cached || strings.Contains(ev.Output, "(cached)")
 }
 
 // matchNoTestOutput compares a logical line as it arrives. Go can split it
