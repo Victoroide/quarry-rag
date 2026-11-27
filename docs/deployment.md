@@ -753,10 +753,14 @@ serving and cleanup logins as part of the [serving role setup](grant-catalog.md#
    has elapsed since freezing. Let live ingestion leases finish or expire and
    resolve open deletion receipts as described above. If verification is missing
    or the corpus changed, finish catch-up and verify again. If the requested
-   generation is already active, continue with deployment in step 6. If
-   activation could not be confirmed, check the active generation before retrying.
+   generation is already active, continue with deployment in step 6.
    If writing the JSON report fails during a hosted-manifest refusal, the
    command reports both errors.
+
+   After an activation refusal, rollback has its own three-second deadline.
+   If rollback cannot be confirmed, the command discards its dedicated connection.
+   PostgreSQL releases the advisory lock when the old session ends. If the
+   commit could not be confirmed, check the active generation before retrying.
 6. Deploy every replica sharing the queue with `VECTOR_GENERATION` set to the new
    generation, the matching embedding deployment and extraction settings, and
    `PINECONE_INDEX_NAME` for a Pinecone target. Apply any [serving grants](grant-catalog.md#database-roles)
