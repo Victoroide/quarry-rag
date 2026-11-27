@@ -413,8 +413,8 @@ func TestCanonicalDocumentKeysRespectTheWriterBarrier(t *testing.T) {
 	docID := "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
 	for _, gateErr := range []error{domain.ErrWritersFrozen, domain.ErrGenerationMismatch} {
 		idx := &documentKeyFakeIndex{matched: map[string]int32{docID: 1}}
-		err := runMaintenance(t.Context(), fakeGate{err: gateErr}, options{CanonicalDocumentIDs: true, Limit: 10}, func() error {
-			report, runErr := canonicalizeDocumentKeys(t.Context(), idx, []string{docID}, options{CanonicalDocumentIDs: true, Limit: 10})
+		err := runMaintenance(t.Context(), fakeGate{err: gateErr}, options{CanonicalDocumentIDs: true, Limit: 10}, func(ctx context.Context) error {
+			report, runErr := canonicalizeDocumentKeys(ctx, idx, []string{docID}, options{CanonicalDocumentIDs: true, Limit: 10})
 			require.Equal(t, int64(1), report.MatchedVectors)
 			return runErr
 		})
@@ -422,8 +422,8 @@ func TestCanonicalDocumentKeysRespectTheWriterBarrier(t *testing.T) {
 		require.Len(t, idx.requests, 1)
 
 		idx = &documentKeyFakeIndex{matched: map[string]int32{docID: 1}}
-		err = runMaintenance(t.Context(), fakeGate{err: gateErr}, options{CanonicalDocumentIDs: true, Apply: true, Limit: 10}, func() error {
-			_, runErr := canonicalizeDocumentKeys(t.Context(), idx, []string{docID}, options{CanonicalDocumentIDs: true, Apply: true, Limit: 10})
+		err = runMaintenance(t.Context(), fakeGate{err: gateErr}, options{CanonicalDocumentIDs: true, Apply: true, Limit: 10}, func(ctx context.Context) error {
+			_, runErr := canonicalizeDocumentKeys(ctx, idx, []string{docID}, options{CanonicalDocumentIDs: true, Apply: true, Limit: 10})
 			return runErr
 		})
 		require.ErrorIs(t, err, gateErr)

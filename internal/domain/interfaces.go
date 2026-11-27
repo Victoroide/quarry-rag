@@ -68,10 +68,14 @@ type WriterLocker interface {
 type WriterOperationKind string
 
 const (
-	WriterOperationDelete              WriterOperationKind = "delete"
-	WriterOperationHeldRelease         WriterOperationKind = "held_release"
+	// WriterOperationDelete removes a live document or resumes its cleanup.
+	WriterOperationDelete WriterOperationKind = "delete"
+	// WriterOperationHeldRelease releases an offline held deletion.
+	WriterOperationHeldRelease WriterOperationKind = "held_release"
+	// WriterOperationLegacyHostedRelease releases a retired hosted hold.
 	WriterOperationLegacyHostedRelease WriterOperationKind = "legacy_hosted_release"
-	WriterOperationReconcile           WriterOperationKind = "reconcile"
+	// WriterOperationReconcile applies hosted index maintenance.
+	WriterOperationReconcile WriterOperationKind = "reconcile"
 )
 
 // WriterOperationRunner keeps a maintenance workflow fenced through its last

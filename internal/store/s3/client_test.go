@@ -28,6 +28,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/stretchr/testify/require"
 )
 
 func s3EndpointClient(t *testing.T, endpoint, owner string) *Client {
@@ -1007,4 +1008,92 @@ func TestPutSourceAttemptsArePerCall(t *testing.T) {
 			t.Fatalf("worker %d: result=%+v err=%v, want err, Acknowledged=false, Settled=%v", i, o.result, o.err, o.wantSettled)
 		}
 	}
+}
+
+func TestWriterDeleteTracksEachS3Attempt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		statuses []int
+		settled  []bool
+	}{
+		{"acknowledged marker", []int{http.StatusNoContent}, []bool{true}},
+		{"rejected", []int{http.StatusForbidden}, []bool{true}},
+		{"uncertain then acknowledged", []int{http.StatusServiceUnavailable, http.StatusNoContent}, []bool{false, true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				i := int(calls.Add(1)) - 1
+				if i >= len(tc.statuses) {
+					t.Error("unexpected SDK retry")
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if tc.statuses[i] == http.StatusNoContent {
+					w.Header().Set("X-Amz-Delete-Marker", "true")
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				writeS3Error(w, tc.statuses[i], http.StatusText(tc.statuses[i]), "test-request")
+			}))
+			defer server.Close()
+
+			var attempts []bool
+			ctx := domain.WithExternalWriterDispatch(t.Context(), func(ctx context.Context, attempt domain.ExternalWriterAttempt) error {
+				settled, err := attempt(ctx)
+				attempts = append(attempts, settled)
+				return err
+			})
+			client := retryingClient(t, server.URL, 2, nil)
+			err := client.DeleteVersion(ctx, "documents/key.txt", "test-version")
+			if tc.statuses[len(tc.statuses)-1] == http.StatusNoContent {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			require.Equal(t, tc.settled, attempts)
+			require.EqualValues(t, len(attempts), calls.Load())
+		})
+	}
+}
+
+type writerResponseBody struct {
+	io.Reader
+	closes int
+}
+
+func (b *writerResponseBody) Close() error {
+	b.closes++
+	return nil
+}
+
+func TestWriterDeleteTransfersResponseBodyOwnership(t *testing.T) {
+	body := &writerResponseBody{Reader: strings.NewReader("provider reply")}
+	var evidence []domain.ExternalWriterEvidence
+	ctx := domain.WithExternalWriterDispatch(t.Context(), func(ctx context.Context, attempt domain.ExternalWriterAttempt) error {
+		reportCtx := domain.WithExternalWriterEvidence(ctx, func(_ context.Context, event domain.ExternalWriterEvidence) error {
+			evidence = append(evidence, event)
+			return nil
+		})
+		settled, err := attempt(reportCtx)
+		require.True(t, settled)
+		return err
+	})
+	req := httptest.NewRequestWithContext(ctx, http.MethodDelete, "/fixture-key", nil)
+	transport := writerDeleteTransport{bucket: "fixture-bucket", send: func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: body,
+			Header: http.Header{"X-Amz-Request-Id": {"test-request"}}}, nil
+	}}
+	response, err := transport.RoundTrip(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, response.Body.Close()) }()
+	require.Same(t, body, response.Body)
+	content, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.Equal(t, "provider reply", string(content))
+	require.Zero(t, body.closes)
+	require.Equal(t, []domain.ExternalWriterEvidence{
+		{Provider: "s3", Namespace: "fixture-bucket", Outcome: "started"},
+		{Provider: "s3", Namespace: "fixture-bucket", Outcome: "acknowledged", RequestID: "test-request"},
+	}, evidence)
 }

@@ -176,8 +176,12 @@ type GenerationLedger struct {
 }
 
 func (c *Client) checkVectorWriterState(ctx context.Context, q queryRower) error {
+	return c.checkVectorWriterStateInSchema(ctx, q, "")
+}
+
+func (c *Client) checkVectorWriterStateInSchema(ctx context.Context, q queryRower, schema string) error {
 	mine := c.servingPin()
-	if !c.vectorStateReady.Load() {
+	if schema == "" && !c.vectorStateReady.Load() {
 		// A schema older than migration 016 has no freeze to honor and only the legacy target.
 		var present bool
 		if err := q.QueryRow(ctx, `SELECT to_regclass('vector_state') IS NOT NULL`).Scan(&present); err != nil {
@@ -196,7 +200,7 @@ func (c *Client) checkVectorWriterState(ctx context.Context, q queryRower) error
 	}
 	var active, profileHash string
 	var frozen bool
-	if err := q.QueryRow(ctx, `SELECT active, frozen, profile_hash FROM vector_writer_state()`).Scan(&active, &frozen, &profileHash); err != nil {
+	if err := q.QueryRow(ctx, `SELECT active, frozen, profile_hash FROM `+schema+`vector_writer_state()`).Scan(&active, &frozen, &profileHash); err != nil {
 		return fmt.Errorf("postgres: read vector state: %w", err)
 	}
 	if active != mine.generation || profileHash != "" && profileHash != mine.profileHash {
@@ -209,10 +213,14 @@ func (c *Client) checkVectorWriterState(ctx context.Context, q queryRower) error
 }
 
 func (c *Client) gateWriter(ctx context.Context, tx pgx.Tx) error {
-	if err := c.checkVectorWriterState(ctx, tx); err != nil {
+	return c.gateWriterInSchema(ctx, tx, "")
+}
+
+func (c *Client) gateWriterInSchema(ctx context.Context, tx pgx.Tx, schema string) error {
+	if err := c.checkVectorWriterStateInSchema(ctx, tx, schema); err != nil {
 		return err
 	}
-	return c.checkWriterAuthzMode(ctx, tx)
+	return c.checkAuthzMode(ctx, tx, `SELECT `+schema+`grant_catalog_corpus_authz_mode_shared()`)
 }
 
 // WritersOpen implements domain.WriterGate.
@@ -259,9 +267,13 @@ func (c *Client) AcquireHeldRecoveryWriter(ctx context.Context) (pgx.Tx, func(),
 }
 
 func (c *Client) gateHeldRecoveryWriter(ctx context.Context, tx pgx.Tx) error {
+	return c.gateHeldRecoveryWriterInSchema(ctx, tx, "")
+}
+
+func (c *Client) gateHeldRecoveryWriterInSchema(ctx context.Context, tx pgx.Tx, schema string) error {
 	var active string
 	var frozen bool
-	if err := tx.QueryRow(ctx, `SELECT active, frozen FROM vector_writer_state()`).Scan(&active, &frozen); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT active, frozen FROM `+schema+`vector_writer_state()`).Scan(&active, &frozen); err != nil {
 		return fmt.Errorf("postgres: read vector state: %w", err)
 	}
 	configured := c.servingPin().generation
@@ -271,7 +283,7 @@ func (c *Client) gateHeldRecoveryWriter(ctx context.Context, tx pgx.Tx) error {
 	if frozen {
 		return domain.ErrWritersFrozen
 	}
-	return c.checkAuthzMode(ctx, tx, corpusAuthzModeQuery)
+	return c.checkAuthzMode(ctx, tx, `SELECT `+schema+`grant_catalog_corpus_authz_mode()`)
 }
 
 func (c *Client) acquireWriterSession(ctx context.Context, check writerTxCheck) (pgx.Tx, func(), error) {
@@ -285,16 +297,16 @@ func (c *Client) acquireWriterSession(ctx context.Context, check writerTxCheck) 
 	}, nil
 }
 
-func (c *Client) openWriterSession(ctx context.Context, check writerTxCheck) (pgx.Tx, func(), func(), error) {
-	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, err
+func (c *Client) openWriterSession(ctx context.Context, check writerTxCheck) (session pgx.Tx, closeSession, returnSlot func(), err error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, nil, nil, ctxErr
 	}
 	select {
 	case c.writerSlots <- struct{}{}:
 	case <-ctx.Done():
 		return nil, nil, nil, ctx.Err()
 	}
-	returnSlot := func() { <-c.writerSlots }
+	returnSlot = func() { <-c.writerSlots }
 	// The lock must not consume a pool connection while the operation uses
 	// the pool for document metadata or while a freeze is waiting for it.
 	conn, err := pgx.ConnectConfig(ctx, c.Pool.Config().ConnConfig)
@@ -303,7 +315,7 @@ func (c *Client) openWriterSession(ctx context.Context, check writerTxCheck) (pg
 		return nil, nil, nil, err
 	}
 	tx, err := beginFencedWriterTx(ctx, conn.BeginTx, check)
-	closeSession := sync.OnceFunc(func() {
+	closeSession = sync.OnceFunc(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if tx != nil {
@@ -543,17 +555,24 @@ func (c *Client) FreezeWriters(ctx context.Context, generation string) error {
 	if fixtureErr := requireServiceableFixtures(ctx, tx, generation); fixtureErr != nil {
 		return fixtureErr
 	}
+	schema, schemaErr := writerOperationSchema(ctx, tx)
+	if schemaErr != nil {
+		return fmt.Errorf("postgres: resolve writer drain schema: %w", schemaErr)
+	}
+	if schema == "" {
+		return errors.New("postgres: vector writer state is unavailable")
+	}
 	var operationsEnabled bool
 	if err = tx.QueryRow(ctx, `SELECT COALESCE((to_jsonb(s)->>'writer_operations_enabled')::boolean,FALSE)
-		FROM vector_state s WHERE singleton FOR UPDATE`).Scan(&operationsEnabled); err != nil {
+		FROM `+schema+`vector_state s WHERE singleton FOR UPDATE`).Scan(&operationsEnabled); err != nil {
 		return fmt.Errorf("postgres: lock writer state: %w", err)
 	}
 	if operationsEnabled {
-		if err = checkWriterOperationsDrained(ctx, tx); err != nil {
+		if err = checkWriterOperationsDrained(ctx, tx, schema); err != nil {
 			return fmt.Errorf("postgres: drain writer operations: %w", err)
 		}
 	}
-	tag, err := tx.Exec(ctx, `UPDATE vector_state SET frozen=TRUE, frozen_at=CASE WHEN frozen THEN frozen_at ELSE clock_timestamp() END, freeze_generation=$1
+	tag, err := tx.Exec(ctx, `UPDATE `+schema+`vector_state SET frozen=TRUE, frozen_at=CASE WHEN frozen THEN frozen_at ELSE clock_timestamp() END, freeze_generation=$1
  WHERE NOT frozen OR freeze_generation=$1`, generation)
 	if err != nil {
 		return fmt.Errorf("postgres: freeze writers: %w", err)

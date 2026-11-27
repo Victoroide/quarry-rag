@@ -24,7 +24,9 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("delete documents", "error", err)
+		if !errors.Is(err, domain.ErrWriterEvidenceUnavailable) {
+			slog.Error("delete documents", "error", err)
+		}
 		os.Exit(1)
 	}
 }

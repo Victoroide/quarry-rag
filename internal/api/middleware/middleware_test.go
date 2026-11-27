@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/logctx"
 	"github.com/Victoroide/quarry-rag/internal/tracing"
 	"github.com/google/uuid"
@@ -203,4 +204,26 @@ func TestRecoveryRedactedWrappedAbort(t *testing.T) {
 	}))
 	require.PanicsWithValue(t, http.ErrAbortHandler, func() { handler.ServeHTTP(w, req) })
 	require.Empty(t, w.Body.String())
+}
+
+func TestLoggingSkipsAStalledWriterRecoveryStream(t *testing.T) {
+	output := captureMiddlewareLogs(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /documents/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") == "stalled" {
+			domain.NotifyWriterEvidenceFailure(context.WithoutCancel(r.Context()))
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := LoggingWithRouteTemplates(mux)
+	stalled := httptest.NewRecorder()
+	handler.ServeHTTP(stalled, httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/stalled", http.NoBody))
+	require.Equal(t, http.StatusServiceUnavailable, stalled.Code)
+	require.Zero(t, output.Len())
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/documents/healthy", http.NoBody)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	require.Equal(t, "DELETE /documents/{id}", req.Pattern)
+	require.Contains(t, output.String(), `"path":"/documents/{id}"`)
 }

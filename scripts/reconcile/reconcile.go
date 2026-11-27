@@ -149,7 +149,7 @@ func reconcile(ctx context.Context, idx vectorIndex, deleteNamespace func(contex
 		return result, nil
 	}
 	for start := 0; start < len(ids); start += 1000 {
-		if err := idx.DeleteVectorsById(ctx, ids[start:min(start+1000, len(ids))]); err != nil {
+		if err := deleteReconcileVectorIDs(ctx, idx, ids[start:min(start+1000, len(ids))]); err != nil {
 			return result, fmt.Errorf("delete orphaned vectors: %w", err)
 		}
 	}
@@ -159,6 +159,12 @@ func reconcile(ctx context.Context, idx vectorIndex, deleteNamespace func(contex
 		}
 	}
 	return result, nil
+}
+
+func deleteReconcileVectorIDs(ctx context.Context, idx vectorIndex, ids []string) error {
+	return pcstore.DispatchWriterMutation(ctx, reconcileNamespace(idx), func(ctx context.Context) error {
+		return idx.DeleteVectorsById(ctx, ids)
+	})
 }
 
 func scanVectors(ctx context.Context, idx vectorIndex, lookup documentLookup, opts options, warnings io.Writer) ([]string, error) {

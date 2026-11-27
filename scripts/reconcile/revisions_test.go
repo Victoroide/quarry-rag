@@ -74,16 +74,15 @@ func (*stubbornVectors) ListPrefixVectorIDs(context.Context, string, string, int
 	return nil, "", false, nil
 }
 
-func revisionRun(t *testing.T, store *retiredStore, apply bool) (report, error) {
-	t.Helper()
+func revisionRun(ctx context.Context, store *retiredStore, apply bool) (report, error) {
 	idx := &reconcileFakeIndex{refs: []vectorRef{{ID: "legacy-orphan", DocID: missingID}}}
-	return reconcileRevisions(t.Context(), store, &stubbornVectors{ids: store.task.VectorIDs}, idx, idx.deleteNamespace, noDocuments,
+	return reconcileRevisions(ctx, store, &stubbornVectors{ids: store.task.VectorIDs}, idx, idx.deleteNamespace, noDocuments,
 		options{Apply: apply, Limit: 10, Page: 5}, sweepSettings{DrainDelay: 45 * time.Second}, &bytes.Buffer{})
 }
 
 func TestApplyReportsResidueAndStillScansLegacyOrphans(t *testing.T) {
 	store := &retiredStore{task: domain.VectorCleanupTask{RevisionID: "revision", DocumentID: storedID, VectorIDs: []string{"vector"}, State: "pending"}}
-	result, err := revisionRun(t, store, true)
+	result, err := revisionRun(t.Context(), store, true)
 	require.NoError(t, err, "unresolved residue is an outcome to report, not a reason to stop")
 	require.Equal(t, 1, result.UnresolvedRevisions)
 	require.Equal(t, 1, result.UnresolvedVectors, "the cursor sits at the end, but the recorded vector was never verified gone")
@@ -96,18 +95,18 @@ func TestApplyReportsResidueAndStillScansLegacyOrphans(t *testing.T) {
 
 func TestApplyStopsOnlyOnAFailureThatAbortsTheSweep(t *testing.T) {
 	store := &retiredStore{task: domain.VectorCleanupTask{RevisionID: "revision", VectorIDs: []string{"vector"}}, claimErr: errors.New("claim unavailable")}
-	_, err := revisionRun(t, store, true)
+	_, err := revisionRun(t.Context(), store, true)
 	require.ErrorContains(t, err, "claim unavailable")
 
 	store = &retiredStore{task: domain.VectorCleanupTask{RevisionID: "revision", VectorIDs: []string{"vector"}}, claimErr: &pgconn.PgError{Code: "42P01"}}
-	result, err := revisionRun(t, store, true)
+	result, err := revisionRun(t.Context(), store, true)
 	require.NoError(t, err, "a database that predates the tables has nothing to sweep")
 	require.Equal(t, 1, result.OrphanVectors)
 }
 
 func TestDryRunReportsRetiredRevisionsWithoutSweeping(t *testing.T) {
 	store := &retiredStore{task: domain.VectorCleanupTask{RevisionID: "revision", VectorIDs: []string{"a", "b"}, NextOffset: 1, State: "unresolved"}}
-	result, err := revisionRun(t, store, false)
+	result, err := revisionRun(t.Context(), store, false)
 	require.NoError(t, err)
 	require.False(t, store.claimed)
 	require.Equal(t, 1, result.RetiredRevisions)
@@ -135,8 +134,8 @@ func TestRunMaintenanceGatesRevisionApplySweep(t *testing.T) {
 	applyOpts := options{Apply: true, Limit: 10, Page: 5}
 	for _, blockedErr := range []error{domain.ErrWritersFrozen, domain.ErrGenerationMismatch} {
 		store := &retiredStore{task: domain.VectorCleanupTask{RevisionID: "revision", VectorIDs: []string{"vector"}, State: "pending"}}
-		err := runMaintenance(t.Context(), &trackingGate{err: blockedErr}, applyOpts, func() error {
-			_, runErr := revisionRun(t, store, true)
+		err := runMaintenance(t.Context(), &trackingGate{err: blockedErr}, applyOpts, func(ctx context.Context) error {
+			_, runErr := revisionRun(ctx, store, true)
 			return runErr
 		})
 		require.ErrorIs(t, err, blockedErr)
@@ -145,8 +144,8 @@ func TestRunMaintenanceGatesRevisionApplySweep(t *testing.T) {
 
 	gate := &trackingGate{}
 	store := &retiredStore{task: domain.VectorCleanupTask{RevisionID: "revision", VectorIDs: []string{"vector"}, State: "pending"}, claimErr: errors.New("claim failed")}
-	err := runMaintenance(t.Context(), gate, applyOpts, func() error {
-		_, runErr := revisionRun(t, store, true)
+	err := runMaintenance(t.Context(), gate, applyOpts, func(ctx context.Context) error {
+		_, runErr := revisionRun(ctx, store, true)
 		return runErr
 	})
 	require.ErrorContains(t, err, "claim failed")

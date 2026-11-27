@@ -158,17 +158,22 @@ func (c *Client) PublishHostedBackfill(ctx context.Context, doc BackfillDocument
 	}
 	// Use a fresh snapshot after lock waits even when the connection defaults
 	// to a stronger isolation level. A canceled statement never reaches commit.
-	var published bool
-	err := pgx.BeginTxFunc(ctx, c.Pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
-		queryErr := tx.QueryRow(ctx, `SELECT grant_catalog_publish_hosted_backfill($1::uuid,$2::uuid,$3::uuid,$4,$5,$6)`,
-			doc.DocumentID, doc.Incarnation, doc.TenantID, doc.SourceVersion, doc.ChunkDigest, doc.Hosted.Digest).Scan(&published)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		return queryErr
-	})
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return false, fmt.Errorf("postgres: publish hosted backfill: %w", err)
+	}
+	defer rollbackFencedWriterTx(ctx, tx)
+	var published bool
+	err = tx.QueryRow(ctx, `SELECT grant_catalog_publish_hosted_backfill($1::uuid,$2::uuid,$3::uuid,$4,$5,$6)`,
+		doc.DocumentID, doc.Incarnation, doc.TenantID, doc.SourceVersion, doc.ChunkDigest, doc.Hosted.Digest).Scan(&published)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	if err != nil {
+		return false, fmt.Errorf("postgres: publish hosted backfill: %w", err)
+	}
+	if err = commitWriterSQL(ctx, tx); err != nil {
+		return false, fmt.Errorf("postgres: commit hosted backfill: %w", err)
 	}
 	return published, nil
 }

@@ -242,7 +242,7 @@ func (c *Client) beginDeletion(ctx context.Context, id domain.DocumentID, ops do
 	if intentErr := insertDeletionIntentTx(ctx, tx, id, incarnation, source, mode, ops); intentErr != nil {
 		return "", false, intentErr
 	}
-	return incarnation, false, tx.Commit(ctx)
+	return incarnation, false, commitWriterSQL(ctx, tx)
 }
 
 // lockDocumentIntent takes the per-document intent key exclusively. Every
@@ -383,6 +383,7 @@ func (c *Client) resumeDeletion(ctx context.Context, id domain.DocumentID, incar
 		AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.id=r.document_id AND d.vector_mutation_until>clock_timestamp())
 		RETURNING r.vector_mode,r.source_key,r.source_bucket,r.vector_index,r.step`,
 		string(id), incarnation, claim, remaining.Seconds()).Scan(&mode, &source, &bucket, &index, &step)
+	err = observeWriterSQL(ctx, err)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c.unclaimedDeletion(ctx, id, incarnation)
 	}
@@ -502,7 +503,7 @@ func (c *Client) deleteArtifact(ctx context.Context, id, incarnation, mode strin
 func (c *Client) checkpointDeletion(ctx context.Context, id domain.DocumentID, incarnation, claim string, step int) error {
 	checkpointCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
-	tag, err := c.Pool.Exec(checkpointCtx, `UPDATE document_deletions SET step=$5 WHERE document_id=$1 AND incarnation=$2
+	tag, err := execWriterSQL(checkpointCtx, c.Pool, `UPDATE document_deletions SET step=$5 WHERE document_id=$1 AND incarnation=$2
 		AND claim=$3 AND step=$4 AND claim_until>clock_timestamp()`, string(id), incarnation, claim, step, step+1)
 	if err != nil {
 		return fmt.Errorf("record cleanup checkpoint: %w", err)
@@ -526,7 +527,7 @@ type deletionExecer interface {
 }
 
 func clearDeletionClaim(ctx context.Context, db deletionExecer, id domain.DocumentID, claim string) error {
-	_, err := db.Exec(ctx, `UPDATE document_deletions SET claim=NULL,claim_until=NULL
+	_, err := execWriterSQL(ctx, db, `UPDATE document_deletions SET claim=NULL,claim_until=NULL
 		WHERE document_id=$1 AND claim=$2`, string(id), claim)
 	return err
 }
@@ -559,7 +560,7 @@ func (c *Client) finalizeDeletion(ctx context.Context, id domain.DocumentID, inc
 	if tag.RowsAffected() != 1 {
 		return domain.ErrDeletionBusy
 	}
-	return tx.Commit(ctx)
+	return commitWriterSQL(ctx, tx)
 }
 
 // WithDocumentFile signs the stored source while a deletion intent for the
@@ -578,7 +579,7 @@ func (c *Client) WithDocumentFile(ctx context.Context, id domain.DocumentID, sig
 	if signErr := sign(ctx, key); signErr != nil {
 		return false, signErr
 	}
-	return true, tx.Commit(ctx)
+	return true, commitWriterSQL(ctx, tx)
 }
 
 // readSignableSource takes the shared intent key and then reads the source in
@@ -862,7 +863,11 @@ func (c *Client) commitScopedDeletionIntent(ctx context.Context, tx pgx.Tx, prin
 	if errors.Is(commitErr, pgx.ErrTxCommitRollback) {
 		return "", false, commitErr
 	}
-	return c.probeScopedDeletionCommit(ctx, id, incarnation, identity, commitErr)
+	resolvedIncarnation, complete, err = c.probeScopedDeletionCommit(ctx, id, incarnation, identity, commitErr)
+	if errors.Is(err, domain.ErrScopedDeletionCommitUnconfirmed) && ctx.Value(writerSQLSettlementKey{}) != nil {
+		err = errors.Join(err, observeWriterSQL(ctx, commitErr))
+	}
+	return resolvedIncarnation, complete, err
 }
 
 func (c *Client) probeScopedDeletionCommit(ctx context.Context, id domain.DocumentID, incarnation string, expected scopedCommitIdentity, commitErr error) (resolvedIncarnation string, complete bool, err error) {

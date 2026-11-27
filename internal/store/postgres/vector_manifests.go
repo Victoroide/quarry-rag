@@ -100,7 +100,11 @@ func (c *Client) ListDocumentVectorManifests(ctx context.Context, docID domain.D
 }
 
 func (c *Client) listManifests(ctx context.Context, docID domain.DocumentID, incarnation string, unretiredOnly bool) ([]domain.VectorManifest, error) {
-	rows, err := c.Pool.Query(ctx, `
+	query := c.Pool.Query
+	if conn := c.removalSession(ctx); conn != nil {
+		query = conn.Query
+	}
+	rows, err := query(ctx, `
 		SELECT revision_id::text, document_id::text, incarnation::text, attempt, COALESCE(lease_token::text, ''),
 		       collection, vector_namespace, id_prefix, vector_ids,
 		       ARRAY(SELECT x::text FROM unnest(chunk_ids) AS x), state
@@ -185,7 +189,7 @@ func (c *Client) ClaimVectorCleanup(ctx context.Context, owner string, lease, dr
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("postgres: claim vector cleanup: %w", err)
+		return nil, fmt.Errorf("postgres: claim vector cleanup: %w", observeWriterSQL(ctx, err))
 	}
 	task.DocumentID = domain.DocumentID(docID)
 	if lastErr != nil {
@@ -198,7 +202,7 @@ const cleanupLeaseMatch = `revision_id=$1 AND lease_owner=$2 AND lease_token IS 
 
 // RenewVectorCleanup extends an active cleanup lease without reviving an expired one.
 func (c *Client) RenewVectorCleanup(ctx context.Context, task domain.VectorCleanupTask, lease time.Duration) (bool, error) {
-	tag, err := c.Pool.Exec(ctx, `UPDATE hosted_vector_cleanups SET lease_until=clock_timestamp()+make_interval(secs=>$4) WHERE `+cleanupLeaseMatch,
+	tag, err := execWriterSQL(ctx, c.Pool, `UPDATE hosted_vector_cleanups SET lease_until=clock_timestamp()+make_interval(secs=>$4) WHERE `+cleanupLeaseMatch,
 		task.RevisionID, task.LeaseOwner, task.LeaseToken, lease.Seconds())
 	if err != nil {
 		return false, fmt.Errorf("postgres: renew vector cleanup: %w", err)
@@ -208,7 +212,7 @@ func (c *Client) RenewVectorCleanup(ctx context.Context, task domain.VectorClean
 
 // AdvanceVectorCleanup persists page cursor progress under a live cleanup lease.
 func (c *Client) AdvanceVectorCleanup(ctx context.Context, task domain.VectorCleanupTask, nextOffset int) (bool, error) {
-	tag, err := c.Pool.Exec(ctx, `UPDATE hosted_vector_cleanups SET next_offset=$4 WHERE `+cleanupLeaseMatch,
+	tag, err := execWriterSQL(ctx, c.Pool, `UPDATE hosted_vector_cleanups SET next_offset=$4 WHERE `+cleanupLeaseMatch,
 		task.RevisionID, task.LeaseOwner, task.LeaseToken, nextOffset)
 	if err != nil {
 		return false, fmt.Errorf("postgres: advance vector cleanup: %w", err)
@@ -222,7 +226,7 @@ func (c *Client) DeferVectorCleanup(ctx context.Context, task domain.VectorClean
 	if lastError != "" {
 		msg = jobError(lastError)
 	}
-	tag, err := c.Pool.Exec(ctx, `
+	tag, err := execWriterSQL(ctx, c.Pool, `
 		UPDATE hosted_vector_cleanups
 		   SET state = $4,
 		       next_attempt_at = clock_timestamp() + make_interval(secs => $5),
@@ -256,14 +260,14 @@ func (c *Client) CompleteVectorCleanup(ctx context.Context, task domain.VectorCl
 		SELECT EXISTS (SELECT 1 FROM done)`,
 		task.RevisionID, task.LeaseOwner, task.LeaseToken).Scan(&completed)
 	if err != nil {
-		return false, fmt.Errorf("postgres: complete vector cleanup: %w", err)
+		return false, fmt.Errorf("postgres: complete vector cleanup: %w", observeWriterSQL(ctx, err))
 	}
 	return completed, nil
 }
 
 // ReleaseVectorCleanup drops the cleanup lease without advancing attempts on shutdown.
 func (c *Client) ReleaseVectorCleanup(ctx context.Context, task domain.VectorCleanupTask) error {
-	_, err := c.Pool.Exec(ctx, `
+	_, err := execWriterSQL(ctx, c.Pool, `
 		UPDATE hosted_vector_cleanups
 		   SET lease_owner = NULL,
 		       lease_token = NULL,

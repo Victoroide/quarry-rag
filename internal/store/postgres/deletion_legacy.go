@@ -124,16 +124,16 @@ func (l *legacyDeletion) discardSession(parent context.Context) {
 func (l *legacyDeletion) exec(parent context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 	if l.conn != nil {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), legacyBookkeepingLimit)
-		tag, err := l.conn.Exec(ctx, query, args...)
+		tag, err := execWriterSQL(ctx, l.conn, query, args...)
 		cancel()
-		if err == nil || (!sessionLost(err) && !l.conn.IsClosed()) {
+		if err == nil || !retryWriterSQL(ctx, err) || (!sessionLost(err) && !l.conn.IsClosed()) {
 			return tag, err
 		}
 		l.discardSession(parent)
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), legacyBookkeepingLimit)
 	defer cancel()
-	return l.client.Pool.Exec(ctx, query, args...)
+	return execWriterSQL(ctx, l.client.Pool, query, args...)
 }
 
 func legacyVectorModeFor(scoped bool, spec domain.LegacyDeletionSpec) (string, error) {
@@ -247,8 +247,8 @@ func (l *legacyDeletion) PrepareLegacyDeletion(ctx context.Context, id domain.Do
 		}
 	}
 	if mode == localVectors {
-		// Transactional vectors have no external effect to outlive the session.
-		return target, tx.Commit(ctx)
+		// Settling an expired mutation above can change the document in this transaction.
+		return target, commitWriterSQL(ctx, tx)
 	}
 	target.Claim = uuid.NewString()
 	remaining := time.Until(legacyDeadline(ctx))
@@ -277,7 +277,7 @@ func (l *legacyDeletion) PrepareLegacyDeletion(ctx context.Context, id domain.Do
 		// Another cleanup owns the reservation, or an operator holds this identity.
 		return target, domain.ErrDeletionBusy
 	}
-	return target, tx.Commit(ctx)
+	return target, commitWriterSQL(ctx, tx)
 }
 
 // recordedReservation is the part of an existing deletion receipt that a resumed
@@ -339,7 +339,7 @@ func (l *legacyDeletion) RetireLegacyDocument(ctx context.Context, id domain.Doc
 			RETURNING id
 		) SELECT EXISTS(SELECT 1 FROM removed)`, string(id), target.Incarnation, target.Claim).Scan(&retired)
 	if err != nil {
-		return err
+		return observeWriterSQL(ctx, err)
 	}
 	if !retired {
 		return domain.ErrLiveVectorMutation

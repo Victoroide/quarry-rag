@@ -1,8 +1,11 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -12,6 +15,68 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
+
+func TestWriterRecoveryEvidenceIgnoresServiceVerbosity(t *testing.T) {
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	for _, level := range []slog.Level{slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
+		t.Run(level.String(), func(t *testing.T) {
+			var retained, ordinary bytes.Buffer
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&ordinary, &slog.HandlerOptions{Level: level})))
+			ctx := t.Context()
+			sink := newWriterRecoveryEvidence(&retained).withAttrs([]slog.Attr{
+				slog.String("writer_operation", "operation"), slog.String("writer_sender", "sender"),
+			})
+			require.NoError(t, writeWriterEvidence(ctx, sink, "writer operation enrollment started"))
+			state := externalWriterState{evidence: sink}
+			require.NoError(t, state.dispatch(ctx, func(ctx context.Context) (bool, error) {
+				event := domain.ExternalWriterEvidence{Provider: "pinecone", Namespace: "default", Outcome: "started"}
+				if err := domain.RecordExternalWriterEvidence(ctx, event); err != nil {
+					return false, err
+				}
+				event.Outcome = "acknowledged_pending_indexing"
+				return false, domain.RecordExternalWriterEvidence(ctx, event)
+			}))
+			require.Panics(t, func() {
+				_ = state.dispatch(ctx, func(ctx context.Context) (bool, error) {
+					event := domain.ExternalWriterEvidence{Provider: "pinecone", Namespace: "fragment", Outcome: "started"}
+					require.NoError(t, domain.RecordExternalWriterEvidence(ctx, event))
+					panic("interrupted before the response")
+				})
+			})
+			require.False(t, state.close())
+			require.Empty(t, ordinary.String())
+			lines := bytes.Split(bytes.TrimSpace(retained.Bytes()), []byte("\n"))
+			require.Len(t, lines, 4)
+			for _, line := range lines {
+				require.Contains(t, string(line), `"stream":"writer_recovery"`)
+				require.Contains(t, string(line), `"writer_operation":"operation","writer_sender":"sender"`)
+			}
+			require.Contains(t, string(lines[0]), "writer operation enrollment started")
+			require.Contains(t, string(lines[1]), `"attempt":1`)
+			require.Contains(t, string(lines[2]), `"outcome":"acknowledged_pending_indexing","provider_request_id":"","provider_request_sequence":""`)
+			require.Contains(t, string(lines[3]), `"attempt":2,"provider":"pinecone","namespace":"fragment","outcome":"started"`)
+		})
+	}
+}
+
+type failedRecoveryOutput struct{}
+
+func (failedRecoveryOutput) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestWriterOperationUnavailableEvidenceStopsAdmission(t *testing.T) {
+	c, _ := sessionTestClientWithPool(t, 2)
+	grantExec(t, c, `UPDATE vector_state SET writer_operations_enabled=TRUE`)
+	c.writerEvidence = newWriterRecoveryEvidence(failedRecoveryOutput{})
+	called := false
+	err := c.RunWriterOperation(t.Context(), domain.WriterOperationReconcile, "scoped", func(context.Context) error {
+		called = true
+		return nil
+	})
+	require.ErrorIs(t, err, io.ErrClosedPipe)
+	require.False(t, called)
+	require.NoError(t, c.FreezeWriters(t.Context(), "next"))
+}
 
 func TestExternalWriterSettlementIsMonotone(t *testing.T) {
 	lost := errors.New("transport reply lost")
@@ -80,7 +145,7 @@ func TestWriterOperationsFreezeAfterGuardBackendLoss(t *testing.T) {
 	_, err := c.Pool.Exec(ctx, `UPDATE vector_state SET writer_operations_enabled=TRUE`)
 	require.NoError(t, err)
 	err = c.RunWriterOperation(ctx, domain.WriterOperationReconcile, "scoped", func(ctx context.Context) error {
-		requireDedicatedSessions(t, c, observer, 0)
+		requireDedicatedSessionsContext(ctx, t, c, observer, 0)
 		var pid uint32
 		require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
 		var terminated bool
@@ -138,7 +203,7 @@ func TestWriterOperationFreezeSeesReservationCommittedDuringLockWait(t *testing.
 	require.Eventually(t, func() bool {
 		var waiting bool
 		err := observer.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
-			AND wait_event_type='Lock' AND query LIKE '%FROM vector_state s WHERE singleton FOR UPDATE%')`).Scan(&waiting)
+			AND wait_event_type='Lock' AND query LIKE '%vector_state s WHERE singleton FOR UPDATE%')`).Scan(&waiting)
 		return err == nil && waiting
 	}, 5*time.Second, 25*time.Millisecond)
 	require.NoError(t, tx.Commit(ctx))
@@ -157,9 +222,14 @@ func TestWriterOperationRightsAndExactResolution(t *testing.T) {
 	work := func(context.Context) error { called++; return nil }
 	require.NoError(t, c.RunWriterOperation(ctx, domain.WriterOperationReconcile, "scoped", work))
 	roles := newGrantRoles(t, dsn, "maintenance", "other", "public_only")
-	grantExec(t, c, roles.sql(`ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO {public_only};
+	grantExec(t, c, roles.sql(`CREATE ROLE {maintenance} LOGIN PASSWORD 'fixture-password';
+		CREATE ROLE {other} LOGIN PASSWORD 'fixture-password';
+		CREATE ROLE {public_only} LOGIN PASSWORD 'fixture-password';
+		GRANT EXECUTE ON FUNCTION vector_writer_state() TO {maintenance}, {other};
+		ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO {public_only};
 		ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO {public_only}`))
 	require.NoError(t, c.RunMigrations(ctx))
+	grantExec(t, c, roles.sql(`GRANT UPDATE (writer_operations_enabled) ON vector_state TO {maintenance}`))
 	require.NoError(t, c.RunWriterOperation(ctx, domain.WriterOperationReconcile, "scoped", work))
 	require.Equal(t, 2, called)
 	var count int
@@ -168,10 +238,12 @@ func TestWriterOperationRightsAndExactResolution(t *testing.T) {
 	grantExec(t, c, roles.sql(`GRANT EXECUTE ON FUNCTION vector_writer_operations_enabled(),
 		vector_writer_operation_begin(uuid,uuid,text,text,text), vector_writer_operation_mark(uuid,uuid),
 		vector_writer_operation_finish(uuid,uuid) TO {maintenance}, {other}`))
-	openRole := func(role string) *Client {
-		return grantRoleClient(t, dsn, "SET SESSION AUTHORIZATION "+pgx.Identifier{roles.name(role)}.Sanitize())
-	}
-	writer, other, restricted := openRole("maintenance"), openRole("other"), openRole("public_only")
+	writer := writerLogin(t, dsn, roles.name("maintenance"))
+	other := writerLogin(t, dsn, roles.name("other"))
+	restricted := writerLogin(t, dsn, roles.name("public_only"))
+	var enabled bool
+	require.NoError(t, writer.Pool.QueryRow(ctx, `SELECT vector_writer_operations_enabled()`).Scan(&enabled))
+	require.False(t, enabled)
 	_, err := restricted.Pool.Exec(ctx, `SELECT vector_writer_operations_enabled()`)
 	requireSQLState(t, err, "42501")
 	_, err = restricted.Pool.Exec(ctx, `SELECT * FROM vector_writer_operations`)
@@ -180,6 +252,7 @@ func TestWriterOperationRightsAndExactResolution(t *testing.T) {
 	requireSQLState(t, err, "42501")
 	_, err = writer.Pool.Exec(ctx, `UPDATE vector_state SET writer_operations_enabled=TRUE`)
 	requireSQLState(t, err, "42501")
+	require.ErrorContains(t, err, "requires the metadata schema owner")
 	grantExec(t, c, `UPDATE vector_state SET writer_operations_enabled=TRUE`)
 	id, sender := uuid.New(), uuid.New()
 	const begin = `SELECT vector_writer_operation_begin($1,$2,$3,$4,$5)`
@@ -256,7 +329,7 @@ func TestWriterOperationFinishFailurePreservesWorkErrorAndReservation(t *testing
 	workErr := errors.New("receipt checkpoint failed")
 	err := c.RunWriterOperation(ctx, domain.WriterOperationDelete, uuid.NewString(), func(ctx context.Context) error {
 		require.NoError(t, domain.DispatchExternalWriter(ctx, func(context.Context) (bool, error) { return true, nil }))
-		grantExec(t, c, `DROP FUNCTION vector_writer_operation_finish(uuid,uuid)`)
+		grantExecContext(ctx, t, c, `DROP FUNCTION vector_writer_operation_finish(uuid,uuid)`)
 		return workErr
 	})
 	require.ErrorIs(t, err, workErr)
@@ -267,4 +340,79 @@ func TestWriterOperationFinishFailurePreservesWorkErrorAndReservation(t *testing
 	require.Equal(t, operation, finish.OperationID)
 	var pending *ErrWriterOperationsPending
 	require.ErrorAs(t, c.FreezeWriters(ctx, "g2"), &pending)
+}
+
+func TestWriterOperationMissingReservationPreventsDispatch(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+	grantExec(t, c, `UPDATE vector_state SET writer_operations_enabled=TRUE`)
+	err := c.RunWriterOperation(ctx, domain.WriterOperationDelete, uuid.NewString(), func(ctx context.Context) error {
+		// Model a replacement database missing the acknowledged enrollment.
+		grantExecContext(ctx, t, c, `DELETE FROM vector_writer_operations`)
+		return domain.DispatchExternalWriter(ctx, func(context.Context) (bool, error) {
+			t.Fatal("missing reservation allowed provider dispatch")
+			return false, nil
+		})
+	})
+	require.ErrorContains(t, err, "reservation missing")
+}
+
+func TestWriterOperationDispatchWithFixtureRemovalAndOneConnection(t *testing.T) {
+	c, observer := sessionTestClientWithPool(t, 1)
+	c.EnableHostedVectorManifests(true)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	grantExec(t, c, `UPDATE vector_state SET writer_operations_enabled=TRUE`)
+	id := domain.DocumentID(uuid.NewSHA1(uuid.NameSpaceOID, []byte("fixture-removal")).String())
+	sends := 0
+	require.NoError(t, c.RunWriterOperation(ctx, domain.WriterOperationDelete, string(id), func(ctx context.Context) error {
+		return c.WithOrdinaryRemoval(ctx, id, func(ctx context.Context) error {
+			manifests, err := c.ListDocumentVectorManifests(ctx, id, "")
+			require.NoError(t, err)
+			require.Empty(t, manifests)
+			return domain.DispatchExternalWriter(ctx, func(ctx context.Context) (bool, error) {
+				var marked bool
+				require.NoError(t, observer.QueryRow(ctx, `SELECT pending_provider FROM vector_writer_operations`).Scan(&marked))
+				require.True(t, marked)
+				sends++
+				return true, nil
+			})
+		})
+	}))
+	require.Equal(t, 1, sends)
+	require.NoError(t, c.FreezeWriters(ctx, "g2"))
+}
+
+func TestWriterSQLSettlementIsMonotoneThroughDetachedCleanup(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		err     error
+		settled bool
+	}{
+		{"acknowledged rollback", pgx.ErrTxCommitRollback, true},
+		{"acknowledged rejection", &pgconn.PgError{Code: "23514", SeverityUnlocalized: "ERROR"}, true},
+		{"acknowledged statement cancellation", &pgconn.PgError{Code: "57014", SeverityUnlocalized: "ERROR"}, true},
+		{"no matching row", pgx.ErrNoRows, true},
+		{"client timeout", context.DeadlineExceeded, false},
+		{"connection reset", &pgconn.PgError{Code: "08006", SeverityUnlocalized: "FATAL"}, false},
+		{"completion unknown", &pgconn.PgError{Code: "40003", SeverityUnlocalized: "ERROR"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			state := &externalWriterState{}
+			ctx = context.WithValue(ctx, writerSQLSettlementKey{}, state)
+			cancel()
+			detached := context.WithoutCancel(ctx)
+			db := heldClaimTestDB{exec: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+				return pgconn.CommandTag{}, test.err
+			}}
+			err := clearHeldDeletionClaim(detached, db, domain.DocumentID(uuid.NewString()), uuid.NewString(), uuid.NewString())
+			require.ErrorIs(t, err, test.err)
+			require.Equal(t, test.settled, retryWriterSQL(detached, err))
+			require.NoError(t, observeWriterSQL(detached, nil))
+			require.NoError(t, state.dispatch(detached, func(context.Context) (bool, error) { return true, nil }))
+			require.Equal(t, test.settled, state.close())
+		})
+	}
 }

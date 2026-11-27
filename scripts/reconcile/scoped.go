@@ -141,7 +141,9 @@ func (h hostedVectors) Verify(ctx context.Context, doc pgstore.BackfillDocument)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return false, ctxErr
 		}
-		if err = h.idx.UpdateVector(ctx, &pinecone.UpdateVectorRequest{Id: targetID, Metadata: labels}); err != nil {
+		if err = pineconestore.DispatchWriterMutation(ctx, reconcileNamespace(h.idx), func(ctx context.Context) error {
+			return h.idx.UpdateVector(ctx, &pinecone.UpdateVectorRequest{Id: targetID, Metadata: labels})
+		}); err != nil {
 			return false, fmt.Errorf("label vector: %w", err)
 		}
 	}

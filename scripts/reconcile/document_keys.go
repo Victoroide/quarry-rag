@@ -127,7 +127,7 @@ func canonicalizeDocumentKeys(ctx context.Context, idx documentKeyIndex, ids []s
 		metadata := &structpb.Struct{Fields: map[string]*structpb.Value{
 			"doc_id": structpb.NewStringValue(canonical),
 		}}
-		res, err := idx.UpdateVectorsByMetadata(ctx, &pinecone.UpdateVectorsByMetadataRequest{
+		res, err := updateReconcileMetadata(ctx, idx, &pinecone.UpdateVectorsByMetadataRequest{
 			Filter:   filter,
 			Metadata: metadata,
 			DryRun:   &dryRun,

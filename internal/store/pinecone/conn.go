@@ -13,6 +13,7 @@ import (
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -62,6 +63,79 @@ func (queryAttemptCredentials) GetRequestMetadata(ctx context.Context, _ ...stri
 }
 
 func (queryAttemptCredentials) RequireTransportSecurity() bool { return true }
+
+type writerTransportKey struct{}
+
+type writerTransportAttempt struct {
+	sent              atomic.Bool
+	headers, trailers metadata.MD
+}
+
+func (a *writerTransportAttempt) responseField(name string) string {
+	values := append(a.headers.Get(name), a.trailers.Get(name)...)
+	if len(values) == 0 {
+		return ""
+	}
+	for _, value := range values[1:] {
+		if value != values[0] {
+			return ""
+		}
+	}
+	return values[0]
+}
+
+type writerTransportCredentials struct{ sent *atomic.Bool }
+
+func (c writerTransportCredentials) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	if c.sent.Swap(true) {
+		return nil, status.Error(codes.Unavailable, "pinecone: retry requires another writer attempt")
+	}
+	return nil, nil
+}
+
+// The counter contributes no credentials or headers to the request.
+func (writerTransportCredentials) RequireTransportSecurity() bool { return false }
+
+// WithSingleWriterTransport guards writer calls against transparent resends.
+func WithSingleWriterTransport() grpc.DialOption {
+	return grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any,
+		conn *grpc.ClientConn, invoke grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		if attempt, ok := ctx.Value(writerTransportKey{}).(*writerTransportAttempt); ok {
+			opts = append(opts, grpc.PerRPCCredentials(writerTransportCredentials{&attempt.sent}),
+				grpc.Header(&attempt.headers), grpc.Trailer(&attempt.trailers))
+		}
+		return invoke(ctx, method, req, reply, conn, opts...)
+	})
+}
+
+// DispatchWriterMutation tracks one SDK mutation attempt. The SDK does not
+// expose a request sequence number, so an accepted mutation remains pending.
+func DispatchWriterMutation(ctx context.Context, namespace string, op func(context.Context) error) error {
+	if !domain.HasExternalWriterDispatch(ctx) {
+		return op(ctx)
+	}
+	return domain.DispatchExternalWriter(ctx, func(ctx context.Context) (bool, error) {
+		transport := new(writerTransportAttempt)
+		ctx = context.WithValue(ctx, writerTransportKey{}, transport)
+		ctx = context.WithValue(ctx, mutationDeliveryKey{}, new(atomic.Bool))
+		evidence := domain.ExternalWriterEvidence{Provider: "pinecone", Namespace: namespace, Outcome: "started"}
+		if err := domain.RecordExternalWriterEvidence(ctx, evidence); err != nil {
+			return true, err
+		}
+		err := op(ctx)
+		rejected := err != nil && !domain.VectorMutationUncertain(definiteRejection(err))
+		evidence.RequestID = transport.responseField("x-pinecone-request-id")
+		evidence.RequestSequence = transport.responseField("x-pinecone-request-lsn")
+		evidence.Outcome = "unconfirmed"
+		if rejected {
+			evidence.Outcome = "rejected"
+		} else if err == nil {
+			evidence.Outcome = "acknowledged_pending_indexing"
+		}
+		evidenceErr := domain.RecordExternalWriterEvidence(ctx, evidence)
+		return rejected && evidenceErr == nil, err
+	})
+}
 
 type mutationDeliveryKey struct{}
 

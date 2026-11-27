@@ -5,7 +5,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/Victoroide/quarry-rag/internal/domain"
 )
 
 // Logging wraps an http.Handler and logs each request's method, path,
@@ -25,7 +28,14 @@ func loggingHandler(next http.Handler, routeTemplates bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-		next.ServeHTTP(rw, r)
+		var evidenceFailed atomic.Bool
+		ctx := domain.WithWriterEvidenceFailureObserver(r.Context(), func() { evidenceFailed.Store(true) })
+		rt := r.WithContext(ctx)
+		next.ServeHTTP(rw, rt)
+		r.Pattern = rt.Pattern
+		if evidenceFailed.Load() {
+			return
+		}
 		path := r.URL.Path
 		if routeTemplates {
 			path = routeTemplate(r.Pattern)

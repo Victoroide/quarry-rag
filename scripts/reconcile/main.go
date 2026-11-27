@@ -168,12 +168,16 @@ func acquireMaintenanceWriter(ctx context.Context, gate domain.WriterLocker, opt
 	}
 	release, err := gate.AcquireWriter(ctx)
 	if err != nil {
-		if errors.Is(err, domain.ErrWritersFrozen) || errors.Is(err, domain.ErrGenerationMismatch) {
-			return nil, fmt.Errorf("maintenance writes are paused: %w", err)
-		}
-		return nil, fmt.Errorf("check document writers: %w", err)
+		return nil, maintenanceWriterError(err)
 	}
 	return release, nil
+}
+
+func maintenanceWriterError(err error) error {
+	if errors.Is(err, domain.ErrWritersFrozen) || errors.Is(err, domain.ErrGenerationMismatch) {
+		return fmt.Errorf("maintenance writes are paused: %w", err)
+	}
+	return fmt.Errorf("check document writers: %w", err)
 }
 
 func main() {
@@ -181,7 +185,9 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
-		slog.Error("reconcile", "error", err)
+		if !errors.Is(err, domain.ErrWriterEvidenceUnavailable) {
+			slog.Error("reconcile", "error", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -239,13 +245,40 @@ func run() error {
 	return reconcileConfigured(ctx, cfg, pg, opts)
 }
 
-func runMaintenance(ctx context.Context, gate domain.WriterLocker, opts options, work func() error) error {
+func runMaintenance(ctx context.Context, gate domain.WriterLocker, opts options, work func(context.Context) error) error {
+	if !opts.Apply {
+		return work(ctx)
+	}
+	if runner, ok := gate.(domain.WriterOperationRunner); ok {
+		entered := false
+		err := runner.RunWriterOperation(ctx, domain.WriterOperationReconcile, maintenanceAction(opts), func(ctx context.Context) error {
+			entered = true
+			return work(ctx)
+		})
+		if err != nil && !entered {
+			return maintenanceWriterError(err)
+		}
+		return err
+	}
 	release, err := acquireMaintenanceWriter(ctx, gate, opts)
 	if err != nil {
 		return err
 	}
 	defer release()
-	return work()
+	return work(ctx)
+}
+
+func maintenanceAction(opts options) string {
+	switch {
+	case opts.BackfillCollections:
+		return "collections"
+	case opts.BackfillScoped:
+		return "scoped"
+	case opts.CanonicalDocumentIDs:
+		return "canonical-document-ids"
+	default:
+		return "orphans"
+	}
 }
 
 func pinMaintenance(ctx context.Context, cfg *config.Config, pg *pgstore.Client, host string) error {
@@ -256,7 +289,7 @@ func pinMaintenance(ctx context.Context, cfg *config.Config, pg *pgstore.Client,
 	return nil
 }
 
-func pinAndRunMaintenance(ctx, pinCtx context.Context, cfg *config.Config, pg *pgstore.Client, host string, opts options, work func() error) error {
+func pinAndRunMaintenance(ctx, pinCtx context.Context, cfg *config.Config, pg *pgstore.Client, host string, opts options, work func(context.Context) error) error {
 	if opts.Apply {
 		if err := pinMaintenance(pinCtx, cfg, pg, host); err != nil {
 			return err
@@ -330,7 +363,11 @@ func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Cl
 	if err != nil {
 		return fmt.Errorf("describe index: %w", err)
 	}
-	conn, err := pc.Index(pinecone.NewIndexConnParams{Host: idx.Host}, reconcileIndexDialOptions(opts)...)
+	dialOptions := reconcileIndexDialOptions(opts)
+	if opts.Apply && !opts.SupersededUnrevisioned {
+		dialOptions = append(dialOptions, pcstore.WithSingleWriterTransport())
+	}
+	conn, err := pc.Index(pinecone.NewIndexConnParams{Host: idx.Host}, dialOptions...)
 	if err != nil {
 		return fmt.Errorf("connect to index: %w", err)
 	}
@@ -343,7 +380,7 @@ func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Cl
 		result, runErr := runSuperseded(ctx, cfg, conn.WithNamespace(defaultVectorNamespace), pg, idx.Host, opts, os.Stderr)
 		return errors.Join(runErr, json.NewEncoder(os.Stdout).Encode(result))
 	}
-	return pinAndRunMaintenance(ctx, startupCtx, cfg, pg, idx.Host, opts, func() error {
+	return pinAndRunMaintenance(ctx, startupCtx, cfg, pg, idx.Host, opts, func(ctx context.Context) error {
 		return reconcileIndex(ctx, cfg, conn, pg, collectionDocuments, documentIDs, opts)
 	})
 }
@@ -382,7 +419,9 @@ func reconcileIndex(ctx context.Context, cfg *config.Config, conn *pinecone.Inde
 		return lookupDocuments(lookupCtx, pg, ids)
 	}
 	deleteNamespace := func(deleteCtx context.Context, name string) error {
-		return conn.WithNamespace(name).DeleteAllVectorsInNamespace(deleteCtx)
+		return pcstore.DispatchWriterMutation(deleteCtx, name, func(ctx context.Context) error {
+			return conn.WithNamespace(name).DeleteAllVectorsInNamespace(ctx)
+		})
 	}
 	result, err := reconcileRevisions(ctx, pg, &indexChecker{conn: conn}, conn, deleteNamespace, lookup, opts,
 		sweepSettings{DrainDelay: cfg.HostedVectorDrainDelay, WriteFence: cfg.IndexVisibilityMode == "lsn"}, os.Stderr)
@@ -426,6 +465,26 @@ func isUndefinedTable(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }
 
+func updateReconcileMetadata(ctx context.Context, idx collectionIndex, request *pinecone.UpdateVectorsByMetadataRequest) (*pinecone.UpdateVectorsByMetadataResponse, error) {
+	if request.DryRun != nil && *request.DryRun {
+		return idx.UpdateVectorsByMetadata(ctx, request)
+	}
+	var response *pinecone.UpdateVectorsByMetadataResponse
+	err := pcstore.DispatchWriterMutation(ctx, reconcileNamespace(idx), func(ctx context.Context) error {
+		var err error
+		response, err = idx.UpdateVectorsByMetadata(ctx, request)
+		return err
+	})
+	return response, err
+}
+
+func reconcileNamespace(idx any) string {
+	if namespaced, ok := idx.(interface{ Namespace() string }); ok {
+		return namespaced.Namespace()
+	}
+	return ""
+}
+
 type indexChecker struct {
 	conn *pinecone.IndexConnection
 }
@@ -443,7 +502,7 @@ func (c *indexChecker) DeleteVectorIDs(ctx context.Context, namespace string, id
 	if len(ids) == 0 {
 		return nil
 	}
-	err := c.nsConn(namespace).DeleteVectorsById(ctx, ids)
+	err := deleteReconcileVectorIDs(ctx, c.nsConn(namespace), ids)
 	if status.Code(err) == codes.NotFound {
 		return nil
 	}

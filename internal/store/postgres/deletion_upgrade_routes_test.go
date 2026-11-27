@@ -13,6 +13,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
 	"github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -73,4 +74,39 @@ func TestUpgradedServingRoleServesIngestAndGuardedDelete(t *testing.T) {
 	require.False(t, live)
 	require.True(t, finalized)
 	require.False(t, held)
+
+	ctx := t.Context()
+	secondID := uuid.NewString()
+	ingest = httptest.NewRequestWithContext(ctx, http.MethodPost, "/ingest",
+		strings.NewReader(`{"content":"strict guarded document","document_id":"`+secondID+`"}`))
+	ingest.Header.Set("Content-Type", "application/json")
+	ingest.Header.Set("X-Service-Token", token)
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, ingest)
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+	_, err = owner.Pool.Exec(ctx, `UPDATE vector_state SET writer_operations_enabled=TRUE`)
+	require.NoError(t, err)
+
+	deleteSecond := func(want int) {
+		remove := httptest.NewRequestWithContext(ctx, http.MethodDelete, "/documents/"+secondID, nil)
+		remove.Header.Set("X-Service-Token", token)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, remove)
+		require.Equal(t, want, response.Code, response.Body.String())
+	}
+	deleteSecond(http.StatusServiceUnavailable)
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM documents WHERE id=$1)`, secondID).Scan(&live))
+	require.True(t, live, "the callback must not remove a document without enrollment privileges")
+	login := pgx.Identifier{serving.Pool.Config().ConnConfig.User}.Sanitize()
+	_, err = owner.Pool.Exec(ctx, `GRANT EXECUTE ON FUNCTION vector_writer_operation_begin(uuid,uuid,text,text,text),
+		vector_writer_operation_finish(uuid,uuid) TO `+login)
+	require.NoError(t, err)
+	deleteSecond(http.StatusServiceUnavailable)
+	_, err = owner.Pool.Exec(ctx, `GRANT EXECUTE ON FUNCTION vector_writer_operation_mark(uuid,uuid) TO `+login)
+	require.NoError(t, err)
+	deleteSecond(http.StatusOK)
+	var pending int
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT count(*) FROM vector_writer_operations`).Scan(&pending))
+	require.Zero(t, pending)
+
 }
