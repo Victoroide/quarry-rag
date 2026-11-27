@@ -211,7 +211,12 @@ func TestStageLayoutWithPostgresTargets(t *testing.T) {
 		}
 		vRep, err := v.run(ctx)
 		require.NoError(t, err)
-		require.True(t, vRep.Passed, "%v", vRep.Failures)
+		require.False(t, vRep.Passed)
+		require.Contains(t, vRep.Failures, "only 1 of 2 sample queries ran with a usable baseline (1 unmeasurable)")
+		require.Equal(t, 1, vRep.Sample.Queries)
+		require.Equal(t, 1, vRep.Sample.Skipped)
+		require.Equal(t, 1.0, vRep.Coverage.KeyCoverage)
+		require.Equal(t, 1.0, vRep.Coverage.ProfileCoverage)
 
 		// Unexpected provenance on target when snapshot lacks it and source is stale fails verify.
 		_, err = pg.Pool.Exec(ctx, `UPDATE chunk_vectors_g2 SET pages = ARRAY[7] WHERE chunk_id = $1`, string(chunksB[0].ID))

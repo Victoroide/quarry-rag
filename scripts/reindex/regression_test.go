@@ -15,7 +15,9 @@ import (
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/google/uuid"
+	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func TestConfiguredSourceMustMatchTheActiveTarget(t *testing.T) {
@@ -369,6 +371,73 @@ func TestFailedAppliedVerificationRevokesPreviousApproval(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, row.CorpusDigest)
 	require.Nil(t, row.VerifiedAt)
+}
+
+func TestAppliedVerificationRevokesApprovalForBadSourceSeed(t *testing.T) {
+	ctx := t.Context()
+	f := newFixture(t)
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	h.stagePinecone("g2", "quarry-g2", sourceModel, 0)
+	require.NoError(t, f.pg.FreezeWriters(ctx, "g2"))
+	apply := verifyOptions("g2")
+	apply.Apply, apply.SampleSize = true, f.completedChunks()
+	report, err := h.run(apply)
+	require.NoError(t, err, "%v", report["failures"])
+	require.Equal(t, true, report["recorded"])
+	approved, err := f.pg.Generation(ctx, "g2")
+	require.NoError(t, err)
+	require.NotNil(t, approved.VerifiedAt)
+	require.NotEmpty(t, approved.CorpusDigest)
+	require.NotEmpty(t, approved.Verification)
+
+	doc := f.docs[0]
+	chunk := f.chunks[doc.ID][0]
+	key := string(chunk.ID)
+	source := h.stores.index("quarry")
+	updateHostedRecord(t, source, key, func(record *pinecone.Vector) {
+		record.Metadata.Fields["chunk_id"] = structpb.NewStringValue(string(f.chunks[doc.ID][1].ID))
+	})
+	dry := apply
+	dry.Apply = false
+	for _, opts := range []options{dry, apply} {
+		bad, verifyErr := h.run(opts)
+		require.ErrorIs(t, verifyErr, errNotVerified)
+		require.Equal(t, false, bad["recorded"])
+		require.Equal(t, false, bad["passed"])
+		sample := bad["sample"].(map[string]any)
+		require.EqualValues(t, 1, sample["skipped"])
+		require.EqualValues(t, apply.SampleSize-1, sample["queries"])
+		cov := bad["coverage"].(map[string]any)
+		require.EqualValues(t, 1, cov["key_coverage"])
+		require.EqualValues(t, 1, cov["profile_coverage"])
+		row, generationErr := f.pg.Generation(ctx, "g2")
+		require.NoError(t, generationErr)
+		if opts.Apply {
+			require.Nil(t, row.VerifiedAt)
+			require.Empty(t, row.CorpusDigest)
+			require.JSONEq(t, "null", string(row.Verification))
+		} else {
+			require.Equal(t, approved, row)
+		}
+	}
+	activate := options{Generation: "g2", Activate: true, Apply: true}
+	_, err = h.run(activate)
+	require.ErrorContains(t, err, "must be verified")
+	require.ErrorIs(t, f.pg.WritersOpen(ctx), domain.ErrWritersFrozen)
+
+	sourceClient := pcstore.NewClientForIndex(source, testConfig(), "")
+	require.NoError(t, sourceClient.Upsert(ctx, "", sourceChunks(doc, []domain.Chunk{chunk}, sourceModel)))
+	report, err = h.run(apply)
+	require.NoError(t, err, "%v", report["failures"])
+	require.Equal(t, true, report["recorded"])
+	sample := report["sample"].(map[string]any)
+	require.EqualValues(t, apply.SampleSize, sample["queries"])
+	require.EqualValues(t, 0, sample["skipped"])
+	switched, err := h.run(activate)
+	require.NoError(t, err, "%v", switched)
+	require.Equal(t, "g2", switched["active_generation"])
+	require.Zero(t, h.embedCalls())
 }
 
 func TestVerificationRejectsEmptyRankingsAndIncompleteDocumentScan(t *testing.T) {
