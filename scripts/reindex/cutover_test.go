@@ -354,7 +354,7 @@ func TestFreezeActivateAndThawLifecycle(t *testing.T) {
 	// Activation needs a verified generation.
 	report, err = h.run(options{Generation: "g2", Activate: true, Quiesce: 0})
 	require.ErrorContains(t, err, "not ready")
-	require.Contains(t, fmt.Sprint(report["reasons"]), "not verified")
+	require.Contains(t, fmt.Sprint(report["reasons"]), "must be verified")
 
 	apply := verifyOptions("g2")
 	apply.Apply = true
@@ -1078,9 +1078,13 @@ func TestActivateRefusesAndNamesOpenDeletionReceipts(t *testing.T) {
 	require.Equal(t, []any{openID}, quiesce["open_deletion_ids"])
 
 	report, err = h.run(options{Generation: "g2", Activate: true, Apply: true, Quiesce: 0})
-	require.ErrorContains(t, err, fmt.Sprintf("0 in-flight jobs and 1 open deletions (%s) must finish before activation", openID))
+	require.ErrorIs(t, err, errActivationNotReady)
+	require.ErrorContains(t, err, fmt.Sprintf("1 open deletions (%s) must finish before activation", openID))
+	require.Equal(t, false, report["ready"])
 	require.Equal(t, false, report["applied"])
 	require.Contains(t, fmt.Sprint(report["reasons"]), openID)
+	quiesce = report["quiesce"].(map[string]any)
+	require.Equal(t, []any{openID}, quiesce["open_deletion_ids"])
 }
 
 func TestFreezeAndActivateErrorsExcludeDocumentContent(t *testing.T) {

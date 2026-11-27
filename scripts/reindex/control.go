@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
@@ -140,6 +141,19 @@ func corpusDigest(ctx context.Context, c corpus, opts options) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+func appendActivationQuiesceReasons(rep *controlReport, q pgstore.Quiesce, window time.Duration) {
+	if q.Frozen && rep.FreezeGeneration == rep.Generation && !q.Settled {
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf("the freeze is still settling; wait %s after freezing", window))
+	}
+	if q.RunningJobs > 0 {
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf("%d in-flight jobs must finish before activation", q.RunningJobs))
+	}
+	if q.OpenDeletions > 0 {
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf("%d open deletions%s must finish before activation",
+			q.OpenDeletions, pgstore.FormatOpenDeletions(q.OpenDeletions, q.OpenDeletionIDs)))
+	}
+}
+
 // activate pins every replica to a verified generation under the freeze. Traffic
 // moves only when the operator deploys replicas that name the generation.
 func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
@@ -181,31 +195,37 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if stateErr := d.state(ctx, &rep); stateErr != nil {
-		return stateErr
+	snapshot, err := d.pg.ReadActivationReadiness(ctx, opts.Generation, opts.Quiesce)
+	if err != nil {
+		return err
 	}
-	quiesce, qErr := d.pg.WriterQuiesce(ctx, opts.Quiesce)
-	if qErr != nil {
-		return qErr
-	}
-	rep.Quiesce = &quiesce
-	if row.State != pgstore.StateVerified {
-		rep.Reasons = append(rep.Reasons, fmt.Sprintf("the generation is %s, not verified", row.State))
-	}
-	if row.CorpusDigest != digest {
-		rep.Reasons = append(rep.Reasons, "the corpus changed since verification")
-	}
-	if !rep.Frozen || rep.FreezeGeneration != opts.Generation {
-		rep.Reasons = append(rep.Reasons, "writers are not frozen for this generation")
-	}
-	if quiesce.OpenDeletions > 0 {
-		rep.Reasons = append(rep.Reasons, fmt.Sprintf("%d open deletions%s must finish before activation",
-			quiesce.OpenDeletions, pgstore.FormatOpenDeletions(quiesce.OpenDeletions, quiesce.OpenDeletionIDs)))
+	rep.Active, rep.Frozen, rep.FreezeGeneration = snapshot.Active, snapshot.Quiesce.Frozen, snapshot.FreezeGeneration
+	rep.Quiesce = &snapshot.Quiesce
+	if snapshot.Active == opts.Generation {
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf("generation %q is already active", snapshot.Active))
+	} else {
+		if snapshot.TargetState != pgstore.StateVerified {
+			rep.Reasons = append(rep.Reasons, fmt.Sprintf("the generation is %s; it must be verified", snapshot.TargetState))
+		}
+		if snapshot.CorpusDigest != digest {
+			rep.Reasons = append(rep.Reasons, "the corpus changed since verification")
+		}
+		if !rep.Frozen || rep.FreezeGeneration != opts.Generation {
+			rep.Reasons = append(rep.Reasons, "writers are not frozen for this generation")
+		}
+		appendActivationQuiesceReasons(&rep, snapshot.Quiesce, opts.Quiesce)
 	}
 	ready := len(rep.Reasons) == 0
 	rep.Ready = &ready
+	if !ready {
+		notReadyErr := fmt.Errorf("%w: %s", errActivationNotReady, strings.Join(rep.Reasons, "; "))
+		if encodeErr := json.NewEncoder(out).Encode(rep); encodeErr != nil {
+			return errors.Join(notReadyErr, encodeErr)
+		}
+		return notReadyErr
+	}
 	if opts.Apply {
-		if ready && row.Store == "pinecone" {
+		if row.Store == "pinecone" {
 			_, closeTarget, _, openErr := d.openBound(ctx, targetSpec{Store: row.Store, Target: row.Target, Generation: row.Name, Dimensions: row.Profile.Dimensions}, row.Host)
 			if openErr != nil {
 				return fmt.Errorf("open the target for activation: %w", openErr)
@@ -213,26 +233,29 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 			defer closeTarget()
 		}
 		if err = fence.Activate(ctx, digest, opts.Quiesce); err != nil {
+			ready = false
+			var refusal *pgstore.ActivationQuiesceError
 			var pgErr *pgconn.PgError
-			if row.Store == "postgres" && errors.As(err, &pgErr) && pgErr.Code == "55000" &&
-				pgErr.ConstraintName == "hosted_manifest_cutover_guard" {
-				ready = false
+			switch {
+			case errors.As(err, &refusal):
+				rep.Quiesce = &refusal.Quiesce
+				appendActivationQuiesceReasons(&rep, refusal.Quiesce, refusal.Window)
+			case row.Store == "postgres" && errors.As(err, &pgErr) && pgErr.Code == "55000" &&
+				pgErr.ConstraintName == "hosted_manifest_cutover_guard":
 				if blocked, _ := d.reportHostedManifestCutover(ctx, &rep); !blocked {
 					rep.Reasons = append(rep.Reasons, "hosted manifest work blocked activation; check the original source before retrying")
 				}
+			default:
+				rep.Reasons = append(rep.Reasons, "activation was not confirmed; check the active generation before retrying")
 			}
-			_ = json.NewEncoder(out).Encode(rep)
+			if encodeErr := json.NewEncoder(out).Encode(rep); encodeErr != nil {
+				return errors.Join(err, encodeErr)
+			}
 			return err
 		}
 		rep.Applied = true
 		rep.Active = opts.Generation
 		rep.Reasons = []string{}
 	}
-	if encodeErr := json.NewEncoder(out).Encode(rep); encodeErr != nil {
-		return encodeErr
-	}
-	if rep.Applied || ready {
-		return nil
-	}
-	return errActivationNotReady
+	return json.NewEncoder(out).Encode(rep)
 }
