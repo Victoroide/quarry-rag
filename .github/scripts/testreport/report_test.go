@@ -23,7 +23,7 @@ func fixture(t testing.TB, name string) string {
 }
 
 // stream renders events as go test would print them.
-func stream(t *testing.T, events ...event) string {
+func stream(t testing.TB, events ...event) string {
 	t.Helper()
 	var b strings.Builder
 	enc := json.NewEncoder(&b)
@@ -40,6 +40,17 @@ func report(t *testing.T, input string, args ...string) (code int, stdout, stder
 	var out, errOut bytes.Buffer
 	code = execute(args, strings.NewReader(input), &out, &errOut)
 	return code, out.String(), errOut.String()
+}
+
+func reportInBothModes(t *testing.T, input string, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	code, stdout, stderr = report(t, input, args...)
+	spillCode, spillOut, spillErr := report(t, input, append([]string{"-diagnostic-spill"}, args...)...)
+	if spillCode != code || spillOut != stdout || spillErr != stderr {
+		t.Errorf("spilled exit %d, want %d\nstdout:\n%s\nwant:\n%s\nstderr:\n%s\nwant:\n%s",
+			spillCode, code, spillOut, stdout, spillErr, stderr)
+	}
+	return code, stdout, stderr
 }
 
 func execute(args []string, in io.Reader, stdout, stderr io.Writer) int {
@@ -176,6 +187,239 @@ func TestACachedResultFails(t *testing.T) {
 		t.Fatalf("exit status = %d, want 1", code)
 	}
 	requireContains(t, "diagnostics", stderr, "testreport: "+module+"/ok reused a cached result")
+}
+
+func TestNoTestResultUsesPackageTerminalOutcome(t *testing.T) {
+	const (
+		pkg          = "probe"
+		marker       = "?   \tprobe\t[no test files]\n"
+		diagnostic   = "diagnostic: [no test files]\n"
+		okProgress   = "ok   \tprobe\t0.25s\n"
+		failProgress = "FAIL \tprobe\t0.25s\n"
+		failed       = "testreport: probe failed\n"
+		incomplete   = "INCOMPLETE\tprobe\n"
+		missing      = "testreport: probe has no result\n"
+		okCount      = "| 1 | 0 | 0 | 0 | 0 |"
+		failedCount  = "| 0 | 1 | 0 | 0 | 0 |"
+		noTestsCount = "| 0 | 0 | 0 | 1 | 0 |"
+		missingCount = "| 0 | 0 | 0 | 0 | 1 |"
+	)
+	markerOutput := event{Action: "output", Package: pkg, Output: marker}
+	output := func(fragment string) event {
+		return event{Action: "output", Package: pkg, Output: fragment}
+	}
+	diagnosticOutput := event{Action: "output", Package: pkg, Output: diagnostic}
+	pass := event{Action: "pass", Package: pkg, Elapsed: 0.25}
+	fail := event{Action: "fail", Package: pkg, Elapsed: 0.25}
+	skip := event{Action: "skip", Package: pkg, Elapsed: 0.25}
+	for _, tc := range []struct {
+		name   string
+		events []event
+		code   int
+		stderr string
+		row    string
+		count  string
+	}{
+		{"diagnostic before fail", []event{diagnosticOutput, fail}, 1, failProgress + diagnostic + failed, "fail", failedCount},
+		{"diagnostic before pass", []event{diagnosticOutput, pass}, 0, okProgress, "pass", okCount},
+		{"exact LF before skip", []event{markerOutput, skip}, 0, "", "no test files", noTestsCount},
+		{"exact CRLF before skip", []event{{Action: "output", Package: pkg, Output: "?   \tprobe\t[no test files]\r\n"}, skip}, 0, "", "no test files", noTestsCount},
+		{"split package and marker", []event{output(marker[:7]), output(marker[7:17]), output(marker[17:]), skip}, 0, "", "no test files", noTestsCount},
+		{"split CRLF", []event{output(strings.TrimSuffix(marker, "\n")), output("\r"), output("\n"), skip}, 0, "", "no test files", noTestsCount},
+		{"start after a line ending", []event{output("diagnostic"), output("\n" + marker[:7]), output(marker[7:]), skip}, 0, "", "no test files", noTestsCount},
+		{"long diagnostic prefix", []event{output(strings.Repeat("x", 1024)), markerOutput, skip}, 0, okProgress, "skip", okCount},
+		{"wrong package across fragments", []event{output(marker[:7]), output("xy" + marker[10:]), skip}, 0, okProgress, "skip", okCount},
+		{"trailing data across fragments", []event{output(strings.TrimSuffix(marker, "\n")), output(" extra\n"), skip}, 0, okProgress, "skip", okCount},
+		{"trailing data after CR", []event{output(strings.TrimSuffix(marker, "\n") + "\r"), output("x\n"), skip}, 0, okProgress, "skip", okCount},
+		{"unfinished fragment before skip", []event{output(strings.TrimSuffix(marker, "\n")), skip}, 0, okProgress, "skip", okCount},
+		{"unfinished fragment before EOF", []event{output(marker[:7])}, 1, incomplete + marker[:7] + "\n" + missing, "no result", missingCount},
+		{"partitioned diagnostic before failure", []event{output(marker[:7]), output(marker[7:]), fail}, 1, failProgress + marker + failed, "fail", failedCount},
+		{"typed output interrupts fragments", []event{output(marker[:7]), {Action: "output", Package: pkg, OutputType: "frame", Output: "PASS\n"}, output(marker[7:]), skip}, 0, okProgress, "skip", okCount},
+		{"typed fragment cannot finish line", []event{output(marker[:7]), {Action: "output", Package: pkg, OutputType: "frame", Output: marker[7:]}, skip}, 0, okProgress, "skip", okCount},
+		{"named fragment cannot finish line", []event{output(marker[:7]), {Action: "output", Package: pkg, Test: "TestProbe", Output: marker[7:]}, skip}, 0, okProgress, "skip", okCount},
+		{"terminal resets partial match", []event{output(marker[:7]), skip, output(marker[7:]), skip}, 0, okProgress + okProgress, "skip", okCount},
+		{"terminal resets discarded line", []event{output("diagnostic"), pass, markerOutput, skip}, 0, okProgress, "no test files", noTestsCount},
+		{"exact before pass", []event{markerOutput, pass}, 0, okProgress, "pass", okCount},
+		{"exact before fail", []event{markerOutput, fail}, 1, failProgress + marker + failed, "fail", failedCount},
+		{"exact before EOF", []event{markerOutput}, 1, incomplete + marker + missing, "no result", missingCount},
+		{"bare skip", []event{skip}, 0, okProgress, "skip", okCount},
+		{"diagnostic before skip", []event{diagnosticOutput, skip}, 0, okProgress, "skip", okCount},
+		{"wrong package", []event{{Action: "output", Package: pkg, Output: "?   \tother\t[no test files]\n"}, skip}, 0, okProgress, "skip", okCount},
+		{"typed frame", []event{{Action: "output", Package: pkg, Output: marker, OutputType: "frame"}, skip}, 0, okProgress, "skip", okCount},
+		{"named marker", []event{{Action: "output", Package: pkg, Output: marker, Test: "TestProbe"}, skip}, 0, okProgress, "skip", okCount},
+		{"named output", []event{markerOutput, {Action: "output", Package: pkg, Test: "TestProbe", Output: "named log\n"}, skip}, 0, okProgress, "skip", okCount},
+		{"named run", []event{markerOutput, {Action: "run", Package: pkg, Test: "TestProbe"}, skip}, 0, okProgress, "skip", okCount},
+		{"named terminal before package skip", []event{markerOutput, {Action: "pass", Package: pkg, Test: "TestProbe"}, skip}, 0, okProgress, "skip", okCount},
+		{"named skip before EOF", []event{markerOutput, {Action: "skip", Package: pkg, Test: "TestProbe"}}, 1, incomplete + marker + missing, "no result", missingCount},
+		{"duplicate skip", []event{markerOutput, skip, skip}, 0, okProgress, "skip", okCount},
+		{"duplicate terminal after pass", []event{markerOutput, pass, skip}, 0, okProgress + okProgress, "skip", okCount},
+		{"late marker", []event{skip, markerOutput}, 0, okProgress, "skip", okCount},
+		{"fresh marker before duplicate skip", []event{skip, markerOutput, skip}, 0, okProgress, "no test files", noTestsCount},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := reportInBothModes(t, stream(t, tc.events...))
+			if code != tc.code || stderr != tc.stderr {
+				t.Errorf("got exit %d and stderr %q, want exit %d and stderr %q", code, stderr, tc.code, tc.stderr)
+			}
+			elapsed := "0.25"
+			if tc.row == "no result" {
+				elapsed = "0.00"
+			}
+			requireOnce(t, stdout, tc.count, "| "+pkg+" | "+tc.row+" | "+elapsed+" |")
+			if tc.row == "no test files" {
+				requireOnce(t, stdout, "### Packages without test files (1)\n\n- "+pkg+"\n")
+			} else {
+				requireAbsent(t, stdout, "### Packages without test files")
+			}
+		})
+	}
+}
+
+func TestNoTestResultAtGoOutputBoundary(t *testing.T) {
+	const prefix, suffix = "?   \t", "\t[no test files]\n"
+	const outputLimit = 1024
+	for _, tc := range []struct {
+		name   string
+		length int
+	}{
+		{"fits one output event", outputLimit},
+		{"LF in its own event", outputLimit + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pkg := strings.Repeat("a", tc.length-len(prefix)-len(suffix))
+			line := prefix + pkg + suffix
+			events := []event{{Action: "output", Package: pkg, Output: line[:outputLimit]}}
+			if tail := line[outputLimit:]; tail != "" {
+				events = append(events, event{Action: "output", Package: pkg, Output: tail})
+			}
+			events = append(events, event{Action: "skip", Package: pkg})
+			requireNoTestResult(t, stream(t, events...), pkg)
+		})
+	}
+}
+
+func TestNoTestResultFromGoWithLongPackageName(t *testing.T) {
+	// Go 1.27.4 emits this result in two plain output fragments of 1024 and
+	// 23 bytes for a module containing only a package declaration.
+	pkg := "example.test/" + strings.Repeat(strings.Repeat("a", 207)+"/", 4) + strings.Repeat("b", 180)
+	requireNoTestResult(t, fixture(t, "long-no-test-result.json"), pkg)
+}
+
+func requireNoTestResult(t *testing.T, input, pkg string) {
+	t.Helper()
+	code, stdout, stderr := reportInBothModes(t, input, pkg)
+	if code != 0 || stderr != "" {
+		t.Errorf("got exit %d and stderr %q, want exit 0 and silent progress", code, stderr)
+	}
+	requireOnce(t, stdout, "| 0 | 0 | 0 | 1 | 0 |", "| "+pkg+" | no test files | 0.00 |",
+		"### Packages without test files (1)\n\n- "+pkg+"\n")
+}
+
+func TestNoTestResultRequiresNoNamedEvents(t *testing.T) {
+	const pkg = "probe"
+	marker := event{Action: "output", Package: pkg, Output: "?   \tprobe\t[no test files]\n"}
+	skip := event{Action: "skip", Package: pkg}
+	for _, tc := range []struct{ action, test string }{
+		{"bench", "BenchmarkProbe"},
+		{"attr", "TestProbe"},
+		{"artifacts", "ExampleProbe"},
+	} {
+		named := event{Action: tc.action, Package: pkg, Test: tc.test}
+		for _, order := range []struct {
+			name   string
+			events []event
+			stops  int
+		}{
+			{"before marker", []event{named, marker, skip}, 1},
+			{"after marker", []event{marker, named, skip}, 1},
+			{"before earlier terminal", []event{named, {Action: "pass", Package: pkg}, marker, skip}, 2},
+		} {
+			t.Run(tc.action+"/"+order.name, func(t *testing.T) {
+				code, stdout, stderr := reportInBothModes(t, stream(t, order.events...))
+				if want := strings.Repeat("ok   \tprobe\t0.00s\n", order.stops); code != 0 || stderr != want {
+					t.Errorf("got exit %d and stderr %q, want exit 0 and stderr %q", code, stderr, want)
+				}
+				requireOnce(t, stdout, "| 1 | 0 | 0 | 0 | 0 |", "| probe | skip | 0.00 |")
+				requireAbsent(t, stdout, "### Packages without test files", tc.test)
+			})
+		}
+		t.Run(tc.action+"/empty test name", func(t *testing.T) {
+			requireNoTestResult(t, stream(t, marker, event{Action: tc.action, Package: pkg}, skip), pkg)
+		})
+	}
+}
+
+func TestNoTestResultIsPackageScoped(t *testing.T) {
+	const marker = "?   \twithout-tests\t[no test files]\n"
+	code, stdout, stderr := reportInBothModes(t, stream(t,
+		event{Action: "start", Package: "without-tests"},
+		event{Action: "start", Package: "with-tests"},
+		event{Action: "output", Package: "with-tests", Output: marker},
+		event{Action: "output", Package: "without-tests", Output: marker[:10]},
+		event{Action: "bench", Package: "with-tests", Test: "BenchmarkProbe"},
+		event{Action: "attr", Package: "with-tests", Test: "TestProbe"},
+		event{Action: "artifacts", Package: "with-tests", Test: "ExampleProbe"},
+		event{Action: "output", Package: "with-tests", Test: "TestProbe", Output: "?   \twith-tests\t[no test files]\n"},
+		event{Action: "output", Package: "without-tests", Output: marker[10:]},
+		event{Action: "output", Package: "without-tests", Output: marker},
+		event{Action: "skip", Package: "with-tests"},
+		event{Action: "skip", Package: "without-tests"},
+	))
+	if code != 0 || stderr != "ok   \twith-tests\t0.00s\n" {
+		t.Errorf("got exit %d and stderr %q, want only with-tests progress and exit 0", code, stderr)
+	}
+	requireOnce(t, stdout, "| 1 | 0 | 0 | 1 | 0 |",
+		"| without-tests | no test files | 0.00 |\n| with-tests | skip | 0.00 |\n")
+	if list := section(t, stdout, "Packages without test files"); list != " (1)\n\n- without-tests\n" {
+		t.Errorf("unexpected no-test list %q", list)
+	}
+}
+
+func TestNoTestResultFragmentsInterleave(t *testing.T) {
+	code, stdout, stderr := reportInBothModes(t, stream(t,
+		event{Action: "output", Package: "a", Output: "?   \ta\t[no"},
+		event{Action: "output", Package: "b", Output: "?   \tb\t[no"},
+		event{Action: "attr", Package: "other", Test: "TestProbe"},
+		event{Action: "output", Package: "a", Output: " test files]\n"},
+		event{Action: "output", Package: "b", Output: " test files]\n"},
+		event{Action: "pass", Package: "other"},
+		event{Action: "skip", Package: "b"},
+		event{Action: "skip", Package: "a"},
+	))
+	if code != 0 || stderr != "ok   \tother\t0.00s\n" {
+		t.Errorf("got exit %d and stderr %q, want exit 0 and only other progress", code, stderr)
+	}
+	requireOnce(t, stdout, "| 1 | 0 | 0 | 2 | 0 |", "| a | no test files | 0.00 |\n| b | no test files | 0.00 |",
+		"### Packages without test files (2)\n\n- a\n- b\n")
+}
+
+func TestNoTestTextPreservesBuildAndCacheFailures(t *testing.T) {
+	const shared = "dep [dep.test]"
+	const sharedDiagnostic = "shared compiler diagnostic: [no test files]\n"
+	const standaloneDiagnostic = "?   \tstandalone\t[no test files]\n"
+	code, stdout, stderr := reportInBothModes(t, stream(t,
+		event{Action: "build-output", ImportPath: shared, Output: sharedDiagnostic},
+		event{Action: "build-fail", ImportPath: shared},
+		event{Action: "output", Package: "a", Output: "?   \ta\t[no test files]\n"},
+		event{Action: "fail", Package: "a", FailedBuild: shared},
+		event{Action: "fail", Package: "b", FailedBuild: shared},
+		event{Action: "build-output", ImportPath: "standalone", Output: standaloneDiagnostic},
+		event{Action: "output", Package: "standalone", Output: standaloneDiagnostic},
+		event{Action: "build-fail", ImportPath: "standalone"},
+		event{Action: "output", Package: "cached", Output: "?   \tcached\t[no test files]\n"},
+		event{Action: "output", Package: "cached", Output: "ok  \tcached\t(cached)\n"},
+		event{Action: "pass", Package: "cached"},
+	))
+	if code != 1 {
+		t.Errorf("exit status = %d, want 1", code)
+	}
+	requireOnce(t, stderr, "FAIL \ta\t0.00s\n"+sharedDiagnostic, sharedDiagnostic, "FAIL \tb\t0.00s\n",
+		"FAIL \tstandalone\t0.00s\nBUILD FAIL\tstandalone\n"+standaloneDiagnostic,
+		"testreport: a did not build\n", "testreport: b did not build\n", "testreport: standalone did not build\n",
+		"ok   \tcached\t0.00s\n", "testreport: cached reused a cached result\n")
+	requireOnce(t, stdout, "| 1 | 0 | 3 | 0 | 0 |", "| a | did not build |", "| b | did not build |",
+		"| standalone | did not build |", "| cached | pass |")
+	requireAbsent(t, stdout, "### Packages without test files")
 }
 
 func TestSlowestTestsAreLongestFirstAndLimited(t *testing.T) {
@@ -537,13 +781,7 @@ func TestDiagnosticSpillMatchesLegacyReport(t *testing.T) {
 	}
 	for _, name := range fixtures {
 		t.Run(name, func(t *testing.T) {
-			input := fixture(t, name)
-			wantCode, wantOut, wantErr := report(t, input)
-			gotCode, gotOut, gotErr := report(t, input, "-diagnostic-spill")
-			if gotCode != wantCode || gotOut != wantOut || gotErr != wantErr {
-				t.Fatalf("spilled exit %d, want %d\nstdout:\n%s\nwant:\n%s\nstderr:\n%s\nwant:\n%s",
-					gotCode, wantCode, gotOut, wantOut, gotErr, wantErr)
-			}
+			reportInBothModes(t, fixture(t, name))
 		})
 	}
 }
