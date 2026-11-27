@@ -11,6 +11,7 @@ Notable changes are grouped by release.
 ### Added
 
 - Opt-in source line and paragraph boundaries for internal layout-aware retrieval.
+- Added an opt-in durable maintenance writer barrier that prevents vector freeze while deletion or hosted reconciliation operations are unsettled.
 
 - Added an opt-in pgvector document-set recall evaluation for precomputed embeddings, with HNSW and IVFFlat comparisons and an exact-scope threshold rule.
 
