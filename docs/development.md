@@ -356,7 +356,8 @@ identity. Its document must be completed with an active manifest for the current
 incarnation and have no ingest job, pending vector mutation or deletion
 reservation. A bare vector can belong to a previous incarnation of that UUID.
 Use the [superseded vector cleanup procedure](deployment.md#superseded-vector-cleanup)
-before applying the selection.
+before applying the selection or using the recovery flags
+`-confirm-sender-stopped` and `-confirm-target-drained`.
 
 `-scan-limit` bounds listed entries, including duplicates and ineligible
 records, and defaults to 100000. It also caps listing requests if the provider

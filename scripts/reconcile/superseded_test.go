@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -588,24 +589,64 @@ func TestSupersededOptions(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 100000, opts.ScanLimit)
 	confirm := "-confirm-target-drained=" + storedID
-	opts, err = parseOptions([]string{"-superseded-unrevisioned", "-apply", confirm}, t.Output())
+	sender := "-confirm-sender-stopped=" + missingID
+	apply := []string{"-superseded-unrevisioned", "-apply"}
+	opts, err = parseOptions(apply, io.Discard)
+	require.NoError(t, err)
+	require.Equal(t, uuid.Nil, opts.ConfirmTargetDrained)
+	require.Equal(t, uuid.Nil, opts.ConfirmSenderStopped)
+	opts, err = parseOptions(append(apply, confirm, sender), t.Output())
 	require.NoError(t, err)
 	require.Equal(t, uuid.MustParse(storedID), opts.ConfirmTargetDrained)
+	require.Equal(t, uuid.MustParse(missingID), opts.ConfirmSenderStopped)
 	for _, flags := range [][]string{
-		{"-scan-limit=1"}, {"-page-token=token"}, {"-apply", confirm},
-		{"-superseded-unrevisioned", confirm},
-		{"-superseded-unrevisioned", "-apply", confirm, "-page-token=token"},
-		{"-superseded-unrevisioned", "-apply", "-confirm-target-drained"},
-		{"-superseded-unrevisioned", "-apply", "-confirm-target-drained=true"},
-		{"-superseded-unrevisioned", "-apply", "-confirm-target-drained="},
-		{"-superseded-unrevisioned", "-apply", "-confirm-target-drained=" + uuid.Nil.String()},
+		{"-scan-limit=1"}, {"-page-token=token"}, {"-apply", confirm, sender},
+		{"-superseded-unrevisioned", confirm, sender},
+		append(apply, confirm, sender, "-page-token=token"),
+		append(apply, confirm, sender, "-page-token="),
+		append(apply, confirm), append(apply, sender),
+		append(apply, confirm, sender, confirm), append(apply, sender, confirm, sender),
+		append(apply, sender, "-confirm-target-drained"),
+		append(apply, confirm, "-confirm-sender-stopped"),
 		{"-superseded-unrevisioned", "-scan-limit=0"},
 	} {
 		_, err := parseOptions(flags, t.Output())
 		require.Error(t, err, fmt.Sprint(flags))
 	}
+	for _, value := range []string{"", "true", "false", "malformed", uuid.Nil.String(),
+		strings.ToUpper("abcdefab-cdef-4abc-8def-abcdefabcdef"), strings.ReplaceAll(storedID, "-", ""),
+		"urn:uuid:" + storedID, "{" + storedID + "}", strings.Repeat("a", 4096)} {
+		_, err := parseOptions(append(apply, sender, "-confirm-target-drained="+value), io.Discard)
+		require.Error(t, err)
+		_, err = parseOptions(append(apply, confirm, "-confirm-sender-stopped="+value), io.Discard)
+		require.Error(t, err)
+	}
 	for _, mode := range []string{"-backfill-collections", "-backfill-scoped", "-canonical-document-ids", "-source-uploads"} {
 		_, err := parseOptions([]string{"-superseded-unrevisioned", mode}, t.Output())
 		require.Error(t, err, mode)
 	}
+}
+
+func FuzzSupersededRecoveryOptions(f *testing.F) {
+	f.Add(storedID, missingID, false)
+	f.Add(storedID, missingID, true)
+	f.Add(uuid.Nil.String(), "", false)
+	f.Add("{"+storedID+"}", "true", false)
+	f.Fuzz(func(t *testing.T, reservation, sender string, duplicate bool) {
+		args := []string{"-superseded-unrevisioned", "-apply", "-confirm-target-drained=" + reservation, "-confirm-sender-stopped=" + sender}
+		if duplicate {
+			args = append(args, args[3])
+		}
+		opts, err := parseOptions(args, io.Discard)
+		reservationID, reservationErr := uuid.Parse(reservation)
+		senderID, senderErr := uuid.Parse(sender)
+		if duplicate || reservationErr != nil || senderErr != nil || reservationID == uuid.Nil || senderID == uuid.Nil ||
+			reservationID.String() != reservation || senderID.String() != sender {
+			require.Error(t, err)
+			return
+		}
+		require.NoError(t, err)
+		require.Equal(t, reservationID, opts.ConfirmTargetDrained)
+		require.Equal(t, senderID, opts.ConfirmSenderStopped)
+	})
 }

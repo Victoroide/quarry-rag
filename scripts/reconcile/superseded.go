@@ -59,14 +59,24 @@ func runSuperseded(ctx context.Context, cfg *config.Config, index vectorIndex, p
 		return reconcileSuperseded(ctx, index, lookup, nil, scope, opts)
 	}
 
-	epoch, err := prepareActiveCleanup(ctx, pg, fence, generation, opts.ConfirmTargetDrained, diagnostics)
+	sender, err := uuid.NewRandom()
+	if err != nil {
+		return supersededReport{}, fmt.Errorf("generate active cleanup sender UUID: %w", err)
+	}
+	if _, diagnosticErr := fmt.Fprintf(diagnostics, "active cleanup sender %s for generation %q\n", sender, generation); diagnosticErr != nil {
+		return supersededReport{}, fmt.Errorf("report active cleanup sender: %w", diagnosticErr)
+	}
+	epoch, err := prepareActiveCleanup(ctx, pg, fence, generation, opts.ConfirmTargetDrained, opts.ConfirmSenderStopped, diagnostics)
 	if err != nil {
 		return supersededReport{}, err
 	}
 	remove := func(ctx context.Context, ids []string) (bool, error) {
-		reservation, err := fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids)
+		reservation, err := fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids, sender)
 		if err != nil {
 			return false, err
+		}
+		if _, err := fmt.Fprintf(diagnostics, "committed active cleanup reservation %s from sender %s for exact IDs %q\n", reservation, sender, ids); err != nil {
+			return false, fmt.Errorf("report committed active cleanup reservation %s: %w", reservation, err)
 		}
 		if err := ctx.Err(); err != nil {
 			return false, fmt.Errorf("dispatch active cleanup reservation %s for exact IDs %q: %w", reservation, ids, err)
@@ -76,7 +86,7 @@ func runSuperseded(ctx context.Context, cfg *config.Config, index vectorIndex, p
 		if err := index.DeleteVectorsById(deleteCtx, ids); err != nil {
 			return false, fmt.Errorf("delete exact IDs %q for active cleanup reservation %s: %w", ids, reservation, err)
 		}
-		if err := fence.ClearActiveCleanup(ctx, epoch, reservation, ids); err != nil {
+		if err := fence.ClearActiveCleanup(ctx, epoch, reservation, ids, sender); err != nil {
 			return true, fmt.Errorf("record acknowledgment for active cleanup reservation %s and exact IDs %q: %w", reservation, ids, err)
 		}
 		return true, nil
@@ -84,7 +94,7 @@ func runSuperseded(ctx context.Context, cfg *config.Config, index vectorIndex, p
 	return reconcileSuperseded(ctx, index, lookup, remove, scope, opts)
 }
 
-func prepareActiveCleanup(ctx context.Context, pg *pgstore.Client, fence *pgstore.GenerationFence, generation string, confirmed uuid.UUID, diagnostics io.Writer) (time.Time, error) {
+func prepareActiveCleanup(ctx context.Context, pg *pgstore.Client, fence *pgstore.GenerationFence, generation string, confirmed, stoppedSender uuid.UUID, diagnostics io.Writer) (time.Time, error) {
 	state, err := pg.VectorState(ctx)
 	if err != nil {
 		return time.Time{}, err
@@ -97,14 +107,15 @@ func prepareActiveCleanup(ctx context.Context, pg *pgstore.Client, fence *pgstor
 	if err != nil {
 		return time.Time{}, err
 	}
-	if batch == nil && confirmed != uuid.Nil {
-		return time.Time{}, fmt.Errorf("stale active cleanup confirmation %s: no batch is pending", confirmed)
+	hasConfirmation := confirmed != uuid.Nil || stoppedSender != uuid.Nil
+	if batch == nil && hasConfirmation {
+		return time.Time{}, errors.New("stale active cleanup confirmation: no batch is pending")
 	}
-	if batch != nil && confirmed != batch.Reservation {
-		pending := fmt.Sprintf("unconfirmed active cleanup reservation %s for exact IDs %q: verify provider settlement before using -confirm-target-drained=%s",
-			batch.Reservation, batch.IDs, batch.Reservation)
-		if confirmed != uuid.Nil {
-			return time.Time{}, fmt.Errorf("stale active cleanup confirmation %s: %s", confirmed, pending)
+	if batch != nil && (confirmed != batch.Reservation || stoppedSender != batch.Sender) {
+		pending := fmt.Sprintf("unconfirmed active cleanup for generation %q, reservation %s, sender %s and exact IDs %q: verify sender shutdown and then provider settlement before using -confirm-sender-stopped=%s -confirm-target-drained=%s",
+			generation, batch.Reservation, batch.Sender, batch.IDs, batch.Sender, batch.Reservation)
+		if hasConfirmation {
+			return time.Time{}, fmt.Errorf("stale active cleanup confirmation: %s", pending)
 		}
 		return time.Time{}, errors.New(pending)
 	}
@@ -117,10 +128,10 @@ func prepareActiveCleanup(ctx context.Context, pg *pgstore.Client, fence *pgstor
 			domain.WriteRequestTimeout, quiet.RunningJobs, quiet.OpenDeletions, pgstore.FormatOpenDeletions(quiet.OpenDeletions, quiet.OpenDeletionIDs))
 	}
 	if batch != nil {
-		if _, err := fmt.Fprintf(diagnostics, "clearing confirmed active cleanup reservation %s for exact IDs %q and restarting the scan\n", confirmed, batch.IDs); err != nil {
+		if _, err := fmt.Fprintf(diagnostics, "clearing active cleanup reservation %s from sender %s for exact IDs %q after operator confirmation of sender shutdown and provider settlement, and restarting the scan\n", confirmed, stoppedSender, batch.IDs); err != nil {
 			return time.Time{}, err
 		}
-		if err := fence.ClearActiveCleanup(ctx, epoch, confirmed, batch.IDs); err != nil {
+		if err := fence.ClearActiveCleanup(ctx, epoch, confirmed, batch.IDs, stoppedSender); err != nil {
 			return time.Time{}, err
 		}
 	}

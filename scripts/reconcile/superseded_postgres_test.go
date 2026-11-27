@@ -31,20 +31,157 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestSupersededReconcileAfterManifestRetry(t *testing.T) {
+func supersededTestDatabase(t *testing.T) (dsn string, pg *pgstore.Client, cfg *config.Config, host string) {
+	t.Helper()
 	ctx := t.Context()
-	dsn := pgtest.Start(t)
-	pg, err := pgstore.NewClient(ctx, dsn)
+	dsn = pgtest.Start(t)
+	var err error
+	pg, err = pgstore.NewClient(ctx, dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pg.Close(context.Background())) })
 	require.NoError(t, pg.RunMigrations(ctx))
-	cfg := &config.Config{
+	cfg = &config.Config{
 		VectorStore: "pinecone", PineconeIndexName: "bound", EmbeddingProvider: domain.EmbeddingProviderOpenAI,
 		OpenAIEmbeddingModel: "text-embedding-3-small", EmbeddingModelRevision: "rev-1",
 		ExtractionChunkVersion: "chunk-1", EmbeddingDimensions: 3, ChunkTokenSize: 512, ChunkOverlap: 64,
 	}
-	const host = "bound-host"
+	host = "bound-host"
 	require.NoError(t, pg.PinVectorGeneration(ctx, pgstore.LegacyGeneration, "pinecone", "bound", host, cfg.EmbeddingSettings()))
+	return dsn, pg, cfg, host
+}
+
+func TestSupersededRecoveryRequiresStoppedSender(t *testing.T) {
+	_, pg, cfg, host := supersededTestDatabase(t)
+	ctx := t.Context()
+	doc, revision := uuid.New(), uuid.New()
+	_, err := pg.Pool.Exec(ctx, `INSERT INTO documents(id,content,status) VALUES($1,'published','completed')`, doc)
+	require.NoError(t, err)
+	_, err = pg.Pool.Exec(ctx, `WITH manifest AS (
+		INSERT INTO hosted_vector_manifests(revision_id,document_id,incarnation,attempt,id_prefix,vector_ids,chunk_ids,state)
+		SELECT $2::uuid,id,COALESCE(incarnation,id),1,$2::uuid::text,ARRAY[$2::uuid::text],ARRAY[$2::uuid],'active' FROM documents WHERE id=$1
+		RETURNING revision_id, document_id, incarnation
+	) INSERT INTO hosted_vector_revisions(document_id,incarnation,active_revision_id)
+		SELECT document_id,incarnation,revision_id FROM manifest`, doc, revision)
+	require.NoError(t, err)
+	require.NoError(t, pg.FreezeWriters(ctx, pgstore.LegacyGeneration))
+	_, err = pg.Pool.Exec(ctx, `UPDATE vector_state SET frozen_at=now()-interval '2 minutes'`)
+	require.NoError(t, err)
+	var tokens []string
+	index := &supersededTestIndex{vectors: map[string]*pinecone.Vector{
+		bareTestID: supersededTestVector(t, bareTestID, map[string]any{"doc_id": doc.String()}),
+	}}
+	index.deleteHook = index.deleteVectors
+	index.list = func(_ context.Context, req *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error) {
+		if req.PaginationToken == nil {
+			tokens = append(tokens, "")
+			return supersededTestList("next", bareTestID), nil
+		}
+		tokens = append(tokens, *req.PaginationToken)
+		return supersededTestList(""), nil
+	}
+	opts := options{SupersededUnrevisioned: true, Apply: true, Page: 1, Limit: 2, ScanLimit: 3}
+	supervisor, stop := context.WithCancel(ctx)
+	paused := make(chan string, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("sender still running after cancellation")
+		}
+	})
+	var invocation string
+	var senderErr error
+	go func() {
+		defer close(done)
+		_, senderErr = runSuperseded(supervisor, cfg, index, pg, host, opts, cleanupDiagnosticFunc(func(p []byte) (int, error) {
+			if strings.Contains(string(p), "exact IDs") {
+				paused <- string(p)
+				<-supervisor.Done()
+			} else {
+				invocation = string(p)
+			}
+			return len(p), nil
+		}))
+	}()
+	select {
+	case <-time.After(10 * time.Second):
+		t.Fatal("sender did not pause after commit")
+	case <-done:
+		t.Fatalf("sender exited before dispatch boundary: %v", senderErr)
+	case diagnostic := <-paused:
+		require.Contains(t, diagnostic, bareTestID)
+	}
+	terminateCleanupFence(t, pg)
+	state, err := pg.VectorState(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, state.FrozenAt)
+	readBatch := func() *pgstore.ActiveCleanupBatch {
+		t.Helper()
+		fence, fenceErr := pg.FenceGeneration(ctx, pgstore.LegacyGeneration)
+		require.NoError(t, fenceErr)
+		defer fence.Close(ctx)
+		batch, readErr := fence.ActiveCleanupBatch(ctx, *state.FrozenAt)
+		require.NoError(t, readErr)
+		return batch
+	}
+	batch := readBatch()
+	require.NotNil(t, batch)
+	require.Equal(t, []string{bareTestID}, batch.IDs)
+	require.Contains(t, invocation, batch.Sender.String())
+	require.Empty(t, index.deleted)
+	recovery := opts
+	recovery.ConfirmTargetDrained = batch.Reservation
+	mismatch := recovery
+	mismatch.ConfirmSenderStopped = uuid.New()
+	for _, blocked := range []options{opts, recovery, mismatch} {
+		_, err = runSuperseded(ctx, cfg, index, pg, host, blocked, io.Discard)
+		require.ErrorContains(t, err, batch.Sender.String())
+		require.Equal(t, batch, readBatch())
+		require.Equal(t, []string{""}, tokens)
+		require.Empty(t, index.deleted)
+		require.ErrorContains(t, pg.ThawWriters(ctx), "pending active vector cleanup")
+	}
+	stop()
+	select {
+	case <-done:
+		require.ErrorIs(t, senderErr, context.Canceled)
+	case <-time.After(10 * time.Second):
+		t.Fatal("sender did not exit")
+	}
+	require.Empty(t, index.deleted)
+	// No request was submitted, so the stopped sender has no outstanding effect.
+	recovery.ConfirmSenderStopped = batch.Sender
+	_, err = runSuperseded(ctx, cfg, index, pg, "wrong-host", recovery, io.Discard)
+	require.ErrorIs(t, err, pgstore.ErrGenerationDrift)
+	require.Equal(t, batch, readBatch())
+	require.Equal(t, []string{""}, tokens)
+	report, err := runSuperseded(ctx, cfg, index, pg, host, recovery, io.Discard)
+	require.NoError(t, err)
+	require.Equal(t, 1, report.Deleted)
+	require.Empty(t, report.NextPageToken)
+	require.Equal(t, []string{"", "", "next"}, tokens)
+	require.Equal(t, [][]string{{bareTestID}}, index.deleted)
+	require.Nil(t, readBatch())
+	require.NoError(t, pg.ThawWriters(ctx))
+	require.NoError(t, pg.WritersOpen(ctx))
+}
+
+func terminateCleanupFence(t *testing.T, pg *pgstore.Client) {
+	t.Helper()
+	var terminated bool
+	err := pg.Pool.QueryRow(t.Context(), `SELECT pg_terminate_backend(pid, 5000) FROM pg_locks
+		WHERE locktype='advisory' AND granted AND objsubid=2
+			AND objid::bigint=(hashtext($1)::bigint & 4294967295)
+			AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`, pgstore.LegacyGeneration).Scan(&terminated)
+	require.NoError(t, err)
+	require.True(t, terminated)
+}
+
+func TestSupersededReconcileAfterManifestRetry(t *testing.T) {
+	ctx := t.Context()
+	dsn, pg, cfg, host := supersededTestDatabase(t)
 
 	partialID, reuseID, legacyID := fmt.Sprintf("%032x", 1), fmt.Sprintf("%032x", 2), fmt.Sprintf("%032x", 3)
 	doc, reused, legacy := uuid.NewString(), uuid.NewString(), uuid.NewString()
@@ -215,6 +352,7 @@ func TestSupersededReconcileAfterManifestRetry(t *testing.T) {
 		require.ErrorContains(t, cleanupErr, "-confirm-target-drained="+batch.Reservation.String())
 		recovery := opts
 		recovery.ConfirmTargetDrained = batch.Reservation
+		recovery.ConfirmSenderStopped = batch.Sender
 		return recovery
 	}
 
@@ -260,15 +398,121 @@ func TestSupersededReconcileAfterManifestRetry(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, acknowledged.Deleted)
 
+	t.Run("failed diagnostics before dispatch", func(t *testing.T) {
+		bare(t, partialID, doc, originalIncarnation)
+		before := len(index.deleted)
+		diagnosticErr := errors.New("diagnostics unavailable")
+		_, cleanupErr := runSuperseded(ctx, cfg, index, pg, host, opts, cleanupDiagnosticFunc(func(p []byte) (int, error) {
+			if strings.Contains(string(p), "exact IDs") {
+				return 0, diagnosticErr
+			}
+			return len(p), nil
+		}))
+		require.ErrorIs(t, cleanupErr, diagnosticErr)
+		require.Len(t, index.deleted, before)
+		require.ErrorContains(t, pg.ThawWriters(ctx), "pending active vector cleanup")
+		_, cleanupErr = runSuperseded(ctx, cfg, index, pg, host, confirm(t), io.Discard)
+		require.NoError(t, cleanupErr)
+		require.Equal(t, [][]string{{partialID}}, index.deleted[before:])
+	})
+
+	t.Run("reservation commit reply lost", func(t *testing.T) {
+		bare(t, partialID, doc, originalIncarnation)
+		before := len(index.deleted)
+		var readyToReserve, armed atomic.Bool
+		originalList := index.list
+		index.list = func(ctx context.Context, req *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error) {
+			readyToReserve.Store(true)
+			return originalList(ctx, req)
+		}
+		defer func() { index.list = originalList }()
+		faulted, connectErr := pgstore.NewClient(ctx, dsn, func(pool *pgxpool.Config) {
+			pool.ConnConfig.Tracer = cleanupQueryTrace(func(sql string) {
+				if sql == "commit" && readyToReserve.CompareAndSwap(true, false) {
+					armed.Store(true)
+				}
+			})
+			pool.ConnConfig.BuildFrontend = func(r io.Reader, w io.Writer) *pgproto3.Frontend {
+				return pgproto3.NewFrontend(&lostCleanupReply{Reader: r, armed: &armed}, w)
+			}
+		})
+		require.NoError(t, connectErr)
+		t.Cleanup(faulted.Pool.Close)
+		var diagnostics bytes.Buffer
+		_, cleanupErr := runSuperseded(ctx, cfg, index, faulted, host, opts, &diagnostics)
+		require.ErrorContains(t, cleanupErr, "commit active cleanup reservation")
+		require.False(t, armed.Load())
+		waitForCleanupFenceRelease(ctx, t, pg)
+		batch := readBatch(t)
+		require.NotNil(t, batch)
+		require.Contains(t, diagnostics.String(), batch.Sender.String())
+		require.NotContains(t, diagnostics.String(), batch.Reservation.String())
+		require.Len(t, index.deleted, before)
+		require.ErrorContains(t, pg.ThawWriters(ctx), "pending active vector cleanup")
+		_, cleanupErr = runSuperseded(ctx, cfg, index, pg, host, confirm(t), io.Discard)
+		require.NoError(t, cleanupErr)
+		require.Equal(t, [][]string{{partialID}}, index.deleted[before:])
+	})
+
+	t.Run("concurrent recovery", func(t *testing.T) {
+		bare(t, partialID, doc, originalIncarnation)
+		index.deleteErr = context.DeadlineExceeded
+		_, cleanupErr := runSuperseded(ctx, cfg, index, pg, host, opts, io.Discard)
+		require.ErrorIs(t, cleanupErr, context.DeadlineExceeded)
+		confirmed := confirm(t)
+		// The first request settled before recovery. No retry should be dispatched.
+		delete(index.vectors, partialID)
+		index.deleteErr = nil
+		before := len(index.deleted)
+		clearing, allowClear, done := make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
+		recoverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("recovery still running after cancellation")
+			}
+		})
+		var recoveryErr error
+		go func() {
+			defer close(done)
+			_, recoveryErr = runSuperseded(recoverCtx, cfg, index, pg, host, confirmed, cleanupDiagnosticFunc(func(p []byte) (int, error) {
+				if strings.Contains(string(p), "restarting the scan") {
+					clearing <- struct{}{}
+					select {
+					case <-allowClear:
+					case <-recoverCtx.Done():
+						return 0, recoverCtx.Err()
+					}
+				}
+				return len(p), nil
+			}))
+		}()
+		select {
+		case <-clearing:
+		case <-done:
+			t.Fatalf("recovery exited before clear: %v", recoveryErr)
+		case <-recoverCtx.Done():
+			t.Fatal("recovery did not reach clear")
+		}
+		_, cleanupErr = runSuperseded(recoverCtx, cfg, index, pg, host, confirmed, io.Discard)
+		require.ErrorContains(t, cleanupErr, "another operation owns")
+		close(allowClear)
+		select {
+		case <-done:
+			require.NoError(t, recoveryErr)
+		case <-recoverCtx.Done():
+			t.Fatal("recovery did not finish")
+		}
+		_, cleanupErr = runSuperseded(ctx, cfg, index, pg, host, confirmed, io.Discard)
+		require.ErrorContains(t, cleanupErr, "no batch is pending")
+		require.Len(t, index.deleted, before)
+	})
+
 	bare(t, partialID, doc, originalIncarnation)
 	index.onDelete = func() {
-		// The fence is the only advisory lock held in this disposable database.
-		var terminated bool
-		terminateErr := pg.Pool.QueryRow(ctx, `SELECT pg_terminate_backend(pid, 5000) FROM pg_locks
-			WHERE locktype='advisory' AND granted
-				AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`).Scan(&terminated)
-		require.NoError(t, terminateErr)
-		require.True(t, terminated)
+		terminateCleanupFence(t, pg)
 	}
 	acknowledged, err = runSuperseded(ctx, cfg, index, pg, host, opts, io.Discard)
 	require.ErrorContains(t, err, "record acknowledgment")
@@ -309,27 +553,22 @@ func TestSupersededReconcileAfterManifestRetry(t *testing.T) {
 				faulted, connectErr := pgstore.NewClient(ctx, dsn, func(pool *pgxpool.Config) {
 					pool.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
 					pool.ConnConfig.BuildFrontend = func(r io.Reader, w io.Writer) *pgproto3.Frontend {
-						return pgproto3.NewFrontend(&lostCleanupClearReply{Reader: r, armed: &armed}, w)
+						return pgproto3.NewFrontend(&lostCleanupReply{Reader: r, armed: &armed}, w)
 					}
 				})
 				require.NoError(t, connectErr)
 				t.Cleanup(func() { require.NoError(t, faulted.Close(context.WithoutCancel(ctx))) })
 				armAfterDiagnostic := cleanupDiagnosticFunc(func(p []byte) (int, error) {
-					armed.Store(true)
+					if strings.Contains(string(p), "restarting the scan") {
+						armed.Store(true)
+					}
 					return len(p), nil
 				})
 				beforeList := listCalls
 				_, err = runSuperseded(ctx, cfg, index, faulted, host, operatorA, armAfterDiagnostic)
 				require.ErrorContains(t, err, "clear active cleanup")
 				require.False(t, armed.Load(), "the clear response must have been dropped")
-				require.Eventually(t, func() bool {
-					var locked bool
-					probeErr := pg.Pool.QueryRow(ctx, `SELECT EXISTS (
-						SELECT FROM pg_locks WHERE locktype='advisory' AND granted
-							AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
-					)`).Scan(&locked)
-					return probeErr == nil && !locked
-				}, 5*time.Second, 10*time.Millisecond, "the disconnected clear must release the fence")
+				waitForCleanupFenceRelease(ctx, t, pg)
 				require.Nil(t, readBatch(t), "the clear committed despite the lost response")
 				_, err = runSuperseded(ctx, cfg, index, pg, host, operatorB, io.Discard)
 				require.ErrorContains(t, err, "no batch is pending")
@@ -343,6 +582,7 @@ func TestSupersededReconcileAfterManifestRetry(t *testing.T) {
 			batchB := readBatch(t)
 			require.NotNil(t, batchB)
 			require.NotEqual(t, operatorB.ConfirmTargetDrained, batchB.Reservation)
+			require.NotEqual(t, operatorB.ConfirmSenderStopped, batchB.Sender)
 			require.Equal(t, []string{tc.nextID}, batchB.IDs)
 
 			// The provider may omit a record even with its delete outstanding.
@@ -426,7 +666,9 @@ func TestSupersededSplitFetchDoesNotReservePartialPage(t *testing.T) {
 		unowned:    supersededTestVector(t, unowned, map[string]any{"doc_id": uuid.NewString()}),
 	}}
 	index.deleteHook = index.deleteVectors
+	var listCalls int
 	index.list = func(_ context.Context, req *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error) {
+		listCalls++
 		switch {
 		case req.PaginationToken == nil:
 			return supersededTestList("start", qualified), nil
@@ -437,18 +679,20 @@ func TestSupersededSplitFetchDoesNotReservePartialPage(t *testing.T) {
 			return supersededTestList(""), nil
 		}
 	}
-	journal := func() ([]string, uuid.NullUUID) {
+	journal := func() ([]string, uuid.NullUUID, uuid.NullUUID) {
 		t.Helper()
 		var ids []string
-		var reservation uuid.NullUUID
-		require.NoError(t, pg.Pool.QueryRow(ctx, `SELECT active_cleanup_ids, active_cleanup_reservation FROM vector_state`).Scan(&ids, &reservation))
-		return ids, reservation
+		var reservation, sender uuid.NullUUID
+		require.NoError(t, pg.Pool.QueryRow(ctx, `SELECT active_cleanup_ids, active_cleanup_reservation, active_cleanup_sender FROM vector_state`).
+			Scan(&ids, &reservation, &sender))
+		return ids, reservation, sender
 	}
 	requireEmptyJournal := func() {
 		t.Helper()
-		ids, reservation := journal()
+		ids, reservation, sender := journal()
 		require.Empty(t, ids)
 		require.False(t, reservation.Valid)
+		require.False(t, sender.Valid)
 	}
 	start, err := runSuperseded(ctx, cfg, index, pg, host, options{SupersededUnrevisioned: true, Page: 1, Limit: 1, ScanLimit: 1}, io.Discard)
 	require.NoError(t, err)
@@ -545,13 +789,16 @@ func TestSupersededSplitFetchDoesNotReservePartialPage(t *testing.T) {
 	require.Empty(t, index.deleted)
 	requireEmptyJournal()
 
-	var lastReservation uuid.UUID
+	var lastReservation, lastSender uuid.UUID
 	index.onDelete = func() {
-		ids, reservation := journal()
+		ids, reservation, sender := journal()
 		require.Equal(t, eligible, ids)
 		require.True(t, reservation.Valid)
 		require.NotEqual(t, lastReservation, reservation.UUID)
+		require.True(t, sender.Valid)
+		require.NotEqual(t, lastSender, sender.UUID)
 		lastReservation = reservation.UUID
+		lastSender = sender.UUID
 		require.ErrorIs(t, pg.WritersOpen(ctx), domain.ErrWritersFrozen)
 	}
 	denyLookup, fetches = false, nil
@@ -574,23 +821,45 @@ func TestSupersededSplitFetchDoesNotReservePartialPage(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Zero(t, ambiguous.Deleted)
 	require.Equal(t, start.NextPageToken, ambiguous.NextPageToken)
-	ids, pending := journal()
+	ids, pending, sender := journal()
 	require.True(t, pending.Valid)
+	require.True(t, sender.Valid)
 	require.Equal(t, eligible, ids)
 	require.Equal(t, lastReservation, pending.UUID)
-	require.ErrorContains(t, pg.ThawWriters(ctx), "pending active vector cleanup")
-	_, err = runSuperseded(ctx, cfg, index, pg, host, apply, io.Discard)
-	require.ErrorContains(t, err, "unconfirmed active cleanup reservation")
+	require.Equal(t, lastSender, sender.UUID)
+	requireHeldJournal := func() {
+		t.Helper()
+		actualIDs, actualReservation, actualSender := journal()
+		require.Equal(t, eligible, actualIDs)
+		require.Equal(t, pending, actualReservation)
+		require.Equal(t, sender, actualSender)
+		require.ErrorContains(t, pg.ThawWriters(ctx), "pending active vector cleanup")
+	}
+	requireHeldJournal()
+	recovery := apply
+	recovery.PageToken = ""
+	recovery.ScanLimit++
+	listCallsBeforeRecovery := listCalls
+	fetches = nil
+	_, err = runSuperseded(ctx, cfg, index, pg, host, recovery, io.Discard)
+	require.ErrorContains(t, err, "unconfirmed active cleanup for generation")
+	require.ErrorContains(t, err, "-confirm-sender-stopped="+sender.UUID.String()+" -confirm-target-drained="+pending.UUID.String())
+	requireHeldJournal()
+	recovery.ConfirmTargetDrained = pending.UUID
+	_, err = runSuperseded(ctx, cfg, index, pg, host, recovery, io.Discard)
+	require.ErrorContains(t, err, "stale active cleanup confirmation")
+	requireHeldJournal()
+	require.Equal(t, listCallsBeforeRecovery, listCalls)
+	require.Empty(t, fetches)
 	require.Equal(t, [][]string{eligible, eligible}, index.deleted)
 	for _, id := range eligible {
 		delete(index.vectors, id)
 	}
 	index.deleteErr = nil
-	apply.PageToken = ""
-	apply.ScanLimit++
-	apply.ConfirmTargetDrained = pending.UUID
-	recovered, err := runSuperseded(ctx, cfg, index, pg, host, apply, io.Discard)
+	recovery.ConfirmSenderStopped = sender.UUID
+	recovered, err := runSuperseded(ctx, cfg, index, pg, host, recovery, io.Discard)
 	require.NoError(t, err)
+	require.Equal(t, len(page)+1, recovered.Scanned)
 	require.Zero(t, recovered.Selected)
 	require.Zero(t, recovered.Deleted)
 	require.Equal(t, [][]string{eligible, eligible}, index.deleted)
@@ -605,14 +874,35 @@ type cleanupDiagnosticFunc func([]byte) (int, error)
 
 func (f cleanupDiagnosticFunc) Write(p []byte) (int, error) { return f(p) }
 
-// lostCleanupClearReply drops ReadyForQuery after the autocommit clear commits.
-type lostCleanupClearReply struct {
+func waitForCleanupFenceRelease(ctx context.Context, t *testing.T, pg *pgstore.Client) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var locked bool
+		err := pg.Pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT FROM pg_locks WHERE locktype='advisory' AND granted
+			AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+		)`).Scan(&locked)
+		return err == nil && !locked
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+type cleanupQueryTrace func(string)
+
+func (trace cleanupQueryTrace) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	trace(data.SQL)
+	return ctx
+}
+
+func (cleanupQueryTrace) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// lostCleanupReply drops the idle ReadyForQuery after the statement commits.
+type lostCleanupReply struct {
 	io.Reader
 	armed *atomic.Bool
 	tail  []byte
 }
 
-func (r *lostCleanupClearReply) Read(p []byte) (int, error) {
+func (r *lostCleanupReply) Read(p []byte) (int, error) {
 	n, err := r.Reader.Read(p)
 	if n == 0 || !r.armed.Load() {
 		return n, err
