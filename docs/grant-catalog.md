@@ -861,6 +861,15 @@ Grants-mode telemetry omits document, object, and upload identifiers and disable
 content capture. API responses, restricted audit records, and durable ingestion
 and cleanup diagnostics keep their existing formats.
 
+Fatal errors from `cmd/server` in grants mode combine a stage from a fixed set with
+one of these categories, for example `server error: startup: postgres: operation failed`.
+Underlying error details are omitted from stderr. Configuration failures use
+`startup: configuration`, including when `AUTHZ_MODE` has an invalid explicit value.
+The default service mode keeps detailed fatal diagnostics. In a mixed deployment,
+each server uses the format its binary supports. Rolling back to the category-only
+format removes stages from later failures and restores detailed output for
+failures before tracing setup completes.
+
 Upgrade every grants-mode replica and worker to apply this behavior across the
 deployment. A binary rollback restores that binary's previous diagnostic rendering.
 Telemetry already exported stays subject to the destination's retention policy.
