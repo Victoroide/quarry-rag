@@ -124,6 +124,38 @@ func TestScopedDocumentOperationsNeedOnlyDocumentedFunctionPrivileges(t *testing
 	_, err = operator.ScopedPolicyState(t.Context(), f.owner)
 	require.Error(t, err, "operator logins cannot query serving policy state")
 
+	// Restricted serving login recovers an applied scoped deletion commit using
+	// only PostgreSQL built-ins and already-granted receipt SELECT.
+	maskedID := f.acceptOwned(t, f.owner, "", "documents/document/masked/orig.pdf")
+	maskedInc := storedIncarnation(t, admin, domain.DocumentID(maskedID))
+	var commitMasked bool
+	service.scopedHooks = &scopedDeletionHooks{
+		wrapTx: func(tx pgx.Tx) pgx.Tx {
+			return &commitInterceptTx{
+				Tx: tx,
+				onCommit: func(ctx context.Context, inner pgx.Tx) error {
+					if commitErr := inner.Commit(ctx); commitErr != nil {
+						return commitErr
+					}
+					commitMasked = true
+					return context.DeadlineExceeded
+				},
+			}
+		},
+	}
+	t.Cleanup(func() { service.scopedHooks = nil })
+	rec2 := newDeletionRecorder()
+	ops2 := rec2.ops("")
+	ops2.InMemory, ops2.MemoryOwner = true, uuid.NewString()
+	ops2.ExpectedIncarnation = maskedInc
+	gotInc, gotComplete, err := service.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(maskedID), ops2)
+	require.NoError(t, err)
+	require.True(t, commitMasked)
+	require.False(t, gotComplete)
+	require.Equal(t, maskedInc, gotInc)
+	require.NoError(t, service.ResumeScopedDeletion(t.Context(), domain.DocumentID(maskedID), gotInc, ops2))
+	require.Empty(t, documentStatus(t, admin, domain.DocumentID(maskedID)))
+
 	t.Run("alternate corpus schema", func(t *testing.T) {
 		grantExec(t, admin, `CREATE SCHEMA alternate_file_corpus`)
 		const path = `SET search_path TO alternate_file_corpus, public`

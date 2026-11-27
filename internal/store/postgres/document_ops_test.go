@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -625,4 +629,717 @@ func TestScopedDeleteQualifierSurvivesRetryAndReuse(t *testing.T) {
 	}, rec.all())
 	require.Equal(t, 1, receiptCount(ctx, t, f.c, id))
 	require.True(t, readReceipt(t, f.c, id).finalized)
+}
+
+type commitInterceptTx struct {
+	pgx.Tx
+	onCommit func(context.Context, pgx.Tx) error
+}
+
+func (w *commitInterceptTx) Commit(ctx context.Context) error {
+	return w.onCommit(ctx, w.Tx)
+}
+
+func TestEvaluateScopedCommitProbe(t *testing.T) {
+	start := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	addr := "127.0.0.1/32"
+	otherAddr := "10.0.0.2/32"
+	port := int32(5432)
+	otherPort := int32(5433)
+	committed := "committed"
+	aborted := "aborted"
+	inProgress := "in progress"
+	weird := "weird"
+	commitErr := errors.New("lost commit reply")
+
+	base := scopedCommitIdentity{xid: "42", postmasterStartTime: start, serverAddr: &addr, serverPort: &port}
+
+	t.Run("committed with receipt recovers", func(t *testing.T) {
+		outcome, err := evaluateScopedCommitProbe(base, scopedCommitProbeResult{
+			xactStatus: &committed,
+			instance:   scopedCommitIdentity{postmasterStartTime: start, serverAddr: &addr, serverPort: &port},
+			receipt:    true,
+		}, commitErr)
+		require.NoError(t, err)
+		require.Equal(t, scopedProbeCommitted, outcome)
+	})
+
+	t.Run("unix socket nil addr and port match", func(t *testing.T) {
+		sockBase := scopedCommitIdentity{xid: "42", postmasterStartTime: start}
+		outcome, err := evaluateScopedCommitProbe(sockBase, scopedCommitProbeResult{
+			xactStatus: &committed,
+			instance:   scopedCommitIdentity{postmasterStartTime: start},
+			receipt:    true,
+		}, commitErr)
+		require.NoError(t, err)
+		require.Equal(t, scopedProbeCommitted, outcome)
+	})
+
+	t.Run("aborted returns original commit error", func(t *testing.T) {
+		outcome, err := evaluateScopedCommitProbe(base, scopedCommitProbeResult{
+			xactStatus: &aborted,
+			instance:   scopedCommitIdentity{postmasterStartTime: start, serverAddr: &addr, serverPort: &port},
+		}, commitErr)
+		require.ErrorIs(t, err, commitErr)
+		require.Equal(t, scopedProbeAborted, outcome)
+	})
+
+	for name, probe := range map[string]scopedCommitProbeResult{
+		"replica in recovery": {
+			xactStatus: &committed,
+			instance:   base,
+			inRecovery: true,
+			receipt:    true,
+		},
+		"replica in recovery even on abort": {
+			xactStatus: &aborted,
+			instance:   base,
+			inRecovery: true,
+		},
+		"server restarted": {
+			xactStatus: &committed,
+			instance:   scopedCommitIdentity{postmasterStartTime: start.Add(time.Second), serverAddr: &addr, serverPort: &port},
+			receipt:    true,
+		},
+		"different server addr": {
+			xactStatus: &committed,
+			instance:   scopedCommitIdentity{postmasterStartTime: start, serverAddr: &otherAddr, serverPort: &port},
+			receipt:    true,
+		},
+		"nil vs non-nil addr": {
+			xactStatus: &committed,
+			instance:   scopedCommitIdentity{postmasterStartTime: start, serverAddr: nil, serverPort: &port},
+			receipt:    true,
+		},
+		"different server port": {
+			xactStatus: &committed,
+			instance:   scopedCommitIdentity{postmasterStartTime: start, serverAddr: &addr, serverPort: &otherPort},
+			receipt:    true,
+		},
+		"nil vs non-nil port": {
+			xactStatus: &committed,
+			instance:   scopedCommitIdentity{postmasterStartTime: start, serverAddr: &addr, serverPort: nil},
+			receipt:    true,
+		},
+		"null xact status": {
+			xactStatus: nil,
+			instance:   base,
+			receipt:    true,
+		},
+		"in progress xact status": {
+			xactStatus: &inProgress,
+			instance:   base,
+			receipt:    true,
+		},
+		"unrecognized xact status": {
+			xactStatus: &weird,
+			instance:   base,
+			receipt:    true,
+		},
+		"committed without receipt": {
+			xactStatus: &committed,
+			instance:   base,
+			receipt:    false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			outcome, err := evaluateScopedCommitProbe(base, probe, context.DeadlineExceeded)
+			require.Equal(t, scopedProbeUnconfirmed, outcome)
+			require.ErrorIs(t, err, domain.ErrScopedDeletionCommitUnconfirmed)
+			require.NotErrorIs(t, err, context.DeadlineExceeded)
+			require.NotErrorIs(t, err, context.Canceled)
+		})
+	}
+}
+
+func TestUnconfirmedCommitErrorDoesNotExposeCancellation(t *testing.T) {
+	err := unconfirmedCommitError("probe_timeout")
+	require.ErrorIs(t, err, domain.ErrScopedDeletionCommitUnconfirmed)
+	require.NotErrorIs(t, err, context.Canceled)
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, domain.ErrScopedDeletionCommitUnconfirmed, errors.Unwrap(err))
+}
+
+func TestSecurityAuditArgsSanitizesAndBounds(t *testing.T) {
+	long := string(make([]byte, 200))
+	args := securityAuditArgs(t.Context(), domain.SecurityAuditEvent{
+		RequestID:   long,
+		TenantID:    "not-a-uuid",
+		PrincipalID: uuid.Nil.String(),
+		Action:      "document_delete",
+		Outcome:     "allow",
+		Reason:      long,
+		DocumentID:  "bad",
+		Incarnation: "also-bad",
+	})
+	require.Len(t, args, 9)
+	require.Len(t, args[0].(string), 128)
+	require.Nil(t, args[1])
+	require.Nil(t, args[2])
+	require.Len(t, args[6].(string), 128)
+	require.Nil(t, args[7])
+	require.Nil(t, args[8])
+}
+
+func TestScopedDeletionCancelBeforeCommit(t *testing.T) {
+	f := provisionOwnedFixture(t, activatedDatabase(t))
+	stages := []string{"before_begin", "lock", "authorize", "intent", "owner", "audit", "precommit"}
+	for _, mode := range []string{"cancel", "expired"} {
+		for _, stage := range stages {
+			t.Run(mode+"/"+stage, func(t *testing.T) {
+				docID := f.acceptOwned(t, f.owner, "", "documents/doc/cancel/"+stage+"/orig.pdf")
+				inc := storedIncarnation(t, f.c, domain.DocumentID(docID))
+				rec := newDeletionRecorder()
+				ops := rec.ops(inc)
+				ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
+
+				fixedNow := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+				clockNow := fixedNow
+				validUntil := fixedNow.Add(time.Minute)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+
+				trigger := func() {
+					if mode == "cancel" {
+						cancel()
+					} else {
+						clockNow = fixedNow.Add(2 * time.Minute)
+					}
+				}
+				if stage == "before_begin" {
+					trigger()
+				} else {
+					f.c.scopedHooks = &scopedDeletionHooks{
+						beforeStage: func(got string) error {
+							if got == stage {
+								trigger()
+							}
+							return nil
+						},
+					}
+				}
+				f.c.now = func() time.Time { return clockNow }
+				t.Cleanup(func() {
+					f.c.scopedHooks = nil
+					f.c.now = nil
+				})
+
+				_, _, err := f.c.BeginScopedDeletion(ctx, f.owner, validUntil, domain.DocumentID(docID), ops)
+				if mode == "cancel" {
+					require.ErrorIs(t, err, context.Canceled)
+				} else {
+					require.ErrorIs(t, err, domain.ErrUnauthorized)
+				}
+				require.Empty(t, rec.all())
+				require.NotEqual(t, "deleting", documentStatus(t, f.c, domain.DocumentID(docID)))
+
+				var receipts, owners, audits int
+				require.NoError(t, f.c.Pool.QueryRow(t.Context(), `SELECT
+					(SELECT count(*) FROM document_deletions WHERE document_id=$1),
+					(SELECT count(*) FROM grant_catalog_deletion_receipts WHERE document_id=$1),
+					(SELECT count(*) FROM grant_catalog_security_audit WHERE document_id=$1 AND action='document_delete')`, docID).
+					Scan(&receipts, &owners, &audits))
+				require.Zero(t, receipts)
+				require.Zero(t, owners)
+				require.Zero(t, audits)
+			})
+		}
+	}
+}
+
+func TestScopedDeletionRecoversAppliedCommit(t *testing.T) {
+	f := provisionOwnedFixture(t, activatedDatabase(t))
+
+	for _, tc := range []struct {
+		name           string
+		alreadyDelete  bool
+		poolMaxOne     bool
+		cancelAfterAck bool
+		maskedErr      error
+	}{
+		{name: "context deadline exceeded", maskedErr: context.DeadlineExceeded},
+		{name: "context canceled after commit", cancelAfterAck: true, maskedErr: context.Canceled},
+		{name: "transport error", maskedErr: io.ErrUnexpectedEOF},
+		{name: "already deleting branch", alreadyDelete: true, maskedErr: context.DeadlineExceeded},
+		{name: "pool max one", poolMaxOne: true, maskedErr: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sourceKey := "documents/doc/recover/" + uuid.NewString() + "/orig.pdf"
+			docID := f.acceptOwned(t, f.owner, "", sourceKey)
+			inc := storedIncarnation(t, f.c, domain.DocumentID(docID))
+			rec := newDeletionRecorder()
+			ops := rec.ops(inc)
+			ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
+
+			if tc.alreadyDelete {
+				_, err := f.c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,source_key,vector_mode,memory_owner)
+					VALUES($1,$2,'qualified_intent',$3,'memory_revision',$4)`,
+					docID, inc, sourceKey, ops.MemoryOwner)
+				require.NoError(t, err)
+				_, err = f.c.Pool.Exec(t.Context(), `UPDATE documents SET status='deleting' WHERE id=$1`, docID)
+				require.NoError(t, err)
+			}
+
+			client := f.c
+			if tc.poolMaxOne {
+				limited, err := NewClient(t.Context(), f.c.Pool.Config().ConnString(), func(cfg *pgxpool.Config) {
+					cfg.MaxConns = 1
+				})
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, limited.Close(context.Background())) })
+				client = limited
+			}
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			var delegated bool
+			var realErr error
+			client.scopedHooks = &scopedDeletionHooks{
+				wrapTx: func(tx pgx.Tx) pgx.Tx {
+					return &commitInterceptTx{
+						Tx: tx,
+						onCommit: func(commitCtx context.Context, inner pgx.Tx) error {
+							delegated = true
+							realErr = inner.Commit(commitCtx)
+							require.NoError(t, realErr, "mask only after real COMMIT result is known")
+							if tc.cancelAfterAck {
+								cancel()
+							}
+							return tc.maskedErr
+						},
+					}
+				},
+			}
+			t.Cleanup(func() { client.scopedHooks = nil })
+
+			gotInc, complete, err := client.BeginScopedDeletion(ctx, f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+			require.NoError(t, err)
+			require.True(t, delegated)
+			require.NoError(t, realErr)
+			require.False(t, complete)
+			require.Equal(t, inc, gotInc)
+
+			var ownerReceipts, allowAudits int
+			require.NoError(t, f.c.Pool.QueryRow(t.Context(), `SELECT
+				(SELECT count(*) FROM grant_catalog_deletion_receipts WHERE document_id=$1 AND incarnation=$2 AND tenant_id=$3 AND principal_id=$4),
+				(SELECT count(*) FROM grant_catalog_security_audit WHERE document_id=$1 AND incarnation=$2 AND action='document_delete' AND outcome='allow' AND reason='intent_recorded')`,
+				docID, inc, f.owner.TenantID, f.owner.ID).Scan(&ownerReceipts, &allowAudits))
+			require.Equal(t, 1, ownerReceipts)
+			require.Equal(t, 1, allowAudits)
+
+			detachedCtx, detachCancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+			defer detachCancel()
+			require.NoError(t, client.ResumeScopedDeletion(detachedCtx, domain.DocumentID(docID), gotInc, ops))
+			require.Equal(t, 1, rec.count("revision"))
+			require.Equal(t, 1, rec.count("source"))
+			require.Empty(t, documentStatus(t, f.c, domain.DocumentID(docID)))
+
+			receipt := readReceipt(t, f.c, domain.DocumentID(docID))
+			require.True(t, receipt.finalized)
+			require.Nil(t, receipt.claim)
+		})
+	}
+}
+
+func TestScopedDeletionCommitProbeDistinguishesAbort(t *testing.T) {
+	f := provisionOwnedFixture(t, activatedDatabase(t))
+
+	t.Run("rolled back tx masked as timeout", func(t *testing.T) {
+		docID := f.acceptOwned(t, f.owner, "", "documents/doc/abort/rb/orig.pdf")
+		inc := storedIncarnation(t, f.c, domain.DocumentID(docID))
+		rec := newDeletionRecorder()
+		ops := rec.ops(inc)
+		ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
+
+		f.c.scopedHooks = &scopedDeletionHooks{
+			wrapTx: func(tx pgx.Tx) pgx.Tx {
+				return &commitInterceptTx{
+					Tx: tx,
+					onCommit: func(ctx context.Context, inner pgx.Tx) error {
+						require.NoError(t, inner.Rollback(context.WithoutCancel(ctx)))
+						return context.DeadlineExceeded
+					},
+				}
+			},
+		}
+		t.Cleanup(func() { f.c.scopedHooks = nil })
+
+		_, _, err := f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Empty(t, rec.all())
+		require.NotEqual(t, "deleting", documentStatus(t, f.c, domain.DocumentID(docID)))
+	})
+
+	t.Run("deferred trigger rejection at COMMIT masked as timeout", func(t *testing.T) {
+		docID := f.acceptOwned(t, f.owner, "", "documents/doc/abort/deferred/orig.pdf")
+		inc := storedIncarnation(t, f.c, domain.DocumentID(docID))
+		rec := newDeletionRecorder()
+		ops := rec.ops(inc)
+		ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
+
+		grantExec(t, f.c, `CREATE FUNCTION fail_deletion_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN RAISE EXCEPTION 'deferred commit abort'; END; $$;
+			CREATE CONSTRAINT TRIGGER fail_deletion_commit AFTER INSERT ON grant_catalog_security_audit
+			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_deletion_commit()`)
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+			defer cancel()
+			_, cleanupErr := f.c.Pool.Exec(ctx, `DROP TRIGGER IF EXISTS fail_deletion_commit ON grant_catalog_security_audit;
+				DROP FUNCTION IF EXISTS fail_deletion_commit()`)
+			require.NoError(t, cleanupErr)
+		})
+
+		var realCommitErr error
+		f.c.scopedHooks = &scopedDeletionHooks{
+			wrapTx: func(tx pgx.Tx) pgx.Tx {
+				return &commitInterceptTx{
+					Tx: tx,
+					onCommit: func(ctx context.Context, inner pgx.Tx) error {
+						realCommitErr = inner.Commit(ctx)
+						require.Error(t, realCommitErr)
+						return context.DeadlineExceeded
+					},
+				}
+			},
+		}
+		t.Cleanup(func() { f.c.scopedHooks = nil })
+
+		_, _, err := f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Error(t, realCommitErr)
+		require.Empty(t, rec.all())
+		require.NotEqual(t, "deleting", documentStatus(t, f.c, domain.DocumentID(docID)))
+	})
+
+	t.Run("preexisting receipt on already-deleting branch cannot impersonate aborted commit", func(t *testing.T) {
+		sourceKey := "documents/doc/abort/preexisting/orig.pdf"
+		docID := f.acceptOwned(t, f.owner, "", sourceKey)
+		inc := storedIncarnation(t, f.c, domain.DocumentID(docID))
+		rec := newDeletionRecorder()
+		ops := rec.ops(inc)
+		ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
+
+		// Seed an open qualified_intent receipt and deleting status.
+		_, err := f.c.Pool.Exec(t.Context(), `INSERT INTO document_deletions(document_id,incarnation,kind,source_key,vector_mode,memory_owner)
+			VALUES($1,$2,'qualified_intent',$3,'memory_revision',$4)`,
+			docID, inc, sourceKey, ops.MemoryOwner)
+		require.NoError(t, err)
+		_, err = f.c.Pool.Exec(t.Context(), `UPDATE documents SET status='deleting' WHERE id=$1`, docID)
+		require.NoError(t, err)
+
+		grantExec(t, f.c, `CREATE FUNCTION fail_deleting_retry_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN RAISE EXCEPTION 'deferred retry abort'; END; $$;
+			CREATE CONSTRAINT TRIGGER fail_deleting_retry_commit AFTER INSERT ON grant_catalog_security_audit
+			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_deleting_retry_commit()`)
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+			defer cancel()
+			_, cleanupErr := f.c.Pool.Exec(ctx, `DROP TRIGGER IF EXISTS fail_deleting_retry_commit ON grant_catalog_security_audit;
+				DROP FUNCTION IF EXISTS fail_deleting_retry_commit()`)
+			require.NoError(t, cleanupErr)
+		})
+
+		f.c.scopedHooks = &scopedDeletionHooks{
+			wrapTx: func(tx pgx.Tx) pgx.Tx {
+				return &commitInterceptTx{
+					Tx: tx,
+					onCommit: func(ctx context.Context, inner pgx.Tx) error {
+						commitErr := inner.Commit(ctx)
+						require.Error(t, commitErr)
+						return context.DeadlineExceeded
+					},
+				}
+			},
+		}
+		t.Cleanup(func() { f.c.scopedHooks = nil })
+
+		_, _, err = f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Empty(t, rec.all())
+	})
+
+	t.Run("concurrent retry committing same pair cannot impersonate earlier abort", func(t *testing.T) {
+		docID := f.acceptOwned(t, f.owner, "", "documents/doc/abort/concurrent/orig.pdf")
+		inc := storedIncarnation(t, f.c, domain.DocumentID(docID))
+		rec := newDeletionRecorder()
+		ops := rec.ops(inc)
+		ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
+		other := otherConnection(t, f.c)
+
+		f.c.scopedHooks = &scopedDeletionHooks{
+			wrapTx: func(tx pgx.Tx) pgx.Tx {
+				return &commitInterceptTx{
+					Tx: tx,
+					onCommit: func(ctx context.Context, inner pgx.Tx) error {
+						require.NoError(t, inner.Rollback(context.WithoutCancel(ctx)))
+						// Concurrent caller commits the intent for the exact same (docID, inc)
+						// before this caller's probe runs.
+						otherInc, otherComplete, otherErr := other.BeginScopedDeletion(context.WithoutCancel(ctx), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+						require.NoError(t, otherErr)
+						require.False(t, otherComplete)
+						require.Equal(t, inc, otherInc)
+						return context.DeadlineExceeded
+					},
+				}
+			},
+		}
+		t.Cleanup(func() { f.c.scopedHooks = nil })
+
+		_, _, err := f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Empty(t, rec.all())
+	})
+}
+
+func TestScopedDeletionUnconfirmedCommitIsRetryable(t *testing.T) {
+	f := provisionOwnedFixture(t, activatedDatabase(t))
+
+	for _, tc := range []struct {
+		name      string
+		wrapProbe func(other *Client, docID string) func(scopedCommitProbeFunc) scopedCommitProbeFunc
+	}{
+		{
+			name: "probe unavailable",
+			wrapProbe: func(_ *Client, _ string) func(scopedCommitProbeFunc) scopedCommitProbeFunc {
+				return func(_ scopedCommitProbeFunc) scopedCommitProbeFunc {
+					return func(context.Context, domain.DocumentID, string, string) (scopedCommitProbeResult, error) {
+						return scopedCommitProbeResult{}, errors.New("dial tcp 10.20.30.40:5432: connection refused")
+					}
+				}
+			},
+		},
+		{
+			name: "server restart",
+			wrapProbe: func(_ *Client, _ string) func(scopedCommitProbeFunc) scopedCommitProbeFunc {
+				return func(next scopedCommitProbeFunc) scopedCommitProbeFunc {
+					return func(ctx context.Context, id domain.DocumentID, inc, xid string) (scopedCommitProbeResult, error) {
+						res, err := next(ctx, id, inc, xid)
+						if err == nil {
+							res.instance.postmasterStartTime = res.instance.postmasterStartTime.Add(time.Second)
+						}
+						return res, err
+					}
+				}
+			},
+		},
+		{
+			name: "replica in recovery",
+			wrapProbe: func(_ *Client, _ string) func(scopedCommitProbeFunc) scopedCommitProbeFunc {
+				return func(next scopedCommitProbeFunc) scopedCommitProbeFunc {
+					return func(ctx context.Context, id domain.DocumentID, inc, xid string) (scopedCommitProbeResult, error) {
+						res, err := next(ctx, id, inc, xid)
+						if err == nil {
+							res.inRecovery = true
+						}
+						return res, err
+					}
+				}
+			},
+		},
+		{
+			name: "status NULL",
+			wrapProbe: func(_ *Client, _ string) func(scopedCommitProbeFunc) scopedCommitProbeFunc {
+				return func(next scopedCommitProbeFunc) scopedCommitProbeFunc {
+					return func(ctx context.Context, id domain.DocumentID, inc, xid string) (scopedCommitProbeResult, error) {
+						res, err := next(ctx, id, inc, xid)
+						if err == nil {
+							res.xactStatus = nil
+						}
+						return res, err
+					}
+				}
+			},
+		},
+		{
+			name: "missing or replaced receipt",
+			wrapProbe: func(_ *Client, _ string) func(scopedCommitProbeFunc) scopedCommitProbeFunc {
+				return func(next scopedCommitProbeFunc) scopedCommitProbeFunc {
+					return func(ctx context.Context, id domain.DocumentID, inc, xid string) (scopedCommitProbeResult, error) {
+						res, err := next(ctx, id, inc, xid)
+						if err == nil {
+							res.receipt = false
+						}
+						return res, err
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docID := f.acceptOwned(t, f.owner, "", "documents/doc/unconfirmed/"+uuid.NewString()+"/orig.pdf")
+			inc := storedIncarnation(t, f.c, domain.DocumentID(docID))
+			rec := newDeletionRecorder()
+			ops := rec.ops(inc)
+			ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
+
+			limited, err := NewClient(t.Context(), f.c.Pool.Config().ConnString(), func(cfg *pgxpool.Config) {
+				cfg.MaxConns = 1
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, limited.Close(context.Background())) })
+
+			limited.scopedHooks = &scopedDeletionHooks{
+				wrapTx: func(tx pgx.Tx) pgx.Tx {
+					return &commitInterceptTx{
+						Tx: tx,
+						onCommit: func(ctx context.Context, inner pgx.Tx) error {
+							require.NoError(t, inner.Commit(ctx))
+							return context.DeadlineExceeded
+						},
+					}
+				},
+				wrapProbe: tc.wrapProbe(f.c, docID),
+			}
+
+			_, _, err = limited.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+			require.ErrorIs(t, err, domain.ErrScopedDeletionCommitUnconfirmed)
+			require.NotErrorIs(t, err, context.DeadlineExceeded)
+			require.NotErrorIs(t, err, context.Canceled)
+			require.NotContains(t, err.Error(), docID)
+			require.NotContains(t, err.Error(), inc)
+			require.NotContains(t, err.Error(), "10.20.30.40")
+			require.Empty(t, rec.all())
+
+			// Connection and advisory lock are released; retry finishes cleanly.
+			limited.scopedHooks = nil
+			retryInc, complete, retryErr := limited.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+			require.NoError(t, retryErr)
+			require.False(t, complete)
+			require.Equal(t, inc, retryInc)
+			require.NoError(t, limited.ResumeScopedDeletion(t.Context(), domain.DocumentID(docID), retryInc, ops))
+			require.Equal(t, 1, rec.count("revision"))
+			require.Equal(t, 1, rec.count("source"))
+		})
+	}
+
+	t.Run("probe timeout under advisory lock contention releases connection and lock", func(t *testing.T) {
+		docID := f.acceptOwned(t, f.owner, "", "documents/doc/unconfirmed/timeout/orig.pdf")
+		inc := storedIncarnation(t, f.c, domain.DocumentID(docID))
+		rec := newDeletionRecorder()
+		ops := rec.ops(inc)
+		ops.InMemory, ops.MemoryOwner = true, uuid.NewString()
+
+		blocker := otherConnection(t, f.c)
+		limited, err := NewClient(t.Context(), f.c.Pool.Config().ConnString(), func(cfg *pgxpool.Config) {
+			cfg.MaxConns = 1
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, limited.Close(context.Background())) })
+
+		var blockerTx pgx.Tx
+		t.Cleanup(func() {
+			if blockerTx != nil {
+				ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+				defer cancel()
+				require.NoError(t, blockerTx.Rollback(ctx))
+			}
+		})
+		var lockHeld sync.WaitGroup
+		lockHeld.Add(1)
+		limited.scopedHooks = &scopedDeletionHooks{
+			wrapTx: func(tx pgx.Tx) pgx.Tx {
+				return &commitInterceptTx{
+					Tx: tx,
+					onCommit: func(ctx context.Context, inner pgx.Tx) error {
+						require.NoError(t, inner.Commit(ctx))
+						var beginErr error
+						blockerCtx := context.WithoutCancel(ctx)
+						blockerTx, beginErr = blocker.Pool.BeginTx(blockerCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+						require.NoError(t, beginErr)
+						require.NoError(t, lockDocumentIntent(blockerCtx, blockerTx, domain.DocumentID(docID)))
+						lockHeld.Done()
+						return context.DeadlineExceeded
+					},
+				}
+			},
+			wrapProbe: func(next scopedCommitProbeFunc) scopedCommitProbeFunc {
+				return func(ctx context.Context, id domain.DocumentID, inc, xid string) (scopedCommitProbeResult, error) {
+					lockHeld.Wait()
+					shortCtx, shortCancel := context.WithTimeout(ctx, 50*time.Millisecond)
+					defer shortCancel()
+					return next(shortCtx, id, inc, xid)
+				}
+			},
+		}
+
+		_, _, err = limited.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+		require.ErrorIs(t, err, domain.ErrScopedDeletionCommitUnconfirmed)
+		require.NotErrorIs(t, err, context.DeadlineExceeded)
+		require.Empty(t, rec.all())
+		if blockerTx != nil {
+			rollbackErr := blockerTx.Rollback(t.Context())
+			blockerTx = nil
+			require.NoError(t, rollbackErr)
+		}
+
+		// Single-connection pool is immediately usable again.
+		limited.scopedHooks = nil
+		retryInc, complete, retryErr := limited.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops)
+		require.NoError(t, retryErr)
+		require.False(t, complete)
+		require.NoError(t, limited.ResumeScopedDeletion(t.Context(), domain.DocumentID(docID), retryInc, ops))
+	})
+}
+
+func TestScopedDeletionRecoveredIntentRemainsIncarnationPinned(t *testing.T) {
+	f := provisionOwnedFixture(t, activatedDatabase(t))
+	docID := f.acceptOwned(t, f.owner, "", "documents/doc/pinned/orig.pdf")
+	inc1 := storedIncarnation(t, f.c, domain.DocumentID(docID))
+	rec := newDeletionRecorder()
+	ops1 := rec.ops(inc1)
+	ops1.InMemory, ops1.MemoryOwner = true, uuid.NewString()
+
+	f.c.scopedHooks = &scopedDeletionHooks{
+		wrapTx: func(tx pgx.Tx) pgx.Tx {
+			return &commitInterceptTx{
+				Tx: tx,
+				onCommit: func(ctx context.Context, inner pgx.Tx) error {
+					require.NoError(t, inner.Commit(ctx))
+					return context.DeadlineExceeded
+				},
+			}
+		},
+	}
+	resolved, complete, err := f.c.BeginScopedDeletion(t.Context(), f.owner, time.Now().Add(time.Minute), domain.DocumentID(docID), ops1)
+	f.c.scopedHooks = nil
+	require.NoError(t, err)
+	require.False(t, complete)
+	require.Equal(t, inc1, resolved)
+	require.NoError(t, f.c.ResumeScopedDeletion(t.Context(), domain.DocumentID(docID), resolved, ops1))
+
+	// Reuse the UUID for a replacement owned by outsider.
+	repReq := jobsRequest("replacement after recovered deletion")
+	repReq.Document.ID, repReq.CallerSupplied, repReq.SupportsScopedVectors = domain.DocumentID(docID), true, true
+	require.Equal(t, domain.AcceptAccepted, f.accept(t, repReq).Outcome)
+	inc2 := storedIncarnation(t, f.c, domain.DocumentID(docID))
+	require.NotEqual(t, inc1, inc2)
+	f.importBatch(t, func(b map[string]any) {
+		b["assignments"] = []grantEntry{grantAssignment(t, f.c, f.otherTenant, f.outsider.ID, docID)}
+	})
+	grantExec(t, f.c, `UPDATE grant_catalog_document_ownership SET ready=true WHERE document_id=$1`, docID)
+
+	// Stale resume of inc1 acknowledges without touching replacement.
+	before := len(rec.all())
+	require.NoError(t, f.c.ResumeScopedDeletion(t.Context(), domain.DocumentID(docID), inc1, ops1))
+	require.Len(t, rec.all(), before)
+
+	// A probe checking inc1 when document_deletions holds inc2 does not confirm inc1 and never deletes inc2.
+	_, err = f.c.Pool.Exec(t.Context(), `UPDATE document_deletions SET incarnation=$2,finalized=false WHERE document_id=$1`, docID, inc2)
+	require.NoError(t, err)
+	var xid string
+	var start time.Time
+	var addr *string
+	var port *int32
+	require.NoError(t, f.c.Pool.QueryRow(t.Context(), `SELECT pg_current_xact_id()::text, pg_postmaster_start_time(), inet_server_addr()::text, inet_server_port()`).
+		Scan(&xid, &start, &addr, &port))
+	_, _, probeErr := f.c.probeScopedDeletionCommit(t.Context(), domain.DocumentID(docID), inc1, scopedCommitIdentity{
+		xid: xid, postmasterStartTime: start, serverAddr: addr, serverPort: port,
+	}, context.DeadlineExceeded)
+	require.ErrorIs(t, probeErr, domain.ErrScopedDeletionCommitUnconfirmed)
+
+	summary, err := f.c.GetScopedDocumentSummary(t.Context(), f.outsider, domain.DocumentID(docID), true)
+	require.NoError(t, err)
+	require.NotNil(t, summary.Document)
+	require.Equal(t, inc2, summary.Document.Incarnation)
 }
