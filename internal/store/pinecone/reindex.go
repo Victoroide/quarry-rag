@@ -12,6 +12,7 @@ import (
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // Read limits for migration tooling.
@@ -24,6 +25,21 @@ const (
 
 // ErrListingUnsupported marks an index that cannot enumerate its record keys.
 var ErrListingUnsupported = errors.New("pinecone: the index does not support listing record keys")
+
+const invalidReindexChunkIndex = -1
+
+func reindexChunkIndex(md *structpb.Struct) int {
+	position, ok := md.GetFields()["chunk_index"].GetKind().(*structpb.Value_NumberValue)
+	if !ok || position == nil {
+		return invalidReindexChunkIndex
+	}
+	n := position.NumberValue
+	// PostgreSQL stores the canonical position as INTEGER on every platform.
+	if math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || n > math.MaxInt32 || math.Trunc(n) != n {
+		return invalidReindexChunkIndex
+	}
+	return int(n)
+}
 
 // ParseTaggedVectorID splits a revision- and attempt-qualified vector ID. It
 // accepts only the form TaggedVectorID produces with a non-empty attempt.
@@ -73,7 +89,8 @@ func ListingUnsupported(err error) bool {
 
 // Fetch returns the stored vectors for the supplied keys from the default
 // namespace. A key without a record, or whose record carries inconsistent
-// ownership tags, is absent from the result.
+// ownership tags, is absent from the result. An invalid position is returned
+// as a negative index so callers can distinguish it from a missing record.
 func (p *Client) Fetch(ctx context.Context, ids []string) (map[string]domain.Chunk, error) {
 	out := make(map[string]domain.Chunk, len(ids))
 	for start := 0; start < len(ids); start += FetchBatchSize {
@@ -93,7 +110,7 @@ func (p *Client) Fetch(ctx context.Context, ids []string) (map[string]domain.Chu
 			if vector.Values == nil {
 				return nil, fmt.Errorf("pinecone: fetched record %s has no values", id)
 			}
-			chunk, consistent := chunkFromMetadata(id, vector.Metadata)
+			chunk, consistent := chunkFromMetadataAtIndex(id, vector.Metadata, reindexChunkIndex(vector.Metadata))
 			if !consistent {
 				continue
 			}
