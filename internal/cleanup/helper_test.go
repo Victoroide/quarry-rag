@@ -426,6 +426,20 @@ func TestRemoveScopedDetachesOnlyAfterIntentCommits(t *testing.T) {
 	require.NotErrorIs(t, err, ErrScopedDeletionCanceled)
 	require.Equal(t, 1, deleter.resumeCalls)
 
+	// Unconfirmed commit passes through without wrapping as ErrScopedDeletionCanceled,
+	// even if caller context also ended, and never starts detached cleanup.
+	canceledUnconfirmed, cancelUnconfirmed := context.WithCancel(t.Context())
+	cancelUnconfirmed()
+	deleter = &scopedRecordingDeleter{
+		incarnation: "inc-1d",
+		beginErr:    fmt.Errorf("%w: probe_timeout", domain.ErrScopedDeletionCommitUnconfirmed),
+	}
+	err = RemoveScoped(canceledUnconfirmed, deleter, nil, nil, Targets{}, principal, time.Now().Add(time.Minute), "doc-1d", "")
+	require.ErrorIs(t, err, domain.ErrScopedDeletionCommitUnconfirmed)
+	require.NotErrorIs(t, err, ErrScopedDeletionCanceled)
+	require.NotErrorIs(t, err, context.Canceled)
+	require.Zero(t, deleter.resumeCalls)
+
 	// When the intent succeeds, detached cleanup ignores caller cancellation.
 	liveCtx, liveCancel := context.WithCancel(context.WithValue(t.Context(), scopedCtxKey{}, "trace"))
 	deleter = &scopedRecordingDeleter{incarnation: "inc-2"}

@@ -337,10 +337,10 @@ func scopedDeleteHandler(cs domain.ChunkStore, pcDriver domain.VectorDeleter, ob
 			defer release()
 		}
 		err = cleanup.RemoveScoped(ctx, deleter, pcDriver, objects, options.targets, subject.Principal, subject.ExpiresAt, domain.DocumentID(canonical), incarnation)
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, cleanup.ErrScopedDeletionCanceled) {
 			if !subject.ValidAt(now()) {
 				err = domain.ErrUnauthorized
-			} else if errors.Is(err, cleanup.ErrScopedDeletionCanceled) {
+			} else {
 				recordSecurityAuditBestEffort(ctx, options.audit, &subject, nil, "document_delete", "error", "deletion_canceled", canonical, incarnation)
 				writeJSONError(ctx, w, http.StatusServiceUnavailable, "unavailable", "document deletion canceled")
 				return
@@ -372,6 +372,8 @@ func auditDeleteFailure(ctx context.Context, recorder domain.SecurityAuditRecord
 		reason = "authz_mode_mismatch"
 	case errors.Is(err, domain.ErrDeletionBusy):
 		reason = "deletion_busy"
+	case errors.Is(err, domain.ErrScopedDeletionCommitUnconfirmed):
+		reason = "commit_unconfirmed"
 	}
 	recordSecurityAuditBestEffort(ctx, recorder, subject, nil, "document_delete", outcome, reason, docID, incarnation)
 }

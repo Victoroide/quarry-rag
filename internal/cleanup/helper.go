@@ -207,6 +207,9 @@ func RemoveScoped(ctx context.Context, deleter domain.ScopedDocumentDeleter, vec
 	ops.ExpectedIncarnation = incarnation
 	resolvedIncarnation, complete, err := deleter.BeginScopedDeletion(ctx, principal, validUntil, id, ops)
 	if err != nil {
+		if errors.Is(err, domain.ErrScopedDeletionCommitUnconfirmed) {
+			return err
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return fmt.Errorf("%w: %w", ErrScopedDeletionCanceled, err)
 		}

@@ -877,14 +877,157 @@ func TestScopedDeletionAuthorizationFailuresAndCancellation(t *testing.T) {
 	require.JSONEq(t, `{"error":"internal","message":"failed to delete document"}`, postCommitValid.Body.String())
 	require.True(t, store.docs[docTimeoutID].deleting)
 
-	// Post-commit deadline exceeded when credential expired maps to 401.
+	// Post-commit deadline exceeded when credential expired still maps to 500, never 401.
 	clockNow = fixedNow
 	store.afterBegin = func() { clockNow = fixedNow.Add(2 * time.Minute) }
 	postCommitExpired := serveScoped(advancingDeleteH, http.MethodDelete, "/documents/"+docTimeoutID, &owner, fixedNow.Add(time.Minute), store.docs[docTimeoutID].summary.Incarnation)
-	require.Equal(t, http.StatusUnauthorized, postCommitExpired.Code, postCommitExpired.Body.String())
+	require.Equal(t, http.StatusInternalServerError, postCommitExpired.Code, postCommitExpired.Body.String())
+	require.JSONEq(t, `{"error":"internal","message":"failed to delete document"}`, postCommitExpired.Body.String())
 	store.afterBegin = nil
 	store.resumeDeleteErr = nil
 	store.now = nil
+}
+
+func TestScopedDeleteReportsCommitAndCleanupFailures(t *testing.T) {
+	tenant := uuid.NewString()
+	owner := domain.Principal{ID: uuid.NewString(), TenantID: tenant}
+	fixedNow := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+
+	newDoc := func(store *scopedMockStore) (string, string) {
+		docID := uuid.NewString()
+		inc := uuid.NewString()
+		key := "documents/doc/" + docID + "/" + inc + "/orig.pdf"
+		store.docs[docID] = &scopedMemoryEntry{
+			owner:   owner,
+			s3Key:   &key,
+			summary: domain.DocumentSummary{ID: docID, Incarnation: inc, Status: "completed"},
+		}
+		return docID, inc
+	}
+
+	// Unconfirmed commit: safe 500, audit reason commit_unconfirmed, no identifier/SQL/provider leakage.
+	t.Run("unconfirmed commit", func(t *testing.T) {
+		logs := captureLeveledLogs(t)
+		audit := &auditMock{}
+		store := newScopedMockStore(owner)
+		store.now = func() time.Time { return fixedNow }
+		docID, inc := newDoc(store)
+		store.beginDeleteErr = fmt.Errorf("%w: probe_timeout", domain.ErrScopedDeletionCommitUnconfirmed)
+		storage := &deleteStorageSpy{}
+		h := DeleteHandler(store, storage, storage, WithScopedDeletion(), WithDeleteAudit(audit), withDeleteClock(func() time.Time { return fixedNow }))
+
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/documents/"+docID, http.NoBody)
+		req.SetPathValue("doc_id", docID)
+		req.Header.Set("X-Document-Incarnation", inc)
+		req = req.WithContext(middleware.ContextWithSubject(req.Context(), middleware.VerifiedSubject{Principal: owner, ExpiresAt: fixedNow.Add(time.Minute)}))
+		rec := httptest.NewRecorder()
+		h(rec, req)
+
+		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		require.Equal(t, "private, no-store", rec.Header().Get("Cache-Control"))
+		require.JSONEq(t, `{"error":"internal","message":"failed to delete document"}`, rec.Body.String())
+		require.Empty(t, storage.vectors)
+		require.Empty(t, storage.objects)
+		require.NotContains(t, logs.String(), docID)
+		require.NotContains(t, rec.Body.String(), docID)
+		require.NotContains(t, rec.Body.String(), "probe_timeout")
+		require.Len(t, audit.events, 1)
+		require.Equal(t, "error", audit.events[0].Outcome)
+		require.Equal(t, "commit_unconfirmed", audit.events[0].Reason)
+	})
+
+	// Precommit cancellation vs precommit credential expiry vs detached cleanup timeout after credential expiry.
+	t.Run("cancellation and credential expiry boundaries", func(t *testing.T) {
+		clockNow := fixedNow
+		audit := &auditMock{}
+		store := newScopedMockStore(owner)
+		store.now = func() time.Time { return clockNow }
+		docID, inc := newDoc(store)
+		storage := &deleteStorageSpy{}
+		h := DeleteHandler(store, storage, storage, WithScopedDeletion(), WithDeleteAudit(audit), withDeleteClock(func() time.Time { return clockNow }))
+
+		// Precommit timeout with valid credential -> 503 deletion_canceled.
+		store.beginDeleteErr = fmt.Errorf("begin tx: %w", context.DeadlineExceeded)
+		recCanceled := serveScoped(h, http.MethodDelete, "/documents/"+docID, &owner, fixedNow.Add(time.Minute))
+		require.Equal(t, http.StatusServiceUnavailable, recCanceled.Code)
+		require.JSONEq(t, `{"error":"unavailable","message":"document deletion canceled"}`, recCanceled.Body.String())
+		require.Equal(t, "deletion_canceled", audit.events[len(audit.events)-1].Reason)
+
+		// Precommit timeout with expired credential -> 401 credential_expired.
+		store.beforeBegin = func() { clockNow = fixedNow.Add(2 * time.Minute) }
+		recExpired := serveScoped(h, http.MethodDelete, "/documents/"+docID, &owner, fixedNow.Add(time.Minute))
+		require.Equal(t, http.StatusUnauthorized, recExpired.Code)
+		require.Equal(t, "deny", audit.events[len(audit.events)-1].Outcome)
+		require.Equal(t, "credential_expired", audit.events[len(audit.events)-1].Reason)
+		store.beforeBegin = nil
+		store.beginDeleteErr = nil
+
+		// Committed intent whose detached cleanup times out after credential expiry -> 500 delete_failed (never 401).
+		clockNow = fixedNow
+		store.afterBegin = func() { clockNow = fixedNow.Add(2 * time.Minute) }
+		store.resumeDeleteErr = fmt.Errorf("delete vectors: %w", context.DeadlineExceeded)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/documents/"+docID, http.NoBody)
+		req.SetPathValue("doc_id", docID)
+		req.Header.Set("X-Document-Incarnation", inc)
+		req = req.WithContext(middleware.ContextWithSubject(req.Context(), middleware.VerifiedSubject{Principal: owner, ExpiresAt: fixedNow.Add(time.Minute)}))
+		recPost := httptest.NewRecorder()
+		h(recPost, req)
+		require.Equal(t, http.StatusInternalServerError, recPost.Code)
+		require.JSONEq(t, `{"error":"internal","message":"failed to delete document"}`, recPost.Body.String())
+		require.Equal(t, "error", audit.events[len(audit.events)-1].Outcome)
+		require.Equal(t, "delete_failed", audit.events[len(audit.events)-1].Reason)
+	})
+
+	// Busy, provider failure releasing claim, and finalized retry.
+	t.Run("busy provider failure and finalized retry", func(t *testing.T) {
+		audit := &auditMock{}
+		store := newScopedMockStore(owner)
+		store.now = func() time.Time { return fixedNow }
+		docID, inc := newDoc(store)
+		storage := &deleteStorageSpy{}
+		h := DeleteHandler(store, storage, storage, WithScopedDeletion(), WithDeleteAudit(audit), withDeleteClock(func() time.Time { return fixedNow }))
+
+		// Busy -> 503 Retry-After: 5, deletion_busy.
+		store.resumeDeleteErr = domain.ErrDeletionBusy
+		recBusy := serveScoped(h, http.MethodDelete, "/documents/"+docID, &owner, fixedNow.Add(time.Minute), inc)
+		require.Equal(t, http.StatusServiceUnavailable, recBusy.Code)
+		require.Equal(t, "5", recBusy.Header().Get("Retry-After"))
+		require.Equal(t, "deletion_busy", audit.events[len(audit.events)-1].Reason)
+		store.resumeDeleteErr = nil
+
+		// Provider error on source step -> 500 delete_failed, then retry succeeds.
+		storage.errOn = "source"
+		recFail := serveScoped(h, http.MethodDelete, "/documents/"+docID, &owner, fixedNow.Add(time.Minute), inc)
+		require.Equal(t, http.StatusInternalServerError, recFail.Code)
+		require.Equal(t, "delete_failed", audit.events[len(audit.events)-1].Reason)
+
+		storage.errOn = ""
+		reqOK := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/documents/"+docID, http.NoBody)
+		reqOK.SetPathValue("doc_id", docID)
+		reqOK.Header.Set("X-Document-Incarnation", inc)
+		reqOK = reqOK.WithContext(middleware.ContextWithSubject(reqOK.Context(), middleware.VerifiedSubject{Principal: owner, ExpiresAt: fixedNow.Add(time.Minute)}))
+		recOK := httptest.NewRecorder()
+		h(recOK, reqOK)
+		require.Equal(t, http.StatusOK, recOK.Code)
+
+		// Finalized retry with original incarnation returns 200 without calling storage.
+		store.docs[docID] = &scopedMemoryEntry{
+			owner:     owner,
+			finalized: true,
+			summary:   domain.DocumentSummary{ID: docID, Incarnation: inc, Status: "completed"},
+		}
+		beforeVec := len(storage.vectors)
+		beforeObj := len(storage.objects)
+		reqFinalized := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/documents/"+docID, http.NoBody)
+		reqFinalized.SetPathValue("doc_id", docID)
+		reqFinalized.Header.Set("X-Document-Incarnation", inc)
+		reqFinalized = reqFinalized.WithContext(middleware.ContextWithSubject(reqFinalized.Context(), middleware.VerifiedSubject{Principal: owner, ExpiresAt: fixedNow.Add(time.Minute)}))
+		recFinalized := httptest.NewRecorder()
+		h(recFinalized, reqFinalized)
+		require.Equal(t, http.StatusOK, recFinalized.Code)
+		require.Len(t, storage.vectors, beforeVec)
+		require.Len(t, storage.objects, beforeObj)
+	})
 }
 
 func withCleanupTargetsForTest(bucket, index string) DeleteOption {
