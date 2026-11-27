@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 
+	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -17,7 +18,7 @@ const (
 	supersededFetchMethod = "/VectorService/Fetch"
 )
 
-func validateSupersededReadNamespace(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoke grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+func validateDefaultReadNamespace(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoke grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 	if err := invoke(ctx, method, req, reply, cc, opts...); err != nil {
 		return err
 	}
@@ -41,7 +42,7 @@ func fetchSupersededOwners(ctx context.Context, index vectorIndex, ids []string,
 	}
 	response, err := index.FetchVectors(ctx, ids)
 	if err != nil {
-		if !isSupersededFetchReceiveSizeError(err) {
+		if !isFetchReceiveSizeError(err) {
 			return fmt.Errorf("fetch active vector metadata: %w", err)
 		}
 		if len(ids) == 1 {
@@ -56,6 +57,18 @@ func fetchSupersededOwners(ctx context.Context, index vectorIndex, ids []string,
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := validateExactVectorFetch(response, ids); err != nil {
+		return err
+	}
+	for id, vector := range response.Vectors {
+		if doc := supersededVectorDocument(id, vector); doc != "" {
+			owners[id] = doc
+		}
+	}
+	return nil
+}
+
+func validateExactVectorFetch(response *pinecone.FetchVectorsResponse, ids []string) error {
 	if response == nil || !isDefaultVectorNamespace(response.Namespace) {
 		return errors.New("invalid vector fetch for the bound default namespace")
 	}
@@ -66,11 +79,6 @@ func fetchSupersededOwners(ctx context.Context, index vectorIndex, ids []string,
 	for id, vector := range response.Vectors {
 		if !requested[id] || vector == nil || vector.Id != id {
 			return errors.New("vector fetch returned an unexpected record")
-		}
-	}
-	for id, vector := range response.Vectors {
-		if doc := supersededVectorDocument(id, vector); doc != "" {
-			owners[id] = doc
 		}
 	}
 	return nil
@@ -85,7 +93,7 @@ var (
 	supersededFetchSizeLimitOnly  = regexp.MustCompile(`^grpc: received message after decompression larger than max ([1-9][0-9]*)$`)
 )
 
-func isSupersededFetchReceiveSizeError(err error) bool {
+func isFetchReceiveSizeError(err error) bool {
 	direct, ok := err.(interface{ GRPCStatus() *status.Status })
 	if !ok {
 		return false

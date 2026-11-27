@@ -541,7 +541,7 @@ func TestSupersededFetchReceiveSizeError(t *testing.T) {
 		{"nil", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, isSupersededFetchReceiveSizeError(tc.err))
+			require.Equal(t, tc.want, isFetchReceiveSizeError(tc.err))
 		})
 	}
 	for _, message := range []string{
@@ -562,7 +562,7 @@ func TestSupersededFetchReceiveSizeError(t *testing.T) {
 		"grpc: received message larger than max length allowed on current machine (4194305 vs. 4194304)",
 		"provider quota exceeded (4194305 vs. 4194304)",
 	} {
-		require.False(t, isSupersededFetchReceiveSizeError(status.Error(codes.ResourceExhausted, message)), "%q", message)
+		require.False(t, isFetchReceiveSizeError(status.Error(codes.ResourceExhausted, message)), "%q", message)
 	}
 }
 
@@ -577,7 +577,7 @@ func FuzzSupersededFetchReceiveSizeError(f *testing.F) {
 		}
 		message := fmt.Sprintf("grpc: %s larger than max (%d vs. %d)%s", diagnostic, size, limit, suffix)
 		want := size > limit && limit == 4194304 && suffix == ""
-		require.Equal(t, want, isSupersededFetchReceiveSizeError(status.Error(codes.ResourceExhausted, message)))
+		require.Equal(t, want, isFetchReceiveSizeError(status.Error(codes.ResourceExhausted, message)))
 	})
 }
 

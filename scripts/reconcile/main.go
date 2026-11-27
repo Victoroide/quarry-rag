@@ -271,7 +271,11 @@ func runScopedLocal(ctx context.Context, cfg *config.Config, pg *pgstore.Client,
 func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Client, opts options) error {
 	var err error
 	if opts.BackfillScoped && !opts.Apply {
-		result, backfillErr := backfillScoped(ctx, pg, nil, opts)
+		var source scopedSource = pg
+		if cfg.VectorStore == "pinecone" {
+			source = hostedScopedSource{pg: pg}
+		}
+		result, backfillErr := backfillScoped(ctx, source, nil, opts)
 		if backfillErr != nil {
 			return backfillErr
 		}
@@ -279,6 +283,11 @@ func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Cl
 	}
 	if opts.BackfillScoped && cfg.VectorStore == "postgres" {
 		return runScopedLocal(ctx, cfg, pg, pgvectorVectors{pg}, opts, os.Stdout)
+	}
+	if opts.BackfillScoped {
+		if privilegeErr := pg.CheckHostedBackfillPrivileges(ctx); privilegeErr != nil {
+			return privilegeErr
+		}
 	}
 	var collectionDocuments []collectionDocument
 	if opts.BackfillCollections {
@@ -330,8 +339,8 @@ func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Cl
 }
 
 func reconcileIndexDialOptions(opts options) []grpc.DialOption {
-	if opts.SupersededUnrevisioned {
-		return []grpc.DialOption{grpc.WithChainUnaryInterceptor(validateSupersededReadNamespace)}
+	if opts.SupersededUnrevisioned || (opts.BackfillScoped && opts.Apply) {
+		return []grpc.DialOption{grpc.WithChainUnaryInterceptor(validateDefaultReadNamespace)}
 	}
 	return nil
 }
@@ -345,7 +354,8 @@ func reconcileIndex(ctx context.Context, cfg *config.Config, conn *pinecone.Inde
 		return json.NewEncoder(os.Stdout).Encode(result)
 	}
 	if opts.BackfillScoped {
-		result, backfillErr := backfillScoped(ctx, pg, hostedVectors{conn}, opts)
+		vectors := hostedVectors{idx: conn.WithNamespace(defaultVectorNamespace), dimensions: cfg.EmbeddingDimensions}
+		result, backfillErr := backfillScoped(ctx, hostedScopedSource{pg: pg}, vectors, opts)
 		if backfillErr != nil {
 			return backfillErr
 		}
