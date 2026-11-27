@@ -41,11 +41,11 @@ func (terminalRevisionStage) Run(context.Context, *pipeline.IngestContext) error
 type claimSource interface {
 	ClaimJob(ctx context.Context, owner string, lease time.Duration, maxAttempts int) (*domain.Job, error)
 	ClaimJobForFixtureStore(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity string) (*domain.Job, error)
+	ClaimPDFProfilesForFixtureStore(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity string, mixed, layout bool) (*domain.Job, error)
 }
 
-// observedRevisionJobs reports every lease that the worker obtains. The worker
-// prefers the fixture-aware claim, so both claim methods must be observed or a
-// promoted method of the embedded client would lease work unnoticed.
+// observedRevisionJobs reports every lease through the worker's current and
+// fallback claim methods.
 type observedRevisionJobs struct {
 	*pgstore.Client
 	claimed     chan domain.Job
@@ -84,6 +84,14 @@ func (s observedRevisionJobs) ClaimJobForFixtureStore(ctx context.Context, owner
 		return nil, nil
 	}
 	job, err := s.source.ClaimJobForFixtureStore(ctx, owner, lease, maxAttempts, vectorIdentity)
+	return s.observe(ctx, job, err)
+}
+
+func (s observedRevisionJobs) ClaimPDFProfilesForFixtureStore(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity string, mixed, layout bool) (*domain.Job, error) {
+	if s.claimedOnce != nil && *s.claimedOnce {
+		return nil, nil
+	}
+	job, err := s.source.ClaimPDFProfilesForFixtureStore(ctx, owner, lease, maxAttempts, vectorIdentity, mixed, layout)
 	return s.observe(ctx, job, err)
 }
 
