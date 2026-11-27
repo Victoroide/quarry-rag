@@ -1,0 +1,61 @@
+{
+  "Width": 840,
+  "Height": 1230,
+  "Nodes": {
+    "document_deletions": {
+      "X": 16,
+      "Y": 78,
+      "W": 352,
+      "H": 292
+    },
+    "vector_generations": {
+      "X": 16,
+      "Y": 378,
+      "W": 352,
+      "H": 330
+    },
+    "vector_generation_documents": {
+      "X": 16,
+      "Y": 716,
+      "W": 352,
+      "H": 204
+    },
+    "vector_state": {
+      "X": 16,
+      "Y": 928,
+      "W": 352,
+      "H": 240
+    },
+    "documents-ref": {
+      "X": 484,
+      "Y": 78,
+      "W": 340,
+      "H": 56
+    },
+    "document_deletion_activation": {
+      "X": 484,
+      "Y": 142,
+      "W": 340,
+      "H": 74
+    },
+    "hosted_vector_manifests": {
+      "X": 484,
+      "Y": 224,
+      "W": 340,
+      "H": 294
+    },
+    "hosted_vector_revisions": {
+      "X": 484,
+      "Y": 526,
+      "W": 340,
+      "H": 114
+    },
+    "hosted_vector_cleanups": {
+      "X": 484,
+      "Y": 648,
+      "W": 340,
+      "H": 366
+    }
+  },
+  "Groups": []
+}

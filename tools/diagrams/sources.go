@@ -287,6 +287,32 @@ func parseSQL(sql string) (sqlSchema, error) {
 	return schema, nil
 }
 
+func collectSchemaColumns(ds []diagram) (sqlSchema, error) {
+	declared := sqlSchema{}
+	for _, d := range ds {
+		if d.Name != "database-schema" && d.Name != "database-operations" {
+			continue
+		}
+		for _, n := range d.Nodes {
+			if len(n.Columns) == 0 {
+				continue
+			}
+			if _, exists := declared[n.ID]; exists {
+				return nil, fmt.Errorf("duplicate schema table %s", n.ID)
+			}
+			cols := map[string]column{}
+			for _, c := range n.Columns {
+				if _, exists := cols[c.Name]; exists {
+					return nil, fmt.Errorf("duplicate schema column %s.%s", n.ID, c.Name)
+				}
+				cols[c.Name] = c
+			}
+			declared[n.ID] = cols
+		}
+	}
+	return declared, nil
+}
+
 func checkSources(root string, ds []diagram) (err error) {
 	rootFS, err := os.OpenRoot(root)
 	if err != nil {
@@ -313,17 +339,14 @@ func checkSources(root string, ds []diagram) (err error) {
 	if err != nil {
 		return err
 	}
-	declared := sqlSchema{}
+	declared, err := collectSchemaColumns(ds)
+	if err != nil {
+		return err
+	}
 	var routes []string
 	routePattern := regexp.MustCompile(`^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /`)
 	for _, d := range ds {
 		for _, n := range d.Nodes {
-			if d.Name == "database-schema" {
-				declared[n.ID] = map[string]column{}
-				for _, c := range n.Columns {
-					declared[n.ID][c.Name] = c
-				}
-			}
 			if d.Name == "system-architecture" {
 				for _, line := range n.Lines {
 					if routePattern.MatchString(line) {
