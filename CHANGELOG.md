@@ -29,6 +29,7 @@ Notable changes are grouped by release.
 - The CI race report shows package failures even when diagnostics mention `[no test files]`.
 - The CI race report prints each shared compiler diagnostic once, preserves standalone build failures, and flags expected packages with missing results.
 - Vector reindex activation reports unsettled freezes and live ingestion jobs before applying and reflects blockers found under the database lock.
+- PostgreSQL client startup returns a configuration error before opening the pool when the effective health check interval is zero or negative.
 - The selective Pinecone staging check pins both index descriptions to the public controller.
 - Ingest lease completion, release, retry, and failure bound PostgreSQL rollback to three seconds and preserve the original error.
 - PostgreSQL rollback for ingest admission, lease claims, and OCR text persistence now has a three-second deadline and preserves the original error.
