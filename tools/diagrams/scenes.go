@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -24,15 +23,14 @@ func buildDiagrams(root string) (result []diagram, err error) {
 	ds := []diagram{architecture(), dataModel(), operationsModel(), repositoryTree(dirs)}
 	for i := range ds {
 		d := &ds[i]
-		b, err := rootFS.ReadFile(filepath.Join("docs", "diagrams", "src", d.Name+".json"))
+		path := filepath.Join("docs", "diagrams", "src", d.Name+".json")
+		b, err := rootFS.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read placement %s: %w", path, err)
 		}
-		var p placement
-		decoder := json.NewDecoder(strings.NewReader(string(b)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&p); err != nil {
-			return nil, err
+		p, err := decodePlacement(b)
+		if err != nil {
+			return nil, fmt.Errorf("decode placement %s: %w", path, err)
 		}
 		d.W = p.Width
 		d.H = p.Height
