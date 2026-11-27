@@ -130,14 +130,14 @@ func (f *trustFile) publishFresh(now func() time.Time, snapshot trustSnapshot) (
 }
 
 // readTrustBytes checks the file policy on every read, including cache hits.
-func (f *trustFile) readTrustBytes() ([]byte, [sha256.Size]byte, error) {
+func (f *trustFile) readTrustBytes() (data []byte, digest [sha256.Size]byte, err error) {
 	readFile := f.readFile
 	if readFile == nil {
 		readFile = credential.ReadFile
 	}
-	data, err := readFile(f.path, maxTrustBytes, 0o022)
+	data, err = readFile(f.path, maxTrustBytes, 0o022)
 	if err != nil {
-		return nil, [sha256.Size]byte{}, err
+		return nil, digest, err
 	}
 	return data, sha256.Sum256(data), nil
 }

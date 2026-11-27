@@ -396,19 +396,21 @@ func requireTrustEvent(t *testing.T, events <-chan TrustEvent, outcome, reason s
 
 // gateTrustRead pauses after taking a real file sample, before the loader can
 // use it. The read count includes any checks that unexpectedly enter the reader.
-func gateTrustRead(t *testing.T, verifier *Verifier, readErr error) (*atomic.Int32, func(int32), <-chan struct{}, func()) {
+func gateTrustRead(t *testing.T, verifier *Verifier, readErr error) (
+	count *atomic.Int32, blockRead func(int32), entered <-chan struct{}, release func(),
+) {
 	t.Helper()
-	count := new(atomic.Int32)
+	count = new(atomic.Int32)
 	var blockedRead atomic.Int32
-	entered, released := make(chan struct{}), make(chan struct{})
+	sampled, released := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	release := func() { once.Do(func() { close(released) }) }
+	release = func() { once.Do(func() { close(released) }) }
 	t.Cleanup(release)
 	verifier.trust.readFile = func(path string, limit int64, denied fs.FileMode) ([]byte, error) {
 		attempt := count.Add(1)
 		data, err := credential.ReadFile(path, limit, denied)
 		if attempt == blockedRead.Load() {
-			close(entered)
+			close(sampled)
 			<-released
 			if readErr != nil {
 				return nil, readErr
@@ -416,7 +418,7 @@ func gateTrustRead(t *testing.T, verifier *Verifier, readErr error) (*atomic.Int
 		}
 		return data, err
 	}
-	return count, func(offset int32) { blockedRead.Store(count.Load() + offset) }, entered, release
+	return count, func(offset int32) { blockedRead.Store(count.Load() + offset) }, sampled, release
 }
 
 func TestTrustUnchangedReadsDoNotBlockEachOther(t *testing.T) {
@@ -480,8 +482,8 @@ func TestTrustPendingReadDoesNotHoldStateMutex(t *testing.T) {
 			}
 
 			for _, check := range []func() error{
-				func() error { _, err := verifier.Verify(oldToken); return err },
-				func() error { _, err := verifier.Verify(newToken); return err },
+				func() error { _, verifyErr := verifier.Verify(oldToken); return verifyErr },
+				func() error { _, verifyErr := verifier.Verify(newToken); return verifyErr },
 				func() error { return verifier.CheckTrust(identity) },
 				verifier.ValidateTrust,
 			} {
@@ -527,7 +529,7 @@ func TestTrustRejectsDelayedReadAcrossTransition(t *testing.T) {
 			identity, err := verifier.Verify(oldToken)
 			require.NoError(t, err)
 			requireTrustEvent(t, events, "allow", "trust_loaded")
-			oldBytes, err := os.ReadFile(path)
+			oldBytes, err := credential.ReadFile(path, maxTrustBytes, 0o022)
 			require.NoError(t, err)
 			episodeOpen := tc.failAudit && tc.staleReadError == nil
 			if episodeOpen {
@@ -577,16 +579,16 @@ func TestTrustRejectsDelayedReadAcrossTransition(t *testing.T) {
 func TestTrustRereadRestoresPublishedSnapshot(t *testing.T) {
 	verifier, key, path := newFixtureVerifier(t)
 	events, _, _ := observeTrustFixture(t, verifier)
-	original, err := os.ReadFile(path)
+	original, err := credential.ReadFile(path, maxTrustBytes, 0o022)
 	require.NoError(t, err)
 	restore := false
 	verifier.trust.readFile = func(path string, limit int64, denied fs.FileMode) ([]byte, error) {
-		data, err := credential.ReadFile(path, limit, denied)
+		data, readErr := credential.ReadFile(path, limit, denied)
 		if restore {
 			restore = false
 			replaceTrust(t, path, original)
 		}
-		return data, err
+		return data, readErr
 	}
 	token := fixtureToken(t, key, fixtureHeader, fixtureClaims(t, nil))
 	identity, err := verifier.Verify(token)
@@ -628,7 +630,8 @@ func TestTrustReadLimitsAndRecovery(t *testing.T) {
 	}
 	expiry := fixtureTime.Add(time.Hour)
 	valid := trustFixture(t, expiry, keys[:maxTrustKeys]...)
-	atLimit := append(valid, strings.Repeat(" ", maxTrustBytes-len(valid))...)
+	atLimit := []byte(strings.Repeat(" ", maxTrustBytes))
+	copy(atLimit, valid)
 	for _, tc := range []struct {
 		name      string
 		data      []byte
