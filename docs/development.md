@@ -20,7 +20,7 @@ make diagrams
 make diagrams-check
 ```
 
-Placement is recorded in `docs/diagrams/src/`, with content and validation in `tools/diagrams/`. The checks cover source drift, geometry, text, contrast and reproducible output. The outlined images respect the reader's reduced-motion preference.
+Placement is recorded in `docs/diagrams/src/`, with content and validation in `tools/diagrams/`. Each placement file contains one JSON object with unique member names at every level. The generator rejects unknown fields. The checks cover source drift, geometry, text, contrast and reproducible output. The outlined images respect the reader's reduced-motion preference.
 
 ---
 
