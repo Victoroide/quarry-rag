@@ -11,8 +11,133 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGrantSourceViewReplacementKeepsRoleAndNamespaceIsolation(t *testing.T) {
+	ctx := t.Context()
+	dbURL := startTestDatabase(t)
+	admin := migrationTestClient(t, dbURL)
+	r := newGrantRoles(t, dbURL, "source_owner", "source_sibling", "source_operator", "source_serving", "source_inspector")
+	grantExec(t, admin, r.sql(`CREATE EXTENSION IF NOT EXISTS pgcrypto;
+		CREATE ROLE {source_owner}; CREATE ROLE {source_sibling}; CREATE ROLE {source_operator};
+		CREATE ROLE {source_serving}; CREATE ROLE {source_inspector};
+		CREATE SCHEMA grant_ledger AUTHORIZATION {source_owner};
+		CREATE SCHEMA sibling_ledger AUTHORIZATION {source_sibling};
+		GRANT USAGE ON SCHEMA grant_ledger TO {source_operator}, {source_serving}, {source_inspector};
+		GRANT USAGE ON SCHEMA sibling_ledger TO {source_operator}`))
+	owner := grantRoleClient(t, dbURL, r.sql(`SET SESSION AUTHORIZATION {source_owner}; SET search_path TO grant_ledger`))
+	applyMigrationsExcept(t, owner, grantSourceVersionMigration)
+	grantExec(t, owner, grantGoldenInsert, grantGoldenID, nil)
+	grantExec(t, owner, r.sql(`GRANT SELECT ON grant_catalog_source_documents TO {source_inspector};
+		GRANT SELECT ON grant_catalog_document_access TO {source_serving};
+		GRANT EXECUTE ON FUNCTION grant_catalog_source_snapshot(uuid), grant_catalog_import_batch(text,boolean) TO {source_operator}`))
+	oldView := grantSourceViewState(t, owner)
+	oldVersion := grantSource(t, owner, grantGoldenID)
+
+	sibling := grantRoleClient(t, dbURL, r.sql(`SET SESSION AUTHORIZATION {source_sibling}; SET search_path TO sibling_ledger`))
+	require.NoError(t, sibling.RunMigrations(ctx))
+	grantExec(t, sibling, `INSERT INTO documents (id,content) VALUES ($1,'sibling corpus')`, grantGoldenID)
+	grantExec(t, sibling, `CREATE FUNCTION sha256(bytea) RETURNS bytea LANGUAGE sql
+		RETURN decode(repeat('00', 32), 'hex')`)
+	siblingVersion := grantSource(t, sibling, grantGoldenID)
+	require.NotEqual(t, oldVersion, siblingVersion)
+
+	cancelGrantSourceViewReplacement(t, owner)
+	require.Equal(t, oldView, grantSourceViewState(t, owner))
+	require.Equal(t, oldVersion, grantSource(t, owner, grantGoldenID))
+	var migrationCount int
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations WHERE version=$1`,
+		grantSourceVersionMigration).Scan(&migrationCount))
+	require.Zero(t, migrationCount)
+
+	grantExec(t, admin, `ALTER SCHEMA grant_ledger RENAME TO "Grant Ledger";
+		CREATE SCHEMA grant_ledger;
+		CREATE TABLE grant_ledger.documents (id uuid);
+		CREATE VIEW grant_ledger.grant_catalog_source_documents AS SELECT 'decoy'::text AS source_version`)
+	renamed := grantRoleClient(t, dbURL, r.sql(`SET SESSION AUTHORIZATION {source_owner}; SET search_path TO "Grant Ledger", sibling_ledger, grant_ledger`))
+	operator := grantRoleClient(t, dbURL, r.sql(`SET SESSION AUTHORIZATION {source_operator};
+		SET search_path TO sibling_ledger, pg_catalog, "Grant Ledger"`))
+	serving := grantRoleClient(t, dbURL, r.sql(`SET SESSION AUTHORIZATION {source_serving}; SET search_path TO "Grant Ledger"`))
+	batch := testGrantBatch(0)
+	batch["tenants"] = []grantEntry{{"tenant_id": uuid.NewString()}}
+	payload, err := json.Marshal(batch)
+	require.NoError(t, err)
+	assertGrantSourceRoleBoundary(t, operator, serving, oldVersion, string(payload))
+
+	require.NoError(t, renamed.RunMigrations(ctx))
+	requireRecordedMigrations(t, renamed)
+	assertGrantSourceRoleBoundary(t, operator, serving, grantGoldenVersion, string(payload))
+	require.Equal(t, oldView, grantSourceViewState(t, renamed))
+	require.NoError(t, renamed.RunMigrations(ctx))
+	requireRecordedMigrations(t, renamed)
+	require.Equal(t, oldView, grantSourceViewState(t, renamed))
+	require.Equal(t, grantGoldenVersion, grantSource(t, renamed, grantGoldenID))
+	require.Equal(t, siblingVersion, grantSource(t, sibling, grantGoldenID))
+	assertGrantRevision(t, sibling, 0)
+}
+
+type grantSourceViewIdentity struct {
+	oid        uint32
+	owner, acl string
+}
+
+func grantSourceViewState(t *testing.T, owner *Client) grantSourceViewIdentity {
+	t.Helper()
+	var view grantSourceViewIdentity
+	var publicAccess bool
+	require.NoError(t, owner.Pool.QueryRow(t.Context(), `SELECT oid, relowner::regrole::text, relacl::text,
+		has_table_privilege('public', oid, 'SELECT') FROM pg_class
+		WHERE oid='grant_catalog_source_documents'::regclass`).Scan(&view.oid, &view.owner, &view.acl, &publicAccess))
+	require.False(t, publicAccess)
+	return view
+}
+
+func assertGrantSourceRoleBoundary(t *testing.T, operator, serving *Client, expected, payload string) {
+	t.Helper()
+	ctx := t.Context()
+	for _, client := range []*Client{serving, operator} {
+		_, err := client.Pool.Exec(ctx, `SELECT * FROM "Grant Ledger".grant_catalog_source_documents`)
+		var denied *pgconn.PgError
+		require.ErrorAs(t, err, &denied)
+		require.Equal(t, "42501", denied.Code)
+	}
+	_, err := serving.Pool.Exec(ctx, `SELECT * FROM "Grant Ledger".grant_catalog_source_snapshot($1)`, grantGoldenID)
+	var denied *pgconn.PgError
+	require.ErrorAs(t, err, &denied)
+	require.Equal(t, "42501", denied.Code)
+	var version string
+	require.NoError(t, operator.Pool.QueryRow(ctx, `SELECT source_version FROM "Grant Ledger".grant_catalog_source_snapshot($1)`,
+		grantGoldenID).Scan(&version))
+	require.Equal(t, expected, version)
+	var result GrantImportResult
+	require.NoError(t, operator.Pool.QueryRow(ctx, `SELECT * FROM "Grant Ledger".grant_catalog_import_batch($1,true)`,
+		payload).Scan(&result.Revision, &result.Replayed))
+	require.Zero(t, result.Revision)
+	require.False(t, result.Replayed)
+}
+
+func cancelGrantSourceViewReplacement(t *testing.T, owner *Client) {
+	t.Helper()
+	ctx := t.Context()
+	writer, err := owner.Pool.Acquire(ctx)
+	require.NoError(t, err)
+	defer writer.Release()
+	lock, err := writer.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = lock.Rollback(context.WithoutCancel(ctx)) }()
+	_, err = lock.Exec(ctx, `LOCK TABLE grant_catalog_source_documents IN ACCESS SHARE MODE`)
+	require.NoError(t, err)
+	migrationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- owner.RunMigrations(migrationCtx) }()
+	waitForGrantSourceBlocker(t, owner, writer.Conn().PgConn().PID())
+	cancel()
+	require.ErrorIs(t, <-result, context.Canceled)
+	require.NoError(t, lock.Rollback(ctx))
+}
 
 func testGrantCatalogQuotedACLs(t *testing.T, databaseURL string) {
 	roles := newGrantRoles(t, databaseURL, "quoted_catalog_reader", "quoted_catalog_inherited", "sales_corpus_owner", "regional_corpus_owner")
