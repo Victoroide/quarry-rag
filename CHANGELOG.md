@@ -65,6 +65,10 @@ Notable changes are grouped by release.
   retries with a matching finalized receipt.
 - Scoped original-file signing uses advisory locks after checkpointed deletion activation and retains the mandatory allow audit. Apply migration 034 and the serving-role grants before deploying.
 
+### Fixed
+
+- `preserve_code` keeps citations visible after unclosed list fences and indented fence-like lines, ignores over-indented top-level closers, and assigns the correct fence margin after thematic breaks, numbered paragraph continuations, block quotes and HTML blocks.
+
 ## [0.2.0] - 2026-11-26
 
 ### Upgrade from 0.1.0

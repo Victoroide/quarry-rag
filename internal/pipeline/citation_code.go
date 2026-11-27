@@ -8,86 +8,250 @@ import (
 // asciiPunctuation lists the characters a backslash can escape in Markdown.
 const asciiPunctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 
-// citationCodeRanges returns the sorted, non-overlapping byte ranges of
-// Markdown code in text: fenced code blocks and single-line inline code spans
-// as defined by CommonMark. Indented code blocks, fences indented four or more
-// spaces, fences inside block quotes and HTML code elements are not recognized.
-// Fence-like openers indented four or more spaces are still tracked until a
-// matching closing line so their closing fences cannot start a stray block, and
-// list-item fences opened with two or three spaces close across four- to
-// six-space closing lines. Lines end at a line feed, so a carriage return
-// before it belongs to the line.
+// citationCodeRanges returns sorted, non-overlapping byte ranges for fences
+// on their own lines and single-line inline spans. It tracks one simple list
+// item at a time. Lines are separated by LF, with an optional preceding CR.
 func citationCodeRanges(text string) [][2]int {
 	var ranges [][2]int
-	var fence struct {
-		char                  byte
-		indent, length, start int
-		open                  bool
-	}
-	var unrecognized struct {
-		char   byte
-		length int
-		open   bool
-	}
+	var fence citationFence
+	var paragraph citationParagraph
+	var quote citationQuote
+	var html citationHTMLBlock
+	listMargin := 0
 	for lineStart := 0; lineStart < len(text); {
 		lineEnd := len(text)
 		if i := strings.IndexByte(text[lineStart:], '\n'); i >= 0 {
 			lineEnd = lineStart + i
 		}
 		line := text[lineStart:lineEnd]
-		indent, char, length := scanFenceLine(line)
-		switch {
-		case fence.open:
-			maxCloserIndent := 3
-			if fence.indent >= 2 {
-				maxCloserIndent = fence.indent + 3
-			}
-			if indent <= maxCloserIndent && isFenceCloser(line, indent, char, length, fence.char, fence.length) {
-				ranges = append(ranges, [2]int{fence.start, lineStart + indent + length})
-				fence.open = false
-			}
-		case unrecognized.open:
-			if isFenceCloser(line, indent, char, length, unrecognized.char, unrecognized.length) {
-				unrecognized.open = false
-			}
-		case indent <= 3 && isFenceOpener(line, indent, char, length):
-			fence.char, fence.indent, fence.length, fence.start, fence.open = char, indent, length, lineStart+indent, true
-		case indent >= 4 && isFenceOpener(line, indent, char, length):
-			unrecognized.char, unrecognized.length, unrecognized.open = char, length, true
-		default:
-			ranges = appendInlineCode(ranges, line, lineStart)
-		}
+		indentBytes, indent := scanCodeIndent(line, 0)
+		content := line[indentBytes:]
+		start := lineStart
 		lineStart = lineEnd + 1
+		if blankCodeContent(content) {
+			paragraph = noCitationParagraph
+			quote = citationQuote{}
+			if html == citationHTMLUntilBlank {
+				html = ""
+			}
+			continue
+		}
+
+		// HTML context only affects paragraph and list admission. Preserve the
+		// existing fence and inline-code recognition within HTML blocks.
+		inHTML := html != ""
+		html = html.afterLine(content)
+		char, length := scanFenceDelimiter(content)
+		if fence.length != 0 {
+			dedented := indent < fence.contentMargin()
+			if !dedented && !fence.closes(indent, char, length, content) {
+				continue
+			}
+			if !fence.suppressed {
+				end := start
+				if !dedented {
+					end += indentBytes + length
+				}
+				ranges = append(ranges, [2]int{fence.start, end})
+			}
+			fence = citationFence{}
+			if !dedented {
+				continue
+			}
+			// The dedent belongs to the outside scanner.
+		}
+
+		if indent < listMargin {
+			listMargin = 0
+		}
+		if isFenceOpener(content, char, length) {
+			fence = citationFence{char: char, length: length, start: start + indentBytes, suppressed: indent >= 4}
+			if indent <= listMargin+3 {
+				paragraph = noCitationParagraph
+				quote = citationQuote{}
+				fence.listMargin = listMargin
+			}
+			continue
+		}
+		ranges = appendInlineCode(ranges, line, start)
+		if inHTML {
+			continue
+		}
+		if listMargin == 0 && indent <= 3 {
+			if content[0] == '>' {
+				paragraph = quote.line(content, indent)
+				continue
+			}
+			if html = citationHTMLStart(content, paragraph == topLevelCitationParagraph); html != "" {
+				paragraph = noCitationParagraph
+				quote = citationQuote{}
+				html = html.afterLine(content)
+				continue
+			}
+		}
+		listMargin, paragraph = citationLineContext(content, indent, listMargin, paragraph)
+		if paragraph != quoteCitationParagraph {
+			quote = citationQuote{}
+		}
 	}
-	if fence.open {
+	if fence.length != 0 && !fence.suppressed {
 		ranges = append(ranges, [2]int{fence.start, len(text)})
 	}
 	return ranges
 }
 
-// scanFenceLine measures leading space indentation and a run of backtick or
-// tilde characters at the first non-space byte. A zero length means the line
-// has no such delimiter run.
-func scanFenceLine(line string) (indent int, char byte, length int) {
-	for indent < len(line) && line[indent] == ' ' {
-		indent++
-	}
-	if indent == len(line) || (line[indent] != '`' && line[indent] != '~') {
-		return 0, 0, 0
-	}
-	char = line[indent]
-	for indent+length < len(line) && line[indent+length] == char {
-		length++
-	}
-	return indent, char, length
+type citationFence struct {
+	char                      byte
+	length, start, listMargin int
+	suppressed                bool
 }
 
-func isFenceCloser(line string, indent int, char byte, length int, openChar byte, openLength int) bool {
-	return char == openChar && length >= openLength && strings.Trim(line[indent+length:], " \t\r") == ""
+func (f citationFence) standaloneIndented() bool {
+	return f.suppressed && f.listMargin == 0
 }
 
-func isFenceOpener(line string, indent int, char byte, length int) bool {
-	return length >= 3 && (char != '`' || !strings.Contains(line[indent+length:], "`"))
+func (f citationFence) contentMargin() int {
+	if f.standaloneIndented() {
+		return 4
+	}
+	return f.listMargin
+}
+
+func (f citationFence) closes(indent int, char byte, length int, content string) bool {
+	return (f.standaloneIndented() || indent <= f.listMargin+3) &&
+		char == f.char && length >= f.length && strings.Trim(content[length:], " \t\r") == ""
+}
+
+// scanCodeIndent returns the number of leading indentation bytes and the
+// resulting visual column. Tabs advance to the next four-column stop.
+func scanCodeIndent(line string, column int) (bytes, columns int) {
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case ' ':
+			column++
+		case '\t':
+			column += 4 - column%4
+		default:
+			return i, column
+		}
+	}
+	return len(line), column
+}
+
+func blankCodeContent(content string) bool {
+	return content == "" || content == "\r"
+}
+
+type citationParagraph uint8
+
+const (
+	noCitationParagraph citationParagraph = iota
+	topLevelCitationParagraph
+	listCitationParagraph
+	quoteCitationParagraph
+)
+
+func citationLineContext(content string, indent, margin int, paragraph citationParagraph) (int, citationParagraph) {
+	if indent > margin+3 {
+		// Indented text may continue an open paragraph but cannot open one.
+		return margin, paragraph
+	}
+	interrupting := paragraph == topLevelCitationParagraph
+	if citationParagraphBoundary(content, interrupting || (margin != 0 && paragraph == listCitationParagraph)) {
+		return margin, noCitationParagraph
+	}
+	if margin != 0 {
+		return margin, listCitationParagraph
+	}
+	if itemMargin, body := citationListStart(content, indent, interrupting); itemMargin != 0 {
+		if body == "" || citationParagraphBoundary(body, false) {
+			return itemMargin, noCitationParagraph
+		}
+		return itemMargin, listCitationParagraph
+	}
+	if paragraph == listCitationParagraph || paragraph == quoteCitationParagraph {
+		// Lazy prose can continue a container paragraph without restoring
+		// the list fence margin after a nonblank dedent.
+		return 0, paragraph
+	}
+	return 0, topLevelCitationParagraph
+}
+
+// citationListStart runs after block boundaries such as thematic breaks have
+// been checked. Only an ordered marker whose value is one can interrupt a
+// top-level paragraph. After a list item, an ordered marker may start at any
+// value, including a sibling with the same delimiter.
+func citationListStart(content string, indent int, interrupting bool) (margin int, body string) {
+	width := 1
+	switch content[0] {
+	case '-', '+', '*':
+	default:
+		digits := 0
+		for digits < min(9, len(content)) && content[digits] >= '0' && content[digits] <= '9' {
+			digits++
+		}
+		if digits == 0 || digits == len(content) || (content[digits] != '.' && content[digits] != ')') {
+			return 0, ""
+		}
+		if interrupting && strings.TrimLeft(content[:digits], "0") != "1" {
+			return 0, ""
+		}
+		width += digits
+	}
+
+	markerEnd := indent + width
+	padding, margin := scanCodeIndent(content[width:], markerEnd)
+	if padding == 0 || blankCodeContent(content[width+padding:]) {
+		return 0, ""
+	}
+	if margin > markerEnd+4 {
+		return markerEnd + 1, ""
+	}
+	return margin, content[width+padding:]
+}
+
+func citationParagraphBoundary(content string, paragraphOpen bool) bool {
+	line := strings.TrimSuffix(content, "\r")
+	switch line[0] {
+	case '#':
+		length := len(line) - len(strings.TrimLeft(line, "#"))
+		return length <= 6 && (length == len(line) || line[length] == ' ' || line[length] == '\t')
+	case '-', '=', '*', '_':
+		mark := line[0]
+		if paragraphOpen && (mark == '-' || mark == '=') && strings.TrimRight(strings.TrimLeft(line, line[:1]), " \t") == "" {
+			return true
+		}
+		if mark == '=' {
+			return false
+		}
+		count := 0
+		for i := range len(line) {
+			switch line[i] {
+			case mark:
+				count++
+			case ' ', '\t':
+			default:
+				return false
+			}
+		}
+		return count >= 3
+	default:
+		return false
+	}
+}
+
+func scanFenceDelimiter(content string) (char byte, length int) {
+	char = content[0]
+	if char == '`' || char == '~' {
+		for length < len(content) && content[length] == char {
+			length++
+		}
+	}
+	return char, length
+}
+
+func isFenceOpener(content string, char byte, length int) bool {
+	return length >= 3 && (char != '`' || !strings.Contains(content[length:], "`"))
 }
 
 type backtickRun struct{ start, length int }

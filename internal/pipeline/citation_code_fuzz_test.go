@@ -11,13 +11,28 @@ import (
 
 const fuzzMaxAnswerBytes = 64 << 10
 
+var citationFenceContainerSeeds = []string{
+	"12)\tSetup\r\n \t```\r\n\t`x[0]`\r\n\t \r\n   `y[1]` [1]",
+	"档案\n- Setup\n  ```\n  a[0]\n \t ```\n```\nb[1]\n```\n[1]",
+}
+
 func FuzzCitationCodeRanges(f *testing.F) {
+	for _, tc := range citationFenceRegressions {
+		f.Add(tc.answer)
+	}
+	for _, tc := range citationListStartCases {
+		answer, _ := tc.fenceAnswer("```", tc.indent)
+		f.Add(answer)
+	}
+	for _, seed := range citationFenceContainerSeeds {
+		f.Add(seed)
+	}
 	for _, seed := range []string{
 		"a `b[0]` c", "``a`b``", "`foo\\`bar`", "\\`x`", "```go\nx\n\ny\n```\n[1]", "~~~\na\n~~~~", "```\r\nx\r\n```\r\n",
 		"```\ncode\n``` [1]", "   ```\nx", "    ```\nx\n    ```", "```x`y```", "> ```\n> a\n> ```", "档案 `x[0]` 记录", "\xff`\xfe`", "~~~`",
 		"1. Install:\n    ```bash\n    npm i x[0]\n   ```\nThen restart [1].",
 		"- Install:\n  ```bash\n  npm i x[0]\n    ```\nThen restart [1].",
-		"   ```bash\n   x[0]\n      ```\n[1]",
+		"1. Install:\n   ```bash\n   x[0]\n      ```\n[1]",
 		"```\n    ```\n[1]\n```",
 	} {
 		f.Add(seed)
@@ -65,6 +80,16 @@ func FuzzCitationCodeRanges(f *testing.F) {
 }
 
 func FuzzVerifyCitationsPreservingCode(f *testing.F) {
+	for _, tc := range citationFenceRegressions {
+		f.Add(tc.answer, uint8(1))
+	}
+	for _, tc := range citationListStartCases {
+		answer, _ := tc.fenceAnswer("~~~", tc.indent)
+		f.Add(answer, uint8(1))
+	}
+	for _, seed := range citationFenceContainerSeeds {
+		f.Add(seed, uint8(1))
+	}
 	for _, seed := range []string{
 		"The first station is `stations[0]` [1].", "Use `a[01]` here [1].", "Use `items[1]` for the second item [1].",
 		"```go\nx := a[0]\n\ny := b[1]\n```\nDone [1].", "Press the ` key [0].\n\nThen run `ls` [1].", "`a[9]` b [9] [1]",
@@ -100,7 +125,10 @@ func FuzzVerifyCitationsPreservingCode(f *testing.F) {
 				literal = cleanedLiteral
 			}
 			runes := []rune(gotAnswer)
+			previous := 0
 			for _, c := range got {
+				require.LessOrEqual(t, previous, c.Offset)
+				previous = c.Offset
 				require.Less(t, c.Offset, len(runes))
 				require.Equal(t, '[', runes[c.Offset])
 				require.False(t, inCitationCode(c.markerByte, literal))

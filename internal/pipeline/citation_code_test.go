@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -8,6 +9,19 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/stretchr/testify/require"
 )
+
+var citationFenceRegressions = []struct {
+	name, answer string
+	blocks       []string
+	offset       int
+}{
+	{"dedent to sibling", "1. Install:\n    ```bash\n    npm i x\n2. Run:\n```\nrun\n```\nThen restart [1].", []string{"```\nrun\n```"}, 69},
+	{"dedent after blank", "1. Install:\n    ```bash\n    npm i x\n\n```\nrun\n```\nThen restart [1].", []string{"```\nrun\n```"}, 62},
+	{"dedent from indented block", "Example:\n\n    ```\n    raw\n\n```\nx\n```\nThen [1].", []string{"```\nx\n```"}, 42},
+	{"over-indented top-level closer", "  ```\n  a\n     ```\n  b\n  ```\nThen [1].", []string{"```\n  a\n     ```\n  b\n  ```"}, 34},
+	{"thematic break before top-level fence", "- - -\n  ```\nliteral\n```\nThen [1].", []string{"```\nliteral\n```"}, 29},
+	{"ordered paragraph continuation before top-level fence", "Paragraph text\n2. continuation\n   ```\nliteral\n```\nThen [1].", []string{"```\nliteral\n```"}, 55},
+}
 
 func TestCitationCodeRanges(t *testing.T) {
 	for _, tc := range []struct {
@@ -37,17 +51,18 @@ func TestCitationCodeRanges(t *testing.T) {
 		{"unclosed fence runs to the end", "text\n```\ncode [1]", []string{"```\ncode [1]"}},
 		{"lone fence", "```", []string{"```"}},
 		{"three-space indent is a fence", "   ```\nx\n   ```\n[1]", []string{"```\nx\n   ```"}},
-		{"four-space indent is not a fence", "    ```\nx\n    ```", nil},
+		{"four-space indent is not a fence", "    ```\n    x\n    ```", nil},
 		{"four-space opener closed at three spaces", "1. Install:\n    ```bash\n    npm i x[0]\n   ``` \nThen restart [1].", nil},
 		{"two-space opener closed at four spaces", "- Install:\n  ```bash\n  npm i x[0]\n    ``` \nThen restart [1].", []string{"```bash\n  npm i x[0]\n    ```"}},
 		{"three-space opener closed at six spaces", "1. Install:\n   ```bash\n   npm i x[0]\n      ```\nThen restart [1].", []string{"```bash\n   npm i x[0]\n      ```"}},
 		{"top-level fence ignores four-space literal fence", "```markdown\n    ```\n```\nThen [1].", []string{"```markdown\n    ```\n```"}},
 		{"one-space fence ignores four-space literal fence", " ```markdown\n    ```\n ```\nThen [1].", []string{"```markdown\n    ```\n ```"}},
-		{"tilde straddle and length mismatch", "    ~~~~\n    a[0]\n   ~~~\n   ~~~~\n`b` [1]\n  ~~~\n  x[0]\n     ~~\n     ~~~~\nDone [2].", []string{"`b`", "~~~\n  x[0]\n     ~~\n     ~~~~"}},
+		{"tilde straddle and length mismatch", "1. First\n    ~~~~\n    a[0]\n   ~~~\n   ~~~~\n`b` [1]\n- Next\n  ~~~\n  x[0]\n     ~~\n     ~~~~\nDone [2].", []string{"`b`", "~~~\n  x[0]\n     ~~\n     ~~~~"}},
+		{"top-level tilde closer must reach the left margin", "  ~~~\n  x[0]\n     ~~~~\n   ~~~~\nDone [1].", []string{"~~~\n  x[0]\n     ~~~~\n   ~~~~"}},
 		{"indented backtick in info string is not an opener", "    ```a`b\n   ```\nx\n   ```\n`c`", []string{"```\nx\n   ```", "`c`"}},
 		{"tab indent is not a fence", "\t```\nx[0]\n\t```", nil},
-		{"inline span inside unrecognized fence", "    ```bash\n    `x[0]`\n   ``` \n`y[0]` [1]", []string{"`y[0]`"}},
-		{"unclosed four-space fence", "    ```bash\n`x[0]`\nThen [1].", nil},
+		{"inline span inside unrecognized list fence", "1. Install\n    ```bash\n    `x[0]`\n   ``` \n`y[0]` [1]", []string{"`y[0]`"}},
+		{"unclosed four-space fence", "    ```bash\n`x[0]`\nThen [1].", []string{"`x[0]`"}},
 		{"CRLF straddle fences", "1. Install:\r\n    ```bash\r\n    npm i x[0]\r\n   ```\r\n- Next:\r\n  ```bash\r\n  npm i y[0]\r\n    ```\r\nThen [1].", []string{"```bash\r\n  npm i y[0]\r\n    ```"}},
 		{"fence inside a block quote is not recognized", "> ```\n> x[0]\n> ```", nil},
 		{"backtick in the info string is not a fence", "```a`b\nx[0]", nil},
@@ -66,7 +81,189 @@ func TestCitationCodeRanges(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+	for _, tc := range citationFenceRegressions {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.offset, strings.LastIndex(tc.answer, "[1]"))
+			assertCitationCodeRanges(t, tc.answer, tc.blocks)
+		})
+	}
 	require.Equal(t, [][2]int{{2, 8}}, citationCodeRanges("a `b[0]` c"))
+}
+
+func assertCitationCodeRanges(t *testing.T, text string, blocks []string) {
+	t.Helper()
+	var want [][2]int
+	end := 0
+	for _, block := range blocks {
+		i := strings.Index(text[end:], block)
+		require.NotEqual(t, -1, i, "%q is missing from the fixture", block)
+		start := end + i
+		end = start + len(block)
+		want = append(want, [2]int{start, end})
+	}
+	require.Equal(t, want, citationCodeRanges(text))
+}
+
+func TestCitationFenceContainerBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		blocks     []string
+	}{
+		{"ordered parenthesis and multiple digits", "12) Setup\n    ```\n    `x`\n    ```\n`y`", []string{"`y`"}},
+		{"nine digits are a marker", "123456789. Setup\n           ```\n           `x`\n          ```\n          `y`\n`z`", []string{"`z`"}},
+		{"zero-padded one interrupts a paragraph", "Paragraph\n000000001) Item\n           ```\n               ```\n           `hidden`\n           ```\n`visible`", []string{"`visible`"}},
+		{"ten digits are prose", "1234567890. Setup\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"sibling resets margin", "12) First\n    ```\n- Second\n  ```\n  `x`\n    ```\n`y`", []string{"```\n  `x`\n    ```", "`y`"}},
+		{"unrelated list expires on prose", "- First\nParagraph\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"marker-like prose", "See - list\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"marker without separating whitespace", "1.No\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"marker-only line", "-  \t\r\n  ```\n  a\n    ```\n  b\n  ```\n[1]", []string{"```\n  a\n    ```\n  b\n  ```"}},
+		{"wide marker padding falls back to one column", "+     Setup\n  ```\n  a\n     ```\n`y`", []string{"```\n  a\n     ```", "`y`"}},
+		{"four padding columns contribute to the margin", "+    Setup\n     ```\n     `x`\n    ```\n     `y`\n`z`", []string{"`z`"}},
+		{"blank lines keep list and open fence", "* Setup\n \t\r\n  ```\n\r\n \t\r\n  a\n     ```\n`y`", []string{"```\n\r\n \t\r\n  a\n     ```", "`y`"}},
+		{"tab padding after marker uses the current column", "  -\tSetup\r\n \t```\r\n\t`x`\r\n\t    ```\r\n\t`y`\r\n\t  ```\t\r\n\t`z`", []string{"`z`"}},
+		{"mixed indentation counts columns but uses byte offsets", "档案\n- Setup\n  ```\r\n  x\r\n \t```\t\r\n`y`", []string{"```\r\n  x\r\n \t```", "`y`"}},
+		{"nonzero opener indentation keeps list margin", " - Setup\n   ```\n   a\n      ```\n`y`", []string{"```\n   a\n      ```", "`y`"}},
+		{"closer bounds follow margin even when opener is deeper", "- Setup\n   ```\n   a\n      ```\n     ```\n`y`", []string{"```\n   a\n      ```\n     ```", "`y`"}},
+		{"list closer must match delimiter length and tail", "- Setup\n  ~~~~\n  ~~~\n  ````\n  ~~~~ text\n    ~~~~~\t\n`y`", []string{"~~~~\n  ~~~\n  ````\n  ~~~~ text\n    ~~~~~", "`y`"}},
+		{"list suppression uses bounded closer indentation", "- Setup\n    ~~~~\n      ~~~~\n    `x`\n     ~~~~~\n  `y`", []string{"`y`"}},
+		{"opener beyond list fence indentation uses indented block margin", "- Setup\n      ```\n    `x`\n  `y`", []string{"`y`"}},
+		{"standalone tab block ends before dedented inline span", "\t```\n \t`x`\n\t \r\n   `y`", []string{"`y`"}},
+		{"standalone closer remains inside the indented block", "    ~~~\n        ~~~\n    `y`", []string{"`y`"}},
+		{"recognized list fence dedents to prose", "- Setup\r\n  ```\r\n  a\r\n `y` [1]", []string{"```\r\n  a\r\n", "`y`"}},
+		{"recognized list fence dedents to another fence", "- Setup\n  ```\n  a\n```\nb\n```\n[1]", []string{"```\n  a\n", "```\nb\n```"}},
+		{"unclosed list fence at eof without lf", "1. Setup\n   ```\n   a", []string{"```\n   a"}},
+		{"unclosed list fence at eof with lf", "1. Setup\n   ```\n   a\n", []string{"```\n   a\n"}},
+		{"lone carriage return is not a line separator", "- Setup\n  ```\r[1]", []string{"```\r[1]"}},
+		{"block quote is outside the fence subset", "> ```\n> `x`\n> ```\n`y`", []string{"`x`", "`y`"}},
+		{"direct marker fence is outside the fence subset", "- ```\n  `x`\n  ```\n  open", []string{"`x`", "```\n  open"}},
+		{"nested marker does not establish a second margin", "- Outer\n  - Inner\n  ```\n  a\n     ```\n`y`", []string{"```\n  a\n     ```", "`y`"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCitationCodeRanges(t, tc.text, tc.blocks)
+		})
+	}
+}
+
+// The indented closers in these fixtures distinguish a real list fence from
+// a top-level one. The same fixtures also seed both citation fuzz targets.
+type citationListStartCase struct {
+	name, prefix, indent string
+	list                 bool
+}
+
+var citationListStartCases = []citationListStartCase{
+	{"dash thematic break", "- - -\n", "  ", false},
+	{"asterisk thematic break", " * * *\n", "   ", false},
+	{"compact thematic break", "---\n", "  ", false},
+	{"interleaved thematic break with CRLF", "- -\t-- \r\n", "  ", false},
+	{"asterisk thematic break with compact run and tab", "* **\t*\n", "  ", false},
+	{"mixed thematic characters are a bullet item", "- * -\n", "  ", true},
+	{"one dash run short of a thematic break", "- -\n", "  ", true},
+	{"dash interrupts a paragraph", "Paragraph\n- Item\n", "  ", true},
+	{"plus interrupts a paragraph", "Paragraph\n+ Item\n", "  ", true},
+	{"asterisk interrupts a paragraph", "Paragraph\n* Item\n", "  ", true},
+	{"bullet without following whitespace", "-Item\n", "  ", false},
+	{"non-ASCII whitespace is not marker padding", "-\u00a0Item\n", "  ", false},
+	{"ordered marker without following whitespace", "1.Item\n", "   ", false},
+	{"empty bullet cannot interrupt", "Paragraph\n* \t\n", "  ", false},
+	{"empty ordered item cannot interrupt", "Paragraph\n1)\n", "   ", false},
+	{"ordered marker requires an ASCII delimiter", "1: Item\n", "   ", false},
+	{"ordered marker requires ASCII digits", "１. Item\n", "   ", false},
+	{"ordered marker stops at nine digits", "Paragraph\n0000000001. Item\n", "   ", false},
+	{"four-column marker indentation", "    - Item\n", "  ", false},
+	{"tab expands to four columns before the marker", " \t* Item\n", "  ", false},
+	{"non-one period cannot interrupt", "Paragraph\n2. Item\n", "   ", false},
+	{"zero with parenthesis cannot interrupt", "Paragraph\n0) Item\n", "   ", false},
+	{"zero-padded non-one cannot interrupt", "Paragraph\n02. Item\n", "   ", false},
+	{"one with period interrupts", "Paragraph\n1. Item\n", "   ", true},
+	{"one with parenthesis interrupts", "Paragraph\n1) Item\n", "   ", true},
+	{"quote before ordered list", "> Quote\n2. Second\n", "   ", true},
+	{"quote in column one before marker one", " > Quote\n1) Item\n", "   ", true},
+	{"quoted heading in column two", "  > # Heading\n2) Item\n", "   ", true},
+	{"quote in column three interrupts a paragraph", "Paragraph\n   > Quote\n2. Item\n", "   ", true},
+	{"lazy continuation of quoted prose", "> Quote\nLazy continuation\n2) Item\n", "   ", true},
+	{"indented lazy continuation of quoted prose", "> Quote\n    Lazy continuation\n2. Item\n", "   ", true},
+	{"equals signs lazily continue quoted prose", "> Quote\n===\n2. Item\n", "   ", true},
+	{"prose after a quoted heading", "> # Heading\nParagraph\n2) Item\n", "   ", false},
+	{"prose after a quoted blank line", "> Quote\n>\nParagraph\n2. Item\n", "   ", false},
+	{"prose after an unclosed quoted fence", "> ~~~\n> code\nParagraph\n2. Item\n", "   ", false},
+	{"prose after quoted HTML", "> <div>\n> raw text\nParagraph\n2. Item\n", "   ", false},
+	{"escaped quote continues top-level prose", "Paragraph\n\\> text\n2. Item\n", "   ", false},
+	{"quote marker at column four continues prose", "Paragraph\n    > text\n2. Item\n", "   ", false},
+	{"single-line HTML comment", "<!-- comment -->\n2. Item\n", "   ", true},
+	{"multiline HTML comment interrupts prose", "Paragraph\n <!-- comment\n\n2. Raw content\n -->\n2) Item\n", "   ", true},
+	{"HTML processing instruction", "  <?instruction\nprocessing ?> trailing text\n2. Item\n", "   ", true},
+	{"HTML declaration", "   <!DOCTYPE html>\n2) Item\n", "   ", true},
+	{"CDATA section with CRLF", "<![CDATA[\r\ncontent\r\n]]>\r\n2. Item\n", "   ", true},
+	{"raw script with a case-insensitive terminator", "<ScRiPt>\ncontent\n</SCRIPT>\n2) Item\n", "   ", true},
+	{"raw pre block ends at another raw end tag", "<pre\ncontent\n</style>\n2. Item\n", "   ", true},
+	{"single-line raw style block", "<style media='screen'>a{color:red}</style>\n2. Item\n", "   ", true},
+	{"raw textarea block", "<textarea>\n</textarea>\n2. Item\n", "   ", true},
+	{"blank-terminated known HTML block stays open after end tag", "Paragraph\n<div>\n</div>\n1. Raw content\n", "   ", false},
+	{"blank-terminated custom HTML block stays open after end tag", "<custom-tag data-key = 'x > y' />\n1) Raw content\n", "   ", false},
+	{"custom tag can start with a raw tag name", "<script-widget>\n1. Raw content\n", "   ", false},
+	{"blank-terminated HTML with closing tag as opener", "</custom-tag>\n1. Raw content\n", "   ", false},
+	{"blank line ends known HTML block", "<section>\n</section>\n\n2. Item\n", "   ", true},
+	{"blank line ends custom HTML block", "<custom-tag>\n\n2) Item\n", "   ", true},
+	{"blank line does not end a raw comment", "<!-- start\n\n1. Raw content\n", "   ", false},
+	{"custom HTML tag cannot interrupt prose", "Paragraph\n<span data-key=x>\n1) Item\n", "   ", true},
+	{"invalid HTML tag is paragraph text", "<span bogus=>\n1. Item\n", "   ", true},
+	{"inline tag with trailing text is paragraph text", "<span> prose\n1) Item\n", "   ", true},
+	{"inline angle-bracket text continues prose", "Paragraph <div>\n2. Item\n", "   ", false},
+	{"escaped angle bracket continues prose", "Paragraph\n\\<!-- literal -->\n2) Item\n", "   ", false},
+	{"raw tag prefix alone cannot open a block", "Paragraph\n<scripture>\n2. Item\n", "   ", false},
+	{"indented HTML opener continues prose", "Paragraph\n    <!-- literal -->\n2. Item\n", "   ", false},
+	{"prose after a terminated raw block", "<!-- comment -->\nParagraph\n2) Item\n", "   ", false},
+	{"non-one period starts after blank line", "Paragraph\n\n2. Item\n", "   ", true},
+	{"non-one parenthesis starts after a closed fence", "~~~\ncode\n~~~\n2) Item\n", "   ", true},
+	{"non-one starts after a thematic break", "Paragraph\n* * *\n2. Item\n", "   ", true},
+	{"non-one starts after an ATX heading", "# Heading\n2. Item\n", "   ", true},
+	{"non-one starts after a setext heading", "Heading\n=====\n2. Item\n", "   ", true},
+	{"hashes without heading whitespace do not end prose", "Paragraph\n#Heading\n2. Item\n", "   ", false},
+	{"setext underline requires an open paragraph", "=====\n2. Item\n", "   ", false},
+	{"non-one period sibling", "1. First\n2. Item\n", "   ", true},
+	{"non-one parenthesis sibling", "1) First\n2) Item\n", "   ", true},
+	{"numbered sibling after lazy prose", "1. First\nLazy continuation\n2. Item\n", "   ", true},
+	{"different delimiter starts a separate list", "1. First\n2) Item\n", "   ", true},
+	{"non-one after bullet starts a separate list", "- First\n2. Item\n", "   ", true},
+	{"lazy marker-like prose leaves no fence margin", "- First\n2.continuation\n", "  ", false},
+	{"non-one after an indented paragraph continuation", "Paragraph\n    continuation\n2. Item\n", "   ", false},
+	{"indented fence-like text cannot interrupt a paragraph", "Paragraph\n    ~~~\n2. Item\n", "   ", false},
+}
+
+func (tc citationListStartCase) fenceAnswer(fence, bodyIndent string) (answer, block string) {
+	closer := fence
+	if tc.list {
+		closer = "    " + closer
+	}
+	block = fence + "\n" + bodyIndent + "literal [01]\n" + closer
+	return tc.prefix + tc.indent + block + "\nThen [1].", block
+}
+
+func TestCitationListFenceStarts(t *testing.T) {
+	for _, tc := range citationListStartCases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, fence := range []string{"```", "~~~"} {
+				for _, bodyIndent := range []string{"", tc.indent} {
+					if tc.list && bodyIndent == "" {
+						continue
+					}
+					answer, block := tc.fenceAnswer(fence, bodyIndent)
+					start := len(tc.prefix) + len(tc.indent)
+					ranges := citationCodeRanges(answer)
+					require.NotEmpty(t, ranges, answer)
+					require.Equal(t, [2]int{start, start + len(block)}, ranges[len(ranges)-1], answer)
+					for _, streaming := range []bool{false, true} {
+						got, citations := preservingFinalize(t, answer, 1, streaming, true)
+						require.Equal(t, answer, got)
+						offset := utf8.RuneCountInString(answer[:strings.LastIndex(answer, "[1]")])
+						require.Equal(t, []int{offset}, citationOffsets(citations))
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestInCitationCode(t *testing.T) {
@@ -88,6 +285,43 @@ func BenchmarkCitationCodeRanges(b *testing.B) {
 	for b.Loop() {
 		citationCodeRanges(text)
 	}
+}
+
+func BenchmarkCitationCodeRangeDedents(b *testing.B) {
+	const item = "- Setup\n  ```\n  code\n~~~\n[1]\n~~~\nThen [1].\n"
+	for _, kiB := range []int{10, 100} {
+		b.Run(strconv.Itoa(kiB)+"KiB", func(b *testing.B) {
+			answer := strings.Repeat(item, kiB*1024/len(item)+1)[:kiB*1024]
+			b.SetBytes(int64(len(answer)))
+			b.ReportAllocs()
+			for b.Loop() {
+				citationCodeRanges(answer)
+			}
+		})
+	}
+}
+
+func TestVerifyCitationsAfterFenceDedent(t *testing.T) {
+	for _, tc := range citationFenceRegressions {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.offset, strings.LastIndex(tc.answer, "[1]"))
+			for _, streaming := range []bool{false, true} {
+				for _, preserve := range []bool{false, true} {
+					answer, citations := preservingFinalize(t, tc.answer, 1, streaming, preserve)
+					require.Equal(t, tc.answer, answer)
+					require.Equal(t, []int{tc.offset}, citationOffsets(citations))
+				}
+			}
+		})
+	}
+	t.Run("marker inside recovered top-level fence is literal", func(t *testing.T) {
+		answer := strings.Replace(citationFenceRegressions[0].answer, "\nrun\n", "\nrun [01]\n", 1)
+		for _, streaming := range []bool{false, true} {
+			got, citations := preservingFinalize(t, answer, 1, streaming, true)
+			require.Equal(t, answer, got)
+			require.Equal(t, []int{strings.LastIndex(answer, "[1]")}, citationOffsets(citations))
+		}
+	})
 }
 
 // preservingFinalize runs the production finalization for a response mode.
