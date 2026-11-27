@@ -126,9 +126,10 @@ func TestAppendActivationQuiesceReasons(t *testing.T) {
 	require.Equal(t, blockers, rep.Reasons)
 }
 
-func TestActivationPreflightQuiescence(t *testing.T) {
+func TestActivationWriterBlockersSkipCorpusOverLimit(t *testing.T) {
 	h, opts := activationHarness(t)
 	pg := h.f.pg
+	opts.MaxDocuments = 1
 	job := insertActivationJob(t, pg, "running", false)
 	id := insertActivationDeletion(t.Context(), t, pg, true)
 	opens, embeds := h.stores.opened, h.embedCalls()
@@ -137,9 +138,10 @@ func TestActivationPreflightQuiescence(t *testing.T) {
 	deleting := fmt.Sprintf("1 open deletions (%s) must finish before activation", id)
 	const freezeRequired = "writers are not frozen for this generation"
 	for _, tt := range []struct {
-		name, freeze         string
-		settling, live, open bool
-		reasons              []string
+		name, freeze, targetState     string
+		settling, live, open, pending bool
+		missingFreezeTime             bool
+		reasons                       []string
 	}{
 		{name: "settling", freeze: activationTarget, settling: true, reasons: []string{settling}},
 		{name: "live lease", freeze: activationTarget, live: true, reasons: []string{running}},
@@ -148,6 +150,10 @@ func TestActivationPreflightQuiescence(t *testing.T) {
 		{name: "all blockers", freeze: activationTarget, settling: true, live: true, open: true, reasons: []string{settling, running, deleting}},
 		{name: "no freeze", reasons: []string{freezeRequired}},
 		{name: "wrong freeze", freeze: "g3", settling: true, reasons: []string{freezeRequired}},
+		{name: "missing freeze timestamp", freeze: activationTarget, missingFreezeTime: true, reasons: []string{settling}},
+		{name: "staging", freeze: activationTarget, targetState: pgstore.StateStaging, reasons: []string{"the generation is staging; it must be verified"}},
+		{name: "pending write", freeze: activationTarget, pending: true, reasons: []string{"the generation has an unconfirmed target write"}},
+		{name: "already active", freeze: activationTarget, targetState: pgstore.StateActive, settling: true, live: true, open: true, reasons: []string{`generation "g2" is already active`}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -157,98 +163,370 @@ func TestActivationPreflightQuiescence(t *testing.T) {
 			require.NoError(t, err)
 			_, err = pg.Pool.Exec(ctx, "UPDATE document_deletions SET finalized=NOT $2, held=NOT $2 WHERE document_id=$1", id, tt.open)
 			require.NoError(t, err)
+			if tt.missingFreezeTime {
+				_, err = pg.Pool.Exec(ctx, `UPDATE vector_state SET frozen_at=NULL`)
+				require.NoError(t, err)
+			}
+			targetState := tt.targetState
+			if targetState == "" {
+				targetState = pgstore.StateVerified
+			}
+			_, err = pg.Pool.Exec(ctx, `UPDATE vector_generations SET state=$2, pending_write=$3,
+				pending_write_id=CASE WHEN $3 THEN gen_random_uuid() END WHERE name=$1`, activationTarget, targetState, tt.pending)
+			require.NoError(t, err)
+			active := pgstore.LegacyGeneration
+			if targetState == pgstore.StateActive {
+				active = activationTarget
+				_, err = pg.Pool.Exec(ctx, `UPDATE vector_state SET active_generation=$1`, active)
+				require.NoError(t, err)
+			}
+			beforeState, err := pg.VectorState(ctx)
+			require.NoError(t, err)
+			beforeTarget, err := pg.Generation(ctx, activationTarget)
+			require.NoError(t, err)
+			tracer := &activationTracer{}
+			d := traceActivation(t, h.deps, tracer)
 			for _, apply := range []bool{false, true} {
 				opts.Apply = apply
 				var out bytes.Buffer
-				err = execute(ctx, h.deps, opts, &out, time.Millisecond)
+				err = execute(ctx, d, opts, &out, time.Millisecond)
 				require.ErrorIs(t, err, errActivationNotReady)
 				for _, reason := range tt.reasons {
 					require.ErrorContains(t, err, reason)
 				}
-				rep := activationReport(t, out.Bytes(), false, false, pgstore.LegacyGeneration, tt.freeze)
+				rep := activationReport(t, out.Bytes(), false, false, active, tt.freeze)
 				require.Equal(t, tt.reasons, rep.Reasons)
+				require.EqualValues(t, boolCount(tt.live), rep.Quiesce.RunningJobs)
+				require.EqualValues(t, boolCount(tt.open), rep.Quiesce.OpenDeletions)
+				if tt.open {
+					require.Equal(t, []string{id}, rep.Quiesce.OpenDeletionIDs)
+				}
+				require.Zero(t, tracer.pages)
+				require.Zero(t, tracer.probes)
 				require.Equal(t, opens, h.stores.opened)
 				require.Equal(t, embeds, h.embedCalls())
-				requireActivationState(ctx, t, pg, pgstore.LegacyGeneration, tt.freeze, pgstore.StateVerified)
+				afterState, stateErr := pg.VectorState(ctx)
+				require.NoError(t, stateErr)
+				require.Equal(t, beforeState, afterState)
+				afterTarget, targetErr := pg.Generation(ctx, activationTarget)
+				require.NoError(t, targetErr)
+				require.Equal(t, beforeTarget, afterTarget)
 			}
 		})
 	}
 }
 
-type activationQuiesceTracer struct {
-	beforeRead func(context.Context)
+func boolCount(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
-func (tr activationQuiesceTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	if strings.Contains(data.SQL, "FROM ingest_jobs") && strings.Contains(data.SQL, "FROM vector_state") {
-		tr.beforeRead(ctx)
+type activationTracer struct {
+	reads, pages, probes int
+	before               func(context.Context, *pgx.Conn, string, int)
+	queryErr             error
+}
+
+func (tr *activationTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	var kind string
+	var count int
+	switch {
+	case strings.Contains(data.SQL, "FROM vector_state CROSS JOIN vector_generations AS target"):
+		tr.reads++
+		kind, count = "readiness", tr.reads
+	case strings.HasPrefix(data.SQL, "WITH eligible AS MATERIALIZED"):
+		tr.pages++
+		kind, count = "page", tr.pages
+	case strings.HasPrefix(data.SQL, "SELECT EXISTS(SELECT 1 FROM documents d WHERE"):
+		tr.probes++
+		kind, count = "probe", tr.probes
+	}
+	if kind != "" && tr.before != nil {
+		tr.before(ctx, conn, kind, count)
 	}
 	return ctx
 }
 
-func (activationQuiesceTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (tr *activationTracer) TraceQueryEnd(_ context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if tr.queryErr == nil {
+		tr.queryErr = data.Err
+	}
+}
+
+func traceActivation(t *testing.T, d deps, tracer *activationTracer) deps {
+	t.Helper()
+	traced, err := pgstore.NewClient(t.Context(), d.pg.Pool.Config().ConnString(), pgstore.WithQueryTracer(tracer))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, traced.Close(context.Background())) })
+	d.pg = traced
+	return d
+}
 
 func TestActivationPreviewObservesRefreezeAndVerificationTogether(t *testing.T) {
 	h, opts := activationHarness(t)
 	opts.Quiesce = time.Hour
+	opts.Page = 1
 	pg := h.f.pg
 	target, err := pg.Generation(t.Context(), activationTarget)
 	require.NoError(t, err)
 	require.NotNil(t, target)
+	revisions, err := pg.DocumentRevisions(t.Context(), "", opts.MaxDocuments)
+	require.NoError(t, err)
+	require.Greater(t, len(revisions), 1)
 	registerGeneration(t, pg, "g3", "pinecone", "quarry-g3", sourceModel)
 	opens, embeds := h.stores.opened, h.embedCalls()
 	const unverified = "the generation is staging; it must be verified"
-	const changed = "the corpus changed since verification"
 	const freezeRequired = "writers are not frozen for this generation"
+	const epochChanged = "the writer freeze changed during the corpus scan. Retry activation"
 	settling := fmt.Sprintf("the freeze is still settling; wait %s after freezing", opts.Quiesce)
 	for _, tt := range []struct {
-		name, freeze string
-		settled      bool
-		reasons      []string
+		name, freeze                              string
+		settled, reverify, midScan, sourceChanged bool
+		reasons                                   []string
 	}{
-		{name: "thaw", reasons: []string{unverified, changed, freezeRequired}},
-		{name: "different freeze", freeze: "g3", reasons: []string{unverified, changed, freezeRequired}},
-		{name: "same freeze target starts settling again", freeze: activationTarget, reasons: []string{unverified, changed, settling}},
-		{name: "same freeze target settles without verification", freeze: activationTarget, settled: true, reasons: []string{unverified, changed}},
+		{name: "early thaw", reasons: []string{unverified, freezeRequired}},
+		{name: "early different freeze", freeze: "g3", reasons: []string{unverified, freezeRequired}},
+		{name: "early settling refreeze", freeze: activationTarget, reasons: []string{unverified, settling}},
+		{name: "early settled refreeze without verification", freeze: activationTarget, settled: true, reasons: []string{unverified}},
+		{name: "mid-scan thaw", midScan: true, reasons: []string{unverified, freezeRequired}},
+		{name: "mid-scan different freeze", midScan: true, freeze: "g3", reasons: []string{unverified, freezeRequired}},
+		{name: "mid-scan settling refreeze", midScan: true, freeze: activationTarget, reasons: []string{unverified, settling}},
+		{name: "mid-scan settled and reverified refreeze", midScan: true, freeze: activationTarget, settled: true, reverify: true, reasons: []string{epochChanged}},
+		{name: "mid-scan active generation changes", midScan: true, freeze: activationTarget, settled: true, sourceChanged: true, reasons: []string{epochChanged}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := t.Context()
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
 			require.NoError(t, pg.ThawWriters(ctx))
 			require.NoError(t, pg.FreezeWriters(ctx, activationTarget))
 			require.NoError(t, pg.RecordVerification(ctx, activationTarget, target.CorpusDigest, target.Verification))
 			setActivationFreeze(ctx, t, pg, activationTarget, false)
 
-			var transitionErr error
-			reads := 0
-			// Pause immediately before reading quiescence and commit the transition through the other pool.
-			tracer := activationQuiesceTracer{beforeRead: func(ctx context.Context) {
-				reads++
-				transitionErr = pg.ThawWriters(ctx)
-				if transitionErr == nil && tt.freeze != "" {
-					transitionErr = pg.FreezeWriters(ctx, tt.freeze)
+			transition := func() error {
+				if tt.sourceChanged {
+					// Change only the active-source identity to isolate it from the freeze epoch check.
+					_, err := pg.Pool.Exec(ctx, `UPDATE vector_state SET active_generation='g3'`)
+					return err
 				}
-				if transitionErr == nil && tt.settled {
-					_, transitionErr = pg.Pool.Exec(ctx, `UPDATE vector_state SET frozen_at=NOW() - INTERVAL '2 hours'`)
+				if err := pg.ThawWriters(ctx); err != nil || tt.freeze == "" {
+					return err
+				}
+				if err := pg.FreezeWriters(ctx, tt.freeze); err != nil {
+					return err
+				}
+				if tt.settled {
+					if _, err := pg.Pool.Exec(ctx, `UPDATE vector_state SET frozen_at=NOW() - INTERVAL '3 hours'`); err != nil {
+						return err
+					}
+				}
+				if tt.reverify {
+					return pg.RecordVerification(ctx, activationTarget, target.CorpusDigest, target.Verification)
+				}
+				return nil
+			}
+			var transitionErr error
+			tracer := &activationTracer{before: func(_ context.Context, _ *pgx.Conn, kind string, count int) {
+				if (!tt.midScan && kind == "readiness" && count == 1) || (tt.midScan && kind == "page" && count == 2) {
+					// Commit through the other pool while activation is paused between statements.
+					done := make(chan error, 1)
+					go func() { done <- transition() }()
+					transitionErr = <-done
 				}
 			}}
-			traced, connectErr := pgstore.NewClient(ctx, pg.Pool.Config().ConnString(), pgstore.WithQueryTracer(tracer))
-			require.NoError(t, connectErr)
-			t.Cleanup(func() { require.NoError(t, traced.Close(context.Background())) })
-			d := h.deps
-			d.pg = traced
+			d := traceActivation(t, h.deps, tracer)
 			var out bytes.Buffer
 			err := execute(ctx, d, opts, &out, time.Millisecond)
-			require.Equal(t, 1, reads)
 			require.NoError(t, transitionErr)
+			if tt.midScan {
+				require.Equal(t, 2, tracer.reads)
+				require.Equal(t, len(revisions)+1, tracer.pages)
+			} else {
+				require.Equal(t, 1, tracer.reads)
+				require.Zero(t, tracer.pages)
+			}
+			require.Zero(t, tracer.probes)
 			require.ErrorIs(t, err, errActivationNotReady)
-			rep := activationReport(t, out.Bytes(), false, false, pgstore.LegacyGeneration, tt.freeze)
+			active := pgstore.LegacyGeneration
+			if tt.sourceChanged {
+				active = "g3"
+			}
+			rep := activationReport(t, out.Bytes(), false, false, active, tt.freeze)
 			require.Equal(t, rep.Frozen, rep.Quiesce.Frozen)
 			require.Equal(t, tt.settled, rep.Quiesce.Settled)
 			require.Equal(t, tt.reasons, rep.Reasons)
 			require.Equal(t, opens, h.stores.opened)
 			require.Equal(t, embeds, h.embedCalls())
-			requireActivationState(ctx, t, pg, pgstore.LegacyGeneration, tt.freeze, pgstore.StateStaging)
+			if tt.sourceChanged {
+				return
+			}
+			targetState := pgstore.StateStaging
+			if tt.reverify {
+				targetState = pgstore.StateVerified
+			}
+			requireActivationState(ctx, t, pg, pgstore.LegacyGeneration, tt.freeze, targetState)
 		})
+	}
+}
+
+func TestActivationEligibleCorpusBudget(t *testing.T) {
+	for _, page := range []int{1, 1000} {
+		t.Run(fmt.Sprintf("page %d", page), func(t *testing.T) {
+			ctx := t.Context()
+			f := newTaggedFixture(t)
+			h := newHarness(t, f, "postgres")
+			h.attestSource()
+			opens, embeds := h.stores.opened, h.embedCalls()
+			registerGeneration(t, f.pg, activationTarget, "pinecone", "quarry-g2", sourceModel)
+			require.NoError(t, f.pg.FreezeWriters(ctx, activationTarget))
+			setActivationFreeze(ctx, t, f.pg, activationTarget, false)
+			opts := defaultOptions()
+			opts.Activate, opts.Generation, opts.Page, opts.MaxDocuments = true, activationTarget, page, 2
+			receipt := json.RawMessage(`{"passed":true}`)
+			digest, err := corpusDigest(ctx, f.pg, opts)
+			require.NoError(t, err)
+			require.NoError(t, f.pg.RecordVerification(ctx, activationTarget, digest, receipt))
+			tracer := &activationTracer{}
+			d := traceActivation(t, h.deps, tracer)
+			var out bytes.Buffer
+			require.NoError(t, execute(ctx, d, opts, &out, time.Millisecond))
+			activationReport(t, out.Bytes(), true, false, pgstore.LegacyGeneration, activationTarget)
+			require.Equal(t, 1, tracer.pages)
+			require.Zero(t, tracer.probes)
+			require.Equal(t, 2, tracer.reads)
+
+			bare := newDoc("", "note", "Bare document")
+			tagged := newTaggedDoc("alpha", "report", "Grant-owned tagged document")
+			f.add(t, bare)
+			f.add(t, tagged)
+			tenant := uuid.NewString()
+			assignDocTenant(t, f.pg, tagged, tenant, uuid.NewString())
+			insertActivationJob(t, f.pg, "pending", false)
+			revisions, err := f.pg.DocumentRevisions(ctx, "", 3)
+			require.NoError(t, err)
+			require.Len(t, revisions, 2)
+			require.ElementsMatch(t, []string{bare.ID, tagged.ID}, []string{revisions[0].ID, revisions[1].ID})
+			require.ElementsMatch(t, []string{"", tenant}, []string{revisions[0].TenantID, revisions[1].TenantID})
+			require.NoError(t, f.pg.RecordVerification(ctx, activationTarget, "old digest", receipt))
+			complete, err := corpusDigest(ctx, f.pg, opts)
+			require.NoError(t, err)
+
+			// Reverification on the same freeze can update the digest during the scan.
+			var verificationErr error
+			*tracer = activationTracer{before: func(ctx context.Context, _ *pgx.Conn, kind string, _ int) {
+				if kind == "probe" {
+					verificationErr = f.pg.RecordVerification(ctx, activationTarget, complete, receipt)
+				}
+			}}
+			out.Reset()
+			err = execute(ctx, d, opts, &out, time.Millisecond)
+			require.NoError(t, verificationErr)
+			require.NoError(t, err)
+			activationReport(t, out.Bytes(), true, false, pgstore.LegacyGeneration, activationTarget)
+			require.Equal(t, 2/min(page, 2), tracer.pages)
+			require.Equal(t, 1, tracer.probes)
+			require.Equal(t, 2, tracer.reads)
+
+			for _, apply := range []bool{false, true} {
+				opts.Apply, opts.MaxDocuments = apply, 1
+				*tracer = activationTracer{}
+				out.Reset()
+				err = execute(ctx, d, opts, &out, time.Millisecond)
+				require.ErrorContains(t, err, "activation exceeds -max-documents")
+				require.ErrorIs(t, err, errActivationCorpusLimit)
+				require.Empty(t, out.String())
+				require.Equal(t, 1, tracer.pages)
+				require.Equal(t, 1, tracer.probes)
+				require.Equal(t, 1, tracer.reads)
+			}
+
+			opts.MaxDocuments = 2
+			_, err = f.pg.Pool.Exec(ctx, `UPDATE documents SET doc_type='changed' WHERE id=$1`, bare.ID)
+			require.NoError(t, err)
+			for _, apply := range []bool{false, true} {
+				opts.Apply = apply
+				out.Reset()
+				require.ErrorIs(t, execute(ctx, d, opts, &out, time.Millisecond), errActivationNotReady)
+				rep := activationReport(t, out.Bytes(), false, false, pgstore.LegacyGeneration, activationTarget)
+				require.Equal(t, []string{"the corpus changed since verification"}, rep.Reasons)
+			}
+			require.Equal(t, opens, h.stores.opened)
+			require.Equal(t, embeds, h.embedCalls())
+			requireActivationState(ctx, t, f.pg, pgstore.LegacyGeneration, activationTarget, pgstore.StateVerified)
+			target, err := f.pg.Generation(ctx, activationTarget)
+			require.NoError(t, err)
+			require.Equal(t, complete, target.CorpusDigest)
+
+			_, err = f.pg.Pool.Exec(ctx, `UPDATE documents SET doc_type=$2 WHERE id=$1`, bare.ID, bare.DocType)
+			require.NoError(t, err)
+			out.Reset()
+			require.NoError(t, execute(ctx, d, opts, &out, time.Millisecond))
+			activationReport(t, out.Bytes(), true, true, activationTarget, activationTarget)
+			require.Equal(t, opens+1, h.stores.opened)
+			require.Equal(t, embeds, h.embedCalls())
+			requireActivationState(ctx, t, f.pg, activationTarget, activationTarget, pgstore.StateActive)
+		})
+	}
+}
+
+func TestActivationReadyScanErrors(t *testing.T) {
+	h, opts := activationHarness(t)
+	opts.MaxDocuments = 4
+	pg := h.f.pg
+	for _, boundary := range []struct {
+		kind  string
+		count int
+	}{
+		{kind: "readiness", count: 1},
+		{kind: "page", count: 1},
+		{kind: "probe", count: 1},
+		{kind: "readiness", count: 2},
+	} {
+		for _, failure := range []string{"42501", "42P01", "cancel"} {
+			name := fmt.Sprintf("%s %d %s", boundary.kind, boundary.count, failure)
+			t.Run(name, func(t *testing.T) {
+				for _, apply := range []bool{false, true} {
+					opts.Apply = apply
+					ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+					opens, embeds := h.stores.opened, h.embedCalls()
+					var injectionErr error
+					tracer := &activationTracer{before: func(ctx context.Context, conn *pgx.Conn, kind string, count int) {
+						if kind != boundary.kind || count != boundary.count {
+							return
+						}
+						switch failure {
+						case "cancel":
+							cancel()
+						case "42501":
+							_, injectionErr = conn.PgConn().Exec(ctx, `SET ROLE pg_read_all_stats`).ReadAll()
+						case "42P01":
+							_, injectionErr = conn.PgConn().Exec(ctx, `SET search_path TO pg_catalog`).ReadAll()
+						}
+					}}
+					d := traceActivation(t, h.deps, tracer)
+					var out bytes.Buffer
+					err := execute(ctx, d, opts, &out, time.Millisecond)
+					cancel()
+					require.NoError(t, injectionErr)
+					if failure == "cancel" {
+						require.ErrorIs(t, err, context.Canceled)
+					} else {
+						var pgErr *pgconn.PgError
+						require.ErrorAs(t, err, &pgErr)
+						require.Equal(t, failure, pgErr.Code)
+						require.ErrorIs(t, err, tracer.queryErr)
+					}
+					require.Empty(t, out.String())
+					require.Equal(t, opens, h.stores.opened)
+					require.Equal(t, embeds, h.embedCalls())
+					fence, lockErr := pg.FenceGeneration(t.Context(), activationTarget)
+					require.NoError(t, lockErr)
+					fence.Close(t.Context())
+					requireActivationState(t.Context(), t, pg, pgstore.LegacyGeneration, activationTarget, pgstore.StateVerified)
+				}
+			})
+		}
 	}
 }
 
@@ -352,12 +630,13 @@ func TestActivationPreflightUsesLiveLeaseBoundary(t *testing.T) {
 	requireActivationState(ctx, t, pg, activationTarget, activationTarget, pgstore.StateActive)
 }
 
-func TestActivationReportsLockedQuiescenceRefusal(t *testing.T) {
+func TestActivationRechecksLockedReadiness(t *testing.T) {
 	h, opts := activationHarness(t)
 	pg := h.f.pg
 	opts.Apply = true
 	t.Run("freeze resumes settling", func(t *testing.T) {
-		d := h.deps
+		tracer := &activationTracer{}
+		d := traceActivation(t, h.deps, tracer)
 		d.open = func(ctx context.Context, spec targetSpec) (vectorTarget, func(), string, error) {
 			setActivationFreeze(ctx, t, pg, activationTarget, true)
 			return h.stores.open(ctx, spec)
@@ -366,6 +645,7 @@ func TestActivationReportsLockedQuiescenceRefusal(t *testing.T) {
 		err := execute(t.Context(), d, opts, &out, time.Millisecond)
 		var refused *pgstore.ActivationQuiesceError
 		require.ErrorAs(t, err, &refused)
+		require.Equal(t, 2, tracer.reads)
 		require.Equal(t, opts.Quiesce, refused.Window)
 		rep := activationReport(t, out.Bytes(), false, false, pgstore.LegacyGeneration, activationTarget)
 		require.Equal(t, refused.Quiesce, *rep.Quiesce)
@@ -377,7 +657,8 @@ func TestActivationReportsLockedQuiescenceRefusal(t *testing.T) {
 		setActivationFreeze(t.Context(), t, pg, activationTarget, false)
 		job := insertActivationJob(t, pg, "running", false)
 		ids := make([]string, 25)
-		d := h.deps
+		tracer := &activationTracer{}
+		d := traceActivation(t, h.deps, tracer)
 		d.open = func(ctx context.Context, spec targetSpec) (vectorTarget, func(), string, error) {
 			_, err := pg.Pool.Exec(ctx, "UPDATE ingest_jobs SET lease_until=NOW() + INTERVAL '1 day' WHERE document_id=$1", job)
 			require.NoError(t, err)
@@ -391,6 +672,7 @@ func TestActivationReportsLockedQuiescenceRefusal(t *testing.T) {
 		err := execute(t.Context(), d, opts, &out, time.Millisecond)
 		var refused *pgstore.ActivationQuiesceError
 		require.ErrorAs(t, err, &refused)
+		require.Equal(t, 2, tracer.reads)
 		rep := activationReport(t, out.Bytes(), false, false, pgstore.LegacyGeneration, activationTarget)
 		require.Equal(t, refused.Quiesce, *rep.Quiesce)
 		require.True(t, rep.Quiesce.Settled)
@@ -412,18 +694,15 @@ func TestActivationReadinessErrorPaths(t *testing.T) {
 	h, opts := activationHarness(t)
 	pg := h.f.pg
 	opts.Apply = true
-	t.Run("target open failure", func(t *testing.T) {
-		openFailure := errors.New("test index unavailable")
-		d := h.deps
-		d.open = func(context.Context, targetSpec) (vectorTarget, func(), string, error) {
-			return nil, nil, "", openFailure
-		}
-		var out bytes.Buffer
-		err := execute(t.Context(), d, opts, &out, time.Millisecond)
-		require.ErrorIs(t, err, openFailure)
-		require.ErrorContains(t, err, "open the target for activation")
-		require.Empty(t, out.String())
-		requireActivationState(t.Context(), t, pg, pgstore.LegacyGeneration, activationTarget, pgstore.StateVerified)
+	t.Run("advisory refusal and output failure", func(t *testing.T) {
+		ctx := t.Context()
+		setActivationFreeze(ctx, t, pg, activationTarget, true)
+		writeFailure := errors.New("test output unavailable")
+		err := execute(ctx, h.deps, opts, activationErrorWriter{writeFailure}, time.Millisecond)
+		require.ErrorIs(t, err, errActivationNotReady)
+		require.ErrorIs(t, err, writeFailure)
+		requireActivationState(ctx, t, pg, pgstore.LegacyGeneration, activationTarget, pgstore.StateVerified)
+		setActivationFreeze(ctx, t, pg, activationTarget, false)
 	})
 	t.Run("canceled before the transaction", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
@@ -466,6 +745,28 @@ func TestActivationReadinessErrorPaths(t *testing.T) {
 		require.ErrorAs(t, err, &pgErr)
 		require.Equal(t, detail, pgErr.Detail)
 		requireActivationState(ctx, t, pg, pgstore.LegacyGeneration, activationTarget, pgstore.StateVerified)
+		_, err = pg.Pool.Exec(ctx, `DROP TRIGGER test_reject_activation ON vector_state`)
+		require.NoError(t, err)
+	})
+	t.Run("retry with a healthy provider", func(t *testing.T) {
+		ctx := t.Context()
+		opens := h.stores.opened
+		openFailure := errors.New("test index unavailable")
+		d := h.deps
+		d.open = func(context.Context, targetSpec) (vectorTarget, func(), string, error) {
+			return nil, nil, "", openFailure
+		}
+		var out bytes.Buffer
+		err := execute(ctx, d, opts, &out, time.Millisecond)
+		require.ErrorIs(t, err, openFailure)
+		require.ErrorContains(t, err, "open the target for activation")
+		require.Empty(t, out.String())
+		requireActivationState(ctx, t, pg, pgstore.LegacyGeneration, activationTarget, pgstore.StateVerified)
+
+		require.NoError(t, execute(ctx, h.deps, opts, &out, time.Millisecond))
+		require.Equal(t, opens+1, h.stores.opened)
+		activationReport(t, out.Bytes(), true, true, activationTarget, activationTarget)
+		requireActivationState(ctx, t, pg, activationTarget, activationTarget, pgstore.StateActive)
 	})
 }
 

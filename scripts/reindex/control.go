@@ -29,7 +29,10 @@ type controlReport struct {
 	HostedManifestCutover *pgstore.HostedManifestCutoverCounts `json:"hosted_manifest_cutover,omitempty"`
 }
 
-var errActivationNotReady = errors.New("the generation is not ready for activation")
+var (
+	errActivationNotReady    = errors.New("the generation is not ready for activation")
+	errActivationCorpusLimit = errors.New("activation exceeds -max-documents, so the corpus digest cannot be proven")
+)
 
 func (d deps) reportHostedManifestCutover(ctx context.Context, rep *controlReport) (bool, error) {
 	counts, err := d.pg.HostedManifestCutoverCounts(ctx)
@@ -136,7 +139,7 @@ func corpusDigest(ctx context.Context, c corpus, opts options) (string, error) {
 		return "", err
 	}
 	if more {
-		return "", errors.New("activation exceeds -max-documents, so the corpus digest cannot be proven")
+		return "", errActivationCorpusLimit
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -152,6 +155,58 @@ func appendActivationQuiesceReasons(rep *controlReport, q pgstore.Quiesce, windo
 		rep.Reasons = append(rep.Reasons, fmt.Sprintf("%d open deletions%s must finish before activation",
 			q.OpenDeletions, pgstore.FormatOpenDeletions(q.OpenDeletions, q.OpenDeletionIDs)))
 	}
+}
+
+func setActivationReadiness(rep *controlReport, snapshot pgstore.ActivationReadiness, window time.Duration) {
+	rep.Active, rep.Frozen, rep.FreezeGeneration = snapshot.Active, snapshot.Quiesce.Frozen, snapshot.FreezeGeneration
+	rep.Quiesce = &snapshot.Quiesce
+	rep.Reasons = rep.Reasons[:0]
+	if snapshot.Active == rep.Generation {
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf("generation %q is already active", snapshot.Active))
+		return
+	}
+	if snapshot.TargetState != pgstore.StateVerified {
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf("the generation is %s; it must be verified", snapshot.TargetState))
+	} else if snapshot.PendingWrite {
+		rep.Reasons = append(rep.Reasons, "the generation has an unconfirmed target write")
+	}
+	if !rep.Frozen || rep.FreezeGeneration != rep.Generation {
+		rep.Reasons = append(rep.Reasons, "writers are not frozen for this generation")
+	}
+	appendActivationQuiesceReasons(rep, snapshot.Quiesce, window)
+}
+
+// activationDigest proves the corpus against the verification for the same
+// writer freeze and active source on both sides of the paged scan.
+func (d deps) activationDigest(ctx context.Context, opts options, rep *controlReport) (string, error) {
+	initial, err := d.pg.ReadActivationReadiness(ctx, opts.Generation, opts.Quiesce)
+	if err != nil {
+		return "", err
+	}
+	setActivationReadiness(rep, initial, opts.Quiesce)
+	if len(rep.Reasons) != 0 {
+		return "", nil
+	}
+	digest, err := corpusDigest(ctx, d.pg, opts)
+	if err != nil {
+		return "", err
+	}
+	latest, err := d.pg.ReadActivationReadiness(ctx, opts.Generation, opts.Quiesce)
+	if err != nil {
+		return "", err
+	}
+	setActivationReadiness(rep, latest, opts.Quiesce)
+	if len(rep.Reasons) != 0 {
+		return "", nil
+	}
+	switch {
+	case initial.Active != latest.Active || initial.FrozenAt == nil || latest.FrozenAt == nil ||
+		!latest.FrozenAt.Equal(*initial.FrozenAt):
+		rep.Reasons = append(rep.Reasons, "the writer freeze changed during the corpus scan. Retry activation")
+	case latest.CorpusDigest != digest:
+		rep.Reasons = append(rep.Reasons, "the corpus changed since verification")
+	}
+	return digest, nil
 }
 
 // activate pins every replica to a verified generation under the freeze. Traffic
@@ -191,29 +246,9 @@ func (d deps) activate(ctx context.Context, opts options, out io.Writer) error {
 			return errActivationNotReady
 		}
 	}
-	digest, err := corpusDigest(ctx, d.pg, opts)
+	digest, err := d.activationDigest(ctx, opts, &rep)
 	if err != nil {
 		return err
-	}
-	snapshot, err := d.pg.ReadActivationReadiness(ctx, opts.Generation, opts.Quiesce)
-	if err != nil {
-		return err
-	}
-	rep.Active, rep.Frozen, rep.FreezeGeneration = snapshot.Active, snapshot.Quiesce.Frozen, snapshot.FreezeGeneration
-	rep.Quiesce = &snapshot.Quiesce
-	if snapshot.Active == opts.Generation {
-		rep.Reasons = append(rep.Reasons, fmt.Sprintf("generation %q is already active", snapshot.Active))
-	} else {
-		if snapshot.TargetState != pgstore.StateVerified {
-			rep.Reasons = append(rep.Reasons, fmt.Sprintf("the generation is %s; it must be verified", snapshot.TargetState))
-		}
-		if snapshot.CorpusDigest != digest {
-			rep.Reasons = append(rep.Reasons, "the corpus changed since verification")
-		}
-		if !rep.Frozen || rep.FreezeGeneration != opts.Generation {
-			rep.Reasons = append(rep.Reasons, "writers are not frozen for this generation")
-		}
-		appendActivationQuiesceReasons(&rep, snapshot.Quiesce, opts.Quiesce)
 	}
 	ready := len(rep.Reasons) == 0
 	rep.Ready = &ready
