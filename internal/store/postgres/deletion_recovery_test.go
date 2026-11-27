@@ -1022,6 +1022,166 @@ func TestLegacyHostedReleaseSerializesWithFreezeAndAdmission(t *testing.T) {
 	require.Equal(t, domain.AcceptAccepted, admit(ctx, t, c, doc.id, "replacement after thaw"))
 }
 
+type heldReleaseFinalizeTraceKey struct{}
+type heldReleaseRollbackTraceKey struct{}
+
+type heldReleaseFinalizeTrace struct {
+	cancel   context.CancelFunc
+	watchdog context.Context
+
+	finalizePID, cleanupPID           uint32
+	finalizeInTx                      bool
+	rollbackDeadline, cleanupOrdered  bool
+	rollbackWaitErr, rollbackQueryErr error
+	cleanupSQL                        string
+	cleanupArgs                       []any
+}
+
+type heldReleaseFinalizeTracer struct{}
+
+func (heldReleaseFinalizeTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	trace, ok := ctx.Value(heldReleaseFinalizeTraceKey{}).(*heldReleaseFinalizeTrace)
+	if !ok {
+		return ctx
+	}
+	pid := conn.PgConn().PID()
+	switch data.SQL {
+	case `UPDATE document_deletions
+		SET finalized=TRUE, held=FALSE, step=$4, source_key=NULL, claim=NULL, claim_until=NULL
+		WHERE document_id=$1 AND incarnation=$2 AND claim=$3 AND claim_until>clock_timestamp()`:
+		trace.finalizePID = pid
+		trace.finalizeInTx = conn.PgConn().TxStatus() == 'T'
+		trace.cancel()
+	case "rollback":
+		if pid == trace.finalizePID {
+			_, trace.rollbackDeadline = ctx.Deadline()
+			select {
+			case <-ctx.Done():
+			case <-trace.watchdog.Done():
+			}
+			trace.rollbackWaitErr = ctx.Err()
+			return context.WithValue(ctx, heldReleaseRollbackTraceKey{}, trace)
+		}
+	default:
+		if trace.finalizePID != 0 && pid != trace.finalizePID && strings.HasPrefix(data.SQL, "UPDATE document_deletions SET claim=NULL,claim_until=NULL") {
+			trace.cleanupPID = pid
+			trace.cleanupOrdered = errors.Is(trace.rollbackQueryErr, context.DeadlineExceeded)
+			trace.cleanupSQL = data.SQL
+			trace.cleanupArgs = append([]any(nil), data.Args...)
+		}
+	}
+	return ctx
+}
+
+func (heldReleaseFinalizeTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if trace, ok := ctx.Value(heldReleaseRollbackTraceKey{}).(*heldReleaseFinalizeTrace); ok {
+		trace.rollbackQueryErr = data.Err
+	}
+}
+
+func TestLegacyHostedReleaseFinalizeRollbackUnblocksFreeze(t *testing.T) {
+	c, observer := sessionTestClientWithPool(t, 1, WithQueryTracer(heldReleaseFinalizeTracer{}))
+	id, incarnation, sourceKey := pendingHeldSource(t, c)
+	watchdog, cancelWatchdog := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancelWatchdog()
+	releaseCtx, cancelRelease := context.WithCancel(watchdog)
+	defer cancelRelease()
+	trace := &heldReleaseFinalizeTrace{cancel: cancelRelease, watchdog: watchdog}
+	releaseCtx = context.WithValue(releaseCtx, heldReleaseFinalizeTraceKey{}, trace)
+	sourceStarted, sourceGate := make(chan struct{}, 1), make(chan struct{})
+	openSourceGate := sync.OnceFunc(func() { close(sourceGate) })
+	defer openSourceGate()
+	var keys []string
+	ops := heldSourceOps(t, &keys)
+	deleteSource := ops.Source
+	ops.Source = func(ctx context.Context, key string) error {
+		if err := deleteSource(ctx, key); err != nil {
+			return err
+		}
+		select {
+		case sourceStarted <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-sourceGate:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	released, frozen := make(chan error, 1), make(chan error, 1)
+	go func() { released <- c.ReleaseLegacyHostedHold(releaseCtx, id, incarnation, ops) }()
+	select {
+	case <-sourceStarted:
+	case err := <-released:
+		t.Fatalf("release ended before source cleanup: %v", err)
+	case <-watchdog.Done():
+		t.Fatal("source cleanup did not start before the watchdog")
+	}
+
+	var originalClaim string
+	require.NoError(t, observer.QueryRow(watchdog, `SELECT claim::text FROM document_deletions
+		WHERE document_id=$1 AND incarnation=$2 AND held AND step=$3 AND claim_until>clock_timestamp()`,
+		string(id), incarnation, stepSource).Scan(&originalClaim))
+	_, err := uuid.Parse(originalClaim)
+	require.NoError(t, err)
+	go func() { frozen <- c.FreezeWriters(watchdog, "next") }()
+	require.Eventually(t, func() bool {
+		var blocked bool
+		err := observer.QueryRow(watchdog, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND application_name=current_setting('application_name')
+			AND wait_event_type='Lock' AND query LIKE 'UPDATE vector_state SET frozen=TRUE%')`).Scan(&blocked)
+		return err == nil && blocked
+	}, 5*time.Second, 10*time.Millisecond)
+	require.EqualValues(t, 1, c.Pool.Stat().AcquiredConns())
+	openSourceGate()
+
+	waitResult := func(result <-chan error, operation string) error {
+		t.Helper()
+		select {
+		case err := <-result:
+			return err
+		case <-watchdog.Done():
+			t.Fatalf("%s did not return before the watchdog", operation)
+			return watchdog.Err()
+		}
+	}
+	require.ErrorIs(t, waitResult(released, "held release"), context.Canceled)
+	require.NoError(t, waitResult(frozen, "writer freeze"))
+	require.NoError(t, watchdog.Err())
+	require.True(t, trace.rollbackDeadline)
+	require.ErrorIs(t, trace.rollbackWaitErr, context.DeadlineExceeded)
+	require.ErrorIs(t, trace.rollbackQueryErr, context.DeadlineExceeded)
+	require.Positive(t, trace.finalizePID)
+	require.True(t, trace.finalizeInTx)
+	require.Positive(t, trace.cleanupPID)
+	require.NotEqual(t, trace.finalizePID, trace.cleanupPID)
+	require.True(t, trace.cleanupOrdered, "claim cleanup began before rollback returned")
+	require.Equal(t, `UPDATE document_deletions SET claim=NULL,claim_until=NULL
+		WHERE document_id=$1 AND incarnation=$2 AND claim=$3`, trace.cleanupSQL)
+	require.Equal(t, []any{string(id), incarnation, originalClaim}, trace.cleanupArgs)
+
+	receipt := readReceipt(t, c, id)
+	require.True(t, receipt.held)
+	require.False(t, receipt.finalized)
+	require.Equal(t, stepDone, receipt.step)
+	require.Nil(t, receipt.claim)
+	require.NotNil(t, receipt.source)
+	require.Equal(t, sourceKey, *receipt.source)
+	require.Zero(t, c.Pool.Stat().AcquiredConns())
+	requireDedicatedSessions(t, c, observer, 0)
+	require.Empty(t, c.writerSlots)
+	require.NoError(t, c.ThawWriters(watchdog))
+	require.NoError(t, c.ReleaseLegacyHostedHold(watchdog, id, incarnation, ops))
+	require.Equal(t, []string{sourceKey}, keys)
+	receipt = readReceipt(t, c, id)
+	require.True(t, receipt.finalized)
+	require.False(t, receipt.held)
+	require.Nil(t, receipt.source)
+}
+
 type interruptHeldReleaseKey struct{}
 
 type interruptHeldReleaseTracer struct{}
