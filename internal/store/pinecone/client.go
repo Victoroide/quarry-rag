@@ -930,7 +930,11 @@ func (p *Client) Ping(ctx context.Context) error {
 // false for a record whose incarnation, revision or attempt tags are not
 // self-consistent, so that no reader treats it as a retrievable chunk.
 func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
-	chunk := domain.Chunk{ID: domain.ChunkID(id), VectorID: id}
+	return chunkFromMetadataAtIndex(id, md, int(md.GetFields()["chunk_index"].GetNumberValue()))
+}
+
+func chunkFromMetadataAtIndex(id string, md *structpb.Struct, index int) (domain.Chunk, bool) {
+	chunk := domain.Chunk{ID: domain.ChunkID(id), VectorID: id, Index: index}
 	if md == nil {
 		return chunk, true
 	}
@@ -943,9 +947,6 @@ func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
 	}
 	if v, ok := fields["doc_id"]; ok {
 		chunk.DocumentID = domain.DocumentID(v.GetStringValue())
-	}
-	if v, ok := fields["chunk_index"]; ok {
-		chunk.Index = int(v.GetNumberValue())
 	}
 	if v, ok := fields["text"]; ok {
 		chunk.Text = v.GetStringValue()

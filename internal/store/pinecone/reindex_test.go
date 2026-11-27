@@ -3,6 +3,7 @@ package pinecone
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -19,6 +20,151 @@ func fetchedVector(t *testing.T, id string, values []float32, fields map[string]
 	md, err := structpb.NewStruct(fields)
 	require.NoError(t, err)
 	return &pinecone.Vector{Id: id, Values: &values, Metadata: md}
+}
+
+func TestReindexChunkIndex(t *testing.T) {
+	for _, metadata := range []*structpb.Struct{nil, {}, {Fields: map[string]*structpb.Value{"text": structpb.NewStringValue("no position")}}} {
+		require.Equal(t, -1, reindexChunkIndex(metadata))
+	}
+	for _, tc := range []struct {
+		name  string
+		value *structpb.Value
+		want  int
+	}{
+		{"nil field", nil, -1},
+		{"unset kind", &structpb.Value{}, -1},
+		{"typed nil number", &structpb.Value{Kind: (*structpb.Value_NumberValue)(nil)}, -1},
+		{"null", structpb.NewNullValue(), -1},
+		{"string zero", structpb.NewStringValue("0"), -1},
+		{"boolean", structpb.NewBoolValue(false), -1},
+		{"list", structpb.NewListValue(&structpb.ListValue{}), -1},
+		{"object", structpb.NewStructValue(&structpb.Struct{}), -1},
+		{"NaN", structpb.NewNumberValue(math.NaN()), -1},
+		{"positive infinity", structpb.NewNumberValue(math.Inf(1)), -1},
+		{"negative infinity", structpb.NewNumberValue(math.Inf(-1)), -1},
+		{"negative integer", structpb.NewNumberValue(-1), -1},
+		{"negative fraction", structpb.NewNumberValue(-0.5), -1},
+		{"zero fraction", structpb.NewNumberValue(0.5), -1},
+		{"nonzero fraction", structpb.NewNumberValue(1.5), -1},
+		{"subnormal", structpb.NewNumberValue(math.SmallestNonzeroFloat64), -1},
+		{"zero", structpb.NewNumberValue(0), 0},
+		{"signed zero", structpb.NewNumberValue(math.Copysign(0, -1)), 0},
+		{"nonzero", structpb.NewNumberValue(12), 12},
+		{"max int32", structpb.NewNumberValue(math.MaxInt32), math.MaxInt32},
+		{"above max int32", structpb.NewNumberValue(math.MaxInt32 + 1), -1},
+		{"huge", structpb.NewNumberValue(math.MaxFloat64), -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			md := &structpb.Struct{Fields: map[string]*structpb.Value{"chunk_index": tc.value}}
+			require.Equal(t, tc.want, reindexChunkIndex(md))
+		})
+	}
+}
+
+func FuzzReindexChunkIndex(f *testing.F) {
+	for _, n := range []float64{0, math.Copysign(0, -1), 1, -1, 0.5, math.MaxInt32, math.MaxInt32 + 1, math.Inf(1), math.NaN()} {
+		f.Add(math.Float64bits(n), uint8(0))
+	}
+	for kind := uint8(1); kind < 7; kind++ {
+		f.Add(uint64(0), kind)
+	}
+	f.Fuzz(func(t *testing.T, bits uint64, kind uint8) {
+		n := math.Float64frombits(bits)
+		values := []*structpb.Value{
+			structpb.NewNumberValue(n), structpb.NewStringValue(fmt.Sprint(n)), structpb.NewBoolValue(bits != 0),
+			structpb.NewNullValue(), structpb.NewListValue(&structpb.ListValue{}), structpb.NewStructValue(&structpb.Struct{}), nil,
+		}
+		wireKind := int(kind) % len(values)
+		md := &structpb.Struct{Fields: map[string]*structpb.Value{"chunk_index": values[wireKind]}}
+		whole, fraction := math.Modf(n)
+		want := -1
+		if wireKind == 0 && whole >= 0 && whole <= math.MaxInt32 && fraction == 0 {
+			want = int(whole)
+		}
+		require.Equal(t, want, reindexChunkIndex(md))
+	})
+}
+
+func TestFetchReindexChunkPositions(t *testing.T) {
+	zero, err := TaggedVectorID("doc", "revision", "attempt", "zero")
+	require.NoError(t, err)
+	fields := map[string]any{
+		"doc_id": "doc", "chunk_index": 0, "text": "first chunk",
+		domain.VectorRevisionKey: "revision", domain.VectorAttemptKey: "attempt", domain.VectorTenantKey: "tenant",
+	}
+	values := []float32{1, 2, 3}
+	records := map[string]*pinecone.Vector{
+		zero:           fetchedVector(t, zero, values, fields),
+		"fraction":     fetchedVector(t, "fraction", values, map[string]any{"chunk_index": 0.5, "text": "still present"}),
+		"no-position":  fetchedVector(t, "no-position", values, map[string]any{"text": "still present"}),
+		"inconsistent": fetchedVector(t, "inconsistent", values, map[string]any{domain.VectorAttemptKey: "orphan"}),
+		"last":         fetchedVector(t, "last", values, map[string]any{"chunk_index": math.MaxInt32}),
+	}
+	ids := make([]string, FetchBatchSize+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("absent-%d", i)
+	}
+	copy(ids, []string{zero, "fraction", "no-position", "inconsistent"})
+	ids[FetchBatchSize] = "last"
+	var batches [][]string
+	client := testClient(&fakeIndexConn{fetch: func(_ context.Context, keys []string) (*pinecone.FetchVectorsResponse, error) {
+		batches = append(batches, keys)
+		out := map[string]*pinecone.Vector{}
+		for _, key := range keys {
+			if record, ok := records[key]; ok {
+				out[key] = record
+			}
+		}
+		return &pinecone.FetchVectorsResponse{Vectors: out}, nil
+	}})
+	got, err := client.Fetch(t.Context(), ids)
+	require.NoError(t, err)
+	require.Equal(t, [][]string{ids[:FetchBatchSize], {"last"}}, batches)
+	require.Len(t, got, 4)
+	for _, key := range []string{zero, "last"} {
+		want, ok := chunkFromMetadata(key, records[key].Metadata)
+		require.True(t, ok)
+		want.Embedding = values
+		require.Equal(t, want, got[key])
+	}
+	for _, key := range []string{"fraction", "no-position"} {
+		require.Contains(t, got, key)
+		require.Negative(t, got[key].Index)
+		require.Equal(t, "still present", got[key].Text)
+		require.Equal(t, values, got[key].Embedding)
+	}
+	legacy, ok := chunkFromMetadata("fraction", records["fraction"].Metadata)
+	require.True(t, ok)
+	require.Zero(t, legacy.Index)
+}
+
+func TestFetchReindexChunkPositionCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ids := make([]string, FetchBatchSize+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("key-%d", i)
+	}
+	calls := 0
+	first := fetchedVector(t, ids[0], []float32{1}, map[string]any{"chunk_index": 0})
+	client := testClient(&fakeIndexConn{fetch: func(attemptCtx context.Context, keys []string) (*pinecone.FetchVectorsResponse, error) {
+		calls++
+		switch calls {
+		case 1:
+			require.Equal(t, ids[:FetchBatchSize], keys)
+			return &pinecone.FetchVectorsResponse{Vectors: map[string]*pinecone.Vector{ids[0]: first}}, nil
+		case 2:
+			return nil, status.Error(codes.Unavailable, "retry")
+		default:
+			require.Equal(t, ids[FetchBatchSize:], keys)
+			cancel()
+			return nil, attemptCtx.Err()
+		}
+	}})
+	got, err := client.Fetch(ctx, ids)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 3, calls)
+	require.Nil(t, got)
 }
 
 func TestFetchBatchesKeysAndMapsStoredVectors(t *testing.T) {
