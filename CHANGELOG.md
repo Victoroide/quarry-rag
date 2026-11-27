@@ -22,6 +22,7 @@ Notable changes are grouped by release.
 
 - Pinecone queries in grants and service mode can retrieve scoped documents with an active hosted vector revision without reindexing.
 - Scoped Pinecone queries exclude hosted manifest vectors stamped with an unauthorized document incarnation before ranking.
+- Pinecone fetch and search omit malformed PDF layout fields without dropping the chunk or its valid layout fields.
 
 ### Fixed
 

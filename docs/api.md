@@ -639,11 +639,15 @@ A citation-shaped number inside a quotation can be literal text. When a quoted n
 | `text` | string | Generated mode returns a preview of up to 600 runes. Evidence mode returns the selected sanitized excerpt body within the context budget set by `SYNTHESIS_CONTEXT_TOKENS` |
 | `kind` | string | Classification category if populated during ingestion (optional) |
 | `quality` | string | Quality rating if populated during ingestion (optional) |
-| `pages` | []int | One-based page numbers covered by the chunk for [PDF layout analysis](#pdf-layout-analysis); omitted for non-layout and legacy rows (optional) |
-| `table_ids` | []string | Document-scoped logical table identifiers covered by the chunk; omitted for non-layout and legacy rows (optional) |
-| `row_ids` | []string | Document-scoped logical table row identifiers covered by the chunk; omitted for non-layout and legacy rows (optional) |
+| `pages` | []int | One-based page numbers covered by the chunk for [PDF layout analysis](#pdf-layout-analysis) (optional) |
+| `table_ids` | []string | Document-scoped logical table identifiers covered by the chunk (optional) |
+| `row_ids` | []string | Document-scoped logical table row identifiers covered by the chunk (optional) |
 | `excerpt` | int | One-based selection index. Omitted for chunks outside the selection |
 | `truncated` | bool | True when the context budget cuts the selected excerpt body. Omitted otherwise |
+
+Layout fields are optional and are omitted individually when absent or empty.
+For Pinecone records, a malformed list or element causes its entire layout field
+to be omitted. The chunk and its other valid fields remain available.
 
 #### Evidence-only queries
 

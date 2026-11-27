@@ -924,7 +924,9 @@ components:
           $ref: '#/components/schemas/CitationCoverage'
     ScoredChunkResponse:
       type: object
-      description: 'See [scored chunks](api.md#post-query).'
+      description: >-
+        Optional layout fields are omitted independently when absent or empty,
+        or when a Pinecone list is malformed. See [scored chunks](api.md#post-query).
       additionalProperties: false
       required: [doc_id, doc_type, chunk_index, score, text]
       properties:
@@ -949,17 +951,17 @@ components:
           type: string
         pages:
           type: array
-          description: One-based PDF layout page numbers covered by the chunk; omitted for non-layout and legacy rows.
+          description: One-based PDF layout page numbers covered by the chunk.
           items:
             type: integer
         table_ids:
           type: array
-          description: Document-scoped PDF layout table identifiers covered by the chunk; omitted for non-layout and legacy rows.
+          description: Document-scoped PDF layout table identifiers covered by the chunk.
           items:
             type: string
         row_ids:
           type: array
-          description: Document-scoped PDF layout row identifiers covered by the chunk; omitted for non-layout and legacy rows.
+          description: Document-scoped PDF layout row identifiers covered by the chunk.
           items:
             type: string
         excerpt:
