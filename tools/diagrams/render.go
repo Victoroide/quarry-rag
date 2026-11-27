@@ -95,41 +95,60 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %s %s" role="img" fill="%s"><title>%s</title><desc>%s</desc>`, number(d.W), number(d.H), p.Text, html.EscapeString(d.Title), html.EscapeString(d.Description))
-	b.WriteString("<style>")
-	for i, n := range d.Nodes {
+	hasNodeMotion, hasPulse := false, false
+	for _, n := range d.Nodes {
 		if len(n.Times) > 0 {
-			b.WriteString(animation(fmt.Sprintf("n%d", i), n.Times, d.Duration, false, 1))
+			hasNodeMotion = true
+			break
 		}
 	}
-	for i, e := range d.Edges {
+	for _, e := range d.Edges {
 		if len(e.Times) > 0 {
-			b.WriteString(animation(fmt.Sprintf("e%d", i), e.Times, d.Duration, true, edgeLength(e)))
+			hasPulse = true
+			break
 		}
 	}
-	b.WriteString(`@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style><defs>`)
+	if hasNodeMotion || hasPulse {
+		b.WriteString("<style>")
+		for i, n := range d.Nodes {
+			if len(n.Times) > 0 {
+				b.WriteString(animation(fmt.Sprintf("n%d", i), n.Times, d.Duration, false, 1))
+			}
+		}
+		for i, e := range d.Edges {
+			if len(e.Times) > 0 {
+				b.WriteString(animation(fmt.Sprintf("e%d", i), e.Times, d.Duration, true, edgeLength(e)))
+			}
+		}
+		b.WriteString(`@media(prefers-reduced-motion:reduce){.pulse,.hit,.ink{animation:none!important;opacity:0!important}}</style>`)
+	}
+	b.WriteString(`<defs>`)
 	labels := sceneLabels(d)
-	glyphs := map[string]struct {
+	type glyphKey struct {
 		bold bool
 		r    rune
-	}{}
+	}
+	glyphUses := make(map[glyphKey]int)
 	for _, l := range labels {
 		for _, r := range l.Text {
 			if r != ' ' {
-				glyphs[glyphID(l.Bold, r)] = struct {
-					bold bool
-					r    rune
-				}{l.Bold, r}
+				glyphUses[glyphKey{l.Bold, r}]++
 			}
 		}
 	}
-	keys := make([]string, 0, len(glyphs))
-	for id := range glyphs {
-		keys = append(keys, id)
+	keys := make([]glyphKey, 0, len(glyphUses))
+	for key := range glyphUses {
+		keys = append(keys, key)
 	}
-	slices.Sort(keys)
-	for _, id := range keys {
-		g := glyphs[id]
-		path, _, err := f.glyph(g.bold, g.r)
+	// Assign the shortest fragment IDs to the most frequent glyphs.
+	slices.SortFunc(keys, func(a, b glyphKey) int {
+		return cmp.Or(cmp.Compare(glyphUses[b], glyphUses[a]), cmp.Compare(a.r, b.r), cmp.Compare(boolRank(a.bold), boolRank(b.bold)))
+	})
+	glyphIDs := make(map[glyphKey]string, len(keys))
+	for i, key := range keys {
+		id := "g" + strconv.FormatInt(int64(i), 36)
+		glyphIDs[key] = id
+		path, _, err := f.glyph(key.bold, key.r)
 		if err != nil {
 			return nil, err
 		}
@@ -145,7 +164,7 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 	labelIDs := make(map[int]string)
 	for i, l := range labels {
 		if animatedTables[l.Owner] && (l.Kind == "muted" || l.Kind == "accent") {
-			labelIDs[i] = fmt.Sprintf("table-label-%d", i)
+			labelIDs[i] = fmt.Sprintf("t%d", i)
 		}
 	}
 	// Text that is written more than once becomes a shared run of glyphs.
@@ -187,9 +206,9 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 			}
 			if r != ' ' {
 				if x == 0 {
-					fmt.Fprintf(out, `<use href="#%s"/>`, glyphID(key.bold, r))
+					fmt.Fprintf(out, `<use href="#%s"/>`, glyphIDs[glyphKey{key.bold, r}])
 				} else {
-					fmt.Fprintf(out, `<use href="#%s" x="%s"/>`, glyphID(key.bold, r), number(math.Round(x)))
+					fmt.Fprintf(out, `<use href="#%s" x="%s"/>`, glyphIDs[glyphKey{key.bold, r}], number(math.Round(x)))
 				}
 			}
 			x += advance
@@ -201,7 +220,7 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 	}
 	runIDs := make(map[runKey]string, len(runKeys))
 	for i, key := range runKeys {
-		id := fmt.Sprintf("run-%d", i)
+		id := fmt.Sprintf("u%d", i)
 		runIDs[key] = id
 		fmt.Fprintf(&b, `<g id="%s" transform="scale(%s)">`, id, strconv.FormatFloat(key.size/1000, 'f', -1, 64))
 		if err := writeRunGlyphs(&b, key); err != nil {
@@ -227,13 +246,15 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 			fmt.Fprintf(&b, `<path class="edge" d="%s"/>`, roundedPath(e.Points))
 		}
 		b.WriteString("</g>")
-		fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s" stroke-linecap="round">`, p.Accent, number(pulseStroke))
-		for i, e := range d.Edges {
-			if len(e.Times) > 0 {
-				fmt.Fprintf(&b, `<path class="pulse" opacity="0" stroke-dasharray="%s %s" d="%s" style="animation:e%d %ss %s infinite"/>`, number(pulseDash), number(2*edgeLength(e)+2*pulseDash+1), roundedPath(e.Points), i, number(d.Duration), easing)
+		if hasPulse {
+			fmt.Fprintf(&b, `<g fill="none" stroke="%s" stroke-width="%s" stroke-linecap="round">`, p.Accent, number(pulseStroke))
+			for i, e := range d.Edges {
+				if len(e.Times) > 0 {
+					fmt.Fprintf(&b, `<path class="pulse" opacity="0" stroke-dasharray="%s %s" d="%s" style="animation:e%d %ss %s infinite"/>`, number(pulseDash), number(2*edgeLength(e)+2*pulseDash+1), roundedPath(e.Points), i, number(d.Duration), easing)
+				}
 			}
+			b.WriteString("</g>")
 		}
-		b.WriteString("</g>")
 	}
 	hasNodes, hasColumns := false, false
 	for _, n := range d.Nodes {
@@ -333,7 +354,7 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 		b.WriteString("</g>")
 	}
 	b.WriteString("</svg>\n")
-	return []byte(strings.ReplaceAll(b.String(), "><", ">\n<")), nil
+	return []byte(b.String()), nil
 }
 
 func boolRank(v bool) int {

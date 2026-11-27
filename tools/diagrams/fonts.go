@@ -109,10 +109,3 @@ func (f *fontSet) glyph(bold bool, r rune) (outline string, advanceWidth float64
 	advance, err := face.GlyphAdvance(&buf, g, fixed.I(1000), font.HintingNone)
 	return d.String(), float64(advance) / 64, err
 }
-func glyphID(bold bool, r rune) string {
-	prefix := "r"
-	if bold {
-		prefix = "s"
-	}
-	return fmt.Sprintf("%s%x", prefix, r)
-}
