@@ -47,32 +47,39 @@ func main() {
 	}
 }
 
-func run() (runErr error) {
+func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if config.ConfiguredAuthzMode() != config.AuthzModeService {
+		ctx = tracing.WithRedactIdentifiers(ctx, true)
+	}
+	stage, err := runServer(ctx)
+	return fatalErrorForTelemetry(ctx, stage, err)
+}
 
+func runServer(ctx context.Context) (fatalStage, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("startup: configuration error: %w", err)
+		return fatalConfiguration, fmt.Errorf("startup: configuration error: %w", err)
 	}
 	noEvidenceCatalog, err := pipeline.LoadNoEvidenceCatalog(cfg.NoEvidenceCatalogFile)
 	if err != nil {
-		return fmt.Errorf("startup: NO_EVIDENCE_CATALOG_FILE: %w", err)
+		return fatalNoEvidenceCatalog, fmt.Errorf("startup: NO_EVIDENCE_CATALOG_FILE: %w", err)
 	}
 	var citationVerifier *citationsupport.Verifier
 	if !cfg.FakeMode {
 		citationVerifier, err = citationsupport.New(cfg.CitationSupportModel, cfg.CitationSupportEndpoint, cfg.CitationSupportToken, cfg.CitationSupportCalibrationFile)
 		if err != nil {
-			return fmt.Errorf("startup: configure citation verifier: %w", err)
+			return fatalCitationVerifier, fmt.Errorf("startup: configure citation verifier: %w", err)
 		}
 	}
 	slog.SetDefault(slog.New(logctx.NewHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))))
 	shutdownTracing, err := tracing.Setup(ctx, cfg.Tracing, buildVersion())
 	if err != nil {
-		return fmt.Errorf("startup: tracing: %w", err)
+		return fatalTracing, fmt.Errorf("startup: tracing: %w", err)
 	}
 	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer shutdownCancel()
 		_ = shutdownTracing(shutdownCtx)
 	}()
@@ -81,10 +88,6 @@ func run() (runErr error) {
 	if cfg.AuthzMode == config.AuthzModeGrants {
 		ctx = tracing.WithRedactIdentifiers(ctx, true)
 	}
-	defer func() {
-		// The entry point renders this error after run returns.
-		runErr = tracing.ErrorForTelemetry(ctx, runErr)
-	}()
 	for _, warning := range cfg.Warnings {
 		slog.Warn(warning)
 	}
@@ -93,7 +96,7 @@ func run() (runErr error) {
 	defer startupCancel()
 	pgClient, err := pgstore.NewClient(startupCtx, cfg.DatabaseURL, pgstore.WithQueryTracer(tracing.NewQueryTracer()))
 	if err != nil {
-		return fmt.Errorf("startup: postgres: %w", err)
+		return fatalPostgres, fmt.Errorf("startup: postgres: %w", err)
 	}
 	defer func() {
 		if closeErr := pgClient.Close(context.WithoutCancel(ctx)); closeErr != nil {
@@ -103,7 +106,7 @@ func run() (runErr error) {
 	pgClient.EnableHostedVectorManifests(cfg.HostedVectorManifest)
 	pgClient.SetLegacyDeletionConcurrency(cfg.LegacyDeletionConcurrency)
 	if migrationErr := pgClient.RunMigrations(startupCtx); migrationErr != nil {
-		return fmt.Errorf("startup: migrations: %w", migrationErr)
+		return fatalMigrations, fmt.Errorf("startup: migrations: %w", migrationErr)
 	}
 	pgClient.SetAuthzMode(cfg.AuthzMode)
 	logger.Info("postgres connected")
@@ -126,10 +129,10 @@ func run() (runErr error) {
 		}
 		subjectVerifier, err = subjectauth.NewVerifierWithObserver(cfg.SubjectAuthority.Issuer, cfg.SubjectAuthority.Audience, cfg.SubjectAuthority.JWKSFile, observer)
 		if err != nil {
-			return fmt.Errorf("startup: subject verifier: %w", err)
+			return fatalSubjectVerifier, fmt.Errorf("startup: subject verifier: %w", err)
 		}
 		if trustErr := subjectVerifier.ValidateTrust(); trustErr != nil {
-			return fmt.Errorf("startup: subject trust validation: %w", trustErr)
+			return fatalSubjectTrust, fmt.Errorf("startup: subject trust validation: %w", trustErr)
 		}
 		subjectResolver = pgClient
 		readAuthority = pgstore.GrantReader{Pool: pgClient.Pool}
@@ -151,7 +154,7 @@ func run() (runErr error) {
 	if cfg.FakeMode {
 		pgClient.SetVectorGeneration(cfg.ActiveVectorGeneration())
 		if profileErr := llm.ValidateSynthesisProfile(cfg); profileErr != nil {
-			return fmt.Errorf("startup: synthesis profile: %w", profileErr)
+			return fatalSynthesisProfile, fmt.Errorf("startup: synthesis profile: %w", profileErr)
 		}
 		logger.Warn("FAKE MODE ACTIVE: deterministic in-memory vector store, embedder, and LLM. No AWS/Pinecone/S3 calls will be made.")
 		mem := memstore.NewFakeVectorStore()
@@ -163,17 +166,17 @@ func run() (runErr error) {
 		if cfg.VectorStore == "postgres" {
 			pgVectors, vectorErr := newPostgresVectors(startupCtx, cfg, pgClient)
 			if vectorErr != nil {
-				return fmt.Errorf("startup: postgres vectors: %w", vectorErr)
+				return fatalPostgresVectors, fmt.Errorf("startup: postgres vectors: %w", vectorErr)
 			}
 			if pinErr := pinVectorGeneration(startupCtx, cfg, pgClient, ""); pinErr != nil {
-				return fmt.Errorf("startup: %w", pinErr)
+				return fatalVectorGeneration, fmt.Errorf("startup: %w", pinErr)
 			}
 			vectorStore = pgVectors
 			fixtureVectorIdentity = domain.FixtureVectorIdentity("postgres", "", "")
 		} else {
 			pcClient, pcErr := openPineconeVectors(startupCtx, cfg, pgClient, pcstore.NewPineconeClient)
 			if pcErr != nil {
-				return fmt.Errorf("startup: pinecone: %w", pcErr)
+				return fatalPinecone, fmt.Errorf("startup: pinecone: %w", pcErr)
 			}
 			defer func() {
 				if closeErr := pcClient.Close(); closeErr != nil {
@@ -186,13 +189,13 @@ func run() (runErr error) {
 
 		selectedEmb, embErr := newEmbeddingProvider(startupCtx, cfg)
 		if embErr != nil {
-			return fmt.Errorf("startup: embedder: %w", embErr)
+			return fatalEmbedder, fmt.Errorf("startup: embedder: %w", embErr)
 		}
 		emb = selectedEmb
 
 		selectedAmb, llmErr := newSynthesisProvider(startupCtx, cfg)
 		if llmErr != nil {
-			return fmt.Errorf("startup: llm client: %w", llmErr)
+			return fatalLLMClient, fmt.Errorf("startup: llm client: %w", llmErr)
 		}
 		amb = selectedAmb
 
@@ -206,7 +209,7 @@ func run() (runErr error) {
 			}
 			s3Cancel()
 			if errors.Is(s3Err, s3store.ErrBucketUnavailable) {
-				return fmt.Errorf("startup: s3: %w", s3Err)
+				return fatalS3, fmt.Errorf("startup: s3: %w", s3Err)
 			}
 			if s3Err != nil {
 				logger.WarnContext(s3Ctx, "S3 initialization or bucket verification failed", "error", tracing.ErrorForTelemetry(s3Ctx, s3Err))
@@ -217,7 +220,7 @@ func run() (runErr error) {
 
 	queryDeps, err := assembleQueryComponents(cfg, vectorStore, emb)
 	if err != nil {
-		return err
+		return fatalQueryComponents, err
 	}
 	emb = queryDeps.embedder
 	vectorStore = queryDeps.vectorStore
@@ -233,7 +236,7 @@ func run() (runErr error) {
 	if !cfg.FakeMode && cfg.RerankModelARN != "" {
 		reranker, err = retriever.NewBedrockReranker(startupCtx, cfg)
 		if err != nil {
-			return fmt.Errorf("startup: reranker: %w", err)
+			return fatalReranker, fmt.Errorf("startup: reranker: %w", err)
 		}
 	}
 
@@ -261,13 +264,13 @@ func run() (runErr error) {
 	// Initialize worker.
 	hostname, err := os.Hostname()
 	if err != nil {
-		return fmt.Errorf("startup: hostname: %w", err)
+		return fatalHostname, fmt.Errorf("startup: hostname: %w", err)
 	}
 	var textDetector worker.TextExtractor
 	if cfg.OCRProvider == "textract" && !cfg.FakeMode {
 		detector, detectorErr := ocr.New(startupCtx, cfg)
 		if detectorErr != nil {
-			return fmt.Errorf("startup: ocr: %w", detectorErr)
+			return fatalOCR, fmt.Errorf("startup: ocr: %w", detectorErr)
 		}
 		textDetector = detector
 	}
@@ -342,11 +345,11 @@ func run() (runErr error) {
 		WriteTimeout:      cfg.HTTPWriteTimeout,
 	}
 
-	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	listener, err := (&net.ListenConfig{}).Listen(signalCtx, "tcp", srv.Addr)
 	if err != nil {
-		return fmt.Errorf("server: listen: %w", err)
+		return fatalAPIListen, fmt.Errorf("server: listen: %w", err)
 	}
 	var additional []httpEndpoint
 	if cfg.MetricsAddr != "" {
@@ -354,13 +357,13 @@ func run() (runErr error) {
 		metricsSrv.BaseContext = func(net.Listener) context.Context { return ctx }
 		metricsListener, listenErr := (&net.ListenConfig{}).Listen(signalCtx, "tcp", metricsSrv.Addr)
 		if listenErr != nil {
-			return errors.Join(fmt.Errorf("metrics: listen: %w", listenErr), listener.Close())
+			return fatalMetricsListen, errors.Join(fmt.Errorf("metrics: listen: %w", listenErr), listener.Close())
 		}
 		additional = append(additional, httpEndpoint{metricsSrv, metricsListener})
 		logger.Info("starting metrics server", "address", metricsSrv.Addr)
 	}
 	logger.Info("starting server", "address", srv.Addr)
-	return serve(signalCtx, srv, listener, probes, cfg.ShutdownDrainDelay, additional...)
+	return fatalServe, serve(signalCtx, srv, listener, probes, cfg.ShutdownDrainDelay, additional...)
 }
 
 func buildVersion() string {
