@@ -325,6 +325,11 @@ On startup, the runner acquires a PostgreSQL transaction-scoped advisory lock an
 
 Application connections default to `pool_max_conns=16` and `statement_timeout=30000` (milliseconds). Explicit settings in `DATABASE_URL` override these defaults, including `statement_timeout=0` to disable the timeout. Both URI query parameters and keyword connection strings are supported; for example, `host=localhost dbname=rag pool_max_conns=24 statement_timeout=10000` sets 24 connections and a 10-second statement timeout. The migration transaction disables statement and lock timeouts while waiting for the advisory lock, then uses a 15-second lock timeout when applying SQL. Transaction-local settings do not change application connection settings after commit or rollback.
 
+Set `synchronous_commit=on` in `DATABASE_URL` to opt in to the
+[writer journal durability policy](deployment.md#postgresql-writer-journal-durability).
+PostgreSQL otherwise supplies the effective commit mode. The DSN settings are
+applied when opening both pooled and dedicated sessions.
+
 When `sslcert` and `sslkey` point to files, keep both files readable after startup so new PostgreSQL connections can pick up rotated client certificates and keys during TLS handshakes.
 
 | File | Description |
