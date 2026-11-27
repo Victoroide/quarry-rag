@@ -40,18 +40,7 @@ func NormalizeForIngest(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	// 1. Preserve line structure before filtering controls.
-	s := ingestLineEndings.Replace(raw)
-	s = norm.NFC.String(s)
-	s = width.Fold.String(s)
-	// 2. Fold selected compatibility characters and filter controls.
-	s = ingestCharacterFolds.Replace(s)
-	s = stripControlExceptStructure(s)
-	// 3. Fix hyphenation across line breaks.
-	s = hyphenLineBreakRe.ReplaceAllString(s, "")
-	// 4. Collapse decorative runs.
-	s = decorationRunRe.ReplaceAllString(s, " ")
-	s = bulletRunRe.ReplaceAllString(s, " ")
+	s := normalizeIngestPrefix(raw)
 	// 5. Re-flow paragraphs:
 	//    - collapse 2+ newlines to a single placeholder so we don't
 	//      eat real paragraph boundaries when we join soft lines
@@ -67,6 +56,21 @@ func NormalizeForIngest(raw string) string {
 		lines[i] = strings.TrimSpace(line)
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func normalizeIngestPrefix(raw string) string {
+	// 1. Preserve line structure before filtering controls.
+	s := ingestLineEndings.Replace(raw)
+	s = norm.NFC.String(s)
+	s = width.Fold.String(s)
+	// 2. Fold selected compatibility characters and filter controls.
+	s = ingestCharacterFolds.Replace(s)
+	s = stripControlExceptStructure(s)
+	// 3. Fix hyphenation across line breaks.
+	s = hyphenLineBreakRe.ReplaceAllString(s, "")
+	// 4. Collapse decorative runs.
+	s = decorationRunRe.ReplaceAllString(s, " ")
+	return bulletRunRe.ReplaceAllString(s, " ")
 }
 
 const paragraphPlaceholder = "\x00P\x00"

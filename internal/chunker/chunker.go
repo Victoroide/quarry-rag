@@ -55,11 +55,31 @@ func (c *Chunker) Chunk(docID domain.DocumentID, text string) []domain.Chunk {
 // ChunkForEmbedding validates chunk text against the embedding input profile.
 // On failure it returns no chunks, even if earlier windows fit.
 func (c *Chunker) ChunkForEmbedding(ctx context.Context, docID domain.DocumentID, text string, profile *embeddinginput.Profile) ([]domain.Chunk, error) {
+	return c.chunkForEmbedding(ctx, docID, text, profile, false)
+}
+
+// ChunkForEmbeddingWithLineBoundaries also records retained source separators.
+func (c *Chunker) ChunkForEmbeddingWithLineBoundaries(ctx context.Context, docID domain.DocumentID, text string, profile *embeddinginput.Profile) ([]domain.Chunk, error) {
+	return c.chunkForEmbedding(ctx, docID, text, profile, true)
+}
+
+func normalizeSource(ctx context.Context, text string, capture bool) (string, []domain.SourceLineBoundary, error) {
 	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+	text = stripHTML(text)
+	if capture {
+		return textutil.NormalizeForIngestWithLineBoundaries(ctx, text)
+	}
+	return textutil.NormalizeForIngest(text), nil, nil
+}
+
+func (c *Chunker) chunkForEmbedding(ctx context.Context, docID domain.DocumentID, text string, profile *embeddinginput.Profile, capture bool) ([]domain.Chunk, error) {
+	cleaned, marks, err := normalizeSource(ctx, text, capture)
+	if err != nil {
 		return nil, err
 	}
-	cleaned := textutil.NormalizeForIngest(stripHTML(text))
-	chunks, _, err := c.chunkNormalized(ctx, docID, cleaned, profile, "")
+	chunks, _, err := c.chunkNormalized(ctx, docID, cleaned, profile, "", marks)
 	return chunks, err
 }
 
@@ -68,13 +88,20 @@ type chunkSpan struct {
 	end   int
 }
 
-func (c *Chunker) chunkNormalized(ctx context.Context, docID domain.DocumentID, cleaned string, profile *embeddinginput.Profile, baseVersion string) ([]domain.Chunk, []chunkSpan, error) {
+func (c *Chunker) chunkNormalized(ctx context.Context, docID domain.DocumentID, cleaned string, profile *embeddinginput.Profile, baseVersion string, marks []domain.SourceLineBoundary) ([]domain.Chunk, []chunkSpan, error) {
 	if profile != nil {
-		return c.chunkProfiled(ctx, docID, cleaned, profile, baseVersion)
+		return c.chunkProfiled(ctx, docID, cleaned, profile, baseVersion, marks)
 	}
 	units, err := c.textUnits(ctx, cleaned)
 	if err != nil {
 		return nil, nil, err
+	}
+	var unitMarks []unitBoundaries
+	if marks != nil {
+		unitMarks, err = indexUnitBoundaries(ctx, cleaned, units, marks)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	var chunks []domain.Chunk
@@ -92,8 +119,14 @@ func (c *Chunker) chunkNormalized(ctx context.Context, docID domain.DocumentID, 
 			}
 			return nil, nil, errEmbeddingChunkBoundary
 		}
-		window := joinUnits(units[start:end], size)
-		chunks = append(chunks, makeChunk(docID, len(chunks), window, baseVersion))
+		var windowMarks []unitBoundaries
+		if unitMarks != nil {
+			windowMarks = unitMarks[start:end]
+		}
+		window, boundaries := joinUnits(units[start:end], size, windowMarks)
+		chunk := makeChunk(docID, len(chunks), window, baseVersion)
+		attachSourceLineBoundaries(&chunk, boundaries)
+		chunks = append(chunks, chunk)
 		spans = append(spans, chunkSpan{start: units[start].byteStart, end: units[end-1].byteEnd})
 		nextNew = end
 		if end == len(units) {
@@ -147,16 +180,35 @@ func (c *Chunker) window(units []textUnit, start int) (end, size int, estimate t
 	return end, size, estimate
 }
 
-func joinUnits(units []textUnit, size int) string {
+func joinUnits(units []textUnit, size int, unitMarks []unitBoundaries) (string, []domain.SourceLineBoundary) {
 	var b strings.Builder
+	var marks []domain.SourceLineBoundary
+	if unitMarks != nil {
+		marks = []domain.SourceLineBoundary{}
+	}
 	b.Grow(size)
 	for i, unit := range units {
 		if i > 0 {
+			if unitMarks != nil {
+				if kind := unitMarks[i].folded; kind != 0 {
+					marks = append(marks, domain.SourceLineBoundary{Offset: b.Len(), Kind: kind})
+				}
+				for _, mark := range unitMarks[i].gap {
+					mark.Offset += b.Len() - units[i-1].byteEnd
+					marks = append(marks, mark)
+				}
+			}
 			b.WriteString(unit.separator)
+		}
+		if unitMarks != nil {
+			for _, mark := range unitMarks[i].inside {
+				mark.Offset += b.Len() - unit.byteStart
+				marks = append(marks, mark)
+			}
 		}
 		b.WriteString(unit.text)
 	}
-	return b.String()
+	return b.String(), marks
 }
 
 func (c *Chunker) overlapStart(units []textUnit, start, end, size int, estimate tokenEstimate) int {

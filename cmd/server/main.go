@@ -246,7 +246,7 @@ func runServer(ctx context.Context) (fatalStage, error) {
 		persistOptions = append(persistOptions, pipeline.WithLSNVisibility())
 	}
 	ingestStages := []pipeline.Stage{
-		pipeline.NewChunkStageWithEmbeddingProfile(chk, cfg.EmbeddingInputProfile),
+		pipeline.NewChunkStageWithEmbeddingProfile(chk, cfg.EmbeddingInputProfile).WithSourceLineBoundaries(cfg.PreserveSourceLineBoundaries),
 		pipeline.NewEmbedStage(emb, cfg.EmbedConcurrency),
 		pipeline.NewPersistStage(vectorStore, persistOptions...),
 	}

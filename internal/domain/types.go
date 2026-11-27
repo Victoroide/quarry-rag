@@ -29,6 +29,8 @@ type Chunk struct {
 	TokenCount int            `json:"token_count"`
 	Embedding  []float32      `json:"embedding,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+	// SourceLineBoundaries describes Text. Nil means the sidecar is unknown.
+	SourceLineBoundaries []SourceLineBoundary `json:"-"`
 	// VectorIncarnation binds an untagged vector to its write-time document identity.
 	VectorIncarnation string `json:"-"`
 	RevisionID        string `json:"-"`

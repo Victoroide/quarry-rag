@@ -90,8 +90,9 @@ type Config struct {
 	LocalRetrievalThreshold float64
 	MaxChunksPerQuery       int
 
-	ChunkTokenSize int
-	ChunkOverlap   int
+	ChunkTokenSize               int
+	ChunkOverlap                 int
+	PreserveSourceLineBoundaries bool
 
 	EmbeddingDimensions   int
 	EmbeddingInputProfile *embeddinginput.Profile
@@ -324,6 +325,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.PineconeTimeout, err = envDurationOrDefault("PINECONE_TIMEOUT", 10*time.Second); err != nil {
+		return nil, err
+	}
+	if cfg.PreserveSourceLineBoundaries, err = envBoolOrDefault("PRESERVE_SOURCE_LINE_BOUNDARIES", false); err != nil {
 		return nil, err
 	}
 	if cfg.HostedVisibilityRefill, err = envBoolOrDefault("HOSTED_VISIBILITY_REFILL", false); err != nil {

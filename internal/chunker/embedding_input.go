@@ -154,7 +154,7 @@ func (s profileText) preferredCut(start, end int, sentence bool) int {
 	return end
 }
 
-func (c *Chunker) chunkProfiled(ctx context.Context, docID domain.DocumentID, text string, profile *embeddinginput.Profile, baseVersion string) ([]domain.Chunk, []chunkSpan, error) {
+func (c *Chunker) chunkProfiled(ctx context.Context, docID domain.DocumentID, text string, profile *embeddinginput.Profile, baseVersion string, marks []domain.SourceLineBoundary) ([]domain.Chunk, []chunkSpan, error) {
 	source, err := indexProfileText(ctx, text)
 	if err != nil {
 		return nil, nil, err
@@ -182,8 +182,19 @@ func (c *Chunker) chunkProfiled(ctx context.Context, docID domain.DocumentID, te
 				return nil, nil, err
 			}
 		}
-		chunks = append(chunks, makeChunk(docID, i, source.slice(start, span.end), version))
-		byteSpans = append(byteSpans, chunkSpan{start: source.points[start].offset, end: source.points[span.end].offset})
+		chunk := makeChunk(docID, i, source.slice(start, span.end), version)
+		byteSpan := chunkSpan{start: source.points[start].offset, end: source.points[span.end].offset}
+		if marks != nil {
+			marks = marks[boundaryPrefix(marks, byteSpan.start):]
+			boundaries := []domain.SourceLineBoundary{}
+			for _, mark := range marks[:boundaryPrefix(marks, byteSpan.end)] {
+				mark.Offset -= byteSpan.start
+				boundaries = append(boundaries, mark)
+			}
+			attachSourceLineBoundaries(&chunk, boundaries)
+		}
+		chunks = append(chunks, chunk)
+		byteSpans = append(byteSpans, byteSpan)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
