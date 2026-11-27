@@ -27,6 +27,8 @@ Notable changes are grouped by release.
 
 - Delegated trust-file checks can proceed independently while another check reads unchanged trust data.
 - Hosted and memory queries take one PostgreSQL snapshot before searching to validate historical vector hits (migration `027_untagged_vector_stamps.sql`).
+- PostgreSQL vector storage (`chunk_vectors` and `chunk_vectors_<generation>`, migration `039_vector_layout_provenance.sql`) now persists and returns ordered PDF layout provenance (`pages`, `table_ids`, `row_ids`) from completion, approximate and exact search, internal vector fetches, and `make reindex` verification, omitting empty or legacy `NULL` fields.
+- Documented column-restricted `SELECT`, `INSERT`, and `UPDATE` privileges for the new pgvector layout provenance columns and fresh-generation backfill guidance.
 
 ### Fixed
 

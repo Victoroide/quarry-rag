@@ -614,7 +614,13 @@ CREATE TABLE public.chunk_vectors_<generation> (
   kind TEXT,
   quality TEXT,
   token_count INTEGER NOT NULL,
-  embedding vector(<dimensions>) NOT NULL
+  embedding vector(<dimensions>) NOT NULL,
+  pages INTEGER[] CONSTRAINT quarry_layout_pages_check
+    CHECK (pages IS NULL OR (cardinality(pages) BETWEEN 1 AND 1000 AND array_ndims(pages) = 1 AND array_lower(pages, 1) = 1)),
+  table_ids TEXT[] CONSTRAINT quarry_layout_table_ids_check
+    CHECK (table_ids IS NULL OR (cardinality(table_ids) BETWEEN 1 AND 250000 AND array_ndims(table_ids) = 1 AND array_lower(table_ids, 1) = 1)),
+  row_ids TEXT[] CONSTRAINT quarry_layout_row_ids_check
+    CHECK (row_ids IS NULL OR (cardinality(row_ids) BETWEEN 1 AND 250000 AND array_ndims(row_ids) = 1 AND array_lower(row_ids, 1) = 1))
 );
 CREATE INDEX idx_chunk_vectors_<generation>_embedding ON public.chunk_vectors_<generation> USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX idx_chunk_vectors_<generation>_document_id ON public.chunk_vectors_<generation> (document_id);
@@ -918,6 +924,48 @@ layout jobs finish (confirming `SELECT count(*) FROM ingest_jobs j JOIN
 document_pdf_extractions p ON p.document_id = j.document_id WHERE
 j.pdf_required AND p.profile = 'quarry.pdf.layout.v1'` returns zero), and then
 roll back the worker binaries.
+
+For PostgreSQL vector storage, use a coordinated writer cutover for migration
+039. Pause ingestion, vector maintenance, and reindex and drain in-flight jobs
+and database sessions. Stop older vector writers and generation creators,
+including their scheduled invocations, before the schema owner migrates.
+Disable their database logins and terminate any remaining sessions before
+resuming with upgraded writers. If a login was shared, issue fresh credentials
+to the upgraded processes and retire the old credentials. Keep schema
+ownership and creation privileges with the upgraded owner-side deployment path.
+This prevents an older upsert from retaining arrays from the previous contents
+of a vector row and prevents older generation DDL from creating tables without
+the provenance columns.
+
+Existing rows acquire nullable columns without a backfill. Older readers and
+explicit-column append-only inserts remain compatible. Use upgraded writers to
+replace existing keys, including during an application rollback. Keep the
+vector write and generation-creation paths paused if the rollback also requires
+older writer binaries. To fill in provenance, stage a fresh target generation
+or re-ingest the source documents. Completed reindex checkpoints can skip
+unchanged documents.
+
+If an older generation creator already produced a table after migration 039
+was recorded, stop and retire the old writer credentials as above. From the
+release tree, connect as schema owner to the affected database and run the
+following in a single session. Set the search path to the affected metadata
+schema followed by the extension schema if they differ. This reapplies the
+same repair under the migration lock, preserves compatible data, and leaves
+migration history intact.
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN;
+SELECT pg_advisory_xact_lock(8175547842735702017);
+\i internal/store/postgres/migrations/039_vector_layout_provenance.sql
+COMMIT;
+```
+
+If validation fails, roll back the transaction and repair the reported
+definition or invalid data before retrying. Open the repaired generation with
+the upgraded binary before resuming writes. Reindex from a fresh checkpoint
+or re-ingest affected documents if an older upsert may already have retained
+stale provenance.
 
 ## Vector Index Maintenance
 
