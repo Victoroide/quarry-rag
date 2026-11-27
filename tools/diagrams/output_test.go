@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"encoding/json/jsontext"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -47,7 +49,8 @@ func TestStandaloneOutputs(t *testing.T) {
 	}
 }
 
-func TestCheckRejectsStaleOutput(t *testing.T) {
+func copyDiagramRepository(t *testing.T) string {
+	t.Helper()
 	root := t.TempDir()
 	for p := range directoryDescriptions {
 		if err := os.MkdirAll(filepath.Join(root, p), 0o750); err != nil {
@@ -82,6 +85,11 @@ func TestCheckRejectsStaleOutput(t *testing.T) {
 		}
 	}
 	trackDirectories(t, root, directoryDescriptions)
+	return root
+}
+
+func TestCheckRejectsStaleOutput(t *testing.T) {
+	root := copyDiagramRepository(t)
 	if err := generate(root, true); err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +105,138 @@ func TestCheckRejectsStaleOutput(t *testing.T) {
 	}
 	if err := generate(root, true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func duplicateDocumentsPlacement(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var source placement
+	if decodeErr := json.Unmarshal(data, &source); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	nodeBox, ok := source.Nodes["documents"]
+	if !ok {
+		t.Fatal("fixture is missing the documents placement")
+	}
+	canonical, err := json.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boxJSON, err := json.Marshal(nodeBox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := append([]byte(`"documents":`), boxJSON...)
+	if !bytes.Contains(canonical, member) {
+		t.Fatal("encoded fixture is missing the documents placement")
+	}
+	return bytes.Replace(canonical, member, bytes.Join([][]byte{member, member}, []byte(",")), 1)
+}
+
+func TestDuplicateDocumentsPlacementAcceptsEquivalentJSON(t *testing.T) {
+	want := duplicateDocumentsPlacement(t, []byte(`{"Nodes":{"documents":{"X":1}}}`))
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "whitespace", data: `{"Nodes": { "documents" : { "X": 1 } }}`},
+		{name: "escaped names", data: `{"N\u006fdes":{"doc\u0075ments":{"\u0058":1}}}`},
+		{name: "field casing", data: `{"nOdEs":{"documents":{"x":1}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := duplicateDocumentsPlacement(t, []byte(tc.data)); !bytes.Equal(got, want) {
+				t.Errorf("duplicate fixture differs for equivalent JSON: got %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestGenerateRejectsInvalidPlacement(t *testing.T) {
+	if err := generate(filepath.Join("..", ".."), true); err != nil {
+		t.Fatalf("checking the repository diagrams: %v", err)
+	}
+	root := copyDiagramRepository(t)
+	path := filepath.Join("docs", "diagrams", "src", "database-schema.json")
+	original, err := readWithin(root, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assets, err := filepath.Glob(filepath.Join(root, "docs", "diagrams", "*.svg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) == 0 {
+		t.Fatal("fixture has no SVGs")
+	}
+	prior := make(map[string][]byte, len(assets))
+	for _, asset := range assets {
+		rel, relErr := filepath.Rel(root, asset)
+		if relErr != nil {
+			t.Fatal(relErr)
+		}
+		data, readErr := readWithin(root, rel)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		prior[rel] = data
+	}
+	assertAssetsUnchanged := func(t *testing.T) {
+		t.Helper()
+		for rel, want := range prior {
+			got, readErr := readWithin(root, rel)
+			if readErr != nil {
+				t.Error(readErr)
+			} else if !bytes.Equal(got, want) {
+				t.Errorf("changed diagram %s", rel)
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		data    []byte
+		message string
+		cause   error
+	}{
+		{name: "trailing object", data: append(bytes.Clone(original), '\n', '{', '}'), message: "after top-level value"},
+		{name: "duplicate node", data: duplicateDocumentsPlacement(t, original), cause: jsontext.ErrDuplicateName},
+		{name: "missing source", cause: os.ErrNotExist},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			action := "decode"
+			if tc.data == nil {
+				action = "read"
+				if err := os.Remove(filepath.Join(root, path)); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := writeWithin(root, path, tc.data); err != nil {
+				t.Fatal(err)
+			}
+			for _, check := range []bool{true, false} {
+				err := generate(root, check)
+				prefix := action + " placement " + path + ":"
+				switch {
+				case err == nil || !strings.HasPrefix(err.Error(), prefix):
+					t.Errorf("check=%t: got %v, want a diagnostic starting with %q", check, err, prefix)
+				case tc.cause != nil && !errors.Is(err, tc.cause):
+					t.Errorf("check=%t: got %v, want an error wrapping %v", check, err, tc.cause)
+				case tc.message != "" && !strings.Contains(err.Error(), tc.message):
+					t.Errorf("check=%t: got %v, want %q", check, err, tc.message)
+				}
+				assertAssetsUnchanged(t)
+			}
+		})
+	}
+
+	if err := writeWithin(root, path, original); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []bool{true, false} {
+		if err := generate(root, check); err != nil {
+			t.Errorf("check=%t after restoring the source: %v", check, err)
+		}
+		assertAssetsUnchanged(t)
 	}
 }
 
