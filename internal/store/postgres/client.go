@@ -140,12 +140,7 @@ func (c *Client) InsertChunks(ctx context.Context, chunks []domain.Chunk) error 
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, ch := range chunks {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO chunks (id, document_id, chunk_index, text, token_count)
-			 VALUES ($1, $2, $3, $4, $5)
-			 ON CONFLICT (id) DO UPDATE SET text=EXCLUDED.text, token_count=EXCLUDED.token_count, chunk_index=EXCLUDED.chunk_index`,
-			string(ch.ID), string(ch.DocumentID), ch.Index, ch.Text, ch.TokenCount,
-		)
+		err := upsertChunk(ctx, tx, ch)
 		if err != nil {
 			return fmt.Errorf("postgres: insert chunk %s: %w", ch.ID, err)
 		}
@@ -154,6 +149,29 @@ func (c *Client) InsertChunks(ctx context.Context, chunks []domain.Chunk) error 
 		return fmt.Errorf("postgres: commit chunk batch: %w", err)
 	}
 	return nil
+}
+
+func upsertChunk(ctx context.Context, tx pgx.Tx, ch domain.Chunk) error {
+	const update = ` ON CONFLICT (id) DO UPDATE SET text=EXCLUDED.text, token_count=EXCLUDED.token_count, chunk_index=EXCLUDED.chunk_index`
+	args := []any{string(ch.ID), string(ch.DocumentID), ch.Index, ch.Text, ch.TokenCount}
+	marks := encodeSourceLineBoundaries(ch.Text, ch.SourceLineBoundaries)
+	if marks == nil {
+		_, err := tx.Exec(ctx, `INSERT INTO chunks (id, document_id, chunk_index, text, token_count)
+			VALUES ($1, $2, $3, $4, $5)`+update, args...)
+		return err
+	}
+	var stored bool
+	err := tx.QueryRow(ctx, `INSERT INTO chunks (id, document_id, chunk_index, text, token_count, source_line_boundaries)
+		VALUES ($1, $2, $3, $4, $5, $6)`+update+`, source_line_boundaries=EXCLUDED.source_line_boundaries
+		RETURNING source_line_boundaries IS NOT NULL`, append(args, marks)...).Scan(&stored)
+	if err != nil || stored {
+		return err
+	}
+	// A body replacement can legitimately have the same offsets. The trigger
+	// clears identical offsets on replacement, so restore them while holding
+	// the row lock acquired by the upsert.
+	_, err = tx.Exec(ctx, `UPDATE chunks SET source_line_boundaries=$2 WHERE id=$1`, string(ch.ID), marks)
+	return err
 }
 
 // UpdateDocumentStatus sets the status of a document (e.g. "completed", "failed").

@@ -756,7 +756,12 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	}
 	batch := &pgx.Batch{}
 	for _, ch := range chunks {
-		batch.Queue(`INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,$3,$4,$5)`, string(ch.ID), string(j.Document.ID), ch.Index, ch.Text, ch.TokenCount)
+		marks := encodeSourceLineBoundaries(ch.Text, ch.SourceLineBoundaries)
+		if marks == nil {
+			batch.Queue(`INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,$3,$4,$5)`, string(ch.ID), string(j.Document.ID), ch.Index, ch.Text, ch.TokenCount)
+		} else {
+			batch.Queue(`INSERT INTO chunks(id,document_id,chunk_index,text,token_count,source_line_boundaries) VALUES($1,$2,$3,$4,$5,$6)`, string(ch.ID), string(j.Document.ID), ch.Index, ch.Text, ch.TokenCount, marks)
+		}
 	}
 	if batchErr := tx.SendBatch(ctx, batch).Close(); batchErr != nil {
 		return false, batchErr

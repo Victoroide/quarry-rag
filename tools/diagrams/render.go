@@ -145,8 +145,14 @@ func render(d diagram, theme string, f *fontSet) ([]byte, error) {
 		return cmp.Or(cmp.Compare(glyphUses[b], glyphUses[a]), cmp.Compare(a.r, b.r), cmp.Compare(boolRank(a.bold), boolRank(b.bold)))
 	})
 	glyphIDs := make(map[glyphKey]string, len(keys))
+	const glyphIDLetters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	for i, key := range keys {
-		id := "g" + strconv.FormatInt(int64(i), 36)
+		var id string
+		if i < len(glyphIDLetters) {
+			id = glyphIDLetters[i : i+1]
+		} else {
+			id = "g" + strconv.FormatInt(int64(i-len(glyphIDLetters)), 36)
+		}
 		glyphIDs[key] = id
 		path, _, err := f.glyph(key.bold, key.r)
 		if err != nil {

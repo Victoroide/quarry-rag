@@ -118,6 +118,7 @@ func (s *FakeVectorStore) Upsert(ctx context.Context, namespace string, chunks [
 		cp := c
 		cp.Embedding = emb
 		cp.Metadata = cloneMetadata(c.Metadata)
+		cp.SourceLineBoundaries = nil
 		key := vectorKey{chunkID: c.ID, manifestRevision: c.RevisionID}
 		if revision, _ := c.Metadata[domain.VectorRevisionKey].(string); revision != "" {
 			key.documentID = c.DocumentID

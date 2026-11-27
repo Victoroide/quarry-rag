@@ -145,7 +145,7 @@ func dataModel() diagram {
 			{"vector_mutation_pending", "BOOLEAN", "", ""}, {"vector_mutation_uncertain", "BOOLEAN", "", ""},
 			{"vector_mutation_claim", "UUID", "", ""}, {"vector_mutation_until", "TIMESTAMPTZ", "", ""},
 			{"untagged_since", "XID8", "", ""}}},
-		{ID: "chunks", Title: "chunks", Columns: []column{{"id", "UUID", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"chunk_index", "INTEGER", "", ""}, {"text", "TEXT", "", ""}, {"token_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}}},
+		{ID: "chunks", Title: "chunks", Columns: []column{{"id", "UUID", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"chunk_index", "INTEGER", "", ""}, {"text", "TEXT", "", ""}, {"token_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"source_line_boundaries", "INTEGER[]", "", ""}}},
 		{ID: "document_fingerprints", Title: "document_fingerprints", Columns: []column{{"fingerprint", "TEXT", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"created_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"pdf_required", "BOOLEAN", "", ""}, {"pdf_claim_attempt", "INTEGER", "", ""}, {"lease_token", "UUID", "", ""}, {"layout_claim_attempt", "INTEGER", "", ""}}},
 		{ID: "document_pdf_extractions", Title: "document_pdf_extractions", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"profile", "TEXT", "", ""}, {"manifest", "JSONB", "", ""}, {"coverage", "TEXT", "", ""}, {"page_results", "JSONB", "", ""}, {"window_id", "UUID", "", ""}, {"started_at", "TIMESTAMPTZ", "", ""}, {"start_bound_at", "TIMESTAMPTZ", "", ""}, {"accepted_at", "TIMESTAMPTZ", "", ""}}},
@@ -159,10 +159,10 @@ func dataModel() diagram {
 		x, sourceY, y float64
 	}{
 		{"documents-chunks", "chunks", "0..n", 452, 126, 138},
-		{"documents-fingerprints", "document_fingerprints", "0..n", 440, 138, 296},
-		{"documents-jobs", "ingest_jobs", "0..1", 428, 150, 382},
-		{"documents-pdf-extractions", "document_pdf_extractions", "0..1", 416, 162, 666},
-		{"documents-evaluation", "evaluation_fixtures", "0..1", 404, 174, 932},
+		{"documents-fingerprints", "document_fingerprints", "0..n", 440, 138, 314},
+		{"documents-jobs", "ingest_jobs", "0..1", 428, 150, 400},
+		{"documents-pdf-extractions", "document_pdf_extractions", "0..1", 416, 162, 684},
+		{"documents-evaluation", "evaluation_fixtures", "0..1", 404, 174, 950},
 	} {
 		l := &label{Text: v.card, X: 479, Y: v.y - 14, Size: edgeLabelSize, Kind: "muted", Owner: v.id}
 		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {484, v.y}}})
