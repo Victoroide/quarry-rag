@@ -91,6 +91,29 @@ type Quiesce struct {
 	OpenDeletionIDs []string `json:"open_deletion_ids,omitempty"`
 }
 
+// ActivationReadiness captures the writer state and target verification in one advisory snapshot.
+type ActivationReadiness struct {
+	Active           string
+	FreezeGeneration string
+	TargetState      string
+	CorpusDigest     string
+	Quiesce          Quiesce
+}
+
+// ActivationQuiesceError reports why the locked activation check refused to switch.
+type ActivationQuiesceError struct {
+	Quiesce Quiesce
+	Window  time.Duration
+}
+
+func (e *ActivationQuiesceError) Error() string {
+	if !e.Quiesce.Settled {
+		return fmt.Sprintf("postgres: the freeze is still settling; wait %s after freezing", e.Window)
+	}
+	return fmt.Sprintf("postgres: %d in-flight jobs and %d open deletions%s must finish before activation",
+		e.Quiesce.RunningJobs, e.Quiesce.OpenDeletions, FormatOpenDeletions(e.Quiesce.OpenDeletions, e.Quiesce.OpenDeletionIDs))
+}
+
 // FormatOpenDeletions formats bounded open deletion document IDs for status and error messages.
 func FormatOpenDeletions(total int, ids []string) string {
 	if total <= 0 || len(ids) == 0 {
@@ -552,20 +575,43 @@ func (c *Client) ThawWriters(ctx context.Context) error {
 // WriterQuiesce reports whether the freeze has settled for at least window and
 // no leased job or deletion receipt remains open.
 func (c *Client) WriterQuiesce(ctx context.Context, window time.Duration) (Quiesce, error) {
-	var q Quiesce
-	err := c.Pool.QueryRow(ctx, `SELECT frozen, COALESCE(frozen_at + make_interval(secs=>$1) <= NOW(), FALSE),
+	return readWriterQuiesce(ctx, c.Pool, window)
+}
+
+const writerQuiesceColumns = `frozen, COALESCE(frozen_at + make_interval(secs=>$1) <= NOW(), FALSE),
  (SELECT count(*) FROM ingest_jobs WHERE state='running' AND lease_until > NOW()),
  (SELECT count(*) FROM document_deletions WHERE NOT finalized),
- ARRAY(SELECT document_id::text FROM document_deletions WHERE NOT finalized ORDER BY document_id LIMIT $2)
- FROM vector_state`, window.Seconds(), maxReportedOpenDeletions).
-		Scan(&q.Frozen, &q.Settled, &q.RunningJobs, &q.OpenDeletions, &q.OpenDeletionIDs)
-	if err != nil {
-		return q, fmt.Errorf("postgres: read writer state: %w", err)
+ ARRAY(SELECT document_id::text FROM document_deletions WHERE NOT finalized ORDER BY document_id LIMIT $2)`
+
+// ReadActivationReadiness observes quiescence and the requested generation's verification together.
+func (c *Client) ReadActivationReadiness(ctx context.Context, name string, window time.Duration) (ActivationReadiness, error) {
+	var result ActivationReadiness
+	row := c.Pool.QueryRow(ctx, `SELECT active_generation, COALESCE(freeze_generation, ''),
+ target.state, COALESCE(target.corpus_digest, ''), `+writerQuiesceColumns+`
+ FROM vector_state CROSS JOIN vector_generations AS target WHERE target.name=$3`, window.Seconds(), maxReportedOpenDeletions, name)
+	if err := scanWriterQuiesce(row, &result.Quiesce, &result.Active, &result.FreezeGeneration, &result.TargetState, &result.CorpusDigest); err != nil {
+		return ActivationReadiness{}, fmt.Errorf("postgres: read activation readiness for generation %q: %w", name, err)
 	}
-	if len(q.OpenDeletionIDs) == 0 {
-		q.OpenDeletionIDs = nil
+	return result, nil
+}
+
+func readWriterQuiesce(ctx context.Context, q queryRower, window time.Duration) (Quiesce, error) {
+	var status Quiesce
+	row := q.QueryRow(ctx, `SELECT `+writerQuiesceColumns+` FROM vector_state`, window.Seconds(), maxReportedOpenDeletions)
+	if err := scanWriterQuiesce(row, &status); err != nil {
+		return status, fmt.Errorf("postgres: read writer state: %w", err)
 	}
-	return q, nil
+	return status, nil
+}
+
+func scanWriterQuiesce(row pgx.Row, status *Quiesce, fields ...any) error {
+	if err := row.Scan(append(fields, &status.Frozen, &status.Settled, &status.RunningJobs, &status.OpenDeletions, &status.OpenDeletionIDs)...); err != nil {
+		return err
+	}
+	if len(status.OpenDeletionIDs) == 0 {
+		status.OpenDeletionIDs = nil
+	}
+	return nil
 }
 
 func frozenFor(state VectorState, generation string) error {
@@ -726,23 +772,12 @@ func (f *GenerationFence) Activate(ctx context.Context, corpusDigest string, win
 	if fixtureErr := requireServiceableFixtures(ctx, tx, name); fixtureErr != nil {
 		return fixtureErr
 	}
-	var settled bool
-	var running, open int
-	var openIDs []string
-	err = tx.QueryRow(ctx, `SELECT frozen_at + make_interval(secs=>$1) <= NOW(),
- (SELECT count(*) FROM ingest_jobs WHERE state='running' AND lease_until > NOW()),
- (SELECT count(*) FROM document_deletions WHERE NOT finalized),
- ARRAY(SELECT document_id::text FROM document_deletions WHERE NOT finalized ORDER BY document_id LIMIT $2)
- FROM vector_state`, window.Seconds(), maxReportedOpenDeletions).Scan(&settled, &running, &open, &openIDs)
+	quiesce, err := readWriterQuiesce(ctx, tx, window)
 	if err != nil {
-		return fmt.Errorf("postgres: read writer state: %w", err)
+		return err
 	}
-	if !settled {
-		return fmt.Errorf("postgres: the freeze is still settling; wait %s after freezing", window)
-	}
-	if running > 0 || open > 0 {
-		return fmt.Errorf("postgres: %d in-flight jobs and %d open deletions%s must finish before activation",
-			running, open, FormatOpenDeletions(open, openIDs))
+	if !quiesce.Quiet() {
+		return &ActivationQuiesceError{Quiesce: quiesce, Window: window}
 	}
 	if target.State != StateVerified || target.PendingWrite {
 		return fmt.Errorf("postgres: generation %q is %s; it must be verified", name, target.State)
