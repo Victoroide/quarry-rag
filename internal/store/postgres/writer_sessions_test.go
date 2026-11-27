@@ -18,11 +18,11 @@ func sessionTestClient(t *testing.T) (*Client, *pgx.Conn) {
 
 // sessionTestClientWithPool returns a migrated client whose pool holds at most
 // maxConns connections, with an independent observer of the server's sessions.
-func sessionTestClientWithPool(t *testing.T, maxConns int) (*Client, *pgx.Conn) {
+func sessionTestClientWithPool(t *testing.T, maxConns int, opts ...Option) (*Client, *pgx.Conn) {
 	t.Helper()
 	address := withFixtureOptions(t, pgtest.Start(t), "application_name=quarry-writer-session-test")
 	poolAddress := withFixtureOptions(t, address, "pool_max_conns="+strconv.Itoa(maxConns))
-	c, err := NewClient(t.Context(), poolAddress)
+	c, err := NewClient(t.Context(), poolAddress, opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
 	require.NoError(t, c.RunMigrations(t.Context()))
