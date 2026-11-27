@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -699,6 +700,9 @@ func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
 	for _, id := range ids {
 		acceptDeletable(t, c, id, "slow document "+id, false, "")
 	}
+	anchorID := uuid.NewString()
+	acceptDeletable(t, c, anchorID, "small-pool anchor "+anchorID, false, "")
+
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	entered, unblock := blockFirstCalls(ctx, stores, "namespace", 2)
@@ -717,22 +721,41 @@ func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
 		path       string
 		payload    string
 		wantStatus int
+		wantID     string
+		list       bool
 		result     chan deletionHTTPResult
 	}
 	requests := make([]request, 0, 3*batches)
 	for i := range batches {
+		ingestID := uuid.NewString()
+		payload, err := json.Marshal(handler.IngestRequest{
+			DocumentID: ingestID,
+			Content:    "admitted during slow deletions " + ingestID,
+		})
+		require.NoError(t, err)
 		requests = append(requests,
 			request{
-				operation: fmt.Sprintf("POST /ingest %d", i+1), method: http.MethodPost, path: "/ingest",
-				payload: `{"content":"admitted during slow deletions ` + uuid.NewString() + `"}`, wantStatus: http.StatusAccepted,
+				operation:  fmt.Sprintf("POST /ingest %d", i+1),
+				method:     http.MethodPost,
+				path:       "/ingest",
+				payload:    string(payload),
+				wantStatus: http.StatusAccepted,
+				wantID:     ingestID,
 			},
 			request{
-				operation: fmt.Sprintf("GET /documents %d", i+1), method: http.MethodGet, path: "/documents?limit=100",
+				operation:  fmt.Sprintf("GET /documents %d", i+1),
+				method:     http.MethodGet,
+				path:       "/documents?limit=100",
 				wantStatus: http.StatusOK,
+				wantID:     anchorID,
+				list:       true,
 			},
 			request{
-				operation: fmt.Sprintf("GET document status %d", i+1), method: http.MethodGet, path: "/documents/" + uuid.NewString(),
-				wantStatus: http.StatusNotFound,
+				operation:  fmt.Sprintf("GET document status %d", i+1),
+				method:     http.MethodGet,
+				path:       "/documents/" + anchorID,
+				wantStatus: http.StatusOK,
+				wantID:     anchorID,
 			},
 		)
 	}
@@ -751,7 +774,7 @@ func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
 	for _, request := range requests {
 		reply, err := waitDeletionReply(trafficCtx, request.result, "while the small-pool DELETE providers are paused")
 		require.NoError(t, err, request.operation)
-		require.NoError(t, checkSmallPoolReply(reply, request.wantStatus), request.operation)
+		require.NoError(t, checkSmallPoolReply(reply, request.wantStatus, request.wantID, request.list), request.operation)
 	}
 	require.NoError(t, context.Cause(trafficCtx), "small-pool traffic exceeded its deadline")
 	cancelTraffic()
