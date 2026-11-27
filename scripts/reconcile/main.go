@@ -248,24 +248,34 @@ func runMaintenance(ctx context.Context, gate domain.WriterLocker, opts options,
 	return work()
 }
 
+func pinMaintenance(ctx context.Context, cfg *config.Config, pg *pgstore.Client, host string) error {
+	store, target := cfg.VectorTarget()
+	if err := pg.PinExistingVectorGeneration(ctx, cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings()); err != nil {
+		return fmt.Errorf("pin the maintenance target: %w", err)
+	}
+	return nil
+}
+
 func pinAndRunMaintenance(ctx, pinCtx context.Context, cfg *config.Config, pg *pgstore.Client, host string, opts options, work func() error) error {
 	if opts.Apply {
-		store, target := cfg.VectorTarget()
-		if err := pg.PinExistingVectorGeneration(pinCtx, cfg.ActiveVectorGeneration(), store, target, host, cfg.EmbeddingSettings()); err != nil {
-			return fmt.Errorf("pin the maintenance target: %w", err)
+		if err := pinMaintenance(pinCtx, cfg, pg, host); err != nil {
+			return err
 		}
 	}
 	return runMaintenance(ctx, pg, opts, work)
 }
 
 func runScopedLocal(ctx context.Context, cfg *config.Config, pg *pgstore.Client, vectors scopedVectors, opts options, out io.Writer) error {
-	return pinAndRunMaintenance(ctx, ctx, cfg, pg, "", opts, func() error {
-		result, backfillErr := backfillScoped(ctx, pg, vectors, opts)
-		if backfillErr != nil {
-			return backfillErr
+	if opts.Apply {
+		if err := pinMaintenance(ctx, cfg, pg, ""); err != nil {
+			return err
 		}
-		return json.NewEncoder(out).Encode(result)
-	})
+	}
+	result, err := backfillScoped(ctx, pg, vectors, opts)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(result)
 }
 
 func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Client, opts options) error {

@@ -20,6 +20,8 @@ Notable changes are grouped by release.
 ### Fixed
 
 - The selective Pinecone staging check pins both index descriptions to the public controller.
+- pgvector scoped backfill takes the writer barrier in each publication transaction.
+
 - Held deletion release recovers claims left by lost commit replies.
 - Vector reindex validates Pinecone chunk positions before copying vectors or accepting verification evidence.
 - Vector reindex rejects same-space verification seeds whose source identity disagrees with the canonical chunk.

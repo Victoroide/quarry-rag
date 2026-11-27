@@ -1150,6 +1150,10 @@ stale provenance.
 
 ## Vector Index Maintenance
 
+For PostgreSQL, [scoped metadata backfill](development.md#scoped-metadata-backfill)
+can finish verification during a freeze. Resume the pass after thaw to publish
+documents that stayed quarantined.
+
 For a Pinecone deployment, use `make reconcile` during a maintenance window to
 inspect orphaned vectors and legacy document namespaces. Configure the same
 PostgreSQL database and Pinecone index as the deployment. Apply the ingestion

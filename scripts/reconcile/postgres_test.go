@@ -121,13 +121,13 @@ func (b *blockingScopedVectors) Verify(ctx context.Context, _ pgstore.BackfillDo
 	close(b.started)
 	select {
 	case <-b.finish:
-		return false, nil
+		return true, nil
 	case <-ctx.Done():
 		return false, ctx.Err()
 	}
 }
 
-func TestScopedBackfillApplyAcquiresWriterAndRefusesGenerationMismatch(t *testing.T) {
+func TestScopedLocalBackfillCannotPublishAfterFreeze(t *testing.T) {
 	ctx := t.Context()
 	pg, err := pgstore.NewClient(ctx, pgtest.StartVector(t))
 	require.NoError(t, err)
@@ -184,16 +184,15 @@ func TestScopedBackfillApplyAcquiresWriterAndRefusesGenerationMismatch(t *testin
 	case <-time.After(5 * time.Second):
 		t.Fatal("scoped backfill did not enter verification")
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	freezeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	require.Error(t, pg.FreezeWriters(waitCtx, "g2"), "freeze must wait for an in-flight applied scoped backfill")
+	require.NoError(t, pg.FreezeWriters(freezeCtx, "g2"))
 	close(blocker.finish)
-	require.NoError(t, <-done)
-
-	require.NoError(t, pg.FreezeWriters(ctx, "g2"))
+	require.ErrorIs(t, <-done, domain.ErrWritersFrozen)
+	candidates, err := pg.BackfillCandidates(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1, "verification that resumes after freeze must leave the document quarantined")
 	var out bytes.Buffer
-	err = runScopedLocal(ctx, cfg, pg, pgvectorVectors{pg}, opts, &out)
-	require.ErrorIs(t, err, domain.ErrWritersFrozen)
 
 	g2Store, err := pgstore.CreateGenerationVectorStore(ctx, pg, 3, "g2")
 	require.NoError(t, err)

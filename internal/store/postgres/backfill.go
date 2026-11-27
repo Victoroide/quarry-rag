@@ -99,12 +99,33 @@ func (c *Client) backfillCandidates(ctx context.Context, after string, limit int
 	return documents, nil
 }
 
-// PublishVerifiedDocument marks one document readable. It reports false, and
-// changes nothing, when the document row or its chunks differ from the snapshot
-// that was verified, so changed data stays quarantined.
+const publishVerifiedDocumentSQL = `SELECT grant_catalog_publish_verified_document($1::uuid,$2::uuid,$3,$4)`
+
+// PublishVerifiedDocument marks one document readable under a transaction-owned
+// writer barrier. It reports false when the verified snapshot has changed.
 func (c *Client) PublishVerifiedDocument(ctx context.Context, doc BackfillDocument) (bool, error) {
+	return publishVerifiedDocument(ctx, doc, c.Pool.BeginTx, c.gateWriter)
+}
+
+func publishVerifiedDocument(ctx context.Context, doc BackfillDocument, begin writerTxBegin, check writerTxCheck) (bool, error) {
+	tx, err := beginFencedWriterTx(ctx, begin, check)
+	if err != nil {
+		return false, err
+	}
+	defer rollbackFencedWriterTx(ctx, tx)
+	published, err := publishBackfillSnapshot(ctx, tx, doc)
+	if err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("postgres: commit verified document: %w", err)
+	}
+	return published, nil
+}
+
+func publishBackfillSnapshot(ctx context.Context, db queryRower, doc BackfillDocument) (bool, error) {
 	var published bool
-	err := c.Pool.QueryRow(ctx, `SELECT grant_catalog_publish_verified_document($1::uuid,$2::uuid,$3,$4)`,
+	err := db.QueryRow(ctx, publishVerifiedDocumentSQL,
 		doc.DocumentID, doc.Incarnation, doc.SourceVersion, doc.ChunkDigest).Scan(&published)
 	if err != nil {
 		return false, fmt.Errorf("postgres: publish verified document: %w", err)

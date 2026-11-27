@@ -556,8 +556,9 @@ not yet readable in ascending UUID order and prints only counts: `examined`,
 it finished. A document with an unresolved vector mutation is skipped until the
 mutation settles. A dry run reads only PostgreSQL. With `-apply`, both the
 PostgreSQL and hosted paths pin the configured `VECTOR_GENERATION` and target
-profile against PostgreSQL's active binding and hold the writer barrier for the
-pass, refusing while writers are frozen or when the active generation differs.
+profile against PostgreSQL's active binding. The hosted path keeps its writer
+barrier for the pass. PostgreSQL takes the barrier in each publication
+transaction and checks the freeze and active generation before publishing.
 On `VECTOR_STORE=postgres`, the pinned vector table must hold exactly the
 current chunks. Pinecone backfill uses only the default namespace. It takes the
 exact vector IDs and their ordered chunk bindings from the active PostgreSQL
