@@ -9,6 +9,7 @@ import (
 // selected suffix per backend. Ring indexes are one-based here.
 type recentOutput struct {
 	ordinal uint64
+	ring    bool
 	length  int
 	text    string
 
@@ -45,7 +46,7 @@ func (t *recentOutput) dropDisk() {
 }
 
 func (t *recentOutput) older(s *diagnosticStore, out *diagnosticOutput) {
-	t.ordinal = 0
+	t.ordinal, t.ring = 0, false
 	if s == nil {
 		if t.legacyNext != 0 {
 			t.legacyNext--
@@ -59,7 +60,7 @@ func (t *recentOutput) older(s *diagnosticStore, out *diagnosticOutput) {
 		t.ringNext--
 		slot := s.slot(t.ringNext)
 		if slot.id == out.ref.id {
-			t.ordinal, t.length = saturatingAdd(spoolLimit, index), len(slot.payload)
+			t.ordinal, t.length, t.ring = index, len(slot.payload), true
 			return
 		}
 	}
@@ -68,7 +69,7 @@ func (t *recentOutput) older(s *diagnosticStore, out *diagnosticOutput) {
 	}
 	t.diskIndex--
 	h, err := s.header(&out.ref, t.diskOffset, t.diskIndex)
-	if err != nil || s.reciprocal(h.next == t.diskNext) != nil {
+	if err != nil || s.reciprocal(h.next == t.diskNext && (t.diskNext == 0 || h.ordinal < t.diskHeader.ordinal)) != nil {
 		t.dropDisk()
 		return
 	}
@@ -80,19 +81,19 @@ func (t *recentOutput) older(s *diagnosticStore, out *diagnosticOutput) {
 	t.diskRemaining -= uint64(h.length)
 	t.diskHeader, t.diskNext = h, t.diskOffset
 	t.diskOffset = h.prev
-	t.ordinal, t.length = t.diskNext, int(h.length)
+	t.ordinal, t.length = h.ordinal, int(h.length)
 }
 
-func (t *recentOutput) endsLine(s *diagnosticStore) bool {
-	if t.ordinal > spoolLimit {
+func (t *recentOutput) endsLine(s *diagnosticStore, ref *diagnosticRef) bool {
+	if t.ring {
 		return s.slot(t.ringNext).data[t.length-1] == '\n'
 	}
 	var suffix [1]byte
-	err := s.readAt(suffix[:], t.diskNext+spoolHeaderSize+uint64(t.diskHeader.length)-1)
+	err := s.readAt(ref, suffix[:], t.diskNext+spoolHeaderSize+uint64(t.diskHeader.length)-1)
 	return err == nil && suffix[0] == '\n'
 }
 
-func (t *recentOutput) start(s *diagnosticStore, available int) (int, bool) {
+func (t *recentOutput) start(s *diagnosticStore, ref *diagnosticRef, available int) (int, bool) {
 	start := max(0, t.length-available)
 	if start == 0 || start == t.length {
 		return start, true
@@ -103,12 +104,12 @@ func (t *recentOutput) start(s *diagnosticStore, available int) (int, bool) {
 		}
 		return start, true
 	}
-	if t.ordinal > spoolLimit {
+	if t.ring {
 		return runeBoundary(s.slot(t.ringNext).data[:t.length], start), true
 	}
 	var prefix [utf8.UTFMax]byte
 	data := prefix[:min(len(prefix), t.length-start)]
-	if s.readAt(data, t.diskNext+spoolHeaderSize+uint64(start)) != nil {
+	if s.readAt(ref, data, t.diskNext+spoolHeaderSize+uint64(start)) != nil {
 		return 0, false
 	}
 	return start + runeBoundary(data, 0), true
@@ -118,7 +119,7 @@ func (t *recentOutput) keep(skip int) {
 	switch {
 	case t.text != "":
 		t.legacyStart, t.legacySkip = t.legacyNext, skip
-	case t.ordinal > spoolLimit:
+	case t.ring:
 		t.ringStart, t.ringSkip = t.ringNext+1, skip
 	default:
 		t.diskStart, t.diskFirstHeader = t.diskNext, t.diskHeader
@@ -146,12 +147,12 @@ func (t *recentOutput) copyTo(w *bytes.Buffer, s *diagnosticStore, out *diagnost
 			break
 		}
 		remaining -= length
-		if _, err := s.copyPayload(w, offset, skip, int(header.length)); err != nil {
+		if _, err := s.copyPayload(w, &out.ref, offset, skip, int(header.length)); err != nil {
 			break
 		}
 		if i+1 < t.diskCount {
 			next, err := s.header(&out.ref, header.next, t.diskFirstIndex+i+1)
-			if err != nil || s.reciprocal(next.prev == offset) != nil {
+			if err != nil || s.reciprocal(next.prev == offset && next.ordinal > header.ordinal) != nil {
 				break
 			}
 			offset, header, skip = header.next, next, 0

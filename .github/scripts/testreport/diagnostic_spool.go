@@ -36,7 +36,8 @@ func createDiagnosticSpool() (spoolFile, func() error, error) {
 }
 
 type diagnosticRef struct {
-	id                 uint32
+	spoolPages
+	id                 uint64
 	first, last        uint64
 	committedFragments uint64
 	committedBytes     uint64
@@ -47,30 +48,37 @@ type diagnosticRef struct {
 type spoolHeader struct {
 	prev, next uint64
 	length     uint32
+	ordinal    uint64
+}
+
+type spoolLink struct {
+	id, offset uint64
 }
 
 type fallbackSlot struct {
 	data     [fallbackSlotBytes]byte
-	id       uint32
+	id       uint64
 	position uint64
 	payload  []byte
 }
 
 type diagnosticStore struct {
+	pageAllocator
 	factory         spoolFactory
 	file            spoolFile
 	remove          func() error
-	limit, end      uint64
-	uncommittedTail uint64
-	nextID          uint32
+	limit           uint64
+	uncommittedTail spoolLink
+	nextID, ordinal uint64
 	failure         string
 	buffer          [32 * 1024]byte
+	record          [spoolHeaderSize]byte
 	fallback        *[fallbackSlots]fallbackSlot
 	slots           uint64
 }
 
 func newDiagnosticStore(factory spoolFactory) *diagnosticStore {
-	return &diagnosticStore{factory: factory, limit: spoolLimit, end: 1}
+	return &diagnosticStore{factory: factory, limit: spoolLimit}
 }
 
 func (s *diagnosticStore) fail(reason string) {
@@ -102,14 +110,18 @@ func (s *diagnosticStore) append(ref *diagnosticRef, output string) {
 	if output == "" {
 		return
 	}
-	if ref.id == 0 {
-		s.nextID++
-		ref.id = s.nextID
-	}
 	position := ref.bytes
 	ref.bytes = saturatingAdd(position, uint64(len(output)))
 	ref.fragments = saturatingAdd(ref.fragments, 1)
 	ref.endsLine = strings.HasSuffix(output, "\n")
+	if ref.id == 0 {
+		if s.nextID == math.MaxUint64 {
+			s.fail("write chain limit exceeded")
+			return
+		}
+		s.nextID++
+		ref.id = s.nextID
+	}
 	if s.failure == "" {
 		s.appendSpool(ref, output)
 		if s.failure == "" {
@@ -120,101 +132,119 @@ func (s *diagnosticStore) append(ref *diagnosticRef, output string) {
 }
 
 func (s *diagnosticStore) appendSpool(ref *diagnosticRef, output string) {
-	length := uint64(len(output))
-	if length > math.MaxUint32 || s.end > s.limit || s.limit-s.end < spoolHeaderSize || length > s.limit-s.end-spoolHeaderSize {
+	if s.ordinal == math.MaxUint64 || ref.id > math.MaxUint32 {
+		s.fail("write record limit exceeded")
+		return
+	}
+	pages, ok := s.reservePages(ref.spoolPages, spoolHeaderSize+uint64(len(output)))
+	if !ok {
 		s.fail("write quota exceeded")
 		return
 	}
-	if s.file == nil {
-		file, remove, err := s.factory()
-		if err != nil {
-			s.fail("create failed")
-			return
-		}
-		s.file, s.remove = file, remove
-	}
-	var header [spoolHeaderSize]byte
-	binary.LittleEndian.PutUint64(header[0:8], ref.last)
-	binary.LittleEndian.PutUint32(header[16:20], uint32(length))
-	binary.LittleEndian.PutUint32(header[20:24], ref.id)
-	if !s.writeAt(header[:], s.end) {
+	offset := max(1, ref.end)
+	ordinal := s.ordinal + 1
+	if !s.open() || !s.writeFragment(ref, pages, output, offset, ordinal) {
+		s.releasePages(pages.pages[len(ref.pages):])
 		return
 	}
-	offset := s.end + spoolHeaderSize
+	if ref.first == 0 {
+		ref.first = offset
+	}
+	ref.spoolPages = pages
+	ref.last = offset
+	ref.committedBytes = ref.bytes
+	ref.committedFragments++
+	s.ordinal = ordinal
+}
+
+func (s *diagnosticStore) open() bool {
+	if s.file != nil {
+		return true
+	}
+	file, remove, err := s.factory()
+	if err != nil {
+		s.fail("create failed")
+		return false
+	}
+	s.file, s.remove = file, remove
+	return true
+}
+
+func (s *diagnosticStore) writeFragment(ref *diagnosticRef, pages spoolPages, output string, offset, ordinal uint64) bool {
+	previous, id, length := ref.last, ref.id, uint64(len(output))
+	if previous > math.MaxUint32 || id > math.MaxUint32 || length > math.MaxUint32 || offset > math.MaxUint32 {
+		s.fail("write invalid record")
+		return false
+	}
+	header := s.record[:]
+	binary.LittleEndian.PutUint32(header[:4], uint32(previous))
+	binary.LittleEndian.PutUint32(header[4:8], 0)
+	binary.LittleEndian.PutUint32(header[8:12], uint32(length))
+	binary.LittleEndian.PutUint32(header[12:16], uint32(id))
+	binary.LittleEndian.PutUint64(header[16:], ordinal)
+	if !s.writeAt(pages, header, offset) {
+		return false
+	}
+	position := offset + spoolHeaderSize
 	for output != "" {
 		n := copy(s.buffer[:], output)
-		if !s.writeAt(s.buffer[:n], offset) {
-			return
+		chunk := s.buffer[:n]
+		if !s.writeAt(pages, chunk, position) {
+			return false
 		}
-		offset += uint64(len(s.buffer[:n]))
+		position += uint64(len(chunk))
 		output = output[n:]
 	}
 	if ref.last != 0 {
-		binary.LittleEndian.PutUint64(header[8:16], s.end)
-		if !s.writeAt(header[8:16], ref.last+8) {
-			s.uncommittedTail = ref.last
-			return
+		binary.LittleEndian.PutUint32(header[4:8], uint32(offset))
+		if !s.writeAt(pages, header[4:8], ref.last+4) {
+			s.uncommittedTail = spoolLink{id: ref.id, offset: ref.last}
+			return false
 		}
-	} else {
-		ref.first = s.end
-	}
-	ref.last = s.end
-	ref.committedBytes = ref.bytes
-	ref.committedFragments++
-	s.end = offset
-}
-
-func (s *diagnosticStore) writeAt(data []byte, offset uint64) bool {
-	if offset > math.MaxInt64 {
-		s.fail("write invalid offset")
-		return false
-	}
-	if n, err := s.file.WriteAt(data, int64(offset)); n != len(data) || err != nil {
-		s.fail("write failed")
-		return false
 	}
 	return true
 }
 
-func (s *diagnosticStore) readAt(data []byte, offset uint64) error {
-	if offset > math.MaxInt64 {
-		s.fail("read invalid offset")
-		return errSpoolRecord
-	}
-	if n, err := s.file.ReadAt(data, int64(offset)); n != len(data) || (err != nil && !errors.Is(err, io.EOF)) {
-		s.fail("read failed")
-		return errSpoolRecord
-	}
-	return nil
-}
-
 func (s *diagnosticStore) header(ref *diagnosticRef, offset, index uint64) (spoolHeader, error) {
-	var raw [spoolHeaderSize]byte
-	if offset == 0 || s.end < spoolHeaderSize || offset > s.end-spoolHeaderSize || index >= ref.committedFragments {
+	raw := s.record[:]
+	if !ref.contains(offset, spoolHeaderSize) || index >= ref.committedFragments {
 		s.fail("read invalid record")
 		return spoolHeader{}, errSpoolRecord
 	}
-	if err := s.readAt(raw[:], offset); err != nil {
+	if err := s.readAt(ref, raw, offset); err != nil {
 		return spoolHeader{}, err
 	}
-	prev := binary.LittleEndian.Uint64(raw[:8])
-	next := binary.LittleEndian.Uint64(raw[8:16])
-	length := binary.LittleEndian.Uint32(raw[16:20])
-	last := index == ref.committedFragments-1
-	// The committed tail's next field can contain an uncommitted patch.
-	if last && offset == s.uncommittedTail {
-		next = 0
+	h := spoolHeader{
+		prev:    uint64(binary.LittleEndian.Uint32(raw[:4])),
+		next:    uint64(binary.LittleEndian.Uint32(raw[4:8])),
+		length:  binary.LittleEndian.Uint32(raw[8:12]),
+		ordinal: binary.LittleEndian.Uint64(raw[16:]),
 	}
-	if binary.LittleEndian.Uint32(raw[20:]) != ref.id ||
-		length == 0 || uint64(length) > s.end-offset-spoolHeaderSize ||
-		(index == 0) != (offset == ref.first) || (prev == 0) != (index == 0) ||
-		(prev != 0 && (offset <= spoolHeaderSize || prev >= offset-spoolHeaderSize)) ||
-		last != (offset == ref.last) || (last && next != 0) ||
-		(!last && (next < offset+spoolHeaderSize+uint64(length) || next > ref.last)) {
+	last := index == ref.committedFragments-1
+	// A failed patch may have changed the committed tail's next field.
+	if last && s.uncommittedTail == (spoolLink{id: ref.id, offset: offset}) {
+		h.next = 0
+	}
+	if uint64(binary.LittleEndian.Uint32(raw[12:16])) != ref.id ||
+		h.ordinal == 0 || h.ordinal > s.ordinal || !ref.validHeader(h, offset, index == 0, last) {
 		s.fail("read invalid record")
 		return spoolHeader{}, errSpoolRecord
 	}
-	return spoolHeader{prev: prev, next: next, length: length}, nil
+	return h, nil
+}
+
+func (ref *diagnosticRef) validHeader(h spoolHeader, offset uint64, first, last bool) bool {
+	if h.length == 0 || !ref.contains(offset+spoolHeaderSize, uint64(h.length)) ||
+		first != (offset == ref.first) || first != (h.prev == 0) ||
+		(h.prev != 0 && (offset <= spoolHeaderSize || h.prev >= offset-spoolHeaderSize)) ||
+		last != (offset == ref.last) {
+		return false
+	}
+	end := offset + spoolHeaderSize + uint64(h.length)
+	if last {
+		return h.next == 0 && end == ref.end
+	}
+	return h.next == end && h.next <= ref.last
 }
 
 func (s *diagnosticStore) reciprocal(valid bool) error {
@@ -225,11 +255,11 @@ func (s *diagnosticStore) reciprocal(valid bool) error {
 	return nil
 }
 
-func (s *diagnosticStore) copyPayload(w io.Writer, offset uint64, start, limit int) (int, error) {
+func (s *diagnosticStore) copyPayload(w io.Writer, ref *diagnosticRef, offset uint64, start, limit int) (int, error) {
 	written := 0
 	for start >= 0 && start < limit {
 		data := s.buffer[:min(len(s.buffer), limit-start)]
-		if err := s.readAt(data, offset+spoolHeaderSize+uint64(start)); err != nil {
+		if err := s.readAt(ref, data, offset+spoolHeaderSize+uint64(start)); err != nil {
 			return written, err
 		}
 		if start+len(data) < limit {
@@ -261,7 +291,7 @@ func (s *diagnosticStore) copyPayload(w io.Writer, offset uint64, start, limit i
 	return written, nil
 }
 
-func (s *diagnosticStore) appendFallback(id uint32, position uint64, output string) {
+func (s *diagnosticStore) appendFallback(id, position uint64, output string) {
 	if s.fallback == nil {
 		s.fallback = new([fallbackSlots]fallbackSlot)
 	}

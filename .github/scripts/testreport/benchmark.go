@@ -18,7 +18,7 @@ func isBenchmarkName(name string) bool {
 
 // advanceBenchmarks closes possible structural parents when the next run
 // leaves their name prefix. An empty name means the runner has finished.
-func (p *packageResult) advanceBenchmarks(next string) {
+func (r *run) advanceBenchmarks(p *packageResult, next string) {
 	for len(p.benchmarkPath) > 0 {
 		last := len(p.benchmarkPath) - 1
 		t := p.benchmarkPath[last]
@@ -29,7 +29,7 @@ func (p *packageResult) advanceBenchmarks(next string) {
 			return
 		}
 		if t.hasPrefixedRun && t.outcome == "" {
-			p.completeBenchmark(t)
+			r.completeBenchmark(p, t)
 		}
 		p.benchmarkPath[last] = nil
 		p.benchmarkPath = p.benchmarkPath[:last]

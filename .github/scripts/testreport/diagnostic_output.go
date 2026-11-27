@@ -29,12 +29,19 @@ func (r *run) appendOutput(out *diagnosticOutput, text string) {
 	out.legacyBytes += uint64(len(text))
 }
 
+func (r *run) discardOutput(out *diagnosticOutput) {
+	if r.store != nil {
+		r.store.discard(&out.ref)
+	}
+	*out = diagnosticOutput{}
+}
+
 func (out *diagnosticOutput) bytes() uint64 {
 	return out.legacyBytes + out.ref.bytes
 }
 
 type diagnosticCursor struct {
-	last             uint64
+	last, ordinal    uint64
 	fragments, bytes uint64
 	broken           bool
 }
@@ -94,7 +101,7 @@ func (s *diagnosticStore) replayCommitted(w *diagnosticWriter, ref *diagnosticRe
 	offset := ref.first
 	if cursor.last != 0 {
 		last, err := s.header(ref, cursor.last, cursor.fragments-1)
-		if err != nil {
+		if err != nil || s.reciprocal(last.ordinal == cursor.ordinal) != nil {
 			cursor.broken = true
 			return
 		}
@@ -102,7 +109,7 @@ func (s *diagnosticStore) replayCommitted(w *diagnosticWriter, ref *diagnosticRe
 	}
 	for cursor.fragments < ref.committedFragments {
 		header, err := s.header(ref, offset, cursor.fragments)
-		if err != nil || s.reciprocal(header.prev == cursor.last) != nil {
+		if err != nil || s.reciprocal(header.prev == cursor.last && header.ordinal > cursor.ordinal) != nil {
 			cursor.broken = true
 			return
 		}
@@ -113,7 +120,7 @@ func (s *diagnosticStore) replayCommitted(w *diagnosticWriter, ref *diagnosticRe
 			cursor.broken = true
 			return
 		}
-		n, err := s.copyPayload(w, offset, 0, int(header.length))
+		n, err := s.copyPayload(w, ref, offset, 0, int(header.length))
 		if n > 0 {
 			cursor.bytes += uint64(n)
 		}
@@ -121,7 +128,7 @@ func (s *diagnosticStore) replayCommitted(w *diagnosticWriter, ref *diagnosticRe
 			cursor.broken = !w.failed()
 			return
 		}
-		cursor.last, offset = offset, header.next
+		cursor.last, cursor.ordinal, offset = offset, header.ordinal, header.next
 		cursor.fragments++
 	}
 }

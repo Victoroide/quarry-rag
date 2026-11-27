@@ -26,6 +26,7 @@ Notable changes are grouped by release.
 - The CI race report no longer mistakes test diagnostics for cached package results.
 - The CI race report retains unfinished test output when a compiler failure shares the package name.
 - Vector reindex reports the hosted drain reason and available counts on stderr when the activation report cannot be written.
+- The CI race report reuses temporary storage from completed successful diagnostics so cumulative output can exceed the spool limit when live output fits.
 - Vector reindex activation preserves the hosted-manifest refusal when writing its JSON report fails.
 - The CI race report shows package failures even when diagnostics mention `[no test files]`.
 - The CI race report prints each shared compiler diagnostic once, preserves standalone build failures, and flags expected packages with missing results.
