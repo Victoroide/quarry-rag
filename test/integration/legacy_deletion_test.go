@@ -27,10 +27,13 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+const deletionLockOperationTimeout = 10 * time.Second
 
 // legacyRoutes composes the production handlers with the reservation guard that
 // the server entry point enables.
@@ -72,24 +75,46 @@ func admission(t *testing.T, c *pgstore.Client, id, content string) domain.Accep
 // activation lock in this fixture database.
 func terminateActivationHolders(t *testing.T, c *pgstore.Client) int {
 	t.Helper()
-	rows, err := c.Pool.Query(t.Context(), `SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND mode='ShareLock'
+	ctx, cancel := context.WithTimeout(t.Context(), deletionLockOperationTimeout)
+	n, err := endDeletionActivationHolders(ctx, c.Pool)
+	cancel()
+	require.NoError(t, err, "terminate activation lock holders in the local fixture")
+	return n
+}
+
+func endDeletionActivationHolders(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	rows, err := pool.Query(ctx, `SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND mode='ShareLock'
 		AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
 		AND classid::bigint=$1 AND objid::bigint=$2 AND objsubid=1`,
 		(pgstore.DeletionActivationLockID>>32)&0xffffffff, pgstore.DeletionActivationLockID&0xffffffff)
-	require.NoError(t, err)
+	if err != nil {
+		return 0, fmt.Errorf("query activation lock holders in the local fixture: %w", err)
+	}
+	defer rows.Close()
+
 	var pids []int32
 	for rows.Next() {
 		var pid int32
-		require.NoError(t, rows.Scan(&pid))
+		if err := rows.Scan(&pid); err != nil {
+			return 0, fmt.Errorf("scan activation lock holder in the local fixture: %w", err)
+		}
 		pids = append(pids, pid)
 	}
-	require.NoError(t, rows.Err())
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("read activation lock holders in the local fixture: %w", err)
+	}
+
 	for _, pid := range pids {
 		var ended bool
-		require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT pg_terminate_backend($1)`, pid).Scan(&ended))
-		require.True(t, ended)
+		if err := pool.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, pid).Scan(&ended); err != nil {
+			return 0, fmt.Errorf("terminate activation lock holder PID %d in the local fixture: %w", pid, err)
+		}
+		if !ended {
+			return 0, fmt.Errorf("activation lock holder PID %d in the local fixture was not terminated", pid)
+		}
 	}
-	return len(pids)
+	return len(pids), nil
 }
 
 func holdSiblingActivationLock(t *testing.T, c *pgstore.Client) pgx.Tx {
@@ -486,10 +511,18 @@ func awaitArrivals(t *testing.T, entered <-chan struct{}, n int) {
 
 func advisoryLocks(t *testing.T, c *pgstore.Client) int {
 	t.Helper()
-	var n int
-	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND granted
-		AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`).Scan(&n))
+	ctx, cancel := context.WithTimeout(t.Context(), deletionLockOperationTimeout)
+	n, err := countDeletionAdvisoryLocks(ctx, c.Pool)
+	cancel()
+	require.NoError(t, err, "count advisory locks in the local fixture")
 	return n
+}
+
+func countDeletionAdvisoryLocks(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	var n int
+	err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND granted
+		AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`).Scan(&n)
+	return n, err
 }
 
 func TestLegacyDeletionProbesIgnoreSiblingActivationLock(t *testing.T) {
