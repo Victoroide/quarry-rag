@@ -329,6 +329,55 @@ func TestReindexManifestWithDocumentedGrants(t *testing.T) {
 	require.Equal(t, true, verified["passed"])
 }
 
+func TestHostedManifestCutoverRoleGrants(t *testing.T) {
+	f := &fixture{pg: vectorDB(t)}
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	ctx := t.Context()
+	owner := f.pg
+	dsn := owner.Pool.Config().ConnString()
+	role := pgtest.Role(t, dsn, "hosted_cutover_reindex")
+	ident := pgx.Identifier{role}.Sanitize()
+	_, err := owner.Pool.Exec(ctx, `CREATE ROLE `+ident+` LOGIN PASSWORD 'fixture-password'`)
+	require.NoError(t, err)
+	_, err = owner.Pool.Exec(ctx, `GRANT USAGE ON SCHEMA public TO `+ident)
+	require.NoError(t, err)
+	restricted, err := pgstore.NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
+		cfg.ConnConfig.User = role
+		cfg.ConnConfig.Password = "fixture-password"
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, restricted.Close(context.Background())) })
+	var pgErr *pgconn.PgError
+	_, err = restricted.HostedManifestCutoverCounts(ctx)
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "42501", pgErr.Code)
+
+	_, err = owner.Pool.Exec(ctx, replaceReindexRoleSQL(publishedDeploymentSQL(t, "GRANT USAGE ON SCHEMA public TO quarry_reindex"), role, ""))
+	require.NoError(t, err)
+	_, err = owner.Pool.Exec(ctx, insertCutoverManifest, uuid.NewString(), uuid.NewString(), "writing")
+	require.NoError(t, err)
+	for _, query := range []string{
+		`SELECT * FROM hosted_vector_manifests`,
+		`SELECT * FROM hosted_vector_cleanups`,
+		`SELECT guard_hosted_manifest_cutover()`,
+		`SELECT guard_hosted_manifest_insert()`,
+	} {
+		_, err = restricted.Pool.Exec(ctx, query)
+		require.ErrorAs(t, err, &pgErr)
+		require.Equal(t, "42501", pgErr.Code)
+	}
+	registerGeneration(t, owner, "g2", "postgres", pgstore.VectorTable("g2"), sourceModel)
+	h.deps.pg = restricted
+	rep, err := h.run(options{Generation: "g2", Profile: h.profileFile("g2.json", testProfile(sourceModel)), TargetStore: "postgres"})
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"writing": float64(1), "active": float64(0), "retired": float64(0), "cleanups": float64(0)}, rep["hosted_manifest_cutover"])
+	_, err = restricted.Pool.Exec(ctx, `UPDATE vector_state SET active_generation='g2'`)
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "55000", pgErr.Code)
+	require.Equal(t, "hosted_manifest_cutover_guard", pgErr.ConstraintName)
+}
+
 func useRestrictedTaggedRoundTripRoles(t *testing.T, h *harness, generation string) *pgstore.Client {
 	t.Helper()
 	owner := h.f.pg

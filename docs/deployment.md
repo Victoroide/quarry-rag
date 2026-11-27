@@ -449,7 +449,8 @@ that has the flag enabled and its grants until `scripts/reconcile` reports no
 `retired_revisions`. Retired revisions wait in the database, and only a
 replica with the flag enabled sweeps them. Without one, run `make reconcile
 ARGS="-apply"` against the same configuration to sweep them from the command
-line.
+line. Follow the hosted manifest drain procedure below before switching to
+PostgreSQL.
 
 An attempt that was interrupted before the rollback and then completed without
 manifests leaves its vectors in the index. Readers never return them, and they
@@ -661,6 +662,34 @@ For an unattested legacy source, keep the original target intact and prepare a
 separate rollback generation with a known profile if you need to return to the
 previous serving encoder.
 
+#### Drain hosted manifests before PostgreSQL
+
+Apply migration 047 before inventory or activation of a PostgreSQL generation,
+including a rollback to PostgreSQL. Inventory shows a
+`hosted_manifest_cutover` object with writing, active and retired manifest
+counts and a separate cleanup queue count that can overlap the retired count.
+Activation requires all four counts to be zero. Inventory counts are advisory
+for staging. Completed documents with active hosted revisions still need to
+meet the PostgreSQL corpus compatibility checks before staging.
+
+Keep the original Pinecone index, host, namespace and credentials available
+until the drain is verified. Resume or settle writing attempts on that source.
+For an abandoned document, use the authorized, incarnation-qualified deletion
+path against the original source. Drain retired work there with the existing
+manifest sweeper or applied reconciliation. Let cleanup leases, drain windows
+and retries finish. Confirm that old writers can no longer send and that their
+submitted provider requests have settled. If writers are frozen, thaw first
+and then freeze, catch up and verify again after cleanup.
+
+Keep the switch blocked during outages and while provider settlement or cleanup
+is unresolved. If previous hosted switches left work with uncertain index
+ownership, establish the original target before applying a sweep. Repair
+orphaned work on the proven original target without deleting journal rows
+directly. An installation that already switched and stranded work before the
+upgrade requires incident recovery on that target. Zero counts cover the
+current journal; work whose records were lost or previously declared converged
+requires separate verification.
+
 #### Vector reindex database privileges
 
 Run `make reindex` as the metadata schema owner, or provision a dedicated
@@ -681,6 +710,7 @@ GRANT SELECT, INSERT, UPDATE ON public.vector_generations TO quarry_reindex;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.vector_generation_documents TO quarry_reindex;
 GRANT SELECT, UPDATE ON public.vector_state TO quarry_reindex;
 GRANT EXECUTE ON FUNCTION public.grant_catalog_document_tenant(uuid, uuid) TO quarry_reindex;
+GRANT EXECUTE ON FUNCTION public.hosted_manifest_cutover_counts() TO quarry_reindex;
 ```
 
 PostgreSQL checks `EXECUTE` privilege on `grant_catalog_document_tenant(uuid, uuid)`
