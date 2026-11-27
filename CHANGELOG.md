@@ -50,6 +50,7 @@ Notable changes are grouped by release.
 ### Fixed
 
 - Bound operational error logs and trace errors in grants mode to prevent disclosure of document identifiers and input excerpts.
+- Grants-mode server fatal errors identify the failing stage while keeping underlying diagnostics private.
 - Reindex staging recovery requires the pending write UUID, preventing stale confirmations from clearing a later mutation.
 
 ### Changed
