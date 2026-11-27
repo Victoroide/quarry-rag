@@ -73,26 +73,62 @@ func TestOwnershipFiltersUseEffectiveNamespace(t *testing.T) {
 	}}
 	for _, tc := range []struct {
 		name string
+		spec *pinecone.IndexSpec
 		ns   *pinecone.NamespaceDescription
 		err  error
 		want ownershipFilters
 	}{
-		{name: "inherited", ns: &pinecone.NamespaceDescription{}, want: ownershipFilters{document: true, revision: true}},
+		{name: "index only", ns: &pinecone.NamespaceDescription{}, want: ownershipFilters{document: true, revision: true}},
 		{name: "override", ns: &pinecone.NamespaceDescription{Schema: override}, want: ownershipFilters{revision: true, attempt: true}},
 		{name: "new namespace", err: status.Error(codes.NotFound, "namespace missing"), want: ownershipFilters{document: true, revision: true}},
 		{name: "unverified namespace", err: status.Error(codes.Unavailable, "namespace unavailable")},
+		{name: "denied discovery", err: status.Error(codes.PermissionDenied, "namespace forbidden")},
 		{name: "empty description"},
+		{name: "empty namespace schema", ns: &pinecone.NamespaceDescription{Schema: &pinecone.MetadataSchema{}}},
+		{
+			name: "incomplete namespace fields",
+			ns: &pinecone.NamespaceDescription{Schema: &pinecone.MetadataSchema{Fields: map[string]pinecone.MetadataSchemaField{
+				"doc_id": {}, domain.VectorAttemptKey: {Filterable: true},
+			}}},
+			want: ownershipFilters{attempt: true},
+		},
+		{
+			name: "all metadata", spec: &pinecone.IndexSpec{Serverless: &pinecone.ServerlessSpec{}},
+			ns: &pinecone.NamespaceDescription{}, want: ownershipFilters{document: true, revision: true, attempt: true},
+		},
+		{
+			name: "pod default", spec: &pinecone.IndexSpec{Pod: &pinecone.PodSpec{}},
+			want: ownershipFilters{document: true, revision: true, attempt: true},
+		},
+		{
+			name: "pod list", spec: &pinecone.IndexSpec{Pod: &pinecone.PodSpec{
+				MetadataConfig: &pinecone.PodSpecMetadataConfig{Indexed: &[]string{"doc_id", domain.VectorAttemptKey}},
+			}},
+			want: ownershipFilters{document: true, attempt: true},
+		},
+		{
+			name: "empty pod list", spec: &pinecone.IndexSpec{Pod: &pinecone.PodSpec{
+				MetadataConfig: &pinecone.PodSpecMetadataConfig{Indexed: &[]string{}},
+			}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			idx := &pinecone.Index{Spec: &pinecone.IndexSpec{Serverless: &pinecone.ServerlessSpec{Schema: indexSchema}}}
+			spec := tc.spec
+			if spec == nil {
+				spec = &pinecone.IndexSpec{Serverless: &pinecone.ServerlessSpec{Schema: indexSchema}}
+			}
+			idx := &pinecone.Index{Spec: spec}
 			describe := describeNamespaceFunc(func(_ context.Context, name string) (*pinecone.NamespaceDescription, error) {
+				require.Nil(t, spec.Pod, "pods must use their indexed list")
 				require.Equal(t, "__default__", name)
 				return tc.ns, tc.err
 			})
 			filters, err := indexedOwnershipFields(t.Context(), idx, describe)
 			switch {
-			case status.Code(tc.err) == codes.Unavailable:
-				require.Equal(t, codes.Unavailable, status.Code(err))
+			case spec.Pod != nil:
+				require.NoError(t, err)
+			case tc.err != nil && status.Code(tc.err) != codes.NotFound:
+				require.Equal(t, status.Code(tc.err), status.Code(err))
 			case tc.ns == nil && tc.err == nil:
 				require.ErrorContains(t, err, "missing default namespace description")
 			default:
