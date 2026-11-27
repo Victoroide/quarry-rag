@@ -12,6 +12,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/pipeline"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -371,10 +372,10 @@ func (r *revisionVectorRecorder) DeleteByManifestRevision(_ context.Context, _, 
 
 func TestManifestedWorkerTargetsOnlyFencedRevision(t *testing.T) {
 	s := leaseStore(2)
-	s.jobs[0].Incarnation = "inc-1"
+	s.jobs[0].Incarnation = uuid.NewString()
 	s.jobs[0].Attempts = 1
 	s.jobs[0].LeaseToken = "lease-1"
-	s.jobs[1].Incarnation = "inc-1"
+	s.jobs[1].Incarnation = s.jobs[0].Incarnation
 	s.jobs[1].Attempts = 2
 	s.jobs[1].LeaseToken = "lease-2"
 
@@ -440,16 +441,94 @@ func (*manifestRejectingStore) ReleaseVectorCleanup(context.Context, domain.Vect
 type upsertSpyStore struct {
 	domain.VectorStore
 	upserts int
+	write   func([]domain.Chunk) error
 }
 
-func (u *upsertSpyStore) Upsert(context.Context, string, []domain.Chunk) error {
+func (u *upsertSpyStore) Upsert(_ context.Context, _ string, chunks []domain.Chunk) error {
 	u.upserts++
+	if u.write != nil {
+		return u.write(chunks)
+	}
 	return nil
+}
+
+func TestHostedManifestUsesClaimedIncarnation(t *testing.T) {
+	base := leaseStore(1)
+	s := &manifestRejectingStore{leaseTestStore: base}
+	vecs := &revisionVectorRecorder{}
+	job := base.jobs[0]
+	job.Incarnation, job.Tenant = uuid.NewString(), uuid.NewString()
+	job.ScopedVectors = true
+	job.LeaseToken = uuid.NewString()
+	owner := "test"
+	var revisions []string
+	spy := &upsertSpyStore{write: func(chunks []domain.Chunk) error {
+		require.Equal(t, len(revisions)+1, s.persistCalls, "intent precedes each upsert")
+		require.Len(t, chunks, 1)
+		chunk := chunks[0]
+		revision := revisionIDForAttempt(job, owner)
+		require.Equal(t, job.Incarnation, chunk.VectorIncarnation)
+		require.Equal(t, revision, chunk.RevisionID)
+		require.Equal(t, domain.FormatRevisionVectorID(job.Document.ID, revision, 0), chunk.VectorID)
+		require.Equal(t, job.Tenant, chunk.Metadata[domain.VectorTenantKey])
+		require.NotContains(t, chunk.Metadata, domain.VectorRevisionKey)
+		require.NotContains(t, chunk.Metadata, domain.VectorAttemptKey)
+		revisions = append(revisions, revision)
+		if len(revisions) == 1 {
+			return errors.New("provider unavailable")
+		}
+		return nil
+	}}
+	w := New(s, []pipeline.Stage{visibilityEmbedStage{}, pipeline.NewPersistStage(spy)}, vecs, Options{
+		HostedVectorManifest: true, MaxAttempts: 5, Lease: time.Second, JobTimeout: time.Second, Owner: owner,
+	})
+	ctx := domain.WithVectorIncarnation(t.Context(), uuid.NewString())
+	w.process(ctx, job)
+	leaseEvent(t, base, "retry")
+	job.Attempts++
+	job.LeaseToken = uuid.NewString()
+	w.process(ctx, job)
+	leaseEvent(t, base, "completed")
+	require.Len(t, revisions, 2)
+	require.NotEqual(t, revisions[0], revisions[1])
+	require.Equal(t, revisions, vecs.revDeletes)
+	require.Zero(t, vecs.docDeletes)
+}
+
+func TestHostedManifestInvalidClaimAndCancellationDoNotDispatch(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(canceled), func(t *testing.T) {
+			base := leaseStore(1)
+			store := &manifestRejectingStore{leaseTestStore: base}
+			vectors := &revisionVectorRecorder{}
+			spy := &upsertSpyStore{}
+			job := base.jobs[0]
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			want := "failed"
+			if canceled {
+				job.Incarnation = uuid.NewString()
+				cancel()
+				want = "released"
+			}
+			stages := []pipeline.Stage{visibilityEmbedStage{}, pipeline.NewPersistStage(spy)}
+			w := New(store, stages, vectors, Options{
+				HostedVectorManifest: true, MaxAttempts: 1, Lease: time.Second, JobTimeout: time.Second, Owner: "test",
+			})
+			w.process(ctx, job)
+			leaseEvent(t, base, want)
+			require.Zero(t, store.persistCalls)
+			require.Zero(t, spy.upserts)
+			require.Empty(t, vectors.revDeletes)
+			require.Zero(t, vectors.docDeletes)
+		})
+	}
 }
 
 func TestManifestedWorkerAbortsUpsertWhenManifestLeaseCheckFails(t *testing.T) {
 	t.Run("transient manifest error retries without upsert", func(t *testing.T) {
 		base := leaseStore(1)
+		base.jobs[0].Incarnation = uuid.NewString()
 		s := &manifestRejectingStore{leaseTestStore: base, persistErr: errors.New("db unavailable")}
 		vecs := &revisionVectorRecorder{activeChunks: map[string]domain.Chunk{}}
 		spy := &upsertSpyStore{}
@@ -466,6 +545,7 @@ func TestManifestedWorkerAbortsUpsertWhenManifestLeaseCheckFails(t *testing.T) {
 
 	t.Run("lost lease aborts cleanly without upsert or retry", func(t *testing.T) {
 		base := leaseStore(1)
+		base.jobs[0].Incarnation = uuid.NewString()
 		s := &manifestRejectingStore{leaseTestStore: base, persistErr: domain.ErrJobNotOwned}
 		vecs := &revisionVectorRecorder{activeChunks: map[string]domain.Chunk{}}
 		spy := &upsertSpyStore{}

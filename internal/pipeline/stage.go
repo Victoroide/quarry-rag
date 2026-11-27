@@ -74,6 +74,8 @@ type IngestContext struct {
 
 	// RevisionID fences hosted external vector writes to one immutable attempt.
 	RevisionID string
+	// ManifestIncarnation is the document incarnation of that attempt's claim.
+	ManifestIncarnation string
 	// PersistManifest records the write-intent manifest before any external upsert.
 	PersistManifest func(context.Context, []domain.Chunk) error
 }
