@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,8 +208,209 @@ func TestSelectiveMetadataStagingConfig(t *testing.T) {
 	}
 }
 
+func TestSelectiveStagingPinsController(t *testing.T) {
+	const overrideEnv = "PINECONE_CONTROLLER_HOST"
+	for _, override := range []struct {
+		name, value string
+		set         bool
+	}{
+		{name: "unset"},
+		{name: "empty", set: true},
+		{name: "malformed", value: "bad%host.invalid", set: true},
+		{name: "alternate authority", value: "controller-override.invalid", set: true},
+	} {
+		t.Run(override.name, func(t *testing.T) {
+			t.Setenv(overrideEnv, override.value)
+			if !override.set {
+				require.NoError(t, os.Unsetenv(overrideEnv))
+			}
+			for _, schema := range []struct {
+				name     string
+				inherits bool
+			}{
+				{name: "explicit namespace"},
+				{name: "inherited index", inherits: true},
+			} {
+				t.Run(schema.name, func(t *testing.T) {
+					cfg, exchanges := selectiveStagingDiscoveryExchanges(t, schema.inherits)
+					requests := 0
+					transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						require.Less(t, requests, len(exchanges), "unexpected discovery request")
+						exchange := exchanges[requests]
+						requests++
+						exchange.checkRequest(t, req, cfg.key)
+						return jsonResponse(req, nil, exchange.body), nil
+					})
+					client := newSelectiveStagingHTTPClient(transport)
+					sdk, err := newSelectiveStagingSDK(client, cfg.key)
+					require.NoError(t, err)
+					called := false
+					err = withSelectiveStagingTargets(t.Context(), cfg, func(ctx context.Context, name string) (*pc.Index, *pc.MetadataSchema, error) {
+						return describeSelectiveStagingTarget(ctx, sdk, client, cfg.key, name)
+					}, func(targets [2]selectiveStagingTarget) {
+						require.False(t, called)
+						called = true
+						wantRequests := 4
+						if schema.inherits {
+							wantRequests = 6
+						}
+						require.Equal(t, wantRequests, requests, "both discoveries must finish before fixture operations")
+						for i, target := range targets {
+							require.Equal(t, cfg.names[i], target.index.Name)
+							require.Equal(t, cfg.names[i]+".invalid", target.plane.endpoint.Host)
+						}
+					})
+					require.NoError(t, err)
+					require.True(t, called)
+					value, set := os.LookupEnv(overrideEnv)
+					require.Equal(t, override.set, set)
+					require.Equal(t, override.value, value)
+				})
+			}
+		})
+	}
+}
+
+func TestSelectiveStagingControllerDiscoveryFailures(t *testing.T) {
+	t.Setenv("PINECONE_CONTROLLER_HOST", "controller-override.invalid")
+	const (
+		sdkStep          = 0
+		namespaceStep    = 1
+		fallbackStep     = 2
+		excludedFallback = 5
+		providerDetail   = "private-provider-detail"
+		responseBody     = "private-response-body"
+	)
+	redirect := url.URL{Scheme: "https", Host: "redirect-destination.invalid", Path: "/private-location"}
+	for _, tc := range []struct {
+		name, want string
+		step, code int
+		body       string
+		oversized  bool
+		transport  error
+		cancel     bool
+	}{
+		{name: "SDK redirect", step: sdkStep, code: http.StatusTemporaryRedirect, want: "SDK describe-index failed"},
+		{name: "namespace redirect", step: namespaceStep, code: http.StatusTemporaryRedirect, want: "describe namespace: describe returned HTTP 307"},
+		{name: "fallback redirect", step: fallbackStep, code: http.StatusTemporaryRedirect, want: "describe index: describe returned HTTP 307"},
+		{name: "denied key", step: sdkStep, code: http.StatusUnauthorized, want: "SDK describe-index failed"},
+		{name: "forbidden namespace", step: namespaceStep, code: http.StatusForbidden, want: "describe namespace: describe returned HTTP 403"},
+		{name: "index not found", step: sdkStep, code: http.StatusNotFound, want: "SDK describe-index failed"},
+		{name: "fallback throttled", step: fallbackStep, code: http.StatusTooManyRequests, want: "describe index: describe returned HTTP 429"},
+		{name: "namespace server failure", step: namespaceStep, code: http.StatusInternalServerError, want: "describe namespace: describe returned HTTP 500"},
+		{name: "SDK transport failure", step: sdkStep, transport: errors.New(providerDetail), want: "SDK describe-index failed"},
+		{name: "fallback transport failure", step: fallbackStep, transport: errors.New(providerDetail), want: "describe index: describe transport failed"},
+		{name: "malformed SDK response", step: sdkStep, body: responseBody, want: "invalid SDK describe-index response"},
+		{name: "malformed namespace response", step: namespaceStep, body: responseBody, want: "describe namespace: invalid describe response"},
+		{name: "malformed fallback response", step: fallbackStep, body: responseBody, want: "describe index: invalid describe response"},
+		{name: "oversized SDK response", step: sdkStep, oversized: true, want: "invalid SDK describe-index response"},
+		{name: "oversized namespace response", step: namespaceStep, oversized: true, want: "describe namespace: invalid describe response"},
+		{name: "oversized fallback response", step: fallbackStep, oversized: true, want: "describe index: invalid describe response"},
+		{
+			name: "wrong fallback name", step: fallbackStep, body: `{"name":"private-index","host":"fixture-included.invalid"}`,
+			want: "describe index did not confirm the SDK target",
+		},
+		{
+			name: "wrong fallback host", step: excludedFallback, body: `{"name":"fixture-excluded","host":"private-host.invalid"}`,
+			want: "describe index did not confirm the SDK target",
+		},
+		{name: "canceled namespace request", step: namespaceStep, cancel: true, want: "describe namespace: describe transport failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			cfg, exchanges := selectiveStagingDiscoveryExchanges(t, true)
+			requests := 0
+			client := newSelectiveStagingHTTPClient(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				require.LessOrEqual(t, requests, tc.step, "a request followed the failed discovery step")
+				step := requests
+				exchange := exchanges[step]
+				requests++
+				exchange.checkRequest(t, req, cfg.key)
+				if step != tc.step {
+					return jsonResponse(req, nil, exchange.body), nil
+				}
+				if tc.cancel {
+					cancel()
+					require.ErrorIs(t, req.Context().Err(), context.Canceled)
+					return nil, req.Context().Err()
+				}
+				if tc.transport != nil {
+					return nil, tc.transport
+				}
+				switch {
+				case tc.code != 0:
+					header := make(http.Header)
+					if tc.code == http.StatusTemporaryRedirect {
+						header.Set("Location", redirect.String())
+					}
+					body := fmt.Sprintf(`{"message":%q,"detail":%q,"key":%q}`, responseBody, providerDetail, cfg.key)
+					resp := jsonResponse(req, header, body)
+					resp.StatusCode = tc.code
+					resp.Status = fmt.Sprintf("%d %s", tc.code, http.StatusText(tc.code))
+					return resp, nil
+				case tc.oversized:
+					return jsonResponse(req, nil, exchange.body+strings.Repeat(" ", selectiveDescribeMax)), nil
+				default:
+					return jsonResponse(req, nil, tc.body), nil
+				}
+			}))
+			sdk, err := newSelectiveStagingSDK(client, cfg.key)
+			require.NoError(t, err)
+			err = withSelectiveStagingTargets(ctx, cfg, func(ctx context.Context, name string) (*pc.Index, *pc.MetadataSchema, error) {
+				return describeSelectiveStagingTarget(ctx, sdk, client, cfg.key, name)
+			}, func([2]selectiveStagingTarget) {
+				t.Fatal("fixture operations started after failed discovery")
+			})
+			require.Equal(t, tc.step+1, requests)
+			require.ErrorContains(t, err, tc.want)
+			require.NotContains(t, err.Error(), "private-")
+			require.NotContains(t, err.Error(), cfg.key)
+			require.NotContains(t, err.Error(), redirect.Host)
+		})
+	}
+}
+
+type selectiveStagingExchange struct {
+	host, path, version, body string
+}
+
+func (e selectiveStagingExchange) checkRequest(t *testing.T, req *http.Request, key string) {
+	t.Helper()
+	endpoint := url.URL{Scheme: "https", Host: e.host, Path: e.path}
+	require.Equal(t, http.MethodGet, req.Method)
+	require.Equal(t, endpoint.String(), req.URL.String())
+	require.Equal(t, e.host, req.Host)
+	require.Equal(t, []string{key}, req.Header.Values("Api-Key"))
+	require.Equal(t, []string{e.version}, req.Header.Values("X-Pinecone-Api-Version"))
+}
+
+func selectiveStagingDiscoveryExchanges(t *testing.T, inherits bool) (selectiveStagingConfig, []selectiveStagingExchange) {
+	t.Helper()
+	cfg := selectiveStagingConfig{names: [2]string{"fixture-included", "fixture-excluded"}, key: "synthetic-discovery-key"}
+	var exchanges []selectiveStagingExchange
+	for i, name := range cfg.names {
+		host := name + ".invalid"
+		indexPath := "/indexes/" + name
+		schema, err := json.Marshal(map[string]any{"fields": selectiveStagingFields(i == 0)})
+		require.NoError(t, err)
+		sdkBody := fmt.Sprintf(`{"name":%q,"host":%q,"dimension":1,"metric":"cosine","vector_type":"dense",
+			"status":{"ready":true},"spec":{"serverless":{"cloud":"aws","region":"us-east-1","read_capacity":{"mode":"OnDemand"}}}}`, name, host)
+		exchanges = append(exchanges, selectiveStagingExchange{"api.pinecone.io", indexPath, "2025-10", sdkBody})
+		namespace := selectiveStagingExchange{host, "/namespaces/__default__", "2026-07",
+			fmt.Sprintf(`{"name":"__default__","schema":%s}`, schema)}
+		if inherits {
+			namespace.body = `{"name":"__default__"}`
+			fallback := fmt.Sprintf(`{"name":%q,"host":%q,"schema":%s}`, name, host, schema)
+			exchanges = append(exchanges, namespace, selectiveStagingExchange{"api.pinecone.io", indexPath, "2026-07", fallback})
+		} else {
+			exchanges = append(exchanges, namespace)
+		}
+	}
+	return cfg, exchanges
+}
+
 func TestSelectiveStagingReadCapacityDiscovery(t *testing.T) {
-	t.Setenv("PINECONE_CONTROLLER_HOST", "")
 	dedicated := func(node, scaling, manual, status string) string {
 		return fmt.Sprintf(`,"read_capacity":{"mode":"Dedicated","dedicated":{"node_type":%q,"scaling":%q,"manual":%s}%s}`,
 			node, scaling, manual, status)
@@ -274,7 +476,7 @@ func TestSelectiveStagingReadCapacityDiscovery(t *testing.T) {
 				t.Fatalf("unexpected discovery request: %s", req.URL)
 				return nil, nil
 			})
-			client := &http.Client{Transport: transport}
+			client := newSelectiveStagingHTTPClient(transport)
 			sdk, err := newSelectiveStagingSDK(client, cfg.key)
 			require.NoError(t, err)
 			called := false
