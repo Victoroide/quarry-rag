@@ -174,6 +174,7 @@ func requireIngestRowLocks(ctx context.Context, t *testing.T, observer *pgx.Conn
 }
 
 func TestIngestCompletionRollbackDeadlineAfterCorpusCutover(t *testing.T) {
+	parallelDatabaseTest(t)
 	releaseTrace := &ingestPoolReleaseTracer{}
 	service, observer, ctx := ingestRollbackDatabase(t, releaseTrace)
 	service.SetAuthzMode("service")
@@ -212,6 +213,7 @@ func TestIngestCompletionRollbackDeadlineAfterCorpusCutover(t *testing.T) {
 }
 
 func TestIngestTransitionRollbackDeadlineAfterLeaseLocks(t *testing.T) {
+	parallelDatabaseTest(t)
 	const retryDelay = 2 * time.Minute
 	const failure = "lease transition fixture"
 	for _, tc := range []struct {
@@ -344,6 +346,7 @@ func requireNoIngestClaim(ctx context.Context, t *testing.T, c *Client) {
 }
 
 func TestIngestRollbackPreservesLeaseRefusals(t *testing.T) {
+	parallelDatabaseTest(t)
 	c, observer, ctx := ingestRollbackDatabase(t, ingestTxTracer{})
 	const content = "same content in distinct collections"
 	job := acceptIngestRollbackJob(ctx, t, c, jobsRequest(content))

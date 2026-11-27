@@ -83,6 +83,7 @@ func receiptCount(ctx context.Context, t *testing.T, c *Client, id domain.Docume
 }
 
 func TestLegacyReservationIsCommittedBeforeAnyExternalCall(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "legacy hosted document", false, true)
@@ -111,6 +112,7 @@ func TestLegacyReservationIsCommittedBeforeAnyExternalCall(t *testing.T) {
 }
 
 func TestReservationSurvivesRetirementUntilTheLastCallReturns(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "memory document", false, false)
@@ -140,6 +142,7 @@ func TestReservationSurvivesRetirementUntilTheLastCallReturns(t *testing.T) {
 }
 
 func TestUncertainAttemptKeepsTheIdentityHeldAfterCompletion(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "hidden timeout", false, false)
@@ -169,6 +172,7 @@ func TestUncertainAttemptKeepsTheIdentityHeldAfterCompletion(t *testing.T) {
 }
 
 func TestDuplicateCleanupCannotResetALiveClaim(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	second := otherConnection(t, c)
 	ctx := legacyContext(t)
@@ -199,6 +203,7 @@ func TestDuplicateCleanupCannotResetALiveClaim(t *testing.T) {
 }
 
 func TestAbandonedReservationIsResumedByTheSameOwnerOnly(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "retry", false, true)
@@ -234,6 +239,7 @@ func TestAbandonedReservationIsResumedByTheSameOwnerOnly(t *testing.T) {
 }
 
 func TestLegacyResumeKeepsTheRecordedTarget(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "moved stores", false, true)
@@ -273,6 +279,7 @@ func TestLegacyResumeKeepsTheRecordedTarget(t *testing.T) {
 }
 
 func TestLegacyResumeOfAMemoryReservationKeepsItsBackend(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "memory with a file", false, true)
@@ -304,6 +311,7 @@ func TestLegacyResumeOfAMemoryReservationKeepsItsBackend(t *testing.T) {
 }
 
 func TestMemoryReservationOfScopedVectorsNeedsRevisionDeletion(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "tagged memory vectors", false, false)
@@ -323,6 +331,7 @@ func TestMemoryReservationOfScopedVectorsNeedsRevisionDeletion(t *testing.T) {
 }
 
 func TestExpiredClaimLetsALaterCleanupTakeOver(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "expired claim", false, false)
@@ -344,6 +353,7 @@ func TestExpiredClaimLetsALaterCleanupTakeOver(t *testing.T) {
 }
 
 func TestPreparationSynchronizesWithWorkerMutations(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "worker is writing", false, false)
@@ -375,6 +385,7 @@ func TestPreparationSynchronizesWithWorkerMutations(t *testing.T) {
 }
 
 func TestReservationStopsNewWorkerVectorWork(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "leased before reservation", false, false)
@@ -399,6 +410,7 @@ func TestReservationStopsNewWorkerVectorWork(t *testing.T) {
 }
 
 func TestPreparationTransfersWorkerUncertainty(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "uncertain worker effect", false, false)
@@ -412,6 +424,7 @@ func TestPreparationTransfersWorkerUncertainty(t *testing.T) {
 }
 
 func TestPreparationSettlesAnExpiredMutationOfAFailedDocumentOnly(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	spec := domain.LegacyDeletionSpec{Memory: true, MemoryOwner: uuid.NewString()}
@@ -433,6 +446,7 @@ func TestPreparationSettlesAnExpiredMutationOfAFailedDocumentOnly(t *testing.T) 
 }
 
 func TestPreparationRefusesWithoutFileStorageAndCreatesNoReservation(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "has a source", false, true)
@@ -446,6 +460,7 @@ func TestPreparationRefusesWithoutFileStorageAndCreatesNoReservation(t *testing.
 }
 
 func TestPreparationOfScopedVectorsNeedsRevisionDeletion(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "tagged vectors", false, false)
@@ -467,6 +482,7 @@ func TestPreparationOfScopedVectorsNeedsRevisionDeletion(t *testing.T) {
 }
 
 func TestTransactionalVectorsNeedNoReservation(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "pgvector document", false, false)
@@ -484,6 +500,7 @@ func TestTransactionalVectorsNeedNoReservation(t *testing.T) {
 }
 
 func TestAbsentDocumentReservesNothing(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	id := domain.DocumentID(uuid.NewString())
@@ -495,6 +512,7 @@ func TestAbsentDocumentReservesNothing(t *testing.T) {
 }
 
 func TestGuardReturnsActivationWithoutCallingRemove(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := activatedDatabase(t)
 	ctx := legacyContext(t)
 	called := false
@@ -518,6 +536,7 @@ func lockIsFree(ctx context.Context, t *testing.T, c *Client) bool {
 }
 
 func TestActivationWaitsForAHealthyCleanup(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	activator := otherConnection(t, c)
 	ctx := legacyContext(t)
@@ -544,6 +563,7 @@ func TestActivationWaitsForAHealthyCleanup(t *testing.T) {
 }
 
 func TestLostSessionReleasesTheLockButNotTheReservation(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	killer := otherConnection(t, c)
 	ctx := legacyContext(t)
@@ -595,6 +615,7 @@ func holdReceiptLock(ctx context.Context, t *testing.T, other *Client, id domain
 // update stalled past the guarded session's budget still completes on the
 // fresh connection, instead of inheriting the spent deadline.
 func TestBookkeepingFallbackGetsItsOwnBudgetAfterAHungSession(t *testing.T) {
+	parallelDatabaseTest(t)
 	for name, record := range map[string]struct {
 		call  func(context.Context, *legacyDeletion, domain.DocumentID, domain.LegacyDeletionTarget) error
 		check func(*testing.T, legacyReceipt)
@@ -619,6 +640,7 @@ func TestBookkeepingFallbackGetsItsOwnBudgetAfterAHungSession(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			parallelDatabaseTest(t)
 			c := jobsDatabase(t)
 			other := otherConnection(t, c)
 			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
@@ -656,6 +678,7 @@ func TestBookkeepingFallbackGetsItsOwnBudgetAfterAHungSession(t *testing.T) {
 }
 
 func TestQualifiedRetryConvertsTheReservationAndCommitsTheFence(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "first hosted call failed", false, true)
@@ -697,6 +720,7 @@ func TestQualifiedRetryConvertsTheReservationAndCommitsTheFence(t *testing.T) {
 }
 
 func TestConversionCommitsTheVisibilityFenceBeforeAnyStep(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "fence on conversion", false, true)
@@ -722,6 +746,7 @@ func TestConversionCommitsTheVisibilityFenceBeforeAnyStep(t *testing.T) {
 }
 
 func TestConversionNeverResetsALiveCleanupClaim(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "live legacy cleanup", false, false)
@@ -742,6 +767,7 @@ func TestConversionNeverResetsALiveCleanupClaim(t *testing.T) {
 }
 
 func TestConversionOfAMemoryReservationBelongsToItsOwner(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "memory conversion", false, false)
@@ -768,6 +794,7 @@ func TestConversionOfAMemoryReservationBelongsToItsOwner(t *testing.T) {
 }
 
 func TestRetireRequiresTheObservedIncarnation(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "stale target", false, false)
@@ -779,6 +806,7 @@ func TestRetireRequiresTheObservedIncarnation(t *testing.T) {
 }
 
 func TestFinalizeRefusesWhileTheRowIsLive(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	doc := acceptDocument(t, c, "not retired", false, false)
@@ -791,6 +819,7 @@ func TestFinalizeRefusesWhileTheRowIsLive(t *testing.T) {
 }
 
 func TestDeletionActivationLockIsReleasedAfterEveryOutcome(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	ctx := legacyContext(t)
 	id := domain.DocumentID(uuid.NewString())

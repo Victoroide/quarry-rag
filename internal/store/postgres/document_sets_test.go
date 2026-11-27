@@ -64,6 +64,7 @@ func (f *retrievalFixture) deriveIDs(t *testing.T, p domain.Principal, req domai
 }
 
 func TestDocumentSetCreationRecordsOwnerTenantRevisionAndExpiry(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	before := time.Now()
 	set := f.createSet(t, f.owner, "", f.shared, f.own, f.own)
@@ -94,6 +95,7 @@ func TestDocumentSetCreationRecordsOwnerTenantRevisionAndExpiry(t *testing.T) {
 }
 
 func TestDocumentSetMayBeEmpty(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	set := f.createSet(t, f.owner, "")
 	require.Zero(t, set.Members)
@@ -105,6 +107,7 @@ func TestDocumentSetMayBeEmpty(t *testing.T) {
 }
 
 func TestDocumentSetRejectsUnusableMembersUniformlyAndPublishesNothing(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	pending := ownedRequest(f.owner, "", "accepted but not indexed")
 	require.Equal(t, domain.AcceptAccepted, f.accept(t, pending).Outcome)
@@ -134,6 +137,7 @@ func TestDocumentSetRejectsUnusableMembersUniformlyAndPublishesNothing(t *testin
 }
 
 func TestDocumentSetCreationRequiresAnActiveOwnerOfTheTenant(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	for name, request := range map[string]DocumentSetRequest{
 		"unknown owner":       {TenantID: f.tenant, OwnerID: uuid.NewString()},
@@ -166,6 +170,7 @@ func TestDocumentSetCreationRequiresAnActiveOwnerOfTheTenant(t *testing.T) {
 }
 
 func TestDocumentSetResolvesOnlyForItsOwner(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	set := f.createSet(t, f.owner, "", f.own, f.shared)
 	ids, scope := f.deriveIDs(t, f.owner, domain.ReadScopeRequest{DocumentSetID: set.ID})
@@ -195,6 +200,7 @@ func TestDocumentSetResolvesOnlyForItsOwner(t *testing.T) {
 }
 
 func TestDocumentSetIsOnlyASelectorOverLiveGrants(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	set := f.createSet(t, f.owner, "", f.own, f.shared)
 
@@ -237,6 +243,7 @@ func TestDocumentSetIsOnlyASelectorOverLiveGrants(t *testing.T) {
 }
 
 func TestDocumentSetNeverYieldsADeletedOrReplacedMember(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	set := f.createSet(t, f.owner, "", f.own, f.shared)
 	grantExec(t, f.c, `DELETE FROM documents WHERE id=$1`, f.own)
@@ -254,6 +261,7 @@ func TestDocumentSetNeverYieldsADeletedOrReplacedMember(t *testing.T) {
 }
 
 func TestExpiredDocumentSetResolvesAsAbsent(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	set := f.createSet(t, f.owner, "", f.own)
 	_, absentErr := f.reader.DeriveReadScope(t.Context(), f.owner, domain.ReadScopeRequest{DocumentSetID: uuid.NewString(), Membership: 10})
@@ -271,6 +279,7 @@ func TestExpiredDocumentSetResolvesAsAbsent(t *testing.T) {
 }
 
 func TestVectorSearchConfinesRankingToTheSetBeforeTheLimit(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	only := f.createSet(t, f.owner, "", f.shared)
 	both := f.createSet(t, f.owner, "", f.own, f.shared)
@@ -311,6 +320,7 @@ func TestVectorSearchConfinesRankingToTheSetBeforeTheLimit(t *testing.T) {
 }
 
 func TestVectorSearchWithASetFollowsRevocationAndExpiry(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	set := f.createSet(t, f.owner, "", f.own, f.shared)
 	filter := domain.VectorFilter{Authorized: &domain.AuthorizedScope{TenantID: f.tenant, PrincipalID: f.owner.ID, DocumentSet: f.setRef(set)}}
@@ -331,6 +341,7 @@ func TestVectorSearchWithASetFollowsRevocationAndExpiry(t *testing.T) {
 }
 
 func TestSubjectEvidenceInASetRequiresMembership(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	candidates, err := f.vectors.QueryFiltered(t.Context(), retrievalQuery, 10, domain.VectorFilter{})
 	require.NoError(t, err)
@@ -356,6 +367,7 @@ func TestSubjectEvidenceInASetRequiresMembership(t *testing.T) {
 }
 
 func TestDocumentSetImportKeyReturnsTheOriginalOrReportsAConflict(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	first := f.createSet(t, f.owner, "nightly", f.own, f.shared)
 	again, err := f.c.CreateDocumentSet(t.Context(), DocumentSetRequest{TenantID: f.tenant, OwnerID: f.owner.ID, ImportKey: "nightly", DocumentIDs: []string{f.shared, f.own, f.own}, MaxMembers: 10, TTL: 2 * time.Hour})
@@ -386,6 +398,7 @@ func TestDocumentSetImportKeyReturnsTheOriginalOrReportsAConflict(t *testing.T) 
 }
 
 func TestConcurrentIdenticalImportsYieldOneSet(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	var wg sync.WaitGroup
 	results := make([]DocumentSet, 6)
@@ -411,6 +424,7 @@ func TestConcurrentIdenticalImportsYieldOneSet(t *testing.T) {
 }
 
 func TestActiveDocumentSetsPerOwnerAreCapped(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	for range 15 {
 		f.createSet(t, f.owner, "")
@@ -426,6 +440,7 @@ func TestActiveDocumentSetsPerOwnerAreCapped(t *testing.T) {
 }
 
 func TestAnExpiredSetReleasesItsSlotAndIsRemovedInSmallSteps(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	var sets []DocumentSet
 	for range 16 {
@@ -454,6 +469,7 @@ func TestAnExpiredSetReleasesItsSlotAndIsRemovedInSmallSteps(t *testing.T) {
 }
 
 func TestConcurrentCreationsNeverExceedTheActiveCap(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	var wg sync.WaitGroup
 	errs := make([]error, 24)
@@ -478,6 +494,7 @@ func TestConcurrentCreationsNeverExceedTheActiveCap(t *testing.T) {
 }
 
 func TestDatabaseEnforcesTheMembershipCeilingAndInputShape(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	call := func(ttl int, key *string, docs []string, ceiling int) error {
 		_, err := f.c.Pool.Exec(t.Context(), `SELECT * FROM grant_catalog_create_document_set($1::uuid,$2::uuid,$3,$4,$5::uuid[],$6)`, f.tenant, f.owner.ID, ttl, key, docs, ceiling)
@@ -502,6 +519,7 @@ func TestDatabaseEnforcesTheMembershipCeilingAndInputShape(t *testing.T) {
 }
 
 func TestDocumentSetMembershipHasCompositeTenantConstraints(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	set := f.createSet(t, f.owner, "", f.own)
 	var incarnation string
@@ -520,6 +538,7 @@ func TestDocumentSetMembershipHasCompositeTenantConstraints(t *testing.T) {
 }
 
 func TestDocumentSetPrivilegesFollowThePublishedGrants(t *testing.T) {
+	parallelDatabaseTest(t)
 	databaseURL := startTestDatabase(t)
 	owner := migrationTestClient(t, databaseURL)
 	applyMigrationPrefix(t, owner, 10)
@@ -570,6 +589,7 @@ func TestDocumentSetPrivilegesFollowThePublishedGrants(t *testing.T) {
 }
 
 func TestDocumentSetIdentifiersAreServerGeneratedAndUnique(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	seen := map[string]struct{}{}
 	revisions := map[string]struct{}{}
@@ -597,6 +617,7 @@ func TestDocumentSetIdentifiersAreServerGeneratedAndUnique(t *testing.T) {
 // properties it checks are kept apart: the exact scope, the deterministic
 // order of tied scores, and the approximate index.
 func TestSetSearchEqualsTheExhaustiveAuthorizedResultWithTiedScores(t *testing.T) {
+	parallelDatabaseTest(t)
 	f := newRetrievalFixture(t)
 	classes := [][]float32{{1, 0, 0}, {.6, .8, 0}, {0, 1, 0}}
 	members := []string{f.own}

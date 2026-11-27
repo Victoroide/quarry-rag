@@ -101,6 +101,7 @@ func requireIngestAdmissionLock(ctx context.Context, t *testing.T, observer *pgx
 }
 
 func TestIngestAdmissionRollbackDeadlineAfterAdvisoryLock(t *testing.T) {
+	parallelDatabaseTest(t)
 	for _, tc := range []struct {
 		name   string
 		setup  func(context.Context, *testing.T, *Client) domain.AcceptRequest
@@ -202,6 +203,7 @@ func requireIngestWriterLocks(ctx context.Context, t *testing.T, observer *pgx.C
 }
 
 func TestIngestClaimRollbackDeadlineAfterWriterGate(t *testing.T) {
+	parallelDatabaseTest(t)
 	for _, profile := range []string{"ordinary", domain.LayoutPDFProfile} {
 		t.Run(profile, func(t *testing.T) {
 			releaseTrace := &ingestPoolReleaseTracer{}
@@ -252,6 +254,7 @@ func TestIngestClaimRollbackDeadlineAfterWriterGate(t *testing.T) {
 }
 
 func TestIngestOCRRollbackDeadlineAfterLeaseLocks(t *testing.T) {
+	parallelDatabaseTest(t)
 	releaseTrace := &ingestPoolReleaseTracer{}
 	c, observer, ctx := ingestRollbackDatabase(t, releaseTrace)
 	req := jobsRequest("")

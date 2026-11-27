@@ -118,11 +118,12 @@ jobs:
         env:
           QUARRY_TEST_POSTGRES_ADMIN_DSN: postgres://rag:rag@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres?sslmode=disable
           QUARRY_TEST_PGVECTOR_ADMIN_DSN: postgres://rag:rag@127.0.0.1:${{ job.services.pgvector.ports['5432'] }}/postgres?sslmode=disable
+          QUARRY_TEST_SHARED_DB_PARALLEL: "1"
           MODULE_CACHE: ${{ steps.modules.outputs.cache-hit == 'true' && 'exact hit' || steps.modules.outputs.cache-matched-key != '' && 'restored from an earlier key' || 'miss' }}
           BUILD_CACHE: ${{ steps.build.outputs.cache-hit == 'true' && 'exact hit' || steps.build.outputs.cache-matched-key != '' && 'restored from an earlier key' || 'miss' }}
         run: |
           mapfile -t packages < <(go list ./...)
-          go test -race -count=1 -json ./... |
+          go test -race -count=1 -parallel=4 -timeout=10m -json ./... |
             "$RUNNER_TEMP/testreport" -diagnostic-spill -module-cache "$MODULE_CACHE" -build-cache "$BUILD_CACHE" "${packages[@]}" >> "$GITHUB_STEP_SUMMARY"
       - name: Save Go modules
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.modules.outputs.cache-hit != 'true'

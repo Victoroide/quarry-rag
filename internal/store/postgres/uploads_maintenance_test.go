@@ -27,6 +27,7 @@ func ids(records []SourceUploadRecord) []string {
 }
 
 func TestDueSourceUploadsSelectsOnlyExpiredUnlinkedRecords(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	fresh, _ := stagedUpload(t, c, "")
 	old, _ := stagedUpload(t, c, "")
@@ -57,6 +58,7 @@ func TestDueSourceUploadsSelectsOnlyExpiredUnlinkedRecords(t *testing.T) {
 }
 
 func TestDueSourceUploadsHonorsTheLimitOldestFirst(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	var created []string
 	for i := range 4 {
@@ -70,6 +72,7 @@ func TestDueSourceUploadsHonorsTheLimitOldestFirst(t *testing.T) {
 }
 
 func TestClaimSourceUploadsFencesAndSchedulesRechecks(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	u, _ := stagedUpload(t, c, "")
 	expireUpload(t, c, u.ID, 3*time.Hour)
@@ -120,6 +123,7 @@ func TestClaimSourceUploadsFencesAndSchedulesRechecks(t *testing.T) {
 }
 
 func TestSourceUploadSelectionSkipsHandledRecords(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	first, _ := stagedUpload(t, c, "")
 	second, _ := stagedUpload(t, c, "")
@@ -137,6 +141,7 @@ func TestSourceUploadSelectionSkipsHandledRecords(t *testing.T) {
 }
 
 func TestAbandonedClaimIsRecoveredAfterItsLease(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	u, _ := stagedUpload(t, c, "")
 	expireUpload(t, c, u.ID, 3*time.Hour)
@@ -154,6 +159,7 @@ func TestAbandonedClaimIsRecoveredAfterItsLease(t *testing.T) {
 }
 
 func TestSettleSourceUploadRemovesOnlyTheClaimedRecord(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	u, _ := stagedUpload(t, c, "")
 	expireUpload(t, c, u.ID, 3*time.Hour)
@@ -173,6 +179,7 @@ func TestSettleSourceUploadRemovesOnlyTheClaimedRecord(t *testing.T) {
 }
 
 func TestSettleSourceUploadRejectsAnUncertainDispatch(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	u, _ := stagedUpload(t, c, "")
 	require.NoError(t, c.BeginSourceUpload(t.Context(), u.ID))
@@ -190,6 +197,7 @@ func TestSettleSourceUploadRejectsAnUncertainDispatch(t *testing.T) {
 }
 
 func TestClaimingNeverRacesAcceptanceToTwoOwners(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	sel := SourceUploadSelection{Bucket: uploadTestBucket, Limit: 10}
 	for range 20 {
@@ -232,6 +240,7 @@ func TestClaimingNeverRacesAcceptanceToTwoOwners(t *testing.T) {
 }
 
 func TestParallelClaimsAreDisjoint(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	for range 12 {
 		u, _ := stagedUpload(t, c, "")
@@ -261,6 +270,7 @@ func TestParallelClaimsAreDisjoint(t *testing.T) {
 }
 
 func TestReferencedSourceKeysFindsDocumentsAndDeletionReceipts(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	_, req := stagedUpload(t, c, "")
 	_, err := c.AcceptDocument(t.Context(), req)
@@ -276,6 +286,7 @@ func TestReferencedSourceKeysFindsDocumentsAndDeletionReceipts(t *testing.T) {
 }
 
 func TestSourceUploadSummariesGroupStatesAndReasons(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	a, _ := stagedUpload(t, c, "")
 	b, _ := stagedUpload(t, c, "")

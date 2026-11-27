@@ -44,6 +44,7 @@ func assertAdmissionState(t *testing.T, c *Client, id domain.DocumentID, status 
 }
 
 func TestAcceptFailedRetryAtQueueCapacity(t *testing.T) {
+	parallelDatabaseTest(t)
 	for _, state := range []string{"pending", "delayed", "running"} {
 		t.Run(state, func(t *testing.T) {
 			c := jobsDatabase(t)
@@ -89,6 +90,7 @@ func TestAcceptFailedRetryAtQueueCapacity(t *testing.T) {
 }
 
 func TestAcceptAfterQueueLimitDecrease(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	failure := "terminal processing error"
 	retry := jobsRequest("failed content")
@@ -143,10 +145,12 @@ func TestAcceptAfterQueueLimitDecrease(t *testing.T) {
 }
 
 func TestConcurrentFailedRetryAdmission(t *testing.T) {
+	parallelDatabaseTest(t)
 	testConcurrentFailedRetryAdmission(t, domain.ContentDedupCollection)
 }
 
 func TestPrivateConcurrentFailedRetryAdmission(t *testing.T) {
+	parallelDatabaseTest(t)
 	testConcurrentFailedRetryAdmission(t, domain.ContentDedupOff)
 }
 
@@ -239,6 +243,7 @@ func raceAdmissions(t *testing.T, c *Client, first, second domain.AcceptRequest)
 }
 
 func TestFailedRetryRollsBackOnJobInsertError(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	failure := "terminal processing error"
 	retry := jobsRequest("failed content")
@@ -255,6 +260,7 @@ func TestFailedRetryRollsBackOnJobInsertError(t *testing.T) {
 }
 
 func TestFailedRetryRollsBackOnCancellation(t *testing.T) {
+	parallelDatabaseTest(t)
 	c := jobsDatabase(t)
 	failure := "terminal processing error"
 	retry := jobsRequest("failed content")
