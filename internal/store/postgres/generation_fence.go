@@ -67,31 +67,40 @@ const activeCleanupEpoch = `singleton AND active_generation=$1 AND frozen
 // ActiveCleanupBatch identifies a single reservation of exact provider IDs.
 type ActiveCleanupBatch struct {
 	Reservation uuid.UUID
+	Sender      uuid.UUID
 	IDs         []string
 }
 
 // ActiveCleanupBatch reads the unresolved batch for the held freeze, if any.
 func (f *GenerationFence) ActiveCleanupBatch(ctx context.Context, epoch time.Time) (*ActiveCleanupBatch, error) {
 	var batch ActiveCleanupBatch
-	var reservation uuid.NullUUID
-	if err := f.conn.QueryRow(ctx, `SELECT active_cleanup_ids, active_cleanup_reservation FROM vector_state WHERE `+activeCleanupEpoch,
-		f.name, epoch).Scan(&batch.IDs, &reservation); err != nil {
+	var reservation, sender uuid.NullUUID
+	if err := f.conn.QueryRow(ctx, `SELECT active_cleanup_ids, active_cleanup_reservation, active_cleanup_sender FROM vector_state WHERE `+activeCleanupEpoch,
+		f.name, epoch).Scan(&batch.IDs, &reservation, &sender); err != nil {
 		return nil, fmt.Errorf("postgres: read active cleanup journal under the pinned freeze: %w", err)
+	}
+	if reservation.Valid != sender.Valid || reservation.Valid != (batch.IDs != nil) ||
+		(reservation.Valid && (reservation.UUID == uuid.Nil || sender.UUID == uuid.Nil || len(batch.IDs) == 0)) {
+		return nil, errors.New("postgres: inconsistent active cleanup journal identity")
 	}
 	if !reservation.Valid {
 		return nil, nil
 	}
 	batch.Reservation = reservation.UUID
+	batch.Sender = sender.UUID
 	return &batch, nil
 }
 
 // ReserveActiveCleanup commits an exact batch before the caller contacts Pinecone.
-func (f *GenerationFence) ReserveActiveCleanup(ctx context.Context, epoch time.Time, target, host string, profile domain.EmbeddingProfile, ids []string) (uuid.UUID, error) {
+func (f *GenerationFence) ReserveActiveCleanup(ctx context.Context, epoch time.Time, target, host string, profile domain.EmbeddingProfile, ids []string, sender uuid.UUID) (uuid.UUID, error) {
 	if err := ctx.Err(); err != nil {
 		return uuid.Nil, err
 	}
 	if len(ids) < 1 || len(ids) > 1000 {
 		return uuid.Nil, errors.New("postgres: reserve between 1 and 1000 active cleanup IDs")
+	}
+	if sender == uuid.Nil {
+		return uuid.Nil, errors.New("postgres: active cleanup requires a nonzero sender UUID")
 	}
 	tx, err := f.conn.Begin(ctx)
 	if err != nil {
@@ -99,9 +108,9 @@ func (f *GenerationFence) ReserveActiveCleanup(ctx context.Context, epoch time.T
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	var reservation uuid.UUID
-	err = tx.QueryRow(ctx, `UPDATE vector_state SET active_cleanup_ids=$3, active_cleanup_reservation=gen_random_uuid()
+	err = tx.QueryRow(ctx, `UPDATE vector_state SET active_cleanup_ids=$3, active_cleanup_reservation=gen_random_uuid(), active_cleanup_sender=$4
  WHERE `+activeCleanupEpoch+` AND active_cleanup_reservation IS NULL RETURNING active_cleanup_reservation`,
-		f.name, epoch, ids).Scan(&reservation)
+		f.name, epoch, ids, sender).Scan(&reservation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, errors.New("postgres: active cleanup freeze changed or a batch is already pending")
 	}
@@ -119,12 +128,15 @@ func (f *GenerationFence) ReserveActiveCleanup(ctx context.Context, epoch time.T
 }
 
 // ClearActiveCleanup clears only the acknowledged or externally settled batch.
-func (f *GenerationFence) ClearActiveCleanup(ctx context.Context, epoch time.Time, reservation uuid.UUID, ids []string) error {
+func (f *GenerationFence) ClearActiveCleanup(ctx context.Context, epoch time.Time, reservation uuid.UUID, ids []string, sender uuid.UUID) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	tag, err := f.conn.Exec(ctx, `UPDATE vector_state SET active_cleanup_ids=NULL, active_cleanup_reservation=NULL
- WHERE `+activeCleanupEpoch+` AND active_cleanup_reservation=$3 AND active_cleanup_ids=$4`, f.name, epoch, reservation, ids)
+	if reservation == uuid.Nil || sender == uuid.Nil {
+		return errors.New("postgres: active cleanup requires nonzero reservation and sender UUIDs")
+	}
+	tag, err := f.conn.Exec(ctx, `UPDATE vector_state SET active_cleanup_ids=NULL, active_cleanup_reservation=NULL, active_cleanup_sender=NULL
+ WHERE `+activeCleanupEpoch+` AND active_cleanup_reservation=$3 AND active_cleanup_ids=$4 AND active_cleanup_sender=$5`, f.name, epoch, reservation, ids, sender)
 	if err != nil {
 		return fmt.Errorf("postgres: clear active cleanup: %w", err)
 	}

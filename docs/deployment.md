@@ -678,7 +678,7 @@ pre-created pattern.
 
 #### Superseded vector cleanup
 
-Apply migration 033 before using `make reconcile ARGS="-superseded-unrevisioned -apply"`.
+Apply migration 042 before using `make reconcile ARGS="-superseded-unrevisioned -apply"`.
 Use the metadata schema owner or the login with the
 [vector reindex database privileges](#vector-reindex-database-privileges).
 The mode reads the documents, jobs, deletion receipts, active revision
@@ -706,19 +706,35 @@ GRANT EXECUTE ON FUNCTION public.vector_writer_state(), public.document_deletion
    in `next_page_token`. Fetching stops on an oversized single record, a
    quota error, or any other provider error. A smaller page can reduce
    multi-record response sizes and the amount of work per page.
-4. If deletion or its checkpoint fails, the next apply reports any pending
-   batch with its reservation UUID and exact IDs. Keep writers stopped and
-   confirm with Pinecone that the request for that reservation can no longer
-   take effect. A timeout or a fetch that omits the IDs does not establish
-   settlement. After confirmation, run
-   `make reconcile ARGS="-superseded-unrevisioned -apply -confirm-target-drained=<reservation-uuid>"`
-   using the UUID of the confirmed reservation. This clears that batch and
-   starts a fresh scan. A stale UUID stops the command before it scans. If a
-   new batch is pending, confirm it separately, even if it lists the same IDs.
-5. After the final pass and provider convergence, run
+4. If deletion or its checkpoint fails, keep writers frozen and disable the
+   old maintenance dispatch and restart paths. The next apply reports any
+   pending batch with its generation, reservation UUID, sender UUID and exact
+   IDs. Correlate the sender UUID in the invocation logs with its execution
+   supervisor. Verify that the process exited or that network egress or
+   provider credentials permanently prevent it from sending to the target.
+   Credential revocation is sufficient only if it covers every route the
+   sender can use, including shared credentials.
+   A stop signal, disconnected database session, paused container, expired
+   deadline, absence of in-flight requests or PID alone cannot establish exit.
+   For a sender UUID assigned by migration or missing invocation logs, stop
+   and verify every process that could dispatch cleanup against the bound
+   target, including older maintenance executables.
+5. After establishing shutdown, confirm with Pinecone that every request
+   already submitted for the recorded IDs on the pinned index and default
+   namespace has settled. A timeout or a fetch that omits the IDs cannot
+   establish settlement. If either confirmation is unavailable, retain the
+   freeze and reservation. With both confirmations, run
+   `make reconcile ARGS="-superseded-unrevisioned -apply -confirm-sender-stopped=<sender-uuid> -confirm-target-drained=<reservation-uuid>"`.
+   This clears only the matching batch and starts from the beginning to
+   re-evaluate candidates. Omit `-page-token`. A stale pair stops the command
+   before it scans. Every reservation has a new UUID, and each invocation
+   has its own sender UUID. Confirm any later batch separately, even when its
+   exact IDs are identical.
+6. After the final pass and provider convergence, run
    `make reindex ARGS="-thaw -apply"` and resume external writers. Thaw and
-   activation are blocked while a batch is pending. Keep migration 033
-   installed during binary rollback until any pending batch is resolved.
+   activation are blocked while a batch is pending. During binary rollback,
+   retain migration 042 and keep an updated reconciliation executable
+   available for recovery.
 
 ### AWS Credentials
 

@@ -129,13 +129,16 @@ func TestMigrateActiveCleanupSender(t *testing.T) {
 	}
 }
 
-func TestFrozenActiveCleanupJournal(t *testing.T) {
+func activeCleanupJournalClients(t *testing.T) (owner, operator, reader *Client) {
+	t.Helper()
 	dsn := startTestDatabase(t)
 	admin := migrationTestClient(t, dsn)
 	ctx := t.Context()
-	roles := newGrantRoles(t, dsn, "cleanup_operator")
+	roles := newGrantRoles(t, dsn, "cleanup_operator", "cleanup_reader")
 	role := roles.name("cleanup_operator")
-	grantExec(t, admin, roles.sql("CREATE SCHEMA vector_maintenance; CREATE ROLE {cleanup_operator} LOGIN PASSWORD 'fixture-password'"))
+	grantExec(t, admin, roles.sql(`CREATE SCHEMA vector_maintenance;
+		CREATE ROLE {cleanup_operator} LOGIN PASSWORD 'fixture-password';
+		CREATE ROLE {cleanup_reader} LOGIN PASSWORD 'fixture-password'`))
 	client := func(user string) *Client {
 		c, err := NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
 			cfg.ConnConfig.RuntimeParams["search_path"] = "vector_maintenance,public"
@@ -148,23 +151,62 @@ func TestFrozenActiveCleanupJournal(t *testing.T) {
 		t.Cleanup(func() { require.NoError(t, c.Close(context.WithoutCancel(ctx))) })
 		return c
 	}
-	owner, operator := client(""), client(role)
+	owner, operator, reader = client(""), client(role), client(roles.name("cleanup_reader"))
 	require.NoError(t, owner.RunMigrations(ctx))
 	grantExec(t, owner, roles.sql(`GRANT USAGE ON SCHEMA vector_maintenance TO {cleanup_operator};
 		GRANT SELECT, UPDATE ON vector_state TO {cleanup_operator};
+		GRANT USAGE ON SCHEMA vector_maintenance TO {cleanup_reader};
+		GRANT SELECT ON vector_state TO {cleanup_reader};
 		GRANT SELECT ON vector_generations, ingest_jobs, document_deletions TO {cleanup_operator};
 		GRANT EXECUTE ON FUNCTION vector_writer_state() TO {cleanup_operator}`))
 	var allowed bool
 	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT has_function_privilege($1, 'guard_active_cleanup_state()', 'EXECUTE')`, role).Scan(&allowed))
 	require.False(t, allowed)
+	return owner, operator, reader
+}
 
+func checkActiveCleanupJournalConstraints(t *testing.T, operator *Client, ids []string, sender uuid.UUID) {
+	t.Helper()
+	reservation, zero := uuid.New(), uuid.Nil
+	for _, tc := range []struct {
+		name        string
+		ids         []string
+		reservation *uuid.UUID
+		sender      *uuid.UUID
+		constraint  string
+	}{
+		{"ids_without_reservation", ids, nil, nil, activeCleanupFrozenConstraint},
+		{"sender_without_reservation", nil, nil, &sender, activeCleanupSenderConstraint},
+		{"reservation_without_sender", ids, &reservation, nil, activeCleanupSenderConstraint},
+		{"zero_sender", ids, &reservation, &zero, activeCleanupSenderConstraint},
+		{"missing_ids", nil, &reservation, &sender, activeCleanupFrozenConstraint},
+		{"empty_ids", []string{}, &reservation, &sender, activeCleanupFrozenConstraint},
+		{"oversize_ids", slices.Repeat(ids[:1], 1001), &reservation, &sender, activeCleanupFrozenConstraint},
+		{"zero_reservation", ids, &zero, &sender, activeCleanupFrozenConstraint},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			tx, err := operator.Pool.Begin(ctx)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, tx.Rollback(context.WithoutCancel(ctx))) }()
+			_, err = tx.Exec(ctx, `UPDATE vector_state SET active_cleanup_ids=$1::text[],
+				active_cleanup_reservation=$2::uuid, active_cleanup_sender=$3::uuid WHERE singleton`,
+				tc.ids, tc.reservation, tc.sender)
+			requireActiveCleanupConstraint(t, err, tc.constraint)
+		})
+	}
+}
+
+func TestFrozenActiveCleanupJournal(t *testing.T) {
 	const target, host = "corpus", "corpus-host"
 	profile := generationProfile()
-	require.NoError(t, owner.PinVectorGeneration(ctx, LegacyGeneration, "pinecone", target, host, profile))
 	ids := []string{"00000000000040008000000000000001", "00000000000040008000000000000002"}
 	for _, generation := range []string{LegacyGeneration, "registered"} {
 		t.Run(generation, func(t *testing.T) {
 			ctx := t.Context()
+			owner, operator, reader := activeCleanupJournalClients(t)
+			sender := uuid.New()
+			require.NoError(t, owner.PinVectorGeneration(ctx, LegacyGeneration, "pinecone", target, host, profile))
 			if generation != LegacyGeneration {
 				grantExec(t, owner, `INSERT INTO vector_generations(name,store,target,host,profile,profile_hash,profile_origin,state)
 					VALUES($1,'pinecone',$2,$3,'{}',$4,'recorded','active')`, generation, target, host, profile.Hash())
@@ -174,7 +216,7 @@ func TestFrozenActiveCleanupJournal(t *testing.T) {
 			fence, err := operator.FenceGeneration(ctx, generation)
 			require.NoError(t, err)
 			defer fence.Close(ctx)
-			_, err = fence.ReserveActiveCleanup(ctx, time.Now(), target, host, profile, ids)
+			_, err = fence.ReserveActiveCleanup(ctx, time.Now(), target, host, profile, ids, sender)
 			require.Error(t, err)
 			require.NoError(t, owner.ThawWriters(ctx))
 			require.NoError(t, owner.FreezeWriters(ctx, generation))
@@ -187,46 +229,47 @@ func TestFrozenActiveCleanupJournal(t *testing.T) {
 			quiet, err := operator.WriterQuiesce(ctx, domain.WriteRequestTimeout)
 			require.NoError(t, err)
 			require.False(t, quiet.Quiet())
-			_, err = fence.ReserveActiveCleanup(ctx, epoch.Add(-time.Second), target, host, profile, ids)
+			_, err = fence.ReserveActiveCleanup(ctx, epoch.Add(-time.Second), target, host, profile, ids, sender)
 			require.Error(t, err)
-			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, "wrong-host", profile, ids)
+			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, "wrong-host", profile, ids, sender)
 			require.Error(t, err)
-			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, []string{})
+			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, []string{}, sender)
 			require.Error(t, err)
-			for _, assignment := range []string{
-				`active_cleanup_ids=ARRAY['record']`,
-				`active_cleanup_reservation=gen_random_uuid()`,
-				`active_cleanup_reservation=gen_random_uuid(), active_cleanup_ids=ARRAY[]::TEXT[]`,
-				`active_cleanup_reservation=gen_random_uuid(), active_cleanup_ids=array_fill('record'::text,ARRAY[1001])`,
-			} {
-				_, err = operator.Pool.Exec(ctx, `UPDATE vector_state SET `+assignment)
-				requireSQLState(t, err, "23514")
-			}
+			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids, uuid.Nil)
+			require.ErrorContains(t, err, "nonzero sender")
+			checkActiveCleanupJournalConstraints(t, operator, ids, sender)
 			canceled, cancel := context.WithCancel(ctx)
 			cancel()
-			_, err = fence.ReserveActiveCleanup(canceled, epoch, target, host, profile, ids)
+			_, err = fence.ReserveActiveCleanup(canceled, epoch, target, host, profile, ids, sender)
 			require.ErrorIs(t, err, context.Canceled)
 			pending, err := fence.ActiveCleanupBatch(ctx, epoch)
 			require.NoError(t, err, "a canceled reservation leaves the original fence usable")
 			require.Nil(t, pending)
-			reservation, err := fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids)
+			reservation, err := fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids, sender)
 			require.NoError(t, err)
 			require.NotEqual(t, uuid.Nil, reservation)
-			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids)
+			_, err = reader.Pool.Exec(ctx, `UPDATE vector_state
+				SET active_cleanup_ids=NULL, active_cleanup_reservation=NULL, active_cleanup_sender=NULL`)
+			requireSQLState(t, err, "42501")
+			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids, sender)
 			require.Error(t, err)
-			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, reservation, ids[:1]))
-			require.Error(t, fence.ClearActiveCleanup(ctx, epoch.Add(-time.Second), reservation, ids))
-			require.ErrorIs(t, fence.ClearActiveCleanup(canceled, epoch, reservation, ids), context.Canceled)
-			want := ActiveCleanupBatch{Reservation: reservation, IDs: ids}
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, reservation, ids[:1], sender))
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, reservation, []string{ids[1], ids[0]}, sender))
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, reservation, ids, uuid.New()))
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, reservation, ids, uuid.Nil))
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, uuid.Nil, ids, sender))
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch.Add(-time.Second), reservation, ids, sender))
+			require.ErrorIs(t, fence.ClearActiveCleanup(canceled, epoch, reservation, ids, sender), context.Canceled)
+			want := ActiveCleanupBatch{Reservation: reservation, Sender: sender, IDs: ids}
 			pending, err = fence.ActiveCleanupBatch(ctx, epoch)
 			require.NoError(t, err)
 			require.Equal(t, &want, pending)
 
 			// Lose the session after reserving, as with a lost dispatch or checkpoint.
 			fence.Close(ctx)
-			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids)
+			_, err = fence.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids, sender)
 			require.Error(t, err)
-			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, reservation, ids))
+			require.Error(t, fence.ClearActiveCleanup(ctx, epoch, reservation, ids, sender))
 			require.ErrorContains(t, owner.ThawWriters(ctx), "pending active vector cleanup")
 			for _, query := range []string{
 				`UPDATE vector_state SET frozen=FALSE, frozen_at=NULL, freeze_generation=NULL`,
@@ -237,6 +280,8 @@ func TestFrozenActiveCleanupJournal(t *testing.T) {
 				`UPDATE vector_state SET active_cleanup_ids=ARRAY['different-id']`,
 				`UPDATE vector_state SET active_cleanup_reservation=gen_random_uuid()`,
 				`UPDATE vector_state SET active_cleanup_ids=NULL`,
+				`UPDATE vector_state SET active_cleanup_sender=NULL`,
+				`UPDATE vector_state SET active_cleanup_sender=gen_random_uuid()`,
 			} {
 				_, err = operator.Pool.Exec(ctx, query)
 				require.ErrorContains(t, err, "pending active vector cleanup")
@@ -253,17 +298,19 @@ func TestFrozenActiveCleanupJournal(t *testing.T) {
 			pending, err = recovery.ActiveCleanupBatch(ctx, epoch)
 			require.NoError(t, err)
 			require.Equal(t, &want, pending)
-			require.NoError(t, recovery.ClearActiveCleanup(ctx, epoch, reservation, ids))
-			newReservation, err := recovery.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids)
+			require.NoError(t, recovery.ClearActiveCleanup(ctx, epoch, reservation, ids, sender))
+			nextSender := uuid.New()
+			newReservation, err := recovery.ReserveActiveCleanup(ctx, epoch, target, host, profile, ids, nextSender)
 			require.NoError(t, err)
 			require.NotEqual(t, reservation, newReservation)
-			require.Error(t, recovery.ClearActiveCleanup(ctx, epoch, reservation, ids))
-			require.NoError(t, recovery.ClearActiveCleanup(ctx, epoch, newReservation, ids))
+			require.Error(t, recovery.ClearActiveCleanup(ctx, epoch, reservation, ids, sender))
+			require.Error(t, recovery.ClearActiveCleanup(ctx, epoch, newReservation, ids, sender))
+			require.NoError(t, recovery.ClearActiveCleanup(ctx, epoch, newReservation, ids, nextSender))
 			pending, err = recovery.ActiveCleanupBatch(ctx, epoch)
 			require.NoError(t, err)
 			require.Nil(t, pending)
 			recovery.Close(ctx)
-			grantExec(t, owner, `UPDATE vector_state SET frozen=FALSE, frozen_at=NULL, freeze_generation=NULL`)
+			require.NoError(t, owner.ThawWriters(ctx))
 		})
 	}
 }

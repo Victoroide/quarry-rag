@@ -41,6 +41,7 @@ type options struct {
 	ScanLimit              int
 	PageToken              string
 	ConfirmTargetDrained   uuid.UUID
+	ConfirmSenderStopped   uuid.UUID
 
 	// SourceUploads selects the object-store mode for journaled originals.
 	SourceUploads bool
@@ -69,7 +70,8 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.BoolVar(&opts.SupersededUnrevisioned, "superseded-unrevisioned", false, "scan the active Pinecone index for bare vectors superseded by a manifested revision")
 	scanLimit := flags.Int("scan-limit", 100000, "with -superseded-unrevisioned, maximum listed vectors to examine")
 	flags.StringVar(&opts.PageToken, "page-token", "", "with -superseded-unrevisioned, resume listing with the reported next_page_token")
-	confirmation := flags.String("confirm-target-drained", "", "with -superseded-unrevisioned -apply, reservation UUID of the delete confirmed settled at Pinecone")
+	flags.Func("confirm-target-drained", "reservation UUID whose Pinecone requests have settled after sender shutdown", cleanupConfirmation(&opts.ConfirmTargetDrained))
+	flags.Func("confirm-sender-stopped", "sender UUID confirmed stopped or permanently unable to send for the pending batch", cleanupConfirmation(&opts.ConfirmSenderStopped))
 	flags.BoolVar(&opts.SourceUploads, "source-uploads", false, "reclaim journaled original files that no document adopted, independent of the vector store")
 	flags.DurationVar(&opts.MinAge, "min-age", time.Hour, "with -source-uploads, leave uploads younger than this untouched")
 	flags.DurationVar(&opts.Settle, "settle", 30*time.Minute, "with -source-uploads, minimum time between a claim and the settlement of a fully accounted-for write (at least 1m)")
@@ -88,18 +90,16 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 		if opts.ScanLimit < 1 {
 			return opts, errors.New("provide -scan-limit greater than zero")
 		}
-	} else if set["scan-limit"] || set["page-token"] || set["confirm-target-drained"] {
-		return opts, errors.New("-scan-limit, -page-token and -confirm-target-drained require -superseded-unrevisioned")
+	} else if set["scan-limit"] || set["page-token"] {
+		return opts, errors.New("-scan-limit and -page-token require -superseded-unrevisioned")
 	}
-	if set["confirm-target-drained"] {
-		if !opts.Apply || set["page-token"] {
-			return opts, errors.New("-confirm-target-drained requires -apply and a fresh scan without -page-token")
+	if set["confirm-target-drained"] || set["confirm-sender-stopped"] {
+		if !set["confirm-target-drained"] || !set["confirm-sender-stopped"] {
+			return opts, errors.New("provide -confirm-sender-stopped and -confirm-target-drained together")
 		}
-		id, err := uuid.Parse(*confirmation)
-		if err != nil || id == uuid.Nil || id.String() != *confirmation {
-			return opts, errors.New("-confirm-target-drained requires the reservation UUID printed for the pending delete")
+		if !opts.SupersededUnrevisioned || !opts.Apply || set["page-token"] {
+			return opts, errors.New("active cleanup confirmations require -superseded-unrevisioned -apply and a fresh scan without -page-token")
 		}
-		opts.ConfirmTargetDrained = id
 	}
 	if opts.SourceUploads {
 		if opts.BackfillCollections || opts.BackfillScoped || opts.CanonicalDocumentIDs || set["after"] || set["page"] {
@@ -145,6 +145,20 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 		opts.After = id.String()
 	}
 	return opts, nil
+}
+
+func cleanupConfirmation(dst *uuid.UUID) func(string) error {
+	return func(value string) error {
+		if *dst != uuid.Nil {
+			return errors.New("confirmation may be supplied only once")
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value {
+			return errors.New("provide a canonical lowercase nonzero UUID")
+		}
+		*dst = id
+		return nil
+	}
 }
 
 // acquireMaintenanceWriter holds the freeze barrier through an applied pass.
