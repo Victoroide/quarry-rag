@@ -242,7 +242,9 @@ go test -race -count=1 -json ./... |
   go run ./.github/scripts/testreport -diagnostic-spill
 ```
 
-The reporter opens one file in the system temporary directory when it first receives diagnostic output, with owner-only access where Unix permissions apply. The 512 MiB file budget includes record headers. Within that budget, explicit failures keep their complete output. If storage fails, the reporter preserves readable output and up to 512 KiB of recent output shared across all diagnostics, reports omissions and a storage error, and exits with status 1 after attempting the summary. A report write failure also exits with status 1 after attempting output on the other stream. Invalid input stops decoding and emits available diagnostic evidence without a summary. The reporter closes and removes the file on return. Process termination before cleanup can leave the file in the runner's temporary directory.
+The reporter opens one file in the system temporary directory when it first needs diagnostic storage, with owner-only access where Unix permissions apply. Its 512 MiB budget covers the payload, record headers and unused bytes in allocated 512-byte pages. Passed or skipped tests and packages and completed successful benchmarks release their diagnostic pages for reuse. Later package output starts a fresh diagnostic chain. The file can stay at its largest used size until cleanup, within the same 512 MiB limit. Output from tests still in progress, failures and retained compiler diagnostics can fill the budget.
+
+If storage fails, the reporter preserves readable output and up to 512 KiB of recent output shared across all diagnostics, reports omissions and a storage error, and exits with status 1 after attempting the summary. A report write failure also exits with status 1 after attempting output on the other stream. Invalid input stops decoding and emits available diagnostic evidence without a summary. The reporter closes and removes the file on return. Process termination before cleanup can leave the file in the runner's temporary directory.
 
 
 ### Runtime Image Job
