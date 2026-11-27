@@ -329,12 +329,9 @@ func TestReindexManifestWithDocumentedGrants(t *testing.T) {
 	require.Equal(t, true, verified["passed"])
 }
 
-func TestHostedManifestCutoverRoleGrants(t *testing.T) {
-	f := &fixture{pg: vectorDB(t)}
-	h := newHarness(t, f, "pinecone")
-	h.attestSource()
+func newHostedCutoverReindexRole(t *testing.T, owner *pgstore.Client) (*pgstore.Client, string) {
+	t.Helper()
 	ctx := t.Context()
-	owner := f.pg
 	dsn := owner.Pool.Config().ConnString()
 	role := pgtest.Role(t, dsn, "hosted_cutover_reindex")
 	ident := pgx.Identifier{role}.Sanitize()
@@ -348,8 +345,18 @@ func TestHostedManifestCutoverRoleGrants(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, restricted.Close(context.Background())) })
+	return restricted, role
+}
+
+func TestHostedManifestCutoverRoleGrants(t *testing.T) {
+	f := &fixture{pg: vectorDB(t)}
+	h := newHarness(t, f, "pinecone")
+	h.attestSource()
+	ctx := t.Context()
+	owner := f.pg
+	restricted, role := newHostedCutoverReindexRole(t, owner)
 	var pgErr *pgconn.PgError
-	_, err = restricted.HostedManifestCutoverCounts(ctx)
+	_, err := restricted.HostedManifestCutoverCounts(ctx)
 	require.ErrorAs(t, err, &pgErr)
 	require.Equal(t, "42501", pgErr.Code)
 
