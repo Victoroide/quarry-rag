@@ -7,15 +7,21 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Victoroide/quarry-rag/internal/credential"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
 func makeTrustFileGroupWritable(t *testing.T, path string) {
 	t.Helper()
+	addTrustFilePermissions(t, path, 0o020)
+}
+
+func addTrustFilePermissions(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	require.NoError(t, os.Chmod(path, info.Mode().Perm()|0o020))
+	require.NoError(t, os.Chmod(path, info.Mode().Perm()|mode))
 }
 
 func TestSubjectTrustFilePermissions(t *testing.T) {
@@ -35,7 +41,7 @@ func TestTrustTransitionRejectsInsecureReread(t *testing.T) {
 
 func TestTrustReadLimitsAndRecoveryUnix(t *testing.T) {
 	verifier, _, path := newFixtureVerifier(t)
-	original, err := os.ReadFile(path)
+	original, err := credential.ReadFile(path, maxTrustBytes, 0o022)
 	require.NoError(t, err)
 	require.NoError(t, verifier.ValidateTrust())
 
@@ -44,7 +50,7 @@ func TestTrustReadLimitsAndRecoveryUnix(t *testing.T) {
 		replace func(*testing.T)
 	}{
 		{"group writable", func(t *testing.T) { makeTrustFileGroupWritable(t, path) }},
-		{"world writable", func(t *testing.T) { require.NoError(t, os.Chmod(path, 0o602)) }},
+		{"world writable", func(t *testing.T) { addTrustFilePermissions(t, path, 0o002) }},
 		{"fifo", func(t *testing.T) {
 			require.NoError(t, os.Remove(path))
 			require.NoError(t, unix.Mkfifo(path, 0o600))
