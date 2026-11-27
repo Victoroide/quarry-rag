@@ -339,38 +339,6 @@ func TestProcessorPassesCollection(t *testing.T) {
 	require.Equal(t, "archive", <-got)
 }
 
-type revisionVectorRecorder struct {
-	mu           sync.Mutex
-	docDeletes   int
-	revDeletes   []string
-	revKnownIDs  [][]string
-	activeChunks map[string]domain.Chunk
-}
-
-func (r *revisionVectorRecorder) DeleteAllVectorsInNamespace(context.Context, string) error {
-	return nil
-}
-
-func (r *revisionVectorRecorder) DeleteByDocID(context.Context, string) error {
-	r.mu.Lock()
-	r.docDeletes++
-	r.mu.Unlock()
-	return nil
-}
-
-func (r *revisionVectorRecorder) DeleteByManifestRevision(_ context.Context, _, revisionID string, knownIDs []string) error {
-	r.mu.Lock()
-	r.revDeletes = append(r.revDeletes, revisionID)
-	r.revKnownIDs = append(r.revKnownIDs, append([]string(nil), knownIDs...))
-	for id, ch := range r.activeChunks {
-		if ch.RevisionID == revisionID {
-			delete(r.activeChunks, id)
-		}
-	}
-	r.mu.Unlock()
-	return nil
-}
-
 func TestManifestedWorkerTargetsOnlyFencedRevision(t *testing.T) {
 	s := leaseStore(2)
 	s.jobs[0].Incarnation = uuid.NewString()
@@ -399,8 +367,11 @@ func TestManifestedWorkerTargetsOnlyFencedRevision(t *testing.T) {
 	vecs.mu.Lock()
 	defer vecs.mu.Unlock()
 	require.Zero(t, vecs.docDeletes, "manifested mode must never call document-wide DeleteByDocID")
-	rev1 := revisionIDForAttempt(s.jobs[0], "test")
-	require.Equal(t, []string{rev1, rev1}, vecs.revDeletes, "both pre-upsert and terminal cleanup must target attempt 1's fenced revision")
+	want := revisionVectorDelete{
+		documentID: string(s.jobs[0].Document.ID),
+		revisionID: revisionIDForAttempt(s.jobs[0], "test"),
+	}
+	require.Equal(t, []revisionVectorDelete{want, want}, vecs.revDeletes, "both pre-upsert and terminal cleanup must target attempt 1's fenced revision")
 	require.Contains(t, vecs.activeChunks, domain.FormatRevisionVectorID("doc", rev2, 0), "attempt 2's active vectors must remain intact")
 }
 
@@ -462,9 +433,9 @@ func TestHostedManifestUsesClaimedIncarnation(t *testing.T) {
 	job.ScopedVectors = true
 	job.LeaseToken = uuid.NewString()
 	owner := "test"
-	var revisions []string
+	var wantDeletes []revisionVectorDelete
 	spy := &upsertSpyStore{write: func(chunks []domain.Chunk) error {
-		require.Equal(t, len(revisions)+1, s.persistCalls, "intent precedes each upsert")
+		require.Equal(t, len(wantDeletes)+1, s.persistCalls, "intent precedes each upsert")
 		require.Len(t, chunks, 1)
 		chunk := chunks[0]
 		revision := revisionIDForAttempt(job, owner)
@@ -474,8 +445,8 @@ func TestHostedManifestUsesClaimedIncarnation(t *testing.T) {
 		require.Equal(t, job.Tenant, chunk.Metadata[domain.VectorTenantKey])
 		require.NotContains(t, chunk.Metadata, domain.VectorRevisionKey)
 		require.NotContains(t, chunk.Metadata, domain.VectorAttemptKey)
-		revisions = append(revisions, revision)
-		if len(revisions) == 1 {
+		wantDeletes = append(wantDeletes, revisionVectorDelete{documentID: string(job.Document.ID), revisionID: revision})
+		if len(wantDeletes) == 1 {
 			return errors.New("provider unavailable")
 		}
 		return nil
@@ -490,9 +461,9 @@ func TestHostedManifestUsesClaimedIncarnation(t *testing.T) {
 	job.LeaseToken = uuid.NewString()
 	w.process(ctx, job)
 	leaseEvent(t, base, "completed")
-	require.Len(t, revisions, 2)
-	require.NotEqual(t, revisions[0], revisions[1])
-	require.Equal(t, revisions, vecs.revDeletes)
+	require.Len(t, wantDeletes, 2)
+	require.NotEqual(t, wantDeletes[0].revisionID, wantDeletes[1].revisionID)
+	require.Equal(t, wantDeletes, vecs.revDeletes)
 	require.Zero(t, vecs.docDeletes)
 }
 
@@ -634,10 +605,10 @@ func TestCorpusModeMismatchReleasesOwnedLease(t *testing.T) {
 			}
 			require.Empty(t, base.events, "fenced publication must neither retry nor fail the job")
 			if tc.hosted {
-				revision := revisionIDForAttempt(job, "test")
-				want := []string{revision}
+				deletion := revisionVectorDelete{documentID: string(job.Document.ID), revisionID: revisionIDForAttempt(job, "test")}
+				want := []revisionVectorDelete{deletion}
 				if tc.deleted {
-					want = append(want, revision)
+					want = append(want, deletion)
 				}
 				require.Equal(t, want, recorder.revDeletes)
 				require.Zero(t, recorder.docDeletes)
