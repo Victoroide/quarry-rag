@@ -1116,13 +1116,36 @@ type selectedExcerpt struct {
 }
 
 type meaningSignals struct {
+	runes   []rune
+	text    string
 	numbers map[string]struct{}
+	tokens  []numberToken
 	terms   map[string]struct{}
+	han     []int
+	index   *anchorIndex
+}
+
+type numberToken struct {
+	start, end int
+	runs       []string
+	class      numberClass
+}
+
+// Anchor windows map to their start offsets in ascending order.
+type anchorIndex struct {
+	two, five map[string][]int
 }
 
 const (
 	meaningBearingOverlapThreshold = 0.50
 	crossDocOverlapWeight          = 0.95
+	hanAnchorWidth                 = 2
+	hanAnchorSlack                 = 0
+	hanReplacementRunes            = 2
+	numberAnchorWidth              = 5
+	numberAnchorSlack              = 8
+	numberReplacementRunes         = 8
+	maxAlignedEdits                = 16
 )
 
 // meaningBearingWordTerms lists space-delimited negations, exceptions, and
@@ -1173,12 +1196,10 @@ var meaningBearingWordTerms = []string{
 	"senza", "almeno", "tutt'al più", "tutt'al piu", "al massimo", "al più", "al piu",
 }
 
-// meaningBearingDenseTerms lists negators and qualifiers matched as substrings
-// in non-space-delimited scripts (Han, Kana, Hangul, Thai).
+// meaningBearingDenseTerms lists negators and qualifiers that can be matched
+// as substrings in Kana, Hangul, Han, and Thai.
 var meaningBearingDenseTerms = []string{
-	"不", "没", "無", "无", "未", "非",
-	"ない", "ません",
-	"않", "안", "못", "없",
+	"ません", "않", "없",
 	"ไม่",
 	"禁止", "のみ", "だけ", "以外",
 	"금지", "제외",
@@ -1447,106 +1468,258 @@ func bestOverlappingExcerpt(shingles []uint64, selected []selectedExcerpt) int {
 	return bestIdx
 }
 
-func candidateMeaningSignals(c *diverseCandidate, effBody string, effTrunc bool) meaningSignals {
+func candidateMeaningSignals(c *diverseCandidate, effBody string, effTrunc bool) *meaningSignals {
 	if effTrunc {
 		if !c.lastCutSigDone {
 			c.lastCutSignals = extractMeaningSignals(effBody)
 			c.lastCutSigDone = true
 		}
-		return c.lastCutSignals
+		return &c.lastCutSignals
 	}
 	if !c.signalsDone {
 		c.signals = extractMeaningSignals(effBody)
 		c.signalsDone = true
 	}
-	return c.signals
+	return &c.signals
 }
 
-func excerptMeaningSignals(s *selectedExcerpt) meaningSignals {
+func excerptMeaningSignals(s *selectedExcerpt) *meaningSignals {
 	if !s.signalsDone {
 		s.signals = extractMeaningSignals(s.text)
 		s.signalsDone = true
 	}
-	return s.signals
+	return &s.signals
 }
 
 func meaningBearingDifference(candidate, excerpt string, candidateCut bool) bool {
-	return hasMeaningBearingSignalDiff(extractMeaningSignals(candidate), extractMeaningSignals(excerpt), candidateCut)
+	cand, exc := extractMeaningSignals(candidate), extractMeaningSignals(excerpt)
+	return hasMeaningBearingSignalDiff(&cand, &exc, candidateCut)
 }
 
-func hasMeaningBearingSignalDiff(cand, exc meaningSignals, candidateCut bool) bool {
-	for n := range cand.numbers {
-		if _, ok := exc.numbers[n]; !ok {
+func hasMeaningBearingSignalDiff(cand, exc *meaningSignals, candidateCut bool) bool {
+	return termsDiffer(cand, exc) || hanEdited(cand, exc) || numberEdited(cand, exc) ||
+		!candidateCut && (termsDiffer(exc, cand) || hanEdited(exc, cand) || numberEdited(exc, cand))
+}
+
+func termsDiffer(x, y *meaningSignals) bool {
+	for term := range x.terms {
+		if _, ok := y.terms[term]; !ok {
 			return true
 		}
 	}
-	for t := range cand.terms {
-		if _, ok := exc.terms[t]; !ok {
+	return false
+}
+
+func hanEdited(x, y *meaningSignals) bool {
+	var edits [maxAlignedEdits]int
+	count := 0
+	for _, i := range x.han {
+		window := x.runes[max(0, i-hanAnchorWidth):min(len(x.runes), i+1+hanAnchorWidth)]
+		if strings.Contains(y.text, string(window)) {
+			continue
+		}
+		if count == len(edits) {
+			return true
+		}
+		edits[count] = i
+		count++
+	}
+	for _, i := range edits[:count] {
+		if alignedEdit(x, y, i, i+1, hanAnchorWidth, hanAnchorSlack, hanReplacementRunes) {
 			return true
 		}
 	}
-	if !candidateCut {
-		for n := range exc.numbers {
-			if _, ok := cand.numbers[n]; !ok {
-				return true
+	return false
+}
+
+func numberEdited(x, y *meaningSignals) bool {
+	var edits [maxAlignedEdits]int
+	count := 0
+	for i, token := range x.tokens {
+		if token.class.incidental() || !token.hasNewRun(y.numbers) {
+			continue
+		}
+		if count == len(edits) {
+			return true
+		}
+		edits[count] = i
+		count++
+	}
+	for _, i := range edits[:count] {
+		t := x.tokens[i]
+		if alignedEdit(x, y, t.start, t.end, numberAnchorWidth, numberAnchorSlack, numberReplacementRunes) {
+			return true
+		}
+	}
+	return false
+}
+
+func (t numberToken) hasNewRun(numbers map[string]struct{}) bool {
+	for _, run := range t.runs {
+		if _, ok := numbers[run]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// alignedEdit compares anchors around x[start:end] with the same anchors in y.
+// A shorter anchor is valid only at a matching boundary of both texts.
+func alignedEdit(x, y *meaningSignals, start, end, anchorWidth, slack, extra int) bool {
+	if y.index == nil {
+		offsets := make([]int, 0, len(y.runes)+1)
+		for start := range y.text {
+			offsets = append(offsets, start)
+		}
+		offsets = append(offsets, len(y.text))
+		y.index = &anchorIndex{
+			two:  indexAnchorWindows(y.text, offsets, hanAnchorWidth),
+			five: indexAnchorWindows(y.text, offsets, numberAnchorWidth),
+		}
+	}
+	windows := y.index.five
+	if anchorWidth == hanAnchorWidth {
+		windows = y.index.two
+	}
+
+	// Gather the right anchors once for this edit. They are offsets into y.
+	var rightAnchors [numberAnchorSlack + 1][]int
+	var rightBoundary [numberAnchorSlack + 1]int
+	rightLimit := min(slack, len(x.runes)-end)
+	for delta := 0; delta <= rightLimit; delta++ {
+		right := end + delta
+		anchor := x.runes[right:min(right+anchorWidth, len(x.runes))]
+		if len(anchor) == anchorWidth {
+			rightAnchors[delta] = windows[string(anchor)]
+		} else if len(y.runes) >= len(anchor) && slices.Equal(anchor, y.runes[len(y.runes)-len(anchor):]) {
+			rightBoundary[delta] = len(y.runes) - len(anchor)
+			rightAnchors[delta] = rightBoundary[delta : delta+1]
+		}
+	}
+
+	for left := start; left >= max(0, start-slack); left-- {
+		anchor := x.runes[max(0, left-anchorWidth):left]
+		var starts []int
+		var boundary [1]int
+		if len(anchor) == anchorWidth {
+			starts = windows[string(anchor)]
+		} else if len(y.runes) >= len(anchor) && slices.Equal(anchor, y.runes[:len(anchor)]) {
+			starts = boundary[:]
+		}
+		for delta, positions := range rightAnchors[:rightLimit+1] {
+			right := end + delta
+			// Two empty anchors share no text.
+			if len(positions) == 0 || len(anchor) == 0 && right == len(x.runes) {
+				continue
 			}
-		}
-		for t := range exc.terms {
-			if _, ok := cand.terms[t]; !ok {
-				return true
+			minGap := len(anchor)
+			maxGap := minGap + right - left + extra
+			for _, offset := range starts {
+				i, _ := slices.BinarySearch(positions, offset+minGap)
+				if i < len(positions) && positions[i] <= offset+maxGap {
+					return true
+				}
 			}
 		}
 	}
 	return false
 }
 
-func extractMeaningSignals(text string) meaningSignals {
-	runes := normalizeContextRunes(text)
-	for i, r := range runes {
-		if r == '\u2019' || r == '\u02bc' {
-			runes[i] = '\''
-		}
+func indexAnchorWindows(text string, offsets []int, anchorWidth int) map[string][]int {
+	windows := make(map[string][]int, max(0, len(offsets)-anchorWidth))
+	for i := 0; i+anchorWidth < len(offsets); i++ {
+		key := text[offsets[i]:offsets[i+anchorWidth]]
+		windows[key] = append(windows[key], i)
 	}
-	var numbers map[string]struct{}
-	var digitBuf []rune
-	flushDigits := func() {
-		if len(digitBuf) == 0 {
-			return
-		}
-		if numbers == nil {
-			numbers = make(map[string]struct{})
-		}
-		numbers[string(digitBuf)] = struct{}{}
-		digitBuf = digitBuf[:0]
-	}
-	for _, r := range runes {
-		if unicode.IsDigit(r) {
-			digitBuf = append(digitBuf, r)
-		} else {
-			flushDigits()
-		}
-	}
-	flushDigits()
+	return windows
+}
 
-	normStr := string(runes)
-	var terms map[string]struct{}
+func extractMeaningSignals(text string) meaningSignals {
+	runes := normalizeContextRunes(text, true)
+	signals := meaningSignals{runes: runes}
+	signals.extractNumbers()
+	for i, r := range runes {
+		if r == '\n' {
+			runes[i] = ' '
+		}
+	}
+	signals.text = string(runes)
 	for _, term := range meaningBearingWordTerms {
-		if containsWordTerm(normStr, term) {
-			if terms == nil {
-				terms = make(map[string]struct{})
-			}
-			terms[term] = struct{}{}
+		if containsWordTerm(signals.text, term) {
+			signals.addTerm(term)
 		}
 	}
 	for _, term := range meaningBearingDenseTerms {
-		if strings.Contains(normStr, term) {
-			if terms == nil {
-				terms = make(map[string]struct{})
-			}
-			terms[term] = struct{}{}
+		if strings.Contains(signals.text, term) {
+			signals.addTerm(term)
 		}
 	}
-	return meaningSignals{numbers: numbers, terms: terms}
+	signals.addKoreanNegators()
+	if japaneseNaiTerm(runes) {
+		signals.addTerm("ない")
+	}
+	for i, r := range runes {
+		switch r {
+		case '不', '没', '無', '无', '未', '非':
+			signals.han = append(signals.han, i)
+		}
+	}
+	return signals
+}
+
+func (x *meaningSignals) addTerm(term string) {
+	if x.terms == nil {
+		x.terms = make(map[string]struct{})
+	}
+	x.terms[term] = struct{}{}
+}
+
+func (x *meaningSignals) addKoreanNegators() {
+	runes := x.runes
+	for i := 0; i < len(runes); {
+		if !unicode.Is(unicode.Hangul, runes[i]) {
+			i++
+			continue
+		}
+		start := i
+		i++
+		for i < len(runes) && unicode.Is(unicode.Hangul, runes[i]) {
+			i++
+		}
+		switch {
+		case i-start == 1 && i+1 < len(runes) && runes[i] == ' ' && unicode.Is(unicode.Hangul, runes[i+1]):
+			if runes[start] == '안' || runes[start] == '못' {
+				x.addTerm(string(runes[start]))
+			}
+		case i-start >= 2 && runes[start] == '못':
+			switch runes[start+1] {
+			case '하', '한', '해', '했', '할', '합', '함':
+				x.addTerm("못")
+			}
+		}
+	}
+}
+
+var japaneseNaiAdjectives = [][]rune{
+	[]rune("少ない"), []rune("危ない"), []rune("切ない"), []rune("すくない"), []rune("あぶない"),
+	[]rune("せつない"), []rune("おさない"), []rune("きたない"), []rune("つたない"), []rune("はかない"),
+}
+
+func japaneseNaiTerm(runes []rune) bool {
+occurrence:
+	for i := 1; i+1 < len(runes); i++ {
+		if runes[i] != 'な' || runes[i+1] != 'い' || !unicode.In(runes[i-1], unicode.Hiragana, unicode.Han) {
+			continue
+		}
+		end := i + 2
+		for _, adjective := range japaneseNaiAdjectives {
+			if len(adjective) <= end && slices.Equal(runes[end-len(adjective):end], adjective) {
+				continue occurrence
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func containsWordTerm(normStr, term string) bool {
@@ -1627,8 +1800,11 @@ func cutExcerptToBudget(text string, remTokens, remBytes int, allowHardCut bool)
 	return body, true
 }
 
-func normalizeContextRunes(text string) []rune {
-	normalized := strings.ToLower(width.Fold.String(norm.NFC.String(text)))
+func normalizeContextRunes(text string, preserveLines bool) []rune {
+	normalized := width.Fold.String(norm.NFC.String(text))
+	if !preserveLines {
+		normalized = strings.ToLower(normalized)
+	}
 	runes := make([]rune, 0, len(normalized))
 	prevSpace := true
 	for _, r := range normalized {
@@ -1640,19 +1816,28 @@ func normalizeContextRunes(text string) []rune {
 				runes = append(runes, ' ')
 				prevSpace = true
 			}
+			if preserveLines && len(runes) > 0 {
+				switch r {
+				case '\n', '\r', '\v', '\f', '\u0085', '\u2028', '\u2029':
+					runes[len(runes)-1] = '\n'
+				}
+			}
 			continue
+		}
+		if preserveLines && (r == '\u2019' || r == '\u02bc') {
+			r = '\''
 		}
 		runes = append(runes, r)
 		prevSpace = false
 	}
-	if len(runes) > 0 && runes[len(runes)-1] == ' ' {
+	if len(runes) > 0 && prevSpace {
 		runes = runes[:len(runes)-1]
 	}
 	return runes
 }
 
 func extractContextShingles(text string) []uint64 {
-	runes := normalizeContextRunes(text)
+	runes := normalizeContextRunes(text, false)
 	if len(runes) == 0 {
 		return nil
 	}
