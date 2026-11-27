@@ -82,6 +82,46 @@ func scoredHostedHit(t *testing.T, record hostedRecord) *pinecone.ScoredVector {
 // Scores tie in groups, so the order of ties decides equality. A foreign tenant
 // and unlisted documents score higher than every member and must never appear.
 func TestHostedSetSearchEqualsTheExhaustiveAuthorizedResult(t *testing.T) {
+	t.Run("tagged filter equivalence", func(t *testing.T) {
+		doc, incarnation := memberID(0), memberIncarnation(0)
+		flat, err := structpb.NewStruct(map[string]any{
+			domain.VectorTenantKey:   map[string]any{"$eq": scopeTenant},
+			"collection":             map[string]any{"$eq": "team"},
+			"doc_type":               map[string]any{"$eq": "report"},
+			"doc_id":                 map[string]any{"$in": []any{doc}},
+			domain.VectorRevisionKey: map[string]any{"$in": []any{incarnation}},
+		})
+		require.NoError(t, err)
+		grouped := buildScopedFilter("report", []string{doc}, "team", scopeTenant, []string{incarnation})
+		match := func(filter *structpb.Struct, field, value string) bool {
+			metadata, err := structpb.NewStruct(map[string]any{
+				domain.VectorTenantKey: scopeTenant, "collection": "team", "doc_type": "report",
+				"doc_id": doc, domain.VectorRevisionKey: incarnation,
+			})
+			require.NoError(t, err)
+			if field != "" {
+				metadata.Fields[field] = structpb.NewStringValue(value)
+			}
+			found, err := matchesFilter(metadata, filter)
+			require.NoError(t, err)
+			return found
+		}
+		for _, filter := range []*structpb.Struct{flat, grouped} {
+			docs, incarnations := hostedFilterMembership(t, filter)
+			require.Equal(t, []string{doc}, docs)
+			require.Equal(t, []string{incarnation}, incarnations)
+			require.Equal(t, scopeTenant, hostedFilterEquality(filter, domain.VectorTenantKey))
+			require.Equal(t, "team", hostedFilterEquality(filter, "collection"))
+			require.Equal(t, "report", hostedFilterEquality(filter, "doc_type"))
+			require.True(t, match(filter, "", ""), "all predicates match")
+			for field, mismatch := range map[string]string{
+				domain.VectorTenantKey: "foreign", "collection": "other", "doc_type": "note",
+				"doc_id": memberID(1), domain.VectorRevisionKey: memberIncarnation(1),
+			} {
+				require.False(t, match(filter, field, mismatch), "%s is required", field)
+			}
+		}
+	})
 	for _, members := range []int{9999, 10000, 10001, 20001} {
 		t.Run(fmt.Sprint(members), func(t *testing.T) {
 			scope, ids := memberScope(members)
