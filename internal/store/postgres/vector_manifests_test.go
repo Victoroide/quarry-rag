@@ -10,8 +10,45 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
+
+type cutoverCountQuery struct {
+	counts []int64
+	err    error
+}
+
+func (q cutoverCountQuery) QueryRow(context.Context, string, ...any) pgx.Row { return q }
+
+func (q cutoverCountQuery) Scan(dest ...any) error {
+	for i := range q.counts {
+		*dest[i].(*int64) = q.counts[i]
+	}
+	return q.err
+}
+
+func TestReadHostedManifestCutoverCounts(t *testing.T) {
+	counts, err := readHostedManifestCutoverCounts(t.Context(), cutoverCountQuery{counts: []int64{1, 2, 3, 1 << 32}})
+	require.NoError(t, err)
+	require.Equal(t, HostedManifestCutoverCounts{Writing: 1, Active: 2, Retired: 3, Cleanups: 1 << 32}, counts)
+	for _, tc := range []struct {
+		name, detail string
+		err          error
+	}{
+		{"missing migration", "apply migration 047", &pgconn.PgError{Code: "42883"}},
+		{"denied", "count hosted manifest work", &pgconn.PgError{Code: "42501"}},
+		{"canceled", "count hosted manifest work", context.Canceled},
+		{"missing row", "count hosted manifest work", pgx.ErrNoRows},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counts, err := readHostedManifestCutoverCounts(t.Context(), cutoverCountQuery{counts: []int64{1}, err: tc.err})
+			require.ErrorIs(t, err, tc.err)
+			require.ErrorContains(t, err, tc.detail)
+			require.Empty(t, counts)
+		})
+	}
+}
 
 func manifestDatabase(t *testing.T) *Client {
 	t.Helper()

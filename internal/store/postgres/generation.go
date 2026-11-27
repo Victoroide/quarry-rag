@@ -701,7 +701,7 @@ func (c *Client) ActivateGeneration(ctx context.Context, name, corpusDigest stri
 // Activate makes the fenced target active.
 func (f *GenerationFence) Activate(ctx context.Context, corpusDigest string, window time.Duration) error {
 	name := f.name
-	tx, err := f.conn.Begin(ctx)
+	tx, err := f.conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return err
 	}

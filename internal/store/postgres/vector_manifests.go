@@ -8,9 +8,38 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var _ domain.VectorManifestStore = (*Client)(nil)
+
+// HostedManifestCutoverCounts counts all outstanding hosted work across the corpus.
+// The cleanup count is separate and can overlap the retired manifest count.
+type HostedManifestCutoverCounts struct {
+	Writing  int64 `json:"writing"`
+	Active   int64 `json:"active"`
+	Retired  int64 `json:"retired"`
+	Cleanups int64 `json:"cleanups"`
+}
+
+// HostedManifestCutoverCounts reports the work that can block PostgreSQL activation.
+func (c *Client) HostedManifestCutoverCounts(ctx context.Context) (HostedManifestCutoverCounts, error) {
+	return readHostedManifestCutoverCounts(ctx, c.Pool)
+}
+
+func readHostedManifestCutoverCounts(ctx context.Context, db queryRower) (HostedManifestCutoverCounts, error) {
+	var counts HostedManifestCutoverCounts
+	err := db.QueryRow(ctx, `SELECT writing, active, retired, cleanups FROM hosted_manifest_cutover_counts()`).
+		Scan(&counts.Writing, &counts.Active, &counts.Retired, &counts.Cleanups)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42883" {
+			return HostedManifestCutoverCounts{}, fmt.Errorf("postgres: apply migration 047 before PostgreSQL vector cutover: %w", err)
+		}
+		return HostedManifestCutoverCounts{}, fmt.Errorf("postgres: count hosted manifest work for cutover: %w", err)
+	}
+	return counts, nil
+}
 
 // PersistVectorManifest records a write-intent manifest for the owned job lease
 // before any external vector batch is dispatched.

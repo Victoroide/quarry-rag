@@ -2,8 +2,12 @@ package cleanup
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -252,31 +256,84 @@ func TestCleanupQualifiedTaggedDeletionUsesPinnedPostgres(t *testing.T) {
 	testQualifiedPostgresCleanup(t, true)
 }
 
+func applyCleanupMigrationsBefore(t *testing.T, metadata *pgstore.Client, before int) {
+	t.Helper()
+	root, err := os.OpenRoot("../store/postgres/migrations")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, root.Close()) }()
+	entries, err := fs.ReadDir(root.FS(), ".")
+	require.NoError(t, err)
+	ctx := t.Context()
+	tx, err := metadata.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		name := entry.Name()
+		prefix, _, _ := strings.Cut(name, "_")
+		version, versionErr := strconv.Atoi(prefix)
+		require.NoError(t, versionErr)
+		if version >= before {
+			break
+		}
+		body, readErr := root.ReadFile(name)
+		require.NoError(t, readErr)
+		_, applyErr := tx.Exec(ctx, string(body))
+		require.NoError(t, applyErr, name)
+		_, recordErr := tx.Exec(ctx, `INSERT INTO schema_migrations(version, name, checksum) VALUES($1, $2, $3)`,
+			version, name, fmt.Sprintf("%x", sha256.Sum256(body)))
+		require.NoError(t, recordErr)
+	}
+	require.NoError(t, tx.Commit(ctx))
+}
+
 func testQualifiedPostgresCleanup(t *testing.T, tagged bool) {
 	t.Helper()
+	ctx := t.Context()
 	databaseURL := pgtest.StartVector(t)
-	metadata, err := pgstore.NewClient(t.Context(), databaseURL)
+	metadata, err := pgstore.NewClient(ctx, databaseURL)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, metadata.Close(context.Background())) })
-	require.NoError(t, metadata.RunMigrations(t.Context()))
-	vectors, err := pgstore.NewVectorStore(t.Context(), metadata, 3)
+	cfg := &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL}
+	if tagged {
+		applyCleanupMigrationsBefore(t, metadata, 47)
+	} else {
+		require.NoError(t, metadata.RunMigrations(ctx))
+	}
+	vectors, err := pgstore.NewVectorStore(ctx, metadata, 3)
 	require.NoError(t, err)
-	cleaner, err := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL})
+	id := domain.DocumentID(uuid.NewString())
+	require.NoError(t, metadata.InsertDocument(ctx, domain.Document{ID: id}))
+	if tagged {
+		_, updateErr := metadata.Pool.Exec(ctx, `UPDATE documents SET scoped_vectors=TRUE WHERE id=$1`, id)
+		require.NoError(t, updateErr)
+	}
+	require.NoError(t, vectors.Upsert(ctx, "", []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: id, Embedding: []float32{1, 0, 0}}}))
+	var incarnation, revision string
+	require.NoError(t, metadata.Pool.QueryRow(ctx, `SELECT COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, id).Scan(&incarnation))
+	if tagged {
+		// Reproduce a hosted intent already stranded on PostgreSQL before
+		// migration 047 fenced writes and cutover.
+		store, target := cfg.VectorTarget()
+		require.NoError(t, metadata.PinCleanupVectorGeneration(ctx, cfg.ActiveVectorGeneration(), store, target, "", cfg.EmbeddingSettings()))
+		revision = uuid.NewString()
+		_, insertErr := metadata.Pool.Exec(ctx, `INSERT INTO hosted_vector_manifests
+			(revision_id,document_id,incarnation,attempt,id_prefix,vector_ids,chunk_ids)
+			VALUES($1,$2,$3,1,$4,ARRAY[$5]::text[],ARRAY[$6]::uuid[])`,
+			revision, id, incarnation, domain.RevisionVectorPrefix(id, revision),
+			domain.FormatRevisionVectorID(id, revision, 0), uuid.NewString())
+		require.NoError(t, insertErr)
+		require.NoError(t, metadata.RunMigrations(ctx))
+		counts, countErr := metadata.HostedManifestCutoverCounts(ctx)
+		require.NoError(t, countErr)
+		require.Equal(t, pgstore.HostedManifestCutoverCounts{Writing: 1}, counts)
+	}
+	cleaner, err := New(ctx, cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, cleaner.Close(context.Background())) })
-	seed := func() (domain.DocumentID, string) {
-		id := domain.DocumentID(uuid.NewString())
-		require.NoError(t, metadata.InsertDocument(t.Context(), domain.Document{ID: id}))
-		if tagged {
-			_, updateErr := metadata.Pool.Exec(t.Context(), `UPDATE documents SET scoped_vectors=TRUE WHERE id=$1`, string(id))
-			require.NoError(t, updateErr)
-		}
-		require.NoError(t, vectors.Upsert(t.Context(), "", []domain.Chunk{{ID: domain.ChunkID(uuid.NewString()), DocumentID: id, Embedding: []float32{1, 0, 0}}}))
-		var incarnation string
-		require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT COALESCE(incarnation,id)::text FROM documents WHERE id=$1`, string(id)).Scan(&incarnation))
-		return id, incarnation
-	}
-	id, incarnation := seed()
 	require.ErrorIs(t, cleaner.DeleteIncarnation(t.Context(), string(id), incarnation), domain.ErrDeletionInactive, "a premature qualifier is refused")
 	exists, err := metadata.DocumentExists(t.Context(), id)
 	require.NoError(t, err)
@@ -287,28 +344,19 @@ func testQualifiedPostgresCleanup(t *testing.T, tagged bool) {
 	require.ErrorIs(t, cleaner.Delete(t.Context(), string(id)), domain.ErrDeletionPreconditionRequired)
 	require.ErrorIs(t, cleaner.DeleteIncarnation(t.Context(), string(id), uuid.NewString()), domain.ErrDeletionPreconditionFailed)
 	if tagged {
-		direct, directErr := New(t.Context(), &config.Config{VectorStore: "postgres", DatabaseURL: databaseURL}, WithDirectRecovery(false))
-		require.NoError(t, directErr)
-		t.Cleanup(func() { require.NoError(t, direct.Close(context.Background())) })
-		require.ErrorIs(t, direct.DeleteIncarnation(t.Context(), string(id), incarnation), domain.ErrVectorStorageUnavailable)
-		// A persisted hosted write intent can survive a cutover even without
-		// an active revision pointer. The pinned cleaner has no hosted client.
-		revision := uuid.NewString()
-		_, err := metadata.Pool.Exec(t.Context(), `INSERT INTO hosted_vector_manifests
-			(revision_id,document_id,incarnation,attempt,id_prefix,vector_ids,chunk_ids)
-			VALUES($1,$2,$3,1,$4,ARRAY[$5]::text[],ARRAY[$6]::uuid[])`,
-			revision, id, incarnation, domain.RevisionVectorPrefix(id, revision),
-			domain.FormatRevisionVectorID(id, revision, 0), uuid.NewString())
-		require.NoError(t, err)
 		require.ErrorIs(t, cleaner.DeleteIncarnation(t.Context(), string(id), incarnation), domain.ErrVectorStorageUnavailable)
 		var intents int
 		require.NoError(t, metadata.Pool.QueryRow(t.Context(), `SELECT count(*) FROM document_deletions WHERE document_id=$1`, id).Scan(&intents))
 		require.Zero(t, intents)
-		exists, err := metadata.DocumentExists(t.Context(), id)
+		exists, err = metadata.DocumentExists(t.Context(), id)
 		require.NoError(t, err)
 		require.True(t, exists)
 		_, err = metadata.Pool.Exec(t.Context(), `UPDATE hosted_vector_manifests SET state='retired' WHERE revision_id=$1`, revision)
 		require.NoError(t, err)
+		direct, directErr := New(ctx, cfg, WithDirectRecovery(false))
+		require.NoError(t, directErr)
+		t.Cleanup(func() { require.NoError(t, direct.Close(context.Background())) })
+		require.ErrorIs(t, direct.DeleteIncarnation(t.Context(), string(id), incarnation), domain.ErrVectorStorageUnavailable)
 	}
 	require.NoError(t, cleaner.DeleteIncarnation(t.Context(), string(id), incarnation))
 	var remaining int
