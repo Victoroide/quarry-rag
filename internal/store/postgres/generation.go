@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -251,9 +252,8 @@ func rollbackFencedWriterTx(ctx context.Context, tx pgx.Tx) {
 	_ = tx.Rollback(cleanupCtx)
 }
 
-// AcquireHeldRecoveryWriter holds the freeze barrier for recovery that sends no
-// vector requests. The receipt separately identifies the retired physical index.
-// The returned transaction can also observe the outcome of a release commit.
+// AcquireHeldRecoveryWriter holds the session barrier for legacy hosted hold
+// recovery and provides an independent transaction for outcome read-back.
 func (c *Client) AcquireHeldRecoveryWriter(ctx context.Context) (pgx.Tx, func(), error) {
 	return c.acquireWriterSession(ctx, c.gateHeldRecoveryWriter)
 }
@@ -274,37 +274,49 @@ func (c *Client) gateHeldRecoveryWriter(ctx context.Context, tx pgx.Tx) error {
 	return c.checkAuthzMode(ctx, tx, corpusAuthzModeQuery)
 }
 
-func (c *Client) acquireWriterSession(ctx context.Context, check func(context.Context, pgx.Tx) error) (pgx.Tx, func(), error) {
-	if err := ctx.Err(); err != nil {
+func (c *Client) acquireWriterSession(ctx context.Context, check writerTxCheck) (pgx.Tx, func(), error) {
+	tx, closeSession, returnSlot, err := c.openWriterSession(ctx, check)
+	if err != nil {
 		return nil, nil, err
+	}
+	return tx, func() {
+		defer returnSlot()
+		closeSession()
+	}, nil
+}
+
+func (c *Client) openWriterSession(ctx context.Context, check writerTxCheck) (pgx.Tx, func(), func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
 	}
 	select {
 	case c.writerSlots <- struct{}{}:
 	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+		return nil, nil, nil, ctx.Err()
 	}
+	returnSlot := func() { <-c.writerSlots }
 	// The lock must not consume a pool connection while the operation uses
 	// the pool for document metadata or while a freeze is waiting for it.
 	conn, err := pgx.ConnectConfig(ctx, c.Pool.Config().ConnConfig)
 	if err != nil {
-		<-c.writerSlots
-		return nil, nil, err
+		returnSlot()
+		return nil, nil, nil, err
 	}
 	tx, err := beginFencedWriterTx(ctx, conn.BeginTx, check)
-	release := func() {
+	closeSession := sync.OnceFunc(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if tx != nil {
 			_ = tx.Rollback(cleanupCtx)
 		}
 		_ = conn.Close(cleanupCtx)
-		<-c.writerSlots
-	}
+	})
 	if err != nil {
-		release()
-		return nil, nil, err
+		closeSession()
+		returnSlot()
+		return nil, nil, nil, err
 	}
-	return tx, release, nil
+	return tx, closeSession, returnSlot, nil
 }
 
 var _ domain.WriterLocker = (*Client)(nil)
@@ -516,11 +528,11 @@ func (c *Client) FreezeWriters(ctx context.Context, generation string) error {
 	if !ValidGenerationName(generation) {
 		return fmt.Errorf("postgres: invalid generation name %q", generation)
 	}
-	tx, err := c.Pool.Begin(ctx)
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer rollbackFencedWriterTx(ctx, tx)
 	if _, err = tx.Exec(ctx, `SET LOCAL statement_timeout=0`); err != nil {
 		return fmt.Errorf("postgres: configure writer drain: %w", err)
 	}
@@ -530,6 +542,16 @@ func (c *Client) FreezeWriters(ctx context.Context, generation string) error {
 	// Admissions are blocked now, so no fixture can appear before the freeze is published.
 	if fixtureErr := requireServiceableFixtures(ctx, tx, generation); fixtureErr != nil {
 		return fixtureErr
+	}
+	var operationsEnabled bool
+	if err = tx.QueryRow(ctx, `SELECT COALESCE((to_jsonb(s)->>'writer_operations_enabled')::boolean,FALSE)
+		FROM vector_state s WHERE singleton FOR UPDATE`).Scan(&operationsEnabled); err != nil {
+		return fmt.Errorf("postgres: lock writer state: %w", err)
+	}
+	if operationsEnabled {
+		if err = checkWriterOperationsDrained(ctx, tx); err != nil {
+			return fmt.Errorf("postgres: drain writer operations: %w", err)
+		}
 	}
 	tag, err := tx.Exec(ctx, `UPDATE vector_state SET frozen=TRUE, frozen_at=CASE WHEN frozen THEN frozen_at ELSE clock_timestamp() END, freeze_generation=$1
  WHERE NOT frozen OR freeze_generation=$1`, generation)

@@ -63,3 +63,19 @@ type WriterGate interface {
 type WriterLocker interface {
 	AcquireWriter(ctx context.Context) (release func(), err error)
 }
+
+// WriterOperationKind identifies a maintenance workflow that may span sessions.
+type WriterOperationKind string
+
+const (
+	WriterOperationDelete              WriterOperationKind = "delete"
+	WriterOperationHeldRelease         WriterOperationKind = "held_release"
+	WriterOperationLegacyHostedRelease WriterOperationKind = "legacy_hosted_release"
+	WriterOperationReconcile           WriterOperationKind = "reconcile"
+)
+
+// WriterOperationRunner keeps a maintenance workflow fenced through its last
+// SQL checkpoint and external dispatch.
+type WriterOperationRunner interface {
+	RunWriterOperation(ctx context.Context, kind WriterOperationKind, target string, work func(context.Context) error) error
+}
