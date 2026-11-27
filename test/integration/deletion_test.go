@@ -478,6 +478,7 @@ func TestDeletionHTTPWaits(t *testing.T) {
 	t.Run("full_batch_after_receiver_exit", func(t *testing.T) {
 		checkAbandonedDeletionBatch(t, 2)
 	})
+	t.Run("abandoned_qualified_batch", testAbandonedQualifiedDeletionBatch)
 
 	t.Run("concurrent_publishers", func(t *testing.T) {
 		const requests = 6
@@ -1102,6 +1103,8 @@ func TestDeleteSurvivesClientDisconnectAndGracefulShutdown(t *testing.T) {
 	require.ErrorIs(t, <-served, http.ErrServerClosed)
 }
 
+const duplicateDeletionRequests = 8
+
 func TestConcurrentDuplicateDeletesRunEachStepOnce(t *testing.T) {
 	c := durableDatabase(t)
 	other := otherDatabaseClient(t, c)
@@ -1114,25 +1117,33 @@ func TestConcurrentDuplicateDeletesRunEachStepOnce(t *testing.T) {
 		return nil
 	})
 	servers := []*httptest.Server{deletionServer(t, c, "token", fullRoutes(stores)), deletionServer(t, other, "token", fullRoutes(stores))}
-	codes := make(chan int, 8)
-	var wg sync.WaitGroup
-	for i := range 8 {
-		wg.Go(func() { codes <- sendDelete(t, servers[i%2], "token", id, incarnation).code })
+	batchCtx, cancelBatch := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelBatch()
+	results := make(chan deletionHTTPResult, duplicateDeletionRequests)
+	for i := range duplicateDeletionRequests {
+		startDeletionRequest(results, fmt.Sprintf("duplicate DELETE %d", i+1), func() (httpReply, error) {
+			return readDeleteReply(batchCtx, servers[i%len(servers)], "token", id, incarnation)
+		})
 	}
-	wg.Wait()
-	close(codes)
 	ok := 0
-	for code := range codes {
-		switch code {
+	for range duplicateDeletionRequests {
+		reply, err := waitDeletionReply(batchCtx, results, "while collecting duplicate DELETE replies")
+		require.NoError(t, err)
+		switch reply.code {
 		case http.StatusOK:
 			ok++
 		case http.StatusServiceUnavailable:
 		default:
-			t.Errorf("unexpected status %d", code)
+			t.Errorf("unexpected duplicate DELETE status %d: %s", reply.code, reply.body)
 		}
 	}
+	cancelBatch()
 	require.Positive(t, ok)
-	require.Equal(t, http.StatusOK, sendDelete(t, servers[0], "token", id, incarnation).code)
+	retryCtx, cancelRetry := context.WithTimeout(t.Context(), 10*time.Second)
+	reply, err := readDeleteReply(retryCtx, servers[0], "token", id, incarnation)
+	cancelRetry()
+	require.NoError(t, err, "retry the completed qualified DELETE")
+	require.Equal(t, http.StatusOK, reply.code, reply.body)
 	require.Equal(t, 1, stores.count("revision"))
 	require.Equal(t, 1, stores.count("source"))
 	require.True(t, receiptOf(t, c, id).finalized)
@@ -1179,48 +1190,64 @@ func TestConcurrentReuseNeverTouchesTheReplacement(t *testing.T) {
 	other := otherDatabaseClient(t, c)
 	activateDeletion(t, c)
 	stores := newDeletionStores()
-	stores.hook("source", func(context.Context) error {
-		time.Sleep(150 * time.Millisecond)
-		return nil
-	})
 	server := deletionServer(t, c, "token", fullRoutes(stores))
 	id := uuid.NewString()
 	oldKey, newKey := "source/"+id+"/original", "source/"+id+"/replacement"
 	original := acceptDeletable(t, c, id, "original lifetime", true, oldKey)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	entered, release := blockFirstCalls(ctx, stores, "source", 1)
+	defer release()
 
-	deleted := make(chan int, 1)
-	go func() { deleted <- sendDelete(t, server, "token", id, original).code }()
-	deadline := time.Now().Add(20 * time.Second)
-	for documentState(t, c, id) != "deleting" {
-		require.True(t, time.Now().Before(deadline), "the intent never committed")
-		time.Sleep(2 * time.Millisecond)
-	}
+	deleted := make(chan deletionHTTPResult, 1)
+	startDeletionRequest(deleted, "qualified DELETE "+id, func() (httpReply, error) {
+		return readDeleteReply(ctx, server, "token", id, original)
+	})
+	entryCtx, cancelEntry := context.WithTimeout(ctx, 10*time.Second)
+	err := waitDeletionArrivals(entryCtx, entered, deleted, 1, "before releasing the original source deletion")
+	cancelEntry()
+	require.NoError(t, err)
+	stateCtx, cancelState := context.WithTimeout(t.Context(), 10*time.Second)
+	state, err := readDocumentState(stateCtx, c, id)
+	cancelState()
+	require.NoError(t, err, "read document state while the original source deletion is paused")
+	require.Equal(t, "deleting", state)
 	// A replacement is refused while the deletion is unfinished and accepted
 	// as soon as its receipt is complete.
 	replacement := domain.AcceptRequest{
 		Document: domain.Document{ID: domain.DocumentID(id), Content: "replacement lifetime", S3Key: &newKey}, CallerSupplied: true,
 		Fingerprint: chunker.ScopedFingerprint("", "replacement lifetime"), MaxPending: 100, SupportsScopedVectors: true,
 	}
-	refused := 0
-	for {
-		result, err := other.AcceptDocument(t.Context(), replacement)
-		require.NoError(t, err)
-		if result.Outcome == domain.AcceptDeletionConflict {
-			refused++
-			require.True(t, time.Now().Before(deadline), "the replacement was never admitted")
-			time.Sleep(5 * time.Millisecond)
-			continue
-		}
-		require.Equal(t, domain.AcceptAccepted, result.Outcome)
-		break
-	}
-	require.Equal(t, http.StatusOK, <-deleted)
-	require.Positive(t, refused, "the admission raced an unfinished deletion")
+	admissionCtx, cancelAdmission := context.WithTimeout(t.Context(), 10*time.Second)
+	result, err := other.AcceptDocument(admissionCtx, replacement)
+	cancelAdmission()
+	require.NoError(t, err, "admit replacement while the source deletion is paused")
+	require.Equal(t, domain.AcceptDeletionConflict, result.Outcome)
+
+	release()
+	replyCtx, cancelReply := context.WithTimeout(ctx, 10*time.Second)
+	reply, err := waitDeletionReply(replyCtx, deleted, "after releasing the original source deletion")
+	cancelReply()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, reply.code, reply.body)
+	admissionRetryCtx, cancelAdmissionRetry := context.WithTimeout(t.Context(), 10*time.Second)
+	result, err = other.AcceptDocument(admissionRetryCtx, replacement)
+	cancelAdmissionRetry()
+	require.NoError(t, err, "admit replacement after the original DELETE finishes")
+	require.Equal(t, domain.AcceptAccepted, result.Outcome)
 
 	successor := storedIncarnation(t, c, id)
 	require.NotEqual(t, original, successor)
-	require.Equal(t, http.StatusPreconditionFailed, sendDelete(t, server, "token", id, original).code, "a stale retry is rejected while a replacement lifetime is live")
-	require.Equal(t, "processing", documentState(t, c, id))
+	staleCtx, cancelStale := context.WithTimeout(t.Context(), 10*time.Second)
+	reply, err = readDeleteReply(staleCtx, server, "token", id, original)
+	cancelStale()
+	require.NoError(t, err, "retry DELETE with the original incarnation")
+	require.Equal(t, http.StatusPreconditionFailed, reply.code, "a stale retry is rejected while a replacement lifetime is live")
+	successorCtx, cancelSuccessor := context.WithTimeout(t.Context(), 10*time.Second)
+	state, err = readDocumentState(successorCtx, c, id)
+	cancelSuccessor()
+	require.NoError(t, err, "read the replacement document state")
+	require.Equal(t, "processing", state)
 	stored, err := c.GetDocumentS3Key(t.Context(), domain.DocumentID(id))
 	require.NoError(t, err)
 	require.NotNil(t, stored)
