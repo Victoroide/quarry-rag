@@ -560,25 +560,61 @@ An assignment of an existing document keeps the document's stored identity
 policy, so a historical retry never registers a shared match once the document
 is assigned. Its ownership starts unreadable and is published only by the
 [scoped backfill](development.md#scoped-metadata-backfill), which verifies the
-current chunks and vectors and requires the document row to match the assignment
-snapshot. A change to the row or its chunks after the snapshot, including a
-retry, leaves the document unreadable until the operator refreshes the
-assignment. Vectors without a validated tenant and incarnation, including those
-in legacy namespaces, are never eligible.
+current chunks and vectors. Refresh the assignment if a bound document property
+changes. Verify again if the chunk set changes and wait for outstanding vector
+mutations to settle before publishing readiness. Vectors require a validated
+tenant and incarnation, including vectors in legacy namespaces.
 
 ## Prepare a batch
 
 Read the policy revision and capture a source snapshot for each document to
 assign. Use an explicit tenant, owner and collection even when the collection
-label is empty. The source version hashes the current document row, including
-its effective incarnation. It binds the assignment to that snapshot. Content
-deduplication and other stored document properties retain their service-mode
-values. Chunk, object and index validation occur separately before readiness.
+label is empty. The source version is an opaque SHA-256 digest encoded as 64
+lowercase hexadecimal characters. It binds the assignment to the following
+document properties.
+
+- Document ID, effective incarnation (the document ID for a historical row with
+  no stored incarnation), collection and document type.
+- Fingerprint, content deduplication policy, content, metadata, content preview
+  and text source.
+- Original filename, file type and object key.
+- Status, chunk count, creation and completion timestamps, scoped vector
+  format, vector attempt and the required-incarnation flag.
+
+The digest preserves the distinction between null and empty values. Unrelated
+schema additions, assignment markers, untagged-vector stamps, visibility
+observations, error text, generic update timestamps and lease or vector mutation
+bookkeeping leave it stable.
 
 ```sql
 SELECT revision FROM grant_catalog_policy_revision;
 SELECT * FROM grant_catalog_source_snapshot('10000000-0000-4000-8000-000000000004');
 ```
+
+### Upgrade the source version
+
+Before applying migration 043, pause source snapshots, grant imports and scoped
+backfill. Apply the migration before rolling out compatible binaries. Replicas
+sharing the database then use the same digest through the existing SQL functions.
+Older binaries accept the same digest format and ignore migration history for
+versions they do not embed. Existing ready access, grants and audit records are preserved. A committed batch
+can still be replayed with the same login, batch ID and equivalent JSON payload.
+
+For an unapplied batch or a pending imported assignment, read the current policy
+revision and take fresh snapshots. For a pending import, confirm the owner,
+tenant and incarnation still match the assignment and use the current collection.
+Preview and apply a fresh batch ID to record the refresh before rerunning scoped
+verification. If the source snapshot or policy revision changes, recapture and
+validate it before submitting again. For a pre-upgrade assignment that is
+already ready, omit its assignment entry from new batches and supply the current
+incarnation on any grant entries. Resume the paused jobs after the cutover.
+
+Keep migration 043 applied when rolling back the binary. Restoring a database
+backup taken before the migration restores the old digest and policy state.
+Prepare fresh batches for uncommitted work against the restored database. Keep
+the view in place while import or backfill jobs are active.
+
+### Batch format
 
 Pass one JSON object on standard input. The two required header fields are
 `batch_id` and `expected_revision`. Each group is optional and at least one
