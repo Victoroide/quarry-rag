@@ -43,6 +43,9 @@ func TestWorkflowServicesUseTheLocalImages(t *testing.T) {
 	if got := services["postgres"].Image; !strings.HasPrefix(got, image+"@sha256:") || len(got) != len(image)+len("@sha256:")+64 {
 		t.Errorf("the postgres service uses %q, want %s pinned by a digest", got, image)
 	}
+	if got := services["postgres"].Image; got != replicationImage {
+		t.Errorf("the postgres service uses %q, want %s for replication", got, replicationImage)
+	}
 	if got := services["pgvector"].Image; got != vectorImage {
 		t.Errorf("the pgvector service uses %q, want %q", got, vectorImage)
 	}
