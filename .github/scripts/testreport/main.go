@@ -26,7 +26,7 @@ func main() {
 		// A closed standard stream must reach the writer and spool cleanup.
 		signal.Ignore(syscall.SIGPIPE)
 	}
-	os.Exit(runReport(o, os.Stdin, os.Stdout, os.Stderr, createDiagnosticSpool))
+	os.Exit(runReport(o, os.Stdin, os.Stdout, os.Stderr, createDiagnosticSpool, spoolLimit))
 }
 
 func parseOptions(args []string, stderr io.Writer) (options, bool) {
@@ -48,7 +48,7 @@ func parseOptions(args []string, stderr io.Writer) (options, bool) {
 	return o, true
 }
 
-func runReport(o options, in io.Reader, stdout, stderr io.Writer, factory spoolFactory) (status int) {
+func runReport(o options, in io.Reader, stdout, stderr io.Writer, factory spoolFactory, limit uint64) (status int) {
 	r := newRun()
 	diagnostics := &diagnosticWriter{Writer: stderr}
 	decode := r.decode
@@ -57,6 +57,7 @@ func runReport(o options, in io.Reader, stdout, stderr io.Writer, factory spoolF
 		delivery := &stickyWriter{Writer: stderr}
 		stdout, diagnostics.Writer = summary, delivery
 		r.store = newDiagnosticStore(factory)
+		r.store.limit = limit
 		defer func() {
 			r.store.close()
 			if r.store.failure != "" {
@@ -72,6 +73,9 @@ func runReport(o options, in io.Reader, stdout, stderr io.Writer, factory spoolF
 		decode = r.decodeSpill
 	}
 	err := decode(in, func(p *packageResult) {
+		if r.store != nil && (p.outcome == "pass" || p.outcome == "skip") {
+			r.discardOutput(&p.output)
+		}
 		if !progress(diagnostics, p) {
 			return
 		}

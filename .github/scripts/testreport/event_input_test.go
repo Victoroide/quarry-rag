@@ -47,6 +47,26 @@ func TestSpillJSONLResourceLimits(t *testing.T) {
 	}
 }
 
+func TestSpillMaximumDiagnosticEvent(t *testing.T) {
+	const prefix = `{"Action":"output","Package":"p","Test":"TestLarge","Output":"`
+	const suffix = "\"}\n"
+	size := maxEventBytes - len(prefix) - len(suffix)
+	payload := strings.Repeat("x", size)
+	s, probe, creates := newProbedDiagnosticStore(t, 2*maxEventBytes)
+	r := newRun()
+	r.store = s
+	r.names.names = make(map[string]string)
+	if err := r.decodeSpill(io.MultiReader(strings.NewReader(prefix), strings.NewReader(payload), strings.NewReader(suffix)),
+		func(*packageResult) { t.Error("unexpected terminal event") }); err != nil {
+		t.Fatal(err)
+	}
+	ref := &r.packages["p"].currentTest["TestLarge"].output.ref
+	verifyPageOutput(t, s, ref, payload)
+	if *creates != 1 || probe.highWater != int64(spoolHeaderSize+size) {
+		t.Fatalf("factory calls %d, extent %d", *creates, probe.highWater)
+	}
+}
+
 func FuzzSpillJSONL(f *testing.F) {
 	f.Add(fixture(f, "shared-build.json"))
 	f.Add(fixture(f, "benchmark-interrupted.json") + "{")
@@ -98,9 +118,15 @@ func TestSpillRetainedIdentityLimits(t *testing.T) {
 	t.Run("occurrences count repeats but not reused names", func(t *testing.T) {
 		r := newRun()
 		r.names.names = make(map[string]string)
+		s, probe, creates := newProbedDiagnosticStore(t, spoolPageSize)
+		r.store = s
 		ev := event{Action: "run", Package: "p", Test: "TestSame"}
+		output := event{Action: "output", Package: ev.Package, Test: ev.Test, Output: "reused\n"}
+		pass := event{Action: "pass", Package: ev.Package, Test: ev.Test}
 		for range maxTestOccurrences {
 			addBoundedEvent(t, r, ev)
+			addBoundedEvent(t, r, output)
+			addBoundedEvent(t, r, pass)
 		}
 		addBoundedEvent(t, r, event{Action: "output", Package: "p", Test: ev.Test})
 		if err := r.retainNames(&ev); !errors.Is(err, errTestLimit) || r.names.bytes != len("pTestSame") {
@@ -109,6 +135,9 @@ func TestSpillRetainedIdentityLimits(t *testing.T) {
 		first, last := r.packages["p"].testOrder[0], r.packages["p"].testOrder[maxTestOccurrences-1]
 		if first == last || first.name != last.name {
 			t.Fatal("repeated test conflated its occurrences")
+		}
+		if s.failure != "" || *creates != 1 || probe.highWater != int64(spoolHeaderSize+len(output.Output)) {
+			t.Fatalf("release at occurrence limit: failure %q, factory calls %d, extent %d", s.failure, *creates, probe.highWater)
 		}
 	})
 	t.Run("exact distinct byte limit", func(t *testing.T) {

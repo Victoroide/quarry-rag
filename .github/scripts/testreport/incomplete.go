@@ -194,10 +194,16 @@ func (r *run) retainRecentOutput(sections []incompleteSection, budget int) int {
 
 type fragmentHeap []*incompleteSection
 
-func (h fragmentHeap) Len() int           { return len(h) }
-func (h fragmentHeap) Less(i, j int) bool { return h[i].tail.ordinal > h[j].tail.ordinal }
-func (h fragmentHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *fragmentHeap) Push(x any)        { *h = append(*h, x.(*incompleteSection)) }
+func (h fragmentHeap) Len() int { return len(h) }
+func (h fragmentHeap) Less(i, j int) bool {
+	left, right := &h[i].tail, &h[j].tail
+	if left.ring != right.ring {
+		return left.ring
+	}
+	return left.ordinal > right.ordinal
+}
+func (h fragmentHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *fragmentHeap) Push(x any)   { *h = append(*h, x.(*incompleteSection)) }
 
 func (h *fragmentHeap) Pop() any {
 	last := len(*h) - 1

@@ -147,9 +147,10 @@ func (p *packageResult) startTest(name string) *testResult {
 	return t
 }
 
-func (p *packageResult) completeBenchmark(t *testResult) {
+func (r *run) completeBenchmark(p *packageResult, t *testResult) {
 	t.outcome = "bench"
-	t.output, t.measurement = diagnosticOutput{}, nil
+	r.discardOutput(&t.output)
+	t.measurement = nil
 	// Repeated benchmark measurements can produce more output without a run event.
 	delete(p.currentTest, t.name)
 }
@@ -184,7 +185,7 @@ func (r *run) add(ev event) *packageResult {
 	switch ev.Action {
 	case "run":
 		if isBenchmarkName(ev.Test) {
-			p.advanceBenchmarks(ev.Test)
+			r.advanceBenchmarks(p, ev.Test)
 			p.benchmarkPath = append(p.benchmarkPath, p.startTest(ev.Test))
 		} else if ev.Test != "" {
 			p.startTest(ev.Test)
@@ -197,7 +198,7 @@ func (r *run) add(ev event) *packageResult {
 		r.addOutput(p, ev)
 	case "bench":
 		if t := p.currentTest[ev.Test]; t != nil && t.outcome == "" {
-			p.completeBenchmark(t)
+			r.completeBenchmark(p, t)
 		}
 	case "pass", "fail", "skip":
 		if ev.Test != "" {
@@ -205,7 +206,8 @@ func (r *run) add(ev event) *packageResult {
 			t := p.test(ev.Test)
 			t.outcome, t.elapsed = ev.Action, ev.Elapsed
 			if ev.Action != "fail" {
-				t.output, t.measurement = diagnosticOutput{}, nil
+				r.discardOutput(&t.output)
+				t.measurement = nil
 			}
 			return nil
 		}
@@ -276,7 +278,7 @@ func (r *run) addOutput(p *packageResult, ev event) {
 		if t.outcome != "pass" && t.outcome != "skip" && ev.Output != "" {
 			r.appendOutput(&t.output, ev.Output)
 			if t.outcome == "" && r.endsBenchmark(t, ev.Output) {
-				p.completeBenchmark(t)
+				r.completeBenchmark(p, t)
 			}
 		}
 		return
@@ -287,7 +289,7 @@ func (r *run) addOutput(p *packageResult, ev event) {
 		// after an abrupt exit, so that summary cannot close benchmarks.
 		switch ev.Output {
 		case "PASS\n", "FAIL\n", "PASS\r\n", "FAIL\r\n":
-			p.advanceBenchmarks("")
+			r.advanceBenchmarks(p, "")
 		}
 	}
 	r.appendOutput(&p.output, ev.Output)

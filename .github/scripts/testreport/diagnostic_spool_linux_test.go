@@ -10,16 +10,6 @@ import (
 	"testing"
 )
 
-const reportProcess = "QUARRY_TESTREPORT_PROCESS"
-
-func TestDiagnosticSpillProcess(*testing.T) {
-	if os.Getenv(reportProcess) != "1" {
-		return
-	}
-	os.Args = []string{"testreport", "-diagnostic-spill"}
-	main()
-}
-
 func TestDiagnosticSpillBrokenPipeCleansUp(t *testing.T) {
 	temp := t.TempDir()
 	reader, writer, pipeErr := os.Pipe()
@@ -64,6 +54,7 @@ func BenchmarkDiagnosticSpillPeakRSS(b *testing.B) {
 			b.Fatalf("peak RSS increased by %d KiB (16 MiB stream: %d KiB, 128 MiB stream: %d KiB)",
 				large-small, small, large)
 		}
+		verifyReusedDiagnosticVolume(b, 1536)
 	}
 	b.ReportMetric(float64(small), "KiB_RSS_16MiB")
 	b.ReportMetric(float64(large), "KiB_RSS_128MiB")
@@ -74,7 +65,7 @@ func diagnosticRSS(b *testing.B, mebibytes int) int64 {
 	b.Helper()
 	cmd := exec.CommandContext(b.Context(), "/proc/self/exe", "-test.run=^TestDiagnosticSpillProcess$")
 	cmd.Env = append(os.Environ(), reportProcess+"=1")
-	input := newVolumeReader(mebibytes)
+	input := newVolumeReader(mebibytes, false)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = input, io.Discard, io.Discard
 	var exited *exec.ExitError
 	if err := cmd.Run(); !errors.As(err, &exited) || exited.ExitCode() != 1 ||

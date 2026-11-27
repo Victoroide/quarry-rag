@@ -69,7 +69,7 @@ func executeWithSpool(args []string, in io.Reader, stdout, stderr io.Writer, fac
 	if !ok {
 		return 2
 	}
-	return runReport(o, in, stdout, stderr, factory)
+	return runReport(o, in, stdout, stderr, factory, spoolLimit)
 }
 
 // section returns the part of a summary from the heading title up to the
