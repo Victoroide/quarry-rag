@@ -11,21 +11,28 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // legacyDocument stores a completed document with chunks and assigns it to the owner.
 func (f *ownedFixture) legacyDocument(t *testing.T, chunks int) (id string, chunkIDs []string) {
 	t.Helper()
+	return f.legacyDocumentContext(t.Context(), t, chunks)
+}
+
+func (f *ownedFixture) legacyDocumentContext(ctx context.Context, t *testing.T, chunks int) (id string, chunkIDs []string) {
+	t.Helper()
 	id = uuid.NewString()
-	grantExec(t, f.c, `INSERT INTO documents(id,content,status,chunk_count) VALUES($1,'legacy text','completed',$2)`, id, chunks)
+	grantExecContext(ctx, t, f.c, `INSERT INTO documents(id,content,status,chunk_count) VALUES($1,'legacy text','completed',$2)`, id, chunks)
 	ids := make([]string, chunks)
 	for i := range ids {
 		ids[i] = strings.ReplaceAll(uuid.NewString(), "-", "")
-		grantExec(t, f.c, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,$3,'chunk',1)`, ids[i], id, i)
+		grantExecContext(ctx, t, f.c, `INSERT INTO chunks(id,document_id,chunk_index,text,token_count) VALUES($1,$2,$3,'chunk',1)`, ids[i], id, i)
 	}
-	f.importBatch(t, func(b map[string]any) {
-		b["assignments"] = []grantEntry{grantAssignment(t, f.c, f.tenant, f.owner.ID, id)}
+	f.importBatchContext(ctx, t, func(b map[string]any) {
+		b["assignments"] = []grantEntry{grantAssignmentContext(ctx, t, f.c, f.tenant, f.owner.ID, id)}
 	})
 	return id, ids
 }
@@ -283,4 +290,353 @@ func TestVectorRowsMatchRequiresExactlyTheCurrentChunks(t *testing.T) {
 	matches, err = c.VectorRowsMatch(t.Context(), BackfillDocument{DocumentID: id})
 	require.NoError(t, err)
 	require.False(t, matches, "a document without chunks cannot be verified")
+}
+
+func hostedCandidate(ctx context.Context, t *testing.T, c *Client, id string) BackfillDocument {
+	t.Helper()
+	docs, err := c.BackfillHostedCandidates(ctx, "", MaxBackfillBatch)
+	require.NoError(t, err)
+	for _, doc := range docs {
+		if doc.DocumentID == id {
+			require.NotNil(t, doc.Hosted)
+			return doc
+		}
+	}
+	t.Fatalf("missing hosted candidate %s", id)
+	return BackfillDocument{}
+}
+
+func addBackfillManifest(ctx context.Context, t *testing.T, c *Client, doc BackfillDocument, state string, pointer bool) string {
+	t.Helper()
+	revision := uuid.NewString()
+	prefix := domain.RevisionVectorPrefix(domain.DocumentID(doc.DocumentID), revision)
+	keys := make([]string, len(doc.ChunkIDs))
+	for i := range keys {
+		keys[i] = domain.FormatRevisionVectorID(domain.DocumentID(doc.DocumentID), revision, i)
+	}
+	grantExecContext(ctx, t, c, `INSERT INTO hosted_vector_manifests
+		(revision_id,document_id,incarnation,attempt,id_prefix,vector_ids,chunk_ids,state)
+		VALUES($1,$2,$3,1,$4,$5,$6,$7)`, revision, doc.DocumentID, doc.Incarnation, prefix, keys, doc.ChunkIDs, state)
+	if pointer {
+		grantExecContext(ctx, t, c, `INSERT INTO hosted_vector_revisions(document_id,incarnation,active_revision_id)
+			VALUES($1,$2,$3)`, doc.DocumentID, doc.Incarnation, revision)
+	}
+	return revision
+}
+
+func TestHostedBackfillCandidateBindings(t *testing.T) {
+	f := newOwnedFixture(t)
+	healthy, ids := f.legacyDocument(t, 2)
+	current := hostedCandidate(t.Context(), t, f.c, healthy)
+	require.True(t, current.Hosted.Valid)
+	require.False(t, current.Hosted.Present)
+	require.NotEmpty(t, current.Hosted.Digest)
+	legacyDigest := current.Hosted.Digest
+	addBackfillManifest(t.Context(), t, f.c, current, "retired", false)
+	require.Equal(t, legacyDigest, hostedCandidate(t.Context(), t, f.c, healthy).Hosted.Digest)
+	active := addBackfillManifest(t.Context(), t, f.c, current, "active", true)
+	grantExec(t, f.c, `UPDATE hosted_vector_manifests SET vector_namespace='__default__' WHERE revision_id=$1`, active)
+	current = hostedCandidate(t.Context(), t, f.c, healthy)
+	require.True(t, current.Hosted.Valid)
+	require.True(t, current.Hosted.Present)
+	require.True(t, current.Hosted.SourceCurrent)
+	require.Equal(t, grantSource(t, f.c, healthy), current.SourceVersion)
+	require.Equal(t, active, current.Hosted.RevisionID)
+	require.Equal(t, ids, current.Hosted.ChunkIDs)
+	require.Equal(t, []int32{0, 1}, current.Hosted.ChunkIndexes)
+	require.Equal(t, 2, current.Hosted.DeclaredChunks)
+	require.Len(t, current.Hosted.Digest, 64)
+	require.NotEqual(t, legacyDigest, current.Hosted.Digest)
+	grantExec(t, f.c, `UPDATE hosted_vector_manifests SET activated_at=now() WHERE revision_id=$1`, active)
+	require.Equal(t, current.Hosted.Digest, hostedCandidate(t.Context(), t, f.c, healthy).Hosted.Digest)
+
+	for name, tc := range map[string]struct {
+		state   string
+		pointer bool
+		change  string
+	}{
+		"orphan active":             {"active", false, ""},
+		"orphan writing":            {"writing", false, ""},
+		"pointed retired":           {"retired", true, ""},
+		"pointed writing":           {"writing", true, ""},
+		"wrong owner":               {"active", true, `UPDATE hosted_vector_manifests SET document_id=gen_random_uuid() WHERE revision_id=$1`},
+		"wrong incarnation":         {"active", true, `UPDATE hosted_vector_manifests SET incarnation=gen_random_uuid() WHERE revision_id=$1`},
+		"wrong pointer incarnation": {"active", true, `UPDATE hosted_vector_revisions SET incarnation=gen_random_uuid() WHERE active_revision_id=$1`},
+		"wrong collection":          {"active", true, `UPDATE hosted_vector_manifests SET collection='other' WHERE revision_id=$1`},
+		"wrong namespace":           {"active", true, `UPDATE hosted_vector_manifests SET vector_namespace='other' WHERE revision_id=$1`},
+		"wrong prefix":              {"active", true, `UPDATE hosted_vector_manifests SET id_prefix='wrong' WHERE revision_id=$1`},
+		"cleanup attached": {"active", true, `INSERT INTO hosted_vector_cleanups(revision_id,document_id,incarnation,id_prefix,vector_ids)
+			SELECT revision_id,document_id,incarnation,id_prefix,vector_ids FROM hosted_vector_manifests WHERE revision_id=$1`},
+		"null element": {"active", true, `UPDATE hosted_vector_manifests SET chunk_ids[1]=NULL WHERE revision_id=$1`},
+		"null key":     {"active", true, `UPDATE hosted_vector_manifests SET vector_ids[1]=NULL WHERE revision_id=$1`},
+		"empty":        {"active", true, `UPDATE hosted_vector_manifests SET vector_ids='{}',chunk_ids='{}' WHERE revision_id=$1`},
+		"dimensions":   {"active", true, `UPDATE hosted_vector_manifests SET chunk_ids=ARRAY[chunk_ids,chunk_ids] WHERE revision_id=$1`},
+		"lower bound":  {"active", true, `UPDATE hosted_vector_manifests SET chunk_ids=array_fill(chunk_ids[1],ARRAY[2],ARRAY[0]) WHERE revision_id=$1`},
+		"length":       {"active", true, `UPDATE hosted_vector_manifests SET vector_ids=vector_ids[1:1] WHERE revision_id=$1`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			id, _ := f.legacyDocument(t, 2)
+			revision := addBackfillManifest(t.Context(), t, f.c, hostedCandidate(t.Context(), t, f.c, id), tc.state, tc.pointer)
+			if tc.change != "" {
+				grantExec(t, f.c, tc.change, revision)
+			}
+			got := hostedCandidate(t.Context(), t, f.c, id).Hosted
+			require.True(t, got.Present)
+			require.False(t, got.Valid)
+			require.Empty(t, got.Digest)
+			require.Empty(t, got.VectorIDs)
+			require.Empty(t, got.ChunkIDs)
+		})
+	}
+
+	for _, held := range []bool{false, true} {
+		id, _ := f.legacyDocument(t, 1)
+		doc := hostedCandidate(t.Context(), t, f.c, id)
+		grantExec(t, f.c, `INSERT INTO document_deletions(document_id,incarnation,kind,vector_mode,held,finalized)
+			VALUES($1,$2,'legacy_reservation','legacy',$3,$3)`, id, doc.Incarnation, held)
+		require.True(t, hostedCandidate(t.Context(), t, f.c, id).Hosted.DeletionReserved)
+		ok, err := f.c.PublishHostedBackfill(t.Context(), doc)
+		require.NoError(t, err)
+		require.False(t, ok)
+	}
+
+	stale, _ := f.legacyDocument(t, 1)
+	grantExec(t, f.c, `UPDATE documents SET content='changed source' WHERE id=$1`, stale)
+	require.False(t, hostedCandidate(t.Context(), t, f.c, stale).Hosted.SourceCurrent)
+	f.importBatch(t, func(b map[string]any) {
+		b["assignments"] = []grantEntry{grantAssignment(t, f.c, f.tenant, f.owner.ID, stale)}
+	})
+	require.True(t, hostedCandidate(t.Context(), t, f.c, stale).Hosted.SourceCurrent)
+
+	docs, err := f.c.BackfillHostedCandidates(t.Context(), "", 50)
+	require.NoError(t, err)
+	require.Greater(t, len(docs), 2)
+	var ordered []string
+	for _, doc := range docs {
+		ordered = append(ordered, doc.DocumentID)
+	}
+	require.True(t, sort.StringsAreSorted(ordered))
+	require.Contains(t, ordered, healthy)
+	page, err := f.c.BackfillHostedCandidates(t.Context(), ordered[0], 1)
+	require.NoError(t, err)
+	require.Equal(t, docs[1:2], page)
+	_, err = f.c.BackfillHostedCandidates(t.Context(), "bad uuid", 1)
+	require.ErrorContains(t, err, "cursor")
+
+	var extra []grantEntry
+	for range MaxBackfillBatch {
+		id := uuid.NewString()
+		grantExec(t, f.c, `INSERT INTO documents(id,content,status) VALUES($1,'zero chunks','completed')`, id)
+		extra = append(extra, grantAssignment(t, f.c, f.tenant, f.owner.ID, id))
+	}
+	f.importBatch(t, func(b map[string]any) { b["assignments"] = extra })
+	capped, err := f.c.BackfillHostedCandidates(t.Context(), "", 1000)
+	require.NoError(t, err)
+	require.Len(t, capped, MaxBackfillBatch)
+	var empty BackfillDocument
+	for _, doc := range capped {
+		if doc.Hosted.DeclaredChunks == 0 {
+			empty = doc
+			break
+		}
+	}
+	require.NotNil(t, empty.Hosted)
+	require.Empty(t, empty.ChunkIDs)
+	require.Empty(t, empty.Hosted.ChunkIndexes)
+	published, err := f.c.PublishHostedBackfill(t.Context(), empty)
+	require.NoError(t, err)
+	require.False(t, published, "an empty current chunk set cannot publish")
+}
+
+func TestPublishHostedBackfillFencesSnapshot(t *testing.T) {
+	f := newOwnedFixture(t)
+	publisher, publisherName := newHostedBackfillPublisher(t.Context(), t, f.c)
+	for name, changes := range map[string][]string{
+		"pointer added": {
+			`UPDATE hosted_vector_manifests SET state='active' WHERE revision_id=$2 AND document_id=$1`,
+			`INSERT INTO hosted_vector_revisions(document_id,incarnation,active_revision_id)
+			 SELECT document_id,incarnation,revision_id FROM hosted_vector_manifests WHERE document_id=$1 AND revision_id=$2`,
+		},
+		"pointer removed": {
+			`DELETE FROM hosted_vector_revisions WHERE document_id=$1 AND active_revision_id=$2`,
+			`UPDATE hosted_vector_manifests SET state='retired' WHERE revision_id=$2 AND document_id=$1`,
+		},
+		"pointer swapped": {
+			`UPDATE hosted_vector_manifests SET state='retired' WHERE document_id=$1 AND revision_id=$2`,
+			`UPDATE hosted_vector_manifests SET state='active' WHERE document_id=$1 AND revision_id<>$2`,
+			`UPDATE hosted_vector_revisions SET active_revision_id=(SELECT revision_id FROM hosted_vector_manifests
+			 WHERE document_id=$1 AND revision_id<>$2) WHERE document_id=$1`,
+		},
+		"retired":             {`UPDATE hosted_vector_manifests SET state='retired' WHERE document_id=$1 AND revision_id=$2`},
+		"changed order":       {`UPDATE hosted_vector_manifests SET vector_ids=ARRAY[vector_ids[2],vector_ids[1]] WHERE document_id=$1 AND revision_id=$2`},
+		"wrong chunk binding": {`UPDATE hosted_vector_manifests SET chunk_ids=ARRAY[chunk_ids[2],chunk_ids[1]] WHERE document_id=$1 AND revision_id=$2`},
+		"changed text":        {`UPDATE chunks SET text='different' WHERE document_id=$1 AND chunk_index=0 AND $2::uuid IS NOT NULL`},
+		"missing chunks":      {`DELETE FROM chunks WHERE document_id=$1 AND $2::uuid IS NOT NULL`},
+		"duplicate indexes":   {`UPDATE chunks SET chunk_index=0 WHERE document_id=$1 AND $2::uuid IS NOT NULL`},
+		"sparse indexes":      {`UPDATE chunks SET chunk_index=2 WHERE document_id=$1 AND chunk_index=1 AND $2::uuid IS NOT NULL`},
+		"reassigned tenant": {`UPDATE grant_catalog_document_ownership o
+			SET (tenant_id,principal_id)=(SELECT p.tenant_id,p.principal_id FROM grant_catalog_principals p
+			 WHERE p.tenant_id<>o.tenant_id)
+			WHERE o.document_id=$1 AND $2::uuid IS NOT NULL`},
+		"changed tokens": {`UPDATE chunks SET token_count=5 WHERE document_id=$1 AND chunk_index=0 AND $2::uuid IS NOT NULL`},
+		"changed source": {`UPDATE documents SET content='changed source' WHERE id=$1 AND $2::uuid IS NOT NULL`},
+		"declared count": {`UPDATE documents SET chunk_count=3 WHERE id=$1 AND $2::uuid IS NOT NULL`},
+		"pending":        {`UPDATE documents SET vector_mutation_pending=true WHERE id=$1 AND $2::uuid IS NOT NULL`},
+		"uncertain":      {`UPDATE documents SET vector_mutation_uncertain=true WHERE id=$1 AND $2::uuid IS NOT NULL`},
+		"deleted":        {`DELETE FROM documents WHERE id=$1 AND $2::uuid IS NOT NULL`},
+		"re-admitted": {
+			`DELETE FROM documents WHERE id=$1 AND $2::uuid IS NOT NULL`,
+			`INSERT INTO documents(id,content,status) SELECT $1,'re-admitted','completed' WHERE $2::uuid IS NOT NULL`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			id, _ := f.legacyDocumentContext(ctx, t, 2)
+			initial := hostedCandidate(ctx, t, f.c, id)
+			revision := addBackfillManifest(ctx, t, f.c, initial, "active", true)
+			if name == "pointer added" {
+				grantExecContext(ctx, t, f.c, `DELETE FROM hosted_vector_revisions WHERE document_id=$1`, id)
+				grantExecContext(ctx, t, f.c, `UPDATE hosted_vector_manifests SET state='retired' WHERE revision_id=$1`, revision)
+			}
+			if name == "pointer swapped" {
+				addBackfillManifest(ctx, t, f.c, initial, "retired", false)
+			}
+			doc := hostedCandidate(ctx, t, f.c, id)
+			tx, err := f.c.Pool.Begin(ctx)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback(ctx) }()
+			var blocker int32
+			require.NoError(t, tx.QueryRow(ctx, `SELECT pg_backend_pid() FROM documents WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&blocker))
+			for _, change := range changes {
+				_, err = tx.Exec(ctx, change, id, revision)
+				require.NoError(t, err)
+			}
+			done := startHostedBackfillPublish(ctx, publisher, doc)
+			waitForHostedBackfillPublishers(ctx, t, f.c, blocker, publisherName, 1)
+			require.NoError(t, tx.Commit(ctx))
+			result := awaitHostedBackfillPublish(ctx, t, done)
+			require.NoError(t, result.err)
+			require.False(t, result.published, "stale snapshot published")
+			switch name {
+			case "missing chunks", "duplicate indexes", "sparse indexes", "wrong chunk binding":
+				current := hostedCandidate(ctx, t, f.c, id)
+				ok, err := publisher.PublishHostedBackfill(ctx, current)
+				require.NoError(t, err)
+				require.False(t, ok, "the current malformed rows are ineligible even with their own digest")
+			}
+			assertDocumentAccessContext(ctx, t, f.c, id, f.owner.ID, false, false, false)
+		})
+	}
+	t.Run("valid concurrent publishers, replay and canceled lock", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		concurrentPublisher, concurrentName := newHostedBackfillPublisher(ctx, t, f.c)
+		id, _ := f.legacyDocumentContext(ctx, t, 2)
+		addBackfillManifest(ctx, t, f.c, hostedCandidate(ctx, t, f.c, id), "active", true)
+		doc := hostedCandidate(ctx, t, f.c, id)
+		for _, mutate := range []func(*BackfillDocument){
+			func(d *BackfillDocument) { d.TenantID = f.otherTenant },
+			func(d *BackfillDocument) { d.Incarnation = uuid.NewString() },
+			func(d *BackfillDocument) { d.SourceVersion = "stale source" },
+			func(d *BackfillDocument) { d.Hosted.Digest = "" },
+		} {
+			wrong := doc
+			snapshot := *doc.Hosted
+			wrong.Hosted = &snapshot
+			mutate(&wrong)
+			ok, err := publisher.PublishHostedBackfill(ctx, wrong)
+			require.NoError(t, err)
+			require.False(t, ok)
+		}
+		tx, err := f.c.Pool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(ctx) }()
+		var blocker int32
+		require.NoError(t, tx.QueryRow(ctx, `SELECT pg_backend_pid() FROM documents WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&blocker))
+		canceled, cancelPublish := context.WithCancel(ctx)
+		defer cancelPublish()
+		stopped := startHostedBackfillPublish(canceled, publisher, doc)
+		waitForHostedBackfillPublishers(ctx, t, f.c, blocker, publisherName, 1)
+		cancelPublish()
+		canceledResult := awaitHostedBackfillPublish(ctx, t, stopped)
+		require.ErrorIs(t, canceledResult.err, context.Canceled)
+		require.False(t, canceledResult.published)
+		assertDocumentAccessContext(ctx, t, f.c, id, f.owner.ID, false, false, false)
+
+		first := startHostedBackfillPublish(ctx, concurrentPublisher, doc)
+		second := startHostedBackfillPublish(ctx, concurrentPublisher, doc)
+		waitForHostedBackfillPublishers(ctx, t, f.c, blocker, concurrentName, 2)
+		require.NoError(t, tx.Commit(ctx))
+		for _, done := range []<-chan hostedBackfillPublishResult{first, second} {
+			result := awaitHostedBackfillPublish(ctx, t, done)
+			require.NoError(t, result.err)
+			require.True(t, result.published)
+		}
+		assertDocumentAccessContext(ctx, t, f.c, id, f.owner.ID, true, true, true)
+		ok, err := publisher.PublishHostedBackfill(ctx, doc)
+		require.NoError(t, err)
+		require.True(t, ok)
+		grantExecContext(ctx, t, f.c, `UPDATE hosted_vector_manifests SET state='retired' WHERE document_id=$1`, id)
+		ok, err = publisher.PublishHostedBackfill(ctx, doc)
+		require.NoError(t, err)
+		require.False(t, ok, "ready ownership cannot validate a stale snapshot")
+	})
+}
+
+func newHostedBackfillPublisher(ctx context.Context, t *testing.T, c *Client) (publisher *Client, name string) {
+	t.Helper()
+	name = "backfill-publisher-" + uuid.NewString()
+	publisher, err := NewClient(ctx, c.Pool.Config().ConnString(), func(cfg *pgxpool.Config) {
+		cfg.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
+		cfg.ConnConfig.RuntimeParams["application_name"] = name
+	})
+	require.NoError(t, err)
+	t.Cleanup(publisher.Pool.Close)
+	return publisher, name
+}
+
+type hostedBackfillPublishResult struct {
+	published bool
+	err       error
+}
+
+func startHostedBackfillPublish(ctx context.Context, publisher *Client, doc BackfillDocument) <-chan hostedBackfillPublishResult {
+	done := make(chan hostedBackfillPublishResult, 1)
+	go func() {
+		published, err := publisher.PublishHostedBackfill(ctx, doc)
+		done <- hostedBackfillPublishResult{published: published, err: err}
+	}()
+	return done
+}
+
+func awaitHostedBackfillPublish(ctx context.Context, t *testing.T, done <-chan hostedBackfillPublishResult) hostedBackfillPublishResult {
+	t.Helper()
+	select {
+	case result := <-done:
+		return result
+	case <-ctx.Done():
+		t.Fatalf("waiting for hosted backfill publisher: %v", ctx.Err())
+		return hostedBackfillPublishResult{}
+	}
+}
+
+func waitForHostedBackfillPublishers(ctx context.Context, t *testing.T, c *Client, holder int32, publisherName string, want int) {
+	t.Helper()
+	// A second publisher can wait on the first publisher's tuple lock.
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		var waiting int
+		err := c.Pool.QueryRow(ctx, `WITH RECURSIVE lock_edges AS MATERIALIZED (
+			SELECT pid, application_name, unnest(pg_blocking_pids(pid)) AS blocker
+			FROM pg_stat_activity WHERE datname=current_database()
+		), lock_chain(pid, application_name) AS (
+			SELECT pid, application_name FROM lock_edges WHERE blocker=$1
+			UNION
+			SELECT e.pid, e.application_name FROM lock_edges e JOIN lock_chain c ON e.blocker=c.pid
+		)
+		SELECT count(*) FROM lock_chain WHERE application_name=$2`, holder, publisherName).Scan(&waiting)
+		if assert.NoError(collect, err) {
+			assert.Equal(collect, want, waiting)
+		}
+	}, 4*time.Second, 20*time.Millisecond)
 }
