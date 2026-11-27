@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -162,6 +163,9 @@ func OpenGenerationVectorStore(ctx context.Context, client *Client, dimensions i
 	if !vectorType || stored != dimensions {
 		return nil, fmt.Errorf("%w: postgres embedding dimension mismatch: existing %d, configured %d", ErrGenerationDrift, stored, dimensions)
 	}
+	if layoutErr := validateVectorLayoutColumns(ctx, client.Pool, table); layoutErr != nil {
+		return nil, layoutErr
+	}
 	return store, nil
 }
 
@@ -217,6 +221,9 @@ func (c *Client) initVectors(ctx context.Context, dimensions int, table string) 
 	if !vectorType || storedDimensions != dimensions {
 		return fmt.Errorf("embedding dimension mismatch: existing %d, configured %d", storedDimensions, dimensions)
 	}
+	if layoutErr := validateVectorLayoutColumns(ctx, tx, table); layoutErr != nil {
+		return layoutErr
+	}
 	if indexErr := ensureVectorIndexes(ctx, tx, table); indexErr != nil {
 		return indexErr
 	}
@@ -259,8 +266,14 @@ func createVectorTable(ctx context.Context, tx pgx.Tx, dimensions int, table str
   kind TEXT,
   quality TEXT,
   token_count INTEGER NOT NULL,
-  embedding vector(%d) NOT NULL
- )`, pgx.Identifier{table}.Sanitize(), dimensions)
+  embedding vector(%d) NOT NULL,
+  pages INTEGER[] CONSTRAINT quarry_layout_pages_check
+    CHECK (pages IS NULL OR (cardinality(pages) BETWEEN 1 AND %d AND array_ndims(pages) = 1 AND array_lower(pages, 1) = 1)),
+  table_ids TEXT[] CONSTRAINT quarry_layout_table_ids_check
+    CHECK (table_ids IS NULL OR (cardinality(table_ids) BETWEEN 1 AND %d AND array_ndims(table_ids) = 1 AND array_lower(table_ids, 1) = 1)),
+  row_ids TEXT[] CONSTRAINT quarry_layout_row_ids_check
+    CHECK (row_ids IS NULL OR (cardinality(row_ids) BETWEEN 1 AND %d AND array_ndims(row_ids) = 1 AND array_lower(row_ids, 1) = 1))
+ )`, pgx.Identifier{table}.Sanitize(), dimensions, domain.MaxPDFPages, domain.MaxLayoutProvenanceIDs, domain.MaxLayoutProvenanceIDs)
 	_, err := tx.Exec(ctx, schema)
 	return err
 }
@@ -334,12 +347,18 @@ func vectorLiteral(embedding []float32, dimensions int) (string, error) {
 
 func insertVectors(ctx context.Context, tx pgx.Tx, table string, chunks []domain.Chunk, dimensions int) error {
 	literals := make([]string, len(chunks))
+	layouts := make([]pgLayoutProvenance, len(chunks))
 	for i, ch := range chunks {
 		literal, err := vectorLiteral(ch.Embedding, dimensions)
 		if err != nil {
 			return err
 		}
+		layout, err := layoutProvenanceToSQL(ch.Metadata)
+		if err != nil {
+			return err
+		}
 		literals[i] = literal
+		layouts[i] = layout
 	}
 	batch := &pgx.Batch{}
 	for i, ch := range chunks {
@@ -350,10 +369,10 @@ func insertVectors(ctx context.Context, tx pgx.Tx, table string, chunks []domain
 		collection, _ := ch.Metadata["collection"].(string)
 		kind, _ := ch.Metadata["kind"].(string)
 		quality, _ := ch.Metadata["quality"].(string)
-		batch.Queue(`INSERT INTO `+pgx.Identifier{table}.Sanitize()+`(chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,embedding)
-   VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),NULLIF($8,''),$9,$10::text::vector)
-   ON CONFLICT(chunk_id) DO UPDATE SET document_id=EXCLUDED.document_id,chunk_index=EXCLUDED.chunk_index,doc_type=EXCLUDED.doc_type,collection=EXCLUDED.collection,text=EXCLUDED.text,kind=EXCLUDED.kind,quality=EXCLUDED.quality,token_count=EXCLUDED.token_count,embedding=EXCLUDED.embedding`,
-			string(ch.ID), string(ch.DocumentID), ch.Index, docType, collection, ch.Text, kind, quality, ch.TokenCount, literals[i])
+		batch.Queue(`INSERT INTO `+pgx.Identifier{table}.Sanitize()+`(chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,embedding,pages,table_ids,row_ids)
+   VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),NULLIF($8,''),$9,$10::text::vector,$11,$12,$13)
+   ON CONFLICT(chunk_id) DO UPDATE SET document_id=EXCLUDED.document_id,chunk_index=EXCLUDED.chunk_index,doc_type=EXCLUDED.doc_type,collection=EXCLUDED.collection,text=EXCLUDED.text,kind=EXCLUDED.kind,quality=EXCLUDED.quality,token_count=EXCLUDED.token_count,embedding=EXCLUDED.embedding,pages=EXCLUDED.pages,table_ids=EXCLUDED.table_ids,row_ids=EXCLUDED.row_ids`,
+			string(ch.ID), string(ch.DocumentID), ch.Index, docType, collection, ch.Text, kind, quality, ch.TokenCount, literals[i], layouts[i].pages, layouts[i].tableIDs, layouts[i].rowIDs)
 	}
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
 		return fmt.Errorf("insert vectors: %w", err)
@@ -487,7 +506,9 @@ func scanScoredChunks(ctx context.Context, tx pgx.Tx, query string, args ...any)
 		var docType, collection string
 		var kind, quality, revision, attempt *string
 		var incarnationRequired bool
-		if scanErr := rows.Scan(&sc.Chunk.ID, &sc.Chunk.DocumentID, &sc.Chunk.Index, &docType, &collection, &sc.Chunk.Text, &kind, &quality, &sc.Chunk.TokenCount, &sc.Score, &sc.ObservedIncarnation, &revision, &attempt, &incarnationRequired); scanErr != nil {
+		var rawPages pgtype.Array[pgtype.Int4]
+		var rawTableIDs, rawRowIDs pgtype.Array[pgtype.Text]
+		if scanErr := rows.Scan(&sc.Chunk.ID, &sc.Chunk.DocumentID, &sc.Chunk.Index, &docType, &collection, &sc.Chunk.Text, &kind, &quality, &sc.Chunk.TokenCount, &rawPages, &rawTableIDs, &rawRowIDs, &sc.Score, &sc.ObservedIncarnation, &revision, &attempt, &incarnationRequired); scanErr != nil {
 			return nil, scanErr
 		}
 		sc.Chunk.Metadata = map[string]any{"doc_type": docType}
@@ -507,6 +528,9 @@ func scanScoredChunks(ctx context.Context, tx pgx.Tx, query string, args ...any)
 		}
 		if published || incarnationRequired {
 			sc.Chunk.VectorIncarnation = sc.ObservedIncarnation
+		}
+		if layoutErr := applyLayoutProvenanceFromSQL(sc.Chunk.Metadata, rawPages, rawTableIDs, rawRowIDs); layoutErr != nil {
+			return nil, layoutErr
 		}
 		out = append(out, sc)
 	}
@@ -644,7 +668,7 @@ ranked AS (
  FROM candidates
  ORDER BY distance,chunk_id%[4]s
 )
-SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-r.distance,
+SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.pages,v.table_ids,v.row_ids,1-r.distance,
        r.observed_incarnation,r.observed_revision,r.observed_attempt,r.vector_incarnation_required
 FROM ranked r JOIN %[1]s v ON v.chunk_id=r.chunk_id
 ORDER BY r.distance,v.chunk_id`, pgx.Identifier{table}.Sanitize(), predicates, scopeArg, limitClause, join)
@@ -660,14 +684,14 @@ func searchSQL(table, literal string, topK int, filter domain.VectorFilter, matc
 	if !ok {
 		return "", nil, false
 	}
-	query = `SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.embedding <=> $1::text::vector AS distance,
+	query = `SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.pages,v.table_ids,v.row_ids,v.embedding <=> $1::text::vector AS distance,
  ` + rankedIdentitySQL + `
  FROM ` + pgx.Identifier{table}.Sanitize() + ` v JOIN documents d ON d.id=v.document_id AND d.status='completed'` + join + ` WHERE TRUE` + predicates
 	if topK > 0 {
 		args = append(args, topK)
 		query += fmt.Sprintf(" ORDER BY distance LIMIT $%d", len(args))
 	}
-	query = `SELECT chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,1-distance,
+	query = `SELECT chunk_id,document_id,chunk_index,doc_type,collection,text,kind,quality,token_count,pages,table_ids,row_ids,1-distance,
         observed_incarnation,observed_revision,observed_attempt,vector_incarnation_required
  FROM (` + query + `) s ORDER BY distance,chunk_id`
 	return query, args, true
@@ -780,7 +804,7 @@ func (s *VectorStore) Fetch(ctx context.Context, ids []string) (map[string]domai
 	if len(ids) > MaxFetchIDs {
 		return nil, fmt.Errorf("postgres: fetch accepts at most %d keys", MaxFetchIDs)
 	}
-	rows, err := s.client.Pool.Query(ctx, `SELECT chunk_id,document_id::text,chunk_index,doc_type,collection,text,kind,quality,token_count,embedding::text
+	rows, err := s.client.Pool.Query(ctx, `SELECT chunk_id,document_id::text,chunk_index,doc_type,collection,text,kind,quality,token_count,pages,table_ids,row_ids,embedding::text
  FROM `+pgx.Identifier{s.table}.Sanitize()+` WHERE chunk_id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: fetch vectors: %w", err)
@@ -790,7 +814,9 @@ func (s *VectorStore) Fetch(ctx context.Context, ids []string) (map[string]domai
 		var chunk domain.Chunk
 		var id, docType, collection, embedding string
 		var kind, quality *string
-		if err = rows.Scan(&id, &chunk.DocumentID, &chunk.Index, &docType, &collection, &chunk.Text, &kind, &quality, &chunk.TokenCount, &embedding); err != nil {
+		var rawPages pgtype.Array[pgtype.Int4]
+		var rawTableIDs, rawRowIDs pgtype.Array[pgtype.Text]
+		if err = rows.Scan(&id, &chunk.DocumentID, &chunk.Index, &docType, &collection, &chunk.Text, &kind, &quality, &chunk.TokenCount, &rawPages, &rawTableIDs, &rawRowIDs, &embedding); err != nil {
 			return nil, fmt.Errorf("postgres: read vector: %w", err)
 		}
 		chunk.ID = domain.ChunkID(id)
@@ -803,6 +829,9 @@ func (s *VectorStore) Fetch(ctx context.Context, ids []string) (map[string]domai
 		}
 		if quality != nil {
 			chunk.Metadata["quality"] = *quality
+		}
+		if layoutErr := applyLayoutProvenanceFromSQL(chunk.Metadata, rawPages, rawTableIDs, rawRowIDs); layoutErr != nil {
+			return nil, layoutErr
 		}
 		out[id] = chunk
 	}

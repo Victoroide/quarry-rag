@@ -18,7 +18,10 @@ func TestMigrationParser(t *testing.T) {
  CREATE TABLE children (id UUID PRIMARY KEY, parent_id UUID REFERENCES parents(id));
  ALTER TABLE parents ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ, ADD COLUMN old TEXT,
      ADD CONSTRAINT amount_range CHECK (amount > 0 AND amount < 100);
- DO $$ BEGIN ALTER TABLE parents ADD COLUMN active BOOLEAN; END $$;
+ DO $$ BEGIN
+   ALTER TABLE ONLY parents ADD COLUMN active BOOLEAN;
+   EXECUTE format('ALTER TABLE ONLY %I.%I ADD COLUMN external TEXT', 'custom', 'vectors');
+ END $$;
  ALTER TABLE parents DROP COLUMN IF EXISTS old;`
 	got, err := parseSQL(sql)
 	if err != nil {
@@ -30,7 +33,7 @@ func TestMigrationParser(t *testing.T) {
 	if _, ok := got["parents"]["old"]; ok {
 		t.Fatal("dropped column retained")
 	}
-	if _, err := parseSQL(`ALTER TABLE unknown ADD COLUMN x TEXT;`); err == nil {
+	if _, err := parseSQL(`ALTER TABLE ONLY unknown ADD COLUMN x TEXT;`); err == nil {
 		t.Fatal("unknown table accepted")
 	}
 	replaced, replaceErr := parseSQL(`CREATE TABLE parents (id UUID PRIMARY KEY, kind TEXT CHECK (kind IN ('a'))); ALTER TABLE parents DROP CONSTRAINT parents_kind_check; ALTER TABLE parents ADD CONSTRAINT parents_kind_check CHECK (kind IN ('a', 'b'));`)

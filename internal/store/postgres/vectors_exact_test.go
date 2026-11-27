@@ -76,7 +76,7 @@ func exhaustiveQuerySnapshot(t *testing.T, tx pgx.Tx, embedding []float32, dims,
 		args = append(args, topK)
 		limitClause = fmt.Sprintf(" LIMIT $%d", len(args))
 	}
-	sql := fmt.Sprintf(`SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,1-(v.embedding <=> $1::text::vector) AS score,
+	sql := fmt.Sprintf(`SELECT v.chunk_id,v.document_id::text,v.chunk_index,v.doc_type,v.collection,v.text,v.kind,v.quality,v.token_count,v.pages,v.table_ids,v.row_ids,1-(v.embedding <=> $1::text::vector) AS score,
  `+rankedIdentitySQL+`
  FROM chunk_vectors v JOIN documents d ON d.id=v.document_id
  WHERE %s

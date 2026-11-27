@@ -321,6 +321,9 @@ The optional `chunk_vectors` table is created dynamically after base migrations,
 | `kind`, `quality` | Nullable `TEXT` | Optional chunk labels. |
 | `token_count` | `INTEGER NOT NULL` | Estimated chunk tokens. |
 | `embedding` | `vector(n) NOT NULL` | Finite, nonzero cosine vector; dimension comes from [configuration](configuration.md#environment-variables). |
+| `pages` | Nullable `INTEGER[]` | Optional ordered one-based PDF layout page numbers (1 to 1,000 when present). |
+| `table_ids` | Nullable `TEXT[]` | Optional ordered document-scoped table IDs (`p<page>-t<table>`, 1 to 250,000 when present). |
+| `row_ids` | Nullable `TEXT[]` | Optional ordered document-scoped row IDs (`p<page>-t<table>-r<row>`, 1 to 250,000 when present). |
 
 An HNSW index uses `vector_cosine_ops`. B-tree indexes cover `document_id` and
 `collection`. Preparing or enabling exact search adds indexes on
@@ -332,6 +335,8 @@ and attempt from that same snapshot. Evidence validation compares those values
 with the current publication. Checkpointed deletion on a transactional target
 uses local mode, with vector rows cascading when source cleanup has completed
 and the document is removed.
+The nullable layout arrays require no index or historical backfill. Migration
+039 extends existing dynamic vector tables, which the static model omits.
 
 At [`PGVECTOR_EXACT_SCOPE_MAX=0`](configuration.md#environment-variables), search
 preserves its existing ranking and applies supplied labels to `chunk_vectors`.

@@ -233,8 +233,12 @@ func parseSQL(sql string) (sqlSchema, error) {
 			schema[table][c.Name] = c
 		}
 	}
-	alter := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(\w+)\s+([^;]+)`)
+	alter := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(?:ONLY\s+)?(\w+|%I(?:\.%I)?)\s+([^;]+)`)
 	for _, m := range alter.FindAllStringSubmatch(sql, -1) {
+		// A format identifier selects a dynamic relation outside the static model.
+		if strings.HasPrefix(m[1], "%") {
+			continue
+		}
 		// Grant storage belongs to the operator reference, so its tables are not modeled here.
 		if strings.HasPrefix(m[1], "grant_catalog_") {
 			continue
