@@ -23,6 +23,7 @@ Notable changes are grouped by release.
 
 ### Fixed
 
+- The CI race report no longer mistakes test diagnostics for cached package results.
 - The CI race report retains unfinished test output when a compiler failure shares the package name.
 - Vector reindex reports the hosted drain reason and available counts on stderr when the activation report cannot be written.
 - Vector reindex activation preserves the hosted-manifest refusal when writing its JSON report fails.
