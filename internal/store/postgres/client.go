@@ -63,6 +63,9 @@ func NewClient(ctx context.Context, databaseURL string, opts ...Option) (*Client
 	for _, opt := range opts {
 		opt(config)
 	}
+	if config.HealthCheckPeriod <= 0 {
+		return nil, errors.New("postgres: configure pool: pool_health_check_period must be greater than zero")
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect: %w", err)
