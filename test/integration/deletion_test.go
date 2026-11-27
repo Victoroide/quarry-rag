@@ -517,6 +517,77 @@ func checkAbandonedDeletionBatch(t *testing.T, requests int) {
 	})
 }
 
+func TestPausedMemoryFixtureReleasesOnExit(t *testing.T) {
+	for _, name := range []string{"early_return", "duplicate_release", "fixture_canceled", "provider_canceled"} {
+		t.Run(name, func(t *testing.T) {
+			watchdog, stop := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stop()
+			fixture, cancelFixture := context.WithCancelCause(watchdog)
+			defer cancelFixture(nil)
+			provider, cancelProvider := context.WithCancelCause(watchdog)
+			defer cancelProvider(nil)
+			index := memory.NewFakeVectorStore()
+			vectors, release := newPausedMemory(fixture, index)
+			const id = "doc"
+			require.NoError(t, vectors.DeleteByDocID(provider, id))
+			embedding := []float32{1}
+			require.NoError(t, index.Upsert(watchdog, "", []domain.Chunk{{
+				ID: "chunk", DocumentID: id, Text: "still indexed until release", Embedding: embedding,
+			}}))
+			providerResult := make(chan error, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				err := vectors.DeleteByDocID(provider, id)
+				providerResult <- err
+				if err != nil {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			defer release()
+			results := make(chan deletionHTTPResult, 1)
+			cause := errors.New("source context stopped")
+			func() {
+				if name == "early_return" {
+					defer release()
+				}
+				startDeletionRequest(results, "memory DELETE", func() (httpReply, error) {
+					return readDeleteReply(watchdog, server, "", id, "")
+				})
+				require.NoError(t, waitDeletionArrivals(watchdog, vectors.entered, results, 1, "before the memory release"))
+				switch name {
+				case "duplicate_release":
+					release()
+					release()
+				case "fixture_canceled":
+					cancelFixture(cause)
+				case "provider_canceled":
+					cancelProvider(cause)
+				}
+			}()
+			reply, err := waitDeletionReply(watchdog, results, "after leaving the memory gate")
+			require.NoError(t, err)
+			select {
+			case err = <-providerResult:
+			case <-watchdog.Done():
+				t.Fatal("memory provider did not finish before server close")
+			}
+			hits, queryErr := index.QueryAllNamespaces(watchdog, embedding, 1, "")
+			require.NoError(t, queryErr)
+			if name == "fixture_canceled" || name == "provider_canceled" {
+				require.ErrorIs(t, err, cause)
+				require.Equal(t, http.StatusServiceUnavailable, reply.code)
+				require.Len(t, hits, 1, "cancellation must leave the paused mutation unapplied")
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, http.StatusOK, reply.code)
+				require.Empty(t, hits)
+			}
+		})
+	}
+}
+
 func TestHTTPDeleteRetryCannotRemoveReplacement(t *testing.T) {
 	c := durableDatabase(t)
 	other := otherDatabaseClient(t, c)
