@@ -36,6 +36,7 @@ Notable changes are grouped by release.
 
 - Restrict the PostgreSQL serving audit writer to runtime actions and valid outcomes, reserving cutover and grant import events for operator transactions.
 - Scoped deletion now checks PostgreSQL transaction status, server identity, and the exact receipt after an uncertain intent `COMMIT`. A confirmed commit resumes detached cleanup. A confirmed rollback or precommit failure preserves the existing cancellation and expiry responses. Unconfirmed commits and postcommit cleanup failures return a retryable `500` and record `commit_unconfirmed` and `delete_failed`, respectively.
+- PDF layout jobs, including retries with saved checkpoints, wait for a worker with layout analysis support. Apply migration `040_layout_pdf_claim_capability.sql` before admitting layout work.
 
 ### Changed
 

@@ -246,6 +246,11 @@ GRANT EXECUTE ON FUNCTION public.evaluation_fixture_claimable(uuid, text),
   public.document_deletion_reserved(uuid), public.hosted_vector_revision_visible(uuid, uuid) TO quarry_service;
 ```
 
+The serving login already holds `SELECT` on `public.document_pdf_extractions`
+(shown above), which the `SECURITY INVOKER` layout claim trigger added in
+`040_layout_pdf_claim_capability.sql` also uses; no new runtime grants are
+required beyond those base privileges.
+
 After applying `030_deletion_mode_lock.sql` and before starting this release
 with a hosted or offline vector store in any authorization mode, grant execution
 of `document_deletion_active_shared`. Admission to a backend that supports

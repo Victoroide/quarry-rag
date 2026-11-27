@@ -135,7 +135,7 @@ func schemaColumnBaseline(index int) float64 {
 }
 
 func dataModel() diagram {
-	d := diagram{Name: "database-schema", Title: "PostgreSQL document lifecycle", MaxW: 840, MaxH: 1430,
+	d := diagram{Name: "database-schema", Title: "PostgreSQL document lifecycle", MaxW: 840, MaxH: 1150,
 		Description: "PostgreSQL document lifecycle data model. The documents table holds an incarnation UUID. The chunks, document_fingerprints, ingest_jobs and document_pdf_extractions tables reference documents.id with cascading deletion. The source_uploads table journals original-file uploads and references documents.id with cascading deletion once acceptance links an upload. The evaluation_fixtures table keeps receipt-qualified UUID reservations, and its active_document_id reference to documents.id restricts deletion until cleanup completes. PK denotes primary key and FK denotes foreign key. SQL types appear beside every column."}
 	d.Nodes = []node{
 		{ID: "documents", Title: "documents", Columns: []column{
@@ -149,7 +149,7 @@ func dataModel() diagram {
 			{"untagged_since", "XID8", "", ""}}},
 		{ID: "chunks", Title: "chunks", Columns: []column{{"id", "UUID", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"chunk_index", "INTEGER", "", ""}, {"text", "TEXT", "", ""}, {"token_count", "INTEGER", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "document_fingerprints", Title: "document_fingerprints", Columns: []column{{"fingerprint", "TEXT", "PK", ""}, {"document_id", "UUID", "FK", "documents.id"}, {"created_at", "TIMESTAMPTZ", "", ""}}},
-		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"pdf_required", "BOOLEAN", "", ""}, {"pdf_claim_attempt", "INTEGER", "", ""}, {"lease_token", "UUID", "", ""}}},
+		{ID: "ingest_jobs", Title: "ingest_jobs", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"state", "TEXT", "", ""}, {"attempts", "INTEGER", "", ""}, {"lease_owner", "TEXT", "", ""}, {"lease_until", "TIMESTAMPTZ", "", ""}, {"next_attempt_at", "TIMESTAMPTZ", "", ""}, {"last_error", "TEXT", "", ""}, {"created_at", "TIMESTAMPTZ", "", ""}, {"updated_at", "TIMESTAMPTZ", "", ""}, {"pdf_required", "BOOLEAN", "", ""}, {"pdf_claim_attempt", "INTEGER", "", ""}, {"lease_token", "UUID", "", ""}, {"layout_claim_attempt", "INTEGER", "", ""}}},
 		{ID: "document_pdf_extractions", Title: "document_pdf_extractions", Columns: []column{{"document_id", "UUID", "PK/FK", "documents.id"}, {"profile", "TEXT", "", ""}, {"manifest", "JSONB", "", ""}, {"coverage", "TEXT", "", ""}, {"page_results", "JSONB", "", ""}, {"window_id", "UUID", "", ""}, {"started_at", "TIMESTAMPTZ", "", ""}, {"start_bound_at", "TIMESTAMPTZ", "", ""}, {"accepted_at", "TIMESTAMPTZ", "", ""}}},
 		{ID: "evaluation_fixtures", Title: "evaluation_fixtures", Columns: []column{
 			{"document_id", "UUID", "PK", ""}, {"receipt", "UUID", "", ""}, {"incarnation", "UUID", "", ""}, {"active_document_id", "UUID", "FK", "documents.id"}, {"vector_identity", "TEXT", "", ""}}},
@@ -163,15 +163,17 @@ func dataModel() diagram {
 		{"documents-chunks", "chunks", "0..n", 452, 126, 138},
 		{"documents-fingerprints", "document_fingerprints", "0..n", 440, 138, 296},
 		{"documents-jobs", "ingest_jobs", "0..1", 428, 150, 382},
-		{"documents-pdf-extractions", "document_pdf_extractions", "0..1", 416, 162, 648},
-		{"documents-evaluation", "evaluation_fixtures", "0..1", 404, 174, 914},
-		{"documents-uploads", "source_uploads", "0..1", 392, 186, 1198},
+		{"documents-pdf-extractions", "document_pdf_extractions", "0..1", 416, 162, 666},
+		{"documents-evaluation", "evaluation_fixtures", "0..1", 404, 174, 932},
 	} {
 		l := &label{Text: v.card, X: 479, Y: v.y - 14, Size: edgeLabelSize, Kind: "muted", Owner: v.id}
 		d.Edges = append(d.Edges, edge{ID: v.id, From: "documents", To: v.to, Label: l, Points: []point{{368, v.sourceY}, {v.x, v.sourceY}, {v.x, v.y}, {484, v.y}}})
 	}
+	uploadCardinality := &label{Text: "0..1", X: 437, Y: 912, Size: edgeLabelSize, Kind: "muted", Owner: "documents-uploads"}
+	d.Edges = append(d.Edges, edge{ID: "documents-uploads", From: "documents", To: "source_uploads", Label: uploadCardinality,
+		Points: []point{{368, 186}, {392, 186}, {392, 926}, {368, 926}}})
 	schedule(&d, []string{"documents-chunks", "documents-fingerprints", "documents-jobs", "documents-pdf-extractions", "documents-evaluation", "documents-uploads"})
-	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 1400, Size: sublabelSize, Kind: "muted"}}
+	d.Labels = []label{{Text: "PK: primary key · FK: foreign key · 0..n: zero or more · 0..1: zero or one.", X: 16, Y: 1128, Size: sublabelSize, Kind: "muted"}}
 	return d
 }
 
