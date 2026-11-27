@@ -691,9 +691,9 @@ serving and cleanup logins as part of the [serving role setup](grant-catalog.md#
 3. Stage with `-apply` while the service keeps serving. Repeat until a run
    reports `complete: true`. Resume a bounded run with the cursor it reports.
 4. Freeze writers for the target generation and wait for the settling time.
-   Reads continue; [writes pause](api.md#writer-pause). Freeze quiescence and
-   activation wait until no unfinalized deletion receipt remains in
-   `document_deletions`, and report up to 20 document IDs of any open receipts
+   Reads continue and [writes pause](api.md#writer-pause). Freeze waits for
+   unfinalized deletion receipts to clear from `document_deletions`, and activation
+   refuses to switch while any remain. Both report up to 20 document IDs of open receipts
    (`open_deletion_ids` in reports; inventory also reports `open_deletions` and
    `open_deletion_ids` without blocking live staging). Freezing and activation
    also refuse a target in a different vector store than an active
@@ -738,9 +738,23 @@ serving and cleanup logins as part of the [serving role setup](grant-catalog.md#
       `make reindex ARGS="-freeze -apply -generation <name>"`. If the report
       lists more open receipts, repeat recovery before resuming catch-up.
 5. Start staging again from the beginning and finish catch-up. Verify with declared
-   thresholds and `-apply` to record the result, then activate. Verification and
-   activation fail if anything changed after the catch-up. For different embedding
-   spaces or an unattested legacy target, [prepare matched query fixtures](development.md#vector-reindex-scriptsreindex).
+   thresholds and `-apply` to record the result. For different embedding spaces
+   or an unattested legacy target, [prepare matched query fixtures](development.md#vector-reindex-scriptsreindex).
+   Preview with
+   `make reindex ARGS="-activate -generation <name>"`. A report with `ready: true`
+   and `applied: false` indicates that the advisory checks passed. Rerun with
+   `-apply` to switch. The database checks again under lock. A confirmed switch
+   reports `ready: true` and `applied: true` and leaves the freeze in force.
+
+   If activation reports `ready: false`, resolve the reported reasons before
+   retrying. Freeze for the requested generation if it lacks a matching freeze.
+   If a different generation is frozen, thaw before freezing for the target.
+   If the freeze is still settling, wait until the selected `-quiesce` interval
+   has elapsed since freezing. Let live ingestion leases finish or expire and
+   resolve open deletion receipts as described above. If verification is missing
+   or the corpus changed, finish catch-up and verify again. If the requested
+   generation is already active, continue with deployment in step 6. If
+   activation could not be confirmed, check the active generation before retrying.
 6. Deploy every replica sharing the queue with `VECTOR_GENERATION` set to the new
    generation, the matching embedding deployment and extraction settings, and
    `PINECONE_INDEX_NAME` for a Pinecone target. Apply any [serving grants](grant-catalog.md#database-roles)
