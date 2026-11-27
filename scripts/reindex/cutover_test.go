@@ -404,6 +404,62 @@ const insertCutoverManifest = `INSERT INTO hosted_vector_manifests
 	(revision_id, document_id, incarnation, attempt, id_prefix, vector_ids, chunk_ids, state)
 	VALUES ($1, $2, $2, 1, 'cutover', '{}', '{}', $3)`
 
+func seedCutoverManifest(t *testing.T, pg *pgstore.Client, state string) string {
+	t.Helper()
+	revision := uuid.NewString()
+	_, err := pg.Pool.Exec(t.Context(), insertCutoverManifest, revision, uuid.NewString(), state)
+	require.NoError(t, err)
+	return revision
+}
+
+func seedCutoverCleanup(t *testing.T, pg *pgstore.Client, retired string) {
+	t.Helper()
+	_, err := pg.Pool.Exec(t.Context(), `INSERT INTO hosted_vector_cleanups
+		(revision_id, document_id, incarnation, id_prefix, vector_ids)
+		SELECT revision_id, document_id, incarnation, id_prefix, vector_ids
+		FROM hosted_vector_manifests WHERE revision_id=$1`, retired)
+	require.NoError(t, err)
+}
+
+func runActivationWithLateManifest(ctx context.Context, t *testing.T, pg *pgstore.Client, revision string, activate func(context.Context) error) error {
+	t.Helper()
+	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	holder, err := pg.Pool.Begin(waitCtx)
+	require.NoError(t, err)
+	defer func() {
+		rollbackCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer stop()
+		_ = holder.Rollback(rollbackCtx)
+	}()
+	pid := holder.Conn().PgConn().PID()
+	_, err = holder.Exec(waitCtx, insertCutoverManifest, revision, uuid.NewString(), "writing")
+	require.NoError(t, err)
+
+	// The intent is invisible to the advisory query while its transaction holds
+	// SHARE. Wait for the switch to request the row lock before publishing it.
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		done <- activate(waitCtx)
+	}()
+	defer func() {
+		cancel()
+		for range done {
+		}
+	}()
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		var blocked bool
+		require.NoError(collect, pg.Pool.QueryRow(waitCtx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))
+			AND query LIKE '% FROM vector_state FOR UPDATE')`, pid).Scan(&blocked))
+		require.True(collect, blocked)
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, holder.Commit(waitCtx))
+	return <-done
+}
+
 func TestReindexActivateReportsHostedManifestWork(t *testing.T) {
 	f := &fixture{pg: vectorDB(t)}
 	h := newHarness(t, f, "pinecone")
@@ -425,19 +481,10 @@ func TestReindexActivateReportsHostedManifestWork(t *testing.T) {
 		t.Helper()
 		require.Equal(t, map[string]any{"writing": writing, "active": active, "retired": retired, "cleanups": cleanups}, rep["hosted_manifest_cutover"])
 	}
-	seed := func(state string) string {
-		t.Helper()
-		rev := uuid.NewString()
-		_, insertErr := f.pg.Pool.Exec(ctx, insertCutoverManifest, rev, uuid.NewString(), state)
-		require.NoError(t, insertErr)
-		return rev
-	}
-	writing, active, retired := seed("writing"), seed("active"), seed("retired")
-	_, err = f.pg.Pool.Exec(ctx, `INSERT INTO hosted_vector_cleanups
-		(revision_id, document_id, incarnation, id_prefix, vector_ids)
-		SELECT revision_id, document_id, incarnation, id_prefix, vector_ids
-		FROM hosted_vector_manifests WHERE revision_id=$1`, retired)
-	require.NoError(t, err)
+	writing := seedCutoverManifest(t, f.pg, "writing")
+	active := seedCutoverManifest(t, f.pg, "active")
+	retired := seedCutoverManifest(t, f.pg, "retired")
+	seedCutoverCleanup(t, f.pg, retired)
 	providerOpens := h.stores.opened
 	rep, err := h.run(inventory)
 	require.NoError(t, err)
@@ -462,39 +509,15 @@ func TestReindexActivateReportsHostedManifestWork(t *testing.T) {
 	_, err = f.pg.Pool.Exec(ctx, `DELETE FROM hosted_vector_manifests WHERE revision_id=ANY($1::uuid[])`, []string{writing, active, retired})
 	require.NoError(t, err)
 
-	// The journal is invisible to the advisory query while its transaction holds
-	// SHARE. Observe the attempted switch waiting before publishing the journal.
-	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	holder, err := f.pg.Pool.Begin(waitCtx)
-	require.NoError(t, err)
-	defer func() { _ = holder.Rollback(ctx) }()
-	pid := holder.Conn().PgConn().PID()
 	late := uuid.NewString()
-	_, err = holder.Exec(waitCtx, insertCutoverManifest, late, uuid.NewString(), "writing")
-	require.NoError(t, err)
 	opts.Apply = true
 	providerOpens = h.stores.opened
 	var out bytes.Buffer
-	done := make(chan error, 1)
-	go func() {
-		defer close(done)
-		done <- execute(waitCtx, h.deps, opts, &out, time.Millisecond)
-	}()
-	defer func() {
-		cancel()
-		for range done {
-		}
-	}()
-	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		var blocked bool
-		require.NoError(collect, f.pg.Pool.QueryRow(waitCtx, `SELECT EXISTS (
-			SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))`, pid).Scan(&blocked))
-		require.True(collect, blocked)
-	}, 5*time.Second, 10*time.Millisecond)
-	require.NoError(t, holder.Commit(waitCtx))
+	err = runActivationWithLateManifest(ctx, t, f.pg, late, func(callCtx context.Context) error {
+		return execute(callCtx, h.deps, opts, &out, time.Millisecond)
+	})
 	var pgErr *pgconn.PgError
-	require.ErrorAs(t, <-done, &pgErr)
+	require.ErrorAs(t, err, &pgErr)
 	require.Equal(t, "hosted_manifest_cutover_guard", pgErr.ConstraintName)
 	require.Equal(t, providerOpens, h.stores.opened, "raced activation needs no provider")
 	rep = nil

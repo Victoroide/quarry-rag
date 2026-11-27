@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +40,11 @@ func (w *hostedReportWriter) Write(p []byte) (int, error) {
 
 type hostedActivationQueryTracer func(string)
 
+const (
+	hostedCountQuery    = "FROM hosted_manifest_cutover_counts()"
+	hostedDrainFallback = "hosted manifest work blocked activation; check the original source before retrying"
+)
+
 func (tr hostedActivationQueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	tr(data.SQL)
 	return ctx
@@ -44,15 +52,18 @@ func (tr hostedActivationQueryTracer) TraceQueryStart(ctx context.Context, _ *pg
 
 func (hostedActivationQueryTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
-func hostedActivationState(t *testing.T, pg *pgstore.Client) string {
+func hostedActivationState(t *testing.T, pg *pgstore.Client, exceptRevision string) string {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
 	var snapshot string
-	err := pg.Pool.QueryRow(t.Context(), `SELECT jsonb_build_object(
+	err := pg.Pool.QueryRow(ctx, `SELECT jsonb_build_object(
 		'state', (SELECT to_jsonb(s) FROM vector_state s),
 		'registry', (SELECT jsonb_agg(g ORDER BY name) FROM vector_generations g),
-		'manifests', (SELECT jsonb_agg(m ORDER BY revision_id) FROM hosted_vector_manifests m),
+		'manifests', (SELECT jsonb_agg(m ORDER BY revision_id) FROM hosted_vector_manifests m
+			WHERE revision_id IS DISTINCT FROM NULLIF($1, '')::uuid),
 		'cleanups', (SELECT jsonb_agg(c ORDER BY revision_id) FROM hosted_vector_cleanups c)
-	)::text`).Scan(&snapshot)
+	)::text`, exceptRevision).Scan(&snapshot)
 	require.NoError(t, err)
 	return snapshot
 }
@@ -66,9 +77,24 @@ func prepareHostedActivationReport(t *testing.T, pg *pgstore.Client) options {
 	digest, err := corpusDigest(t.Context(), pg, opts)
 	require.NoError(t, err)
 	require.NoError(t, pg.RecordVerification(t.Context(), opts.Generation, digest, json.RawMessage(`{"passed":true}`)))
-	_, err = pg.Pool.Exec(t.Context(), insertCutoverManifest, uuid.NewString(), uuid.NewString(), "writing")
-	require.NoError(t, err)
 	return opts
+}
+
+func requireHostedReportWriteError(t *testing.T, err error, out *hostedReportWriter, prefix, reason string, failure *hostedReportWriteError) {
+	t.Helper()
+	require.ErrorContains(t, err, reason)
+	require.ErrorIs(t, err, failure)
+	require.ErrorIs(t, err, failure.cause)
+	var typed *hostedReportWriteError
+	require.ErrorAs(t, err, &typed)
+	require.Same(t, failure, typed)
+	require.Equal(t, 1, out.attempts)
+	require.Equal(t, prefix, string(out.written))
+	var stderr bytes.Buffer
+	slog.New(slog.NewTextHandler(&stderr, nil)).Error("reindex", "error", err)
+	require.Contains(t, stderr.String(), "error=")
+	require.Contains(t, stderr.String(), reason)
+	require.Contains(t, stderr.String(), failure.Error())
 }
 
 func TestHostedActivationRefusalPreservesReportWriteError(t *testing.T) {
@@ -79,6 +105,14 @@ func TestHostedActivationRefusalPreservesReportWriteError(t *testing.T) {
 	h.attestSource()
 	opts := prepareHostedActivationReport(t, f.pg)
 	opts.MaxDocuments = 1
+	for range 2 {
+		seedCutoverManifest(t, f.pg, "writing")
+	}
+	for range 3 {
+		seedCutoverManifest(t, f.pg, "active")
+		seedCutoverManifest(t, f.pg, "retired")
+	}
+	seedCutoverCleanup(t, f.pg, seedCutoverManifest(t, f.pg, "retired"))
 	revisions, err := f.pg.DocumentRevisions(t.Context(), "", opts.MaxDocuments)
 	require.NoError(t, err)
 	require.Len(t, revisions, 1)
@@ -86,13 +120,15 @@ func TestHostedActivationRefusalPreservesReportWriteError(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, more)
 
-	pages, probes := 0, 0
+	pages, probes, countQueries := 0, 0, 0
 	tracer := hostedActivationQueryTracer(func(sql string) {
 		switch {
 		case strings.HasPrefix(sql, "WITH eligible AS MATERIALIZED (SELECT d.* FROM documents"):
 			pages++
 		case strings.HasPrefix(sql, "SELECT EXISTS(SELECT 1 FROM documents d WHERE"):
 			probes++
+		case strings.Contains(sql, hostedCountQuery):
+			countQueries++
 		}
 	})
 	traced, err := pgstore.NewClient(t.Context(), f.pg.Pool.Config().ConnString(), pgstore.WithQueryTracer(tracer))
@@ -100,9 +136,10 @@ func TestHostedActivationRefusalPreservesReportWriteError(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, traced.Close(context.Background())) })
 	d := h.deps
 	d.pg = traced
-	before := hostedActivationState(t, f.pg)
+	before := hostedActivationState(t, f.pg, "")
 	providerOpens := h.stores.opened
 	failure := &hostedReportWriteError{cause: io.ErrClosedPipe}
+	const reason = "drain hosted work on the original source before activation (writing: 2, active: 3, retired: 4, cleanups: 1)"
 	for _, tc := range []struct {
 		name   string
 		apply  bool
@@ -116,33 +153,54 @@ func TestHostedActivationRefusalPreservesReportWriteError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			opts.Apply = tc.apply
 			out := &hostedReportWriter{accept: len(tc.prefix), err: failure}
+			priorCountQueries := countQueries
 			err := execute(t.Context(), d, opts, out, time.Millisecond)
 			require.ErrorIs(t, err, errActivationNotReady)
-			require.ErrorIs(t, err, failure)
-			require.ErrorIs(t, err, io.ErrClosedPipe)
-			var typed *hostedReportWriteError
-			require.ErrorAs(t, err, &typed)
-			require.Same(t, failure, typed)
-			require.Equal(t, 1, out.attempts)
-			require.Equal(t, tc.prefix, string(out.written))
+			require.EqualError(t, err, errActivationNotReady.Error()+": "+reason+"\n"+failure.Error())
+			requireHostedReportWriteError(t, err, out, tc.prefix, reason, failure)
+			require.Equal(t, priorCountQueries+1, countQueries)
 			require.Zero(t, pages, "activation must exit before reading corpus revisions")
 			require.Zero(t, probes, "activation must exit before probing for more documents")
 			require.Equal(t, providerOpens, h.stores.opened)
-			require.Equal(t, before, hostedActivationState(t, f.pg))
+			require.Equal(t, before, hostedActivationState(t, f.pg, ""))
 
 			if tc.apply {
 				var retry bytes.Buffer
-				require.ErrorIs(t, execute(t.Context(), d, opts, &retry, time.Millisecond), errActivationNotReady,
+				retryCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				require.Same(t, errActivationNotReady, execute(retryCtx, d, opts, &retry, time.Millisecond),
 					"a same-target apply must reacquire the generation fence and reach the hosted check")
-				require.Equal(t, before, hostedActivationState(t, f.pg))
+				require.Equal(t, before, hostedActivationState(t, f.pg, ""))
 			}
 		})
 	}
+
+	seedCutoverManifest(t, f.pg, "retired")
+	opts.Apply = false
+	var retry bytes.Buffer
+	priorCountQueries := countQueries
+	require.Same(t, errActivationNotReady, execute(t.Context(), d, opts, &retry, time.Millisecond))
+	require.Equal(t, priorCountQueries+1, countQueries)
+	require.Zero(t, pages)
+	require.Zero(t, probes)
+	require.Equal(t, providerOpens, h.stores.opened)
+	require.JSONEq(t, `{
+		"action": "activate",
+		"generation": "g2",
+		"applied": false,
+		"active_generation": "legacy",
+		"frozen": true,
+		"freeze_generation": "g2",
+		"ready": false,
+		"reasons": ["drain hosted work on the original source before activation (writing: 2, active: 3, retired: 5, cleanups: 1)"],
+		"hosted_manifest_cutover": {"writing": 2, "active": 3, "retired": 5, "cleanups": 1}
+	}`, retry.String())
 }
 
 func TestHostedActivationReportSuccessKeepsRefusal(t *testing.T) {
 	pg := vectorDB(t)
 	opts := prepareHostedActivationReport(t, pg)
+	seedCutoverManifest(t, pg, "writing")
 	restricted, role := newHostedCutoverReindexRole(t, pg)
 	_, err := pg.Pool.Exec(t.Context(), replaceReindexRoleSQL(
 		publishedDeploymentSQL(t, "GRANT USAGE ON SCHEMA public TO quarry_reindex"), role, ""))
@@ -166,9 +224,169 @@ func TestHostedActivationReportSuccessKeepsRefusal(t *testing.T) {
 	}
 }
 
+func TestHostedLockedActivationReportWriteError(t *testing.T) {
+	const reasonWithCounts = "drain hosted work on the original source before activation (writing: 1, active: 0, retired: 0, cleanups: 0)"
+	const sqlRefusal = "drain outstanding hosted manifest work on the original source before activating PostgreSQL"
+	for _, tc := range []struct {
+		name, prefix, reason                      string
+		clean, cancelRefresh, deleteBeforeRefresh bool
+	}{
+		{name: "clean output", clean: true},
+		{name: "zero bytes", reason: reasonWithCounts},
+		{name: "partial write", prefix: "{", reason: reasonWithCounts},
+		{name: "refresh unavailable", prefix: "{", reason: hostedDrainFallback, cancelRefresh: true},
+		{name: "refresh returns zero", reason: hostedDrainFallback, deleteBeforeRefresh: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pg := vectorDB(t)
+			h := newHarness(t, &fixture{pg: pg}, "pinecone")
+			h.attestSource()
+			opts := prepareHostedActivationReport(t, pg)
+			opts.Apply = true
+			late := uuid.NewString()
+			before := hostedActivationState(t, pg, late)
+			initialCounts, err := pg.HostedManifestCutoverCounts(t.Context())
+			require.NoError(t, err)
+			require.Empty(t, initialCounts)
+
+			callCtx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var countQueries int
+			var cleanupTag pgconn.CommandTag
+			var cleanupErr error
+			tracer := hostedActivationQueryTracer(func(sql string) {
+				if !strings.Contains(sql, hostedCountQuery) {
+					return
+				}
+				countQueries++
+				if countQueries != 2 {
+					return
+				}
+				switch {
+				case tc.cancelRefresh:
+					cancel()
+				case tc.deleteBeforeRefresh:
+					// The owner pool is separate from the traced activation client.
+					cleanupCtx, stop := context.WithTimeout(t.Context(), 5*time.Second)
+					defer stop()
+					cleanupTag, cleanupErr = pg.Pool.Exec(cleanupCtx, `DELETE FROM hosted_vector_manifests WHERE revision_id=$1`, late)
+				}
+			})
+			traced, err := pgstore.NewClient(t.Context(), pg.Pool.Config().ConnString(), pgstore.WithQueryTracer(tracer))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, traced.Close(context.Background())) })
+			d := h.deps
+			d.pg = traced
+
+			failure := &hostedReportWriteError{cause: io.ErrClosedPipe}
+			out := &hostedReportWriter{accept: len(tc.prefix), err: failure}
+			if tc.clean {
+				out.accept, out.err = math.MaxInt, nil
+			}
+			providerOpens := h.stores.opened
+			err = runActivationWithLateManifest(callCtx, t, pg, late, func(ctx context.Context) error {
+				return execute(ctx, d, opts, out, time.Millisecond)
+			})
+			require.Equal(t, 2, countQueries, "one advisory read and one refresh")
+			require.Equal(t, providerOpens, h.stores.opened)
+			require.Equal(t, before, hostedActivationState(t, pg, late))
+			if tc.cancelRefresh {
+				require.ErrorIs(t, callCtx.Err(), context.Canceled)
+			}
+			if tc.deleteBeforeRefresh {
+				require.NoError(t, cleanupErr)
+				require.EqualValues(t, 1, cleanupTag.RowsAffected())
+			}
+			inspectCtx, stopInspect := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stopInspect()
+			var lateState string
+			inspectErr := pg.Pool.QueryRow(inspectCtx, `SELECT state FROM hosted_vector_manifests WHERE revision_id=$1`, late).Scan(&lateState)
+			if tc.deleteBeforeRefresh {
+				require.ErrorIs(t, inspectErr, pgx.ErrNoRows)
+			} else {
+				require.NoError(t, inspectErr)
+				require.Equal(t, "writing", lateState)
+			}
+
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, err, &pgErr)
+			require.ErrorIs(t, err, pgErr)
+			require.Equal(t, "55000", pgErr.Code)
+			require.Equal(t, "hosted_manifest_cutover_guard", pgErr.ConstraintName)
+			require.Equal(t, sqlRefusal, pgErr.Message)
+			require.NotErrorIs(t, err, errActivationNotReady)
+			originalError := "postgres: record active generation: ERROR: " + sqlRefusal + " (SQLSTATE 55000)"
+			if tc.clean {
+				require.EqualError(t, err, originalError)
+				require.Equal(t, 1, out.attempts)
+				require.JSONEq(t, `{
+					"action": "activate",
+					"generation": "g2",
+					"applied": false,
+					"active_generation": "legacy",
+					"frozen": true,
+					"freeze_generation": "g2",
+					"quiesce": {"Frozen": true, "Settled": true, "RunningJobs": 0, "OpenDeletions": 0},
+					"ready": false,
+					"reasons": ["drain hosted work on the original source before activation (writing: 1, active: 0, retired: 0, cleanups: 0)"],
+					"hosted_manifest_cutover": {"writing": 1, "active": 0, "retired": 0, "cleanups": 0}
+				}`, string(out.written))
+			} else {
+				require.EqualError(t, err, originalError+": "+tc.reason+"\n"+failure.Error())
+				requireHostedReportWriteError(t, err, out, tc.prefix, tc.reason, failure)
+			}
+
+			retryCtx, stopRetry := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stopRetry()
+			var retry bytes.Buffer
+			err = execute(retryCtx, h.deps, opts, &retry, time.Millisecond)
+			if tc.deleteBeforeRefresh {
+				require.NoError(t, err)
+				activationReport(t, retry.Bytes(), true, true, opts.Generation, opts.Generation)
+			} else {
+				require.Same(t, errActivationNotReady, err)
+				var report controlReport
+				require.NoError(t, json.Unmarshal(retry.Bytes(), &report))
+				require.Equal(t, []string{reasonWithCounts}, report.Reasons)
+				require.Equal(t, &pgstore.HostedManifestCutoverCounts{Writing: 1}, report.HostedManifestCutover)
+			}
+			require.Equal(t, providerOpens, h.stores.opened)
+		})
+	}
+}
+
+func TestHostedActivationReportWriteErrorFormatting(t *testing.T) {
+	pgErr := &pgconn.PgError{Code: "55000", ConstraintName: "hosted_manifest_cutover_guard"}
+	refusal := fmt.Errorf("record active generation: %w", pgErr)
+	failure := &hostedReportWriteError{cause: io.ErrClosedPipe}
+	for _, tc := range []struct {
+		name, reason string
+	}{
+		{name: "fallback", reason: hostedDrainFallback},
+		{name: "large counts", reason: fmt.Sprintf(
+			"drain hosted work on the original source before activation (writing: %d, active: 12, retired: 3, cleanups: 4)", int64(math.MaxInt64))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := hostedActivationReportWriteError(refusal, []string{tc.reason}, failure)
+			require.EqualError(t, err, refusal.Error()+": "+tc.reason+"\n"+failure.Error())
+			require.ErrorIs(t, err, refusal)
+			require.ErrorIs(t, err, pgErr)
+			require.ErrorIs(t, err, failure)
+			require.ErrorIs(t, err, io.ErrClosedPipe)
+			var driverErr *pgconn.PgError
+			require.ErrorAs(t, err, &driverErr)
+			require.Same(t, pgErr, driverErr)
+			var writerErr *hostedReportWriteError
+			require.ErrorAs(t, err, &writerErr)
+			require.Same(t, failure, writerErr)
+		})
+	}
+}
+
 func TestHostedActivationLookupErrorsPrecedeReport(t *testing.T) {
 	pg := vectorDB(t)
 	opts := prepareHostedActivationReport(t, pg)
+	seedCutoverManifest(t, pg, "writing")
 	for _, tc := range []struct {
 		name, revokeSQL, message string
 	}{
@@ -201,6 +419,7 @@ func TestHostedActivationLookupErrorsPrecedeReport(t *testing.T) {
 				require.ErrorContains(t, err, tc.message)
 				require.NotErrorIs(t, err, errActivationNotReady)
 				require.NotErrorIs(t, err, io.ErrClosedPipe)
+				requireNoHostedDrainReason(t, err)
 				require.Zero(t, out.attempts)
 			}
 		})
@@ -212,7 +431,7 @@ func TestHostedActivationLookupErrorsPrecedeReport(t *testing.T) {
 			t.Cleanup(cancel)
 			countQueries := 0
 			tracer := hostedActivationQueryTracer(func(sql string) {
-				if strings.Contains(sql, "FROM hosted_manifest_cutover_counts()") {
+				if strings.Contains(sql, hostedCountQuery) {
 					countQueries++
 					cancel()
 				}
@@ -227,7 +446,28 @@ func TestHostedActivationLookupErrorsPrecedeReport(t *testing.T) {
 			require.ErrorContains(t, err, "count hosted manifest work for cutover")
 			require.NotErrorIs(t, err, errActivationNotReady)
 			require.NotErrorIs(t, err, io.ErrClosedPipe)
+			requireNoHostedDrainReason(t, err)
 			require.Zero(t, out.attempts)
 		}
 	})
+	t.Run("deadline expired", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		defer cancel()
+		for _, apply := range []bool{false, true} {
+			opts.Apply = apply
+			out := &hostedReportWriter{err: io.ErrClosedPipe}
+			err := execute(ctx, deps{pg: pg}, opts, out, time.Millisecond)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			require.NotErrorIs(t, err, errActivationNotReady)
+			require.NotErrorIs(t, err, io.ErrClosedPipe)
+			requireNoHostedDrainReason(t, err)
+			require.Zero(t, out.attempts)
+		}
+	})
+}
+
+func requireNoHostedDrainReason(t *testing.T, err error) {
+	t.Helper()
+	require.NotContains(t, err.Error(), "drain hosted work on the original source")
+	require.NotContains(t, err.Error(), hostedDrainFallback)
 }
