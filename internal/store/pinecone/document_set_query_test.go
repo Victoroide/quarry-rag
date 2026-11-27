@@ -32,13 +32,13 @@ type recordedRequest struct {
 
 func (h *hostedRecorder) conn() *fakeIndexConn {
 	return &fakeIndexConn{query: func(_ context.Context, req *pinecone.QueryByVectorValuesRequest) (*pinecone.QueryVectorsResponse, error) {
-		fields := req.MetadataFilter.GetFields()
+		documents, incarnations := hostedFilterMembership(h.t, req.MetadataFilter)
 		rec := recordedRequest{
-			documents:    listValues(h.t, req.MetadataFilter, "doc_id"),
-			incarnations: listValues(h.t, req.MetadataFilter, domain.VectorRevisionKey),
-			tenant:       fields[domain.VectorTenantKey].GetStructValue().GetFields()["$eq"].GetStringValue(),
-			docType:      fields["doc_type"].GetStructValue().GetFields()["$eq"].GetStringValue(),
-			label:        fields["collection"].GetStructValue().GetFields()["$eq"].GetStringValue(),
+			documents:    documents,
+			incarnations: incarnations,
+			tenant:       hostedFilterEquality(req.MetadataFilter, domain.VectorTenantKey),
+			docType:      hostedFilterEquality(req.MetadataFilter, "doc_type"),
+			label:        hostedFilterEquality(req.MetadataFilter, "collection"),
 		}
 		h.mu.Lock()
 		h.calls = append(h.calls, rec)
