@@ -31,6 +31,7 @@ Notable changes are grouped by release.
 - The selective Pinecone staging check pins both index descriptions to the public controller.
 - Ingest lease completion, release, retry, and failure bound PostgreSQL rollback to three seconds and preserve the original error.
 - PostgreSQL rollback for ingest admission, lease claims, and OCR text persistence now has a three-second deadline and preserves the original error.
+- Mixed and layout PDF OCR lease-window, provider-start, and checkpoint writes bound PostgreSQL rollback and preserve the original error.
 - Held deletion release recovers claims left by lost commit replies.
 - Vector reindex validates Pinecone chunk positions before copying vectors or accepting verification evidence.
 - Vector reindex rejects same-space verification seeds whose source identity disagrees with the canonical chunk.

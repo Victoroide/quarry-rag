@@ -1177,6 +1177,10 @@ pricing before enabling it. S3 and other ingestion charges also apply. Detection
 can continue in AWS after a local timeout or deletion, and incurred charges are
 not canceled by stopping ingestion.
 
+Canceled mixed and layout PDF OCR transactions have three seconds to roll back
+in PostgreSQL. After a pre-commit rollback, the worker can retry with the same
+lease while it remains valid.
+
 ### Mixed PDF OCR Rollout
 
 Deploy migration 015 with `OCR_PDF_MODE=image_only`. If the serving login and
