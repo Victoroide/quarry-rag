@@ -33,12 +33,17 @@ func newOwnedFixture(t *testing.T) *ownedFixture {
 
 func provisionOwnedFixture(t testing.TB, c *Client) *ownedFixture {
 	t.Helper()
+	return provisionOwnedFixtureContext(t.Context(), t, c)
+}
+
+func provisionOwnedFixtureContext(ctx context.Context, t testing.TB, c *Client) *ownedFixture {
+	t.Helper()
 	f := &ownedFixture{c: c, tenant: uuid.NewString(), otherTenant: uuid.NewString()}
 	f.owner = domain.Principal{ID: uuid.NewString(), TenantID: f.tenant}
 	f.peer = domain.Principal{ID: uuid.NewString(), TenantID: f.tenant}
 	f.disabled = domain.Principal{ID: uuid.NewString(), TenantID: f.tenant}
 	f.outsider = domain.Principal{ID: uuid.NewString(), TenantID: f.otherTenant}
-	f.importBatch(t, func(b map[string]any) {
+	f.importBatchContext(ctx, t, func(b map[string]any) {
 		b["tenants"] = []grantEntry{{"tenant_id": f.tenant}, {"tenant_id": f.otherTenant}}
 		b["collections"] = []grantEntry{
 			{"tenant_id": f.tenant, "collection": ""}, {"tenant_id": f.tenant, "collection": "team"},
@@ -61,10 +66,15 @@ func provisionOwnedFixture(t testing.TB, c *Client) *ownedFixture {
 
 func (f *ownedFixture) importBatch(t testing.TB, fill func(map[string]any)) {
 	t.Helper()
-	require.NoError(t, f.c.Pool.QueryRow(t.Context(), `SELECT revision FROM grant_catalog_policy_revision`).Scan(&f.revision))
+	f.importBatchContext(t.Context(), t, fill)
+}
+
+func (f *ownedFixture) importBatchContext(ctx context.Context, t testing.TB, fill func(map[string]any)) {
+	t.Helper()
+	require.NoError(t, f.c.Pool.QueryRow(ctx, `SELECT revision FROM grant_catalog_policy_revision`).Scan(&f.revision))
 	batch := testGrantBatch(f.revision)
 	fill(batch)
-	result, err := importTestBatch(t.Context(), f.c, batch, false)
+	result, err := importTestBatch(ctx, f.c, batch, false)
 	require.NoError(t, err)
 	f.revision = result.Revision
 }

@@ -563,12 +563,34 @@ The service resolves the reference by tenant and authenticated principal. An ina
 
 The documents searched are the set's membership intersected with the principal's live read grants, each document's current incarnation, the inline list, the collection, the type and the completion rules. The same relations decide candidate checks, routing previews and every later release, so a document outside the set can neither be previewed nor released even if a store returned it.
 
-- pgvector joins the set, the live grants and the document incarnation inside the ranking statement, before ordering and `LIMIT`. Nothing lists the membership, and the exact-scope probe, exact ranking and approximate ranking use the same join. The result is exact in scope. Approximate-index recall on a selective set remains a separate property: measure it with the deployment's data, as under [residual channels](#residual-channels), and use `PGVECTOR_EXACT_SCOPE_MAX` for small sets.
+- pgvector joins the set, the live grants and the document incarnation inside the ranking statement, before ordering and `LIMIT`. Nothing lists the membership, and the exact-scope probe, exact ranking and approximate ranking use the same join. The result is exact in scope. Selective sets can still return fewer eligible chunks than requested or miss nearer eligible chunks when the planner uses an approximate index.
 - Pinecone receives the intersection as an explicit member list, in partitions of at most 10,000 documents. Every request carries the tenant and any collection and type filter, and each predicate holds at most 10,000 values. The query embeds once. The service searches one partition at a time and buffers at most the requested number of hits per partition, then merges the verified hits by descending vector score and ascending chunk ID, deduplicates across partitions and truncates only after merging. The optional hosted refill is not used for a set query.
 - Each request spends from one budget of `DOCUMENT_SET_MAX_BATCHES` hosted attempts, counting the probe, the local pass, the global pass, the sparse top-up and every retry. Transport retries are disabled, so every retry is counted. The route is priced before anything is embedded: its first attempts never exceed the priced total, and retries may spend only what that total leaves. See the [query contract](api.md#document-sets) for the pricing and the `422` that an unaffordable explicit route returns.
 - A timeout or failed partition fails the whole request.
 
 Before each hosted batch, each reranker or model request, each JSON release and each streamed frame, the service checks the credential, key trust, principal and policy revision, and that the set is still live under the same revision. The database clock decides expiry, and a set past its recorded expiry by the service's own clock is also unusable. A set that lapses mid-request ends it with the same `404` as before the first byte, or with the terminal `error` event once streaming began. Nothing from the rejected disclosure is sent.
+
+### Tune pgvector exact search
+
+Use the pgvector document-set recall evaluation in the development guide to
+decide whether to set `PGVECTOR_EXACT_SCOPE_MAX` on deployment data. A member
+can account for multiple eligible chunks, so the cutoff uses chunk counts.
+The serving index is cosine HNSW. The comparison also measures a separate,
+fixture-only cosine IVFFlat index. Natural plans may fall back to non-ANN
+paths, and forced index figures describe a different planner setting.
+
+For the reference rule, consider each positive cutoff among 100, 1,000,
+10,000 and 100,000 chunks. Include every nonempty configured-strategy cell at
+k=50 with eligible chunks at or below the cutoff, across both layouts and
+both sample types. At least one such cell must exist. Every included cell
+must select exact search, have perfect strict recall, have zero timeouts, and
+meet a p95 full-query latency of 50 ms or less. At least one of those cells
+must have mean strict recall below 0.95 on verified HNSW plans at the default
+threshold. The evaluation reports the largest passing cutoff, or 0 when
+none passes. The 50 ms budget is a reference for the fixture. Profile the
+same rule with deployment data and its latency budget.
+
+The default is 0. Reference corpus measurements are pending.
 
 ## Assign historical documents
 
