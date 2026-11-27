@@ -429,10 +429,18 @@ unscoped stores (`503`).
 - **Owner-only deletion:** See [the grants-mode API contract](api.md#delete-documentsdoc_id).
   Authorization and the incarnation-pinned
   `document_deletions` intent commit atomically under the caller's request and
-  credential deadline before detached cross-store cleanup runs; cancellation or
-  token expiry before commit leaves the document intact and makes zero vector or
-  object-store calls, while a committed intent finishes cleanup for that exact
-  incarnation without affecting any replacement UUID.
+  credential deadline before detached cross-store cleanup runs; confirmed
+  cancellation or token expiry before commit leaves the document intact and makes
+  zero vector or object-store calls (`503` or `401`). When the intent `COMMIT`
+  reply is lost, a bounded outcome check inspects the PostgreSQL transaction
+  status, server instance identity and exact `(document_id, incarnation)`
+  qualified intent receipt on the primary writer: a confirmed commit resumes
+  detached cleanup for that exact incarnation without affecting any replacement
+  UUID (and credential expiry during detached cleanup does not reclassify a
+  committed intent to `401`), a confirmed rollback keeps the precommit failure,
+  and an unconfirmed outcome returns a retryable `500` (`commit_unconfirmed` in
+  the security audit log) without exposing internal identifiers or touching
+  external stores.
 
 ## Authorized retrieval
 

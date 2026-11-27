@@ -320,7 +320,7 @@ paths:
     delete:
       operationId: deleteDocument
       summary: Remove a document and its stored artifacts
-      description: 'See [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id).'
+      description: 'See [DELETE /documents/{doc_id}](api.md#delete-documentsdoc_id). Confirmed precommit cancellation leaves the document untouched (`503` or `401`), lost intent `COMMIT` replies undergo a bounded outcome check, and unconfirmed outcomes or postcommit cleanup failures return a retryable `500`.'
       security:
         - ServiceToken: []
         - ServiceToken: []
