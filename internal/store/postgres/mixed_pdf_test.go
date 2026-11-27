@@ -594,7 +594,7 @@ func TestLayoutPDFProfileAdmissionIsolationAndCheckpoint(t *testing.T) {
 
 	// Claim and checkpoint layout sections, then verify retry preserves sections.
 	for range 2 {
-		job, claimErr := c.ClaimPDFJob(ctx, "layout-worker", time.Minute, 5)
+		job, claimErr := c.ClaimPDFProfilesForFixtureStore(ctx, "layout-worker", time.Minute, 5, "", true, true)
 		require.NoError(t, claimErr)
 		require.NotNil(t, job)
 		if job.Document.ID == mixedRes.DocumentID {
@@ -626,7 +626,7 @@ func TestLayoutPDFProfileAdmissionIsolationAndCheckpoint(t *testing.T) {
 		require.NoError(t, c.StorePDFOCR(ctx, *job, checkpoint))
 		require.NoError(t, c.ReleaseJob(ctx, *job))
 
-		reclaimed, claimErr := c.ClaimPDFJob(ctx, "layout-worker", time.Minute, 5)
+		reclaimed, claimErr := c.ClaimPDFProfilesForFixtureStore(ctx, "layout-worker", time.Minute, 5, "", false, true)
 		require.NoError(t, claimErr)
 		require.NotNil(t, reclaimed)
 		require.Len(t, reclaimed.PDF.PageResults, 1)

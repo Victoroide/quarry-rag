@@ -120,6 +120,9 @@ func TestDeletionMigrationPreservesLiveStorageAndLease(t *testing.T) {
 	for table, row := range before.rows {
 		require.Subset(t, after.rows[table], row, "preserve the original %s row", table)
 	}
+	var layoutAttempt *int
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT layout_claim_attempt FROM ingest_jobs WHERE document_id=$1`, id).Scan(&layoutAttempt))
+	require.Nil(t, layoutAttempt)
 	requireRecordedMigrations(t, c)
 	requireInactiveDeletionSchema(t, c)
 

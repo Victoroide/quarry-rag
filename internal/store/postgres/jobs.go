@@ -227,27 +227,30 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 		}
 	}
 	var reopenPDF, rotateWindow bool
-	if id != "" && (req.PDF != nil || existingPDFOnly) {
+	var pdfProfile string
+	if id != "" {
 		var pdfCoverage domain.PDFCoverage
 		var unusable, expired, intentExpired bool
-		err = tx.QueryRow(ctx, `SELECT p.coverage,octet_length(d.content)<$2,
+		err = tx.QueryRow(ctx, `SELECT p.profile,p.coverage,octet_length(d.content)<$2,
 			COALESCE(COALESCE(p.accepted_at,p.start_bound_at,p.started_at)+make_interval(secs=>$3)<=clock_timestamp(),FALSE),
 			COALESCE(p.started_at+make_interval(secs=>$3)<=clock_timestamp(),FALSE)
-			FROM document_pdf_extractions p JOIN documents d ON d.id=p.document_id WHERE d.id=$1`, id, domain.MinPDFTextBytes, domain.PDFOCRLifetime.Seconds()).Scan(&pdfCoverage, &unusable, &expired, &intentExpired)
+			FROM document_pdf_extractions p JOIN documents d ON d.id=p.document_id WHERE d.id=$1`, id, domain.MinPDFTextBytes, domain.PDFOCRLifetime.Seconds()).Scan(&pdfProfile, &pdfCoverage, &unusable, &expired, &intentExpired)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return result, err
 		}
-		unusableCheckpoint := pdfCoverage == domain.PDFPartial && unusable
-		reopenPDF = pdfCoverage == domain.PDFFailed || unusableCheckpoint
-		if reopenPDF && !req.CallerSupplied {
-			result.Outcome = domain.AcceptOCRRetryRequired
-			return result, nil
+		if err == nil && (req.PDF != nil || existingPDFOnly) {
+			unusableCheckpoint := pdfCoverage == domain.PDFPartial && unusable
+			reopenPDF = pdfCoverage == domain.PDFFailed || unusableCheckpoint
+			if reopenPDF && !req.CallerSupplied {
+				result.Outcome = domain.AcceptOCRRetryRequired
+				return result, nil
+			}
+			if reopenPDF && (unusableCheckpoint || intentExpired) && !expired {
+				result.Outcome = domain.AcceptOCRRetryAfterExpiry
+				return result, nil
+			}
+			rotateWindow = expired
 		}
-		if reopenPDF && (unusableCheckpoint || intentExpired) && !expired {
-			result.Outcome = domain.AcceptOCRRetryAfterExpiry
-			return result, nil
-		}
-		rotateWindow = expired
 	}
 
 	// An unfinished or held deletion keeps its identity until it is released.
@@ -269,15 +272,25 @@ func (c *Client) acceptDocument(ctx context.Context, req domain.AcceptRequest, e
 		return result, nil
 	}
 	if id != "" {
-		if _, err = tx.Exec(ctx, `UPDATE documents SET status='processing',last_error=NULL,index_visibility=NULL,index_visibility_observed_at=NULL,updated_at=NOW() WHERE id=$1`, id); err != nil {
-			return result, err
-		}
 		if reopenPDF {
-			if requeueErr := requeuePDF(ctx, tx, id, rotateWindow); requeueErr != nil {
+			if requeueErr := requeuePDF(ctx, tx, id, pdfProfile, rotateWindow); requeueErr != nil {
 				return result, requeueErr
 			}
-		} else if _, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id) VALUES($1) ON CONFLICT DO NOTHING`, id); err != nil {
-			return result, err
+			if _, err = tx.Exec(ctx, `UPDATE documents SET status='processing',last_error=NULL,index_visibility=NULL,index_visibility_observed_at=NULL,updated_at=NOW() WHERE id=$1`, id); err != nil {
+				return result, err
+			}
+		} else {
+			if pdfProfile == domain.LayoutPDFProfile {
+				if compatErr := requirePDFQueueCompatibility(ctx, tx, pdfProfile); compatErr != nil {
+					return result, compatErr
+				}
+			}
+			if _, err = tx.Exec(ctx, `UPDATE documents SET status='processing',last_error=NULL,index_visibility=NULL,index_visibility_observed_at=NULL,updated_at=NOW() WHERE id=$1`, id); err != nil {
+				return result, err
+			}
+			if _, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id,pdf_required) VALUES($1,$2) ON CONFLICT DO NOTHING`, id, pdfProfile == domain.LayoutPDFProfile); err != nil {
+				return result, err
+			}
 		}
 		result.Outcome = domain.AcceptRequeued
 		if owned {
@@ -422,13 +435,37 @@ func recordOwnedIngestAudit(ctx context.Context, tx pgx.Tx, req domain.AcceptReq
 	})
 }
 
-const claimJobPrefix = `WITH claimed AS (
+const claimJobUpdateHeader = `WITH claimed AS (
 	UPDATE ingest_jobs j SET state='running',attempts=j.attempts+1,lease_owner=$1,lease_until=clock_timestamp()+make_interval(secs=>$2),
-		pdf_claim_attempt=CASE WHEN $3 THEN j.attempts+1 END,lease_token=gen_random_uuid(),updated_at=now()
+		pdf_claim_attempt=CASE WHEN ($3 OR $4) THEN j.attempts+1 END`
+
+const claimJobSetLayout = `,
+		layout_claim_attempt=CASE WHEN $4 AND EXISTS(
+			SELECT 1 FROM document_pdf_extractions lp WHERE lp.document_id=j.document_id AND lp.profile='` + domain.LayoutPDFProfile + `'
+		) THEN j.attempts+1 END`
+
+const claimJobTail = `,lease_token=gen_random_uuid(),updated_at=now()`
+
+const claimReadyPrefix = `
 	FROM documents d WHERE j.document_id=d.id AND d.status='processing'
 	AND j.document_id=(SELECT ready.document_id FROM ingest_jobs ready
 		JOIN documents candidate ON candidate.id=ready.document_id AND candidate.status='processing'
-		WHERE ($3 OR NOT EXISTS(SELECT 1 FROM ingest_jobs WHERE pdf_required))
+		LEFT JOIN document_pdf_extractions candidate_pdf ON candidate_pdf.document_id=ready.document_id
+		WHERE (($3 OR $4) OR NOT EXISTS(SELECT 1 FROM ingest_jobs WHERE pdf_required))
+		AND `
+
+const claimProfileCurrent = `(
+			(candidate_pdf.document_id IS NULL AND NOT ready.pdf_required)
+			OR (candidate_pdf.profile='` + domain.MixedPDFProfile + `' AND (NOT ready.pdf_required OR $3))
+			OR (candidate_pdf.profile='` + domain.LayoutPDFProfile + `' AND $4)
+		)`
+
+const claimProfileLegacy = `(
+			(candidate_pdf.document_id IS NULL AND NOT ready.pdf_required)
+			OR (candidate_pdf.profile='` + domain.MixedPDFProfile + `' AND (NOT ready.pdf_required OR $3))
+		)`
+
+const claimReadySchedule = `
 		AND ((ready.state='pending' AND ready.next_attempt_at<=(SELECT clock_timestamp()))
 			OR (ready.state='running' AND ready.lease_until<=(SELECT clock_timestamp())))
 		AND (candidate.vector_mutation_until IS NULL OR candidate.vector_mutation_until<=clock_timestamp())
@@ -447,10 +484,24 @@ const claimJobSuffix = `
 // privilege on the receipt table to lease ordinary work. An unfinished or held
 // deletion receipt keeps a worker from leasing the document, so no new broad
 // vector work starts under a reservation.
-const claimGuardedJob = claimJobPrefix + `evaluation_fixture_claimable(ready.document_id, NULLIF($4::text, ''))
-		AND NOT document_deletion_reserved(ready.document_id)` + claimJobSuffix
+const claimFixturePredicate = `evaluation_fixture_claimable(ready.document_id, NULLIF($5::text, ''))
+		AND NOT document_deletion_reserved(ready.document_id)`
 
-const claimBeforeFixtureMigration = claimJobPrefix + `to_regclass('evaluation_fixtures') IS NULL` + claimJobSuffix
+const claimBeforeFixturePredicate = `to_regclass('evaluation_fixtures') IS NULL`
+
+func claimStatement(hasLayoutColumn, hasFixtureGuards bool) string {
+	layoutSet := ""
+	profileRule := claimProfileLegacy
+	if hasLayoutColumn {
+		layoutSet = claimJobSetLayout
+		profileRule = claimProfileCurrent
+	}
+	guard := claimBeforeFixturePredicate
+	if hasFixtureGuards {
+		guard = claimFixturePredicate
+	}
+	return claimJobUpdateHeader + layoutSet + claimJobTail + claimReadyPrefix + profileRule + claimReadySchedule + guard + claimJobSuffix
+}
 
 // ClaimJob leases ordinary work on both current and pre-fixture schemas.
 func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration, maxAttempts int) (*domain.Job, error) {
@@ -459,7 +510,7 @@ func (c *Client) ClaimJob(ctx context.Context, owner string, lease time.Duration
 
 // ClaimJobForFixtureStore permits fixture jobs only for their reserved vector store.
 func (c *Client) ClaimJobForFixtureStore(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity string) (*domain.Job, error) {
-	return c.claimGuarded(ctx, owner, lease, maxAttempts, false, vectorIdentity)
+	return c.ClaimPDFProfilesForFixtureStore(ctx, owner, lease, maxAttempts, vectorIdentity, false, false)
 }
 
 // ClaimPDFJob also leases jobs that require a mixed-PDF worker.
@@ -469,15 +520,60 @@ func (c *Client) ClaimPDFJob(ctx context.Context, owner string, lease time.Durat
 
 // ClaimPDFJobForFixtureStore applies both the PDF and fixture claim rules.
 func (c *Client) ClaimPDFJobForFixtureStore(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity string) (*domain.Job, error) {
-	return c.claimGuarded(ctx, owner, lease, maxAttempts, true, vectorIdentity)
+	return c.ClaimPDFProfilesForFixtureStore(ctx, owner, lease, maxAttempts, vectorIdentity, true, false)
 }
 
-func (c *Client) claimGuarded(ctx context.Context, owner string, lease time.Duration, maxAttempts int, pdfCapable bool, vectorIdentity string) (*domain.Job, error) {
-	job, err := c.claimJob(ctx, owner, maxAttempts, claimGuardedJob, owner, lease.Seconds(), pdfCapable, vectorIdentity)
+// ClaimPDFProfilesForFixtureStore leases jobs matching the worker's PDF OCR capabilities and fixture store binding.
+func (c *Client) ClaimPDFProfilesForFixtureStore(ctx context.Context, owner string, lease time.Duration, maxAttempts int, vectorIdentity string, mixed, layout bool) (*domain.Job, error) {
+	return c.claimGuarded(ctx, owner, lease, maxAttempts, mixed, layout, vectorIdentity)
+}
+
+func (c *Client) isLayoutClaimColumnMissing(ctx context.Context) (bool, error) {
+	_, err := c.Pool.Exec(ctx, `SELECT layout_claim_attempt FROM ingest_jobs WHERE FALSE`)
+	if err == nil {
+		return false, nil
+	}
 	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42703" {
+		return true, nil
+	}
+	return false, fmt.Errorf("postgres: check layout claim column: %w", err)
+}
+
+func (c *Client) claimGuarded(ctx context.Context, owner string, lease time.Duration, maxAttempts int, mixed, layout bool, vectorIdentity string) (*domain.Job, error) {
+	job, err := c.claimJob(ctx, owner, maxAttempts, claimStatement(true, true), owner, lease.Seconds(), mixed, layout, vectorIdentity)
+	if err == nil {
+		return job, nil
+	}
+	hasLayoutCol := true
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42703" {
+		missing, checkErr := c.isLayoutClaimColumnMissing(ctx)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if !missing {
+			return nil, err
+		}
+		hasLayoutCol = false
+		job, err = c.claimJob(ctx, owner, maxAttempts, claimStatement(false, true), owner, lease.Seconds(), mixed, layout, vectorIdentity)
+		if err == nil {
+			return job, nil
+		}
+	}
 	if errors.As(err, &pgErr) && pgErr.Code == "42883" {
 		// Before the fixture migration, only claim while the reservation table is absent.
-		return c.claimJob(ctx, owner, maxAttempts, claimBeforeFixtureMigration, owner, lease.Seconds(), pdfCapable)
+		job, err = c.claimJob(ctx, owner, maxAttempts, claimStatement(hasLayoutCol, false), owner, lease.Seconds(), mixed, layout)
+		if err != nil && hasLayoutCol && errors.As(err, &pgErr) && pgErr.Code == "42703" {
+			missing, checkErr := c.isLayoutClaimColumnMissing(ctx)
+			if checkErr != nil {
+				return nil, checkErr
+			}
+			if !missing {
+				return nil, err
+			}
+			return c.claimJob(ctx, owner, maxAttempts, claimStatement(false, false), owner, lease.Seconds(), mixed, layout)
+		}
 	}
 	return job, err
 }
