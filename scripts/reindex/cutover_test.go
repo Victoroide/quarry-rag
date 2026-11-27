@@ -305,7 +305,7 @@ func TestVerificationQueriesAreAlwaysScoped(t *testing.T) {
 	require.True(t, rep.Passed, "%v", rep.Failures)
 	require.Equal(t, rep.Sample.Queries, seen)
 
-	chunk := sampleChunk{id: "c", doc: "d", collection: ""}
+	chunk := sampleChunk{id: "c", sourceIdentity: sourceChunkIdentity{documentID: "d"}}
 	scope := scopeFor(chunk, []string{"d", "x", "y", "z"}, 2)
 	require.Len(t, scope, 2)
 	require.Equal(t, "d", scope[0])
