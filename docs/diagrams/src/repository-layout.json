@@ -1,6 +1,6 @@
 {
   "Width": 840,
-  "Height": 1042,
+  "Height": 1068,
   "Nodes": {
     "client": {
       "X": 444,
@@ -308,75 +308,81 @@
       "W": 344,
       "H": 26
     },
-    "scripts/reconcile": {
+    "scripts/postgres-durability": {
       "X": 468,
       "Y": 610,
       "W": 344,
       "H": 26
     },
-    "scripts/reindex": {
+    "scripts/reconcile": {
       "X": 468,
       "Y": 636,
       "W": 344,
       "H": 26
     },
-    "scripts/simulate": {
+    "scripts/reindex": {
       "X": 468,
       "Y": 662,
       "W": 344,
       "H": 26
     },
-    "scripts/validate": {
+    "scripts/simulate": {
       "X": 468,
       "Y": 688,
       "W": 344,
       "H": 26
     },
+    "scripts/validate": {
+      "X": 468,
+      "Y": 714,
+      "W": 344,
+      "H": 26
+    },
     "test": {
       "X": 444,
-      "Y": 746,
+      "Y": 772,
       "W": 368,
       "H": 30
     },
     "test/integration": {
       "X": 468,
-      "Y": 776,
+      "Y": 802,
       "W": 344,
       "H": 30
     },
     "test/smoke": {
       "X": 468,
-      "Y": 806,
+      "Y": 832,
       "W": 344,
       "H": 30
     },
     "test/unit": {
       "X": 468,
-      "Y": 836,
+      "Y": 862,
       "W": 344,
       "H": 30
     },
     "tools": {
       "X": 444,
-      "Y": 898,
+      "Y": 924,
       "W": 368,
       "H": 30
     },
     "tools/diagrams": {
       "X": 468,
-      "Y": 928,
+      "Y": 954,
       "W": 344,
       "H": 30
     },
     "tools/diagrams/fonts": {
       "X": 492,
-      "Y": 958,
+      "Y": 984,
       "W": 320,
       "H": 30
     },
     "tools/imagecheck": {
       "X": 468,
-      "Y": 988,
+      "Y": 1014,
       "W": 344,
       "H": 30
     }
@@ -424,14 +430,14 @@
         "X": 432,
         "Y": 392,
         "W": 392,
-        "H": 330
+        "H": 356
       }
     },
     {
       "Title": "",
       "Box": {
         "X": 432,
-        "Y": 738,
+        "Y": 764,
         "W": 392,
         "H": 136
       }
@@ -440,7 +446,7 @@
       "Title": "",
       "Box": {
         "X": 432,
-        "Y": 890,
+        "Y": 916,
         "W": 392,
         "H": 136
       }

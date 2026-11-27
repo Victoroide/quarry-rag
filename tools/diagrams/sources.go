@@ -40,8 +40,9 @@ var directoryDescriptions = map[string]string{
 	"internal/testutil/grantse2e": "Grants integration fixtures", "internal/testutil/pineconetest": "Pinecone test transport",
 	"internal/textutil": "Unicode normalization", "internal/wordprocessingml": "Word schema identifiers", "internal/worker": "Leased ingestion and retry handling",
 	"scripts": "Operational commands", "scripts/cleanup": "Delete selected documents", "scripts/document-sets": "Create subject-bound sets", "scripts/evidenceeval": "Scoped evidence and visibility checks", "scripts/fuzz": "Discover and exercise Go fuzz targets", "scripts/grant-catalog": "Import tenant grants", "scripts/langeval": "Answer language and latency checks", "scripts/reconcile": "Find and remove orphan vectors", "scripts/reindex": "Stage and verify vector generations", "scripts/simulate": "Exercise the service API", "scripts/validate": "Check retrieval behavior",
-	"scripts/citationsupport": "Calibration",
-	"test":                    "Service test suites", "test/integration": "Database and API integration", "test/smoke": "Opt-in live service checks", "test/unit": "Package behavior checks",
+	"scripts/citationsupport":     "Calibration",
+	"scripts/postgres-durability": "Writer journal checks",
+	"test":                        "Service test suites", "test/integration": "Database and API integration", "test/smoke": "Opt-in live service checks", "test/unit": "Package behavior checks",
 	"tools": "Repository tools", "tools/diagrams": "Vector image sources and checks", "tools/diagrams/fonts": "Bundled typefaces and license",
 	"tools/imagecheck": "Runtime image and license verification",
 }
