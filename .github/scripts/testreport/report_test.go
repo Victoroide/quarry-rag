@@ -414,11 +414,11 @@ func TestNoTestTextPreservesBuildAndCacheFailures(t *testing.T) {
 		t.Errorf("exit status = %d, want 1", code)
 	}
 	requireOnce(t, stderr, "FAIL \ta\t0.00s\n"+sharedDiagnostic, sharedDiagnostic, "FAIL \tb\t0.00s\n",
-		"FAIL \tstandalone\t0.00s\nBUILD FAIL\tstandalone\n"+standaloneDiagnostic,
+		"INCOMPLETE\tstandalone\n"+standaloneDiagnostic+"BUILD FAIL\tstandalone\n"+standaloneDiagnostic,
 		"testreport: a did not build\n", "testreport: b did not build\n", "testreport: standalone did not build\n",
-		"ok   \tcached\t0.00s\n", "testreport: cached reused a cached result\n")
-	requireOnce(t, stdout, "| 1 | 0 | 3 | 0 | 0 |", "| a | did not build |", "| b | did not build |",
-		"| standalone | did not build |", "| cached | pass |")
+		"testreport: standalone has no result\n", "ok   \tcached\t0.00s\n", "testreport: cached reused a cached result\n")
+	requireOnce(t, stdout, "| 1 | 0 | 3 | 0 | 1 |", "| a | did not build |", "| b | did not build |",
+		"| standalone | no result |", "| standalone | did not build |", "| cached | pass |")
 	requireAbsent(t, stdout, "### Packages without test files")
 }
 
@@ -736,8 +736,8 @@ func TestInterruptedPackageDiagnostics(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			events := []event{
 				{Action: "start", Package: a},
-				{Action: "output", Package: a, Output: "package build noise\n"},
-				{Action: "output", Package: a, Test: "TestIrrelevant", Output: "test build noise\n"},
+				{Action: "output", Package: a, Output: "package output\n"},
+				{Action: "output", Package: a, Test: "TestUnfinished", Output: "test output\n"},
 				{Action: "build-output", ImportPath: a, Output: "compiler diagnostic\n"},
 				{Action: "build-fail", ImportPath: a},
 			}
@@ -748,11 +748,16 @@ func TestInterruptedPackageDiagnostics(t *testing.T) {
 			if code != 1 {
 				t.Fatalf("exit status = %d, want 1", code)
 			}
-			requireOnce(t, stderr, "compiler diagnostic\n", "testreport: "+a+" did not build")
-			requireContains(t, "summary", stdout, "| "+a+" | did not build |")
-			requireAbsent(t, stderr, "build noise", "has no result", "--- INCOMPLETE:")
+			requireOnce(t, stderr, "compiler diagnostic\n", "testreport: "+a+" has no result\n",
+				"INCOMPLETE\t"+a+"\n--- INCOMPLETE: TestUnfinished\ntest output\npackage output\n")
+			requireOnce(t, stdout, "| 0 | 0 | 1 | 0 | 1 |", "| "+a+" | no result |", "- "+a+" has no result\n")
 			if dependentFail {
-				requireOnce(t, stderr, "FAIL \t"+b+"\t", "testreport: "+b+" did not build")
+				requireOnce(t, stderr, "FAIL \t"+b+"\t", "testreport: "+b+" did not build\n")
+				requireOnce(t, stdout, "| "+b+" | did not build |")
+				requireAbsent(t, stdout, "| "+a+" | did not build |")
+			} else {
+				requireOnce(t, stderr, "BUILD FAIL\t"+a+"\n", "testreport: "+a+" did not build\n")
+				requireOnce(t, stdout, "| "+a+" | did not build |")
 			}
 		})
 	}

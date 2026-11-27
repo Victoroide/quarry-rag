@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -17,6 +18,15 @@ func FuzzDecodeTestReportEvents(f *testing.F) {
 	sharedBuild := fixture(f, "shared-build.json")
 	f.Add(sharedBuild)
 	f.Add(sharedBuild + `{"Action":"build-output"`)
+	collision := []event{
+		{Action: "start", Package: "p"},
+		{Action: "run", Package: "p", Test: "TestP"},
+		{Action: "output", Package: "p", Test: "TestP", Output: "unfinished test output\n"},
+		{Action: "build-output", ImportPath: "p [p.test]", Output: "compiler diagnostic\n"},
+		{Action: "build-fail", ImportPath: "p [p.test]"},
+	}
+	f.Add(stream(f, collision...))
+	f.Add(stream(f, append(collision, event{Action: "fail", Package: "q", FailedBuild: "p [p.test]"})...))
 	f.Add(`{"Action":"fail","Package":"a","FailedBuild":"dep [dep.test]"}` +
 		`{"Action":"build-output","ImportPath":"dep [dep.test]","Output":"compiler diagnostic"}`)
 	marker := event{Action: "output", Package: "a", Output: "?   \ta\t[no test files]\n"}
@@ -91,6 +101,66 @@ func FuzzDecodeTestReportEvents(f *testing.F) {
 			if strings.HasPrefix(line, "--- INCOMPLETE OUTPUT OMITTED:") && !omission.MatchString(line) {
 				t.Fatalf("invalid omission marker %q", line)
 			}
+		}
+	})
+}
+
+func FuzzIncompletePackageBuildCollision(f *testing.F) {
+	f.Add(uint8(1), uint8(7), true, true, false)
+	f.Add(uint8(2), uint8(2), false, false, false)
+	f.Add(uint8(0), uint8(1), false, true, true)
+	f.Fuzz(func(t *testing.T, variant, fragmentSize uint8, buildFirst, referenced, malformed bool) {
+		const detail = "<compiler:first><compiler:last>\r\n"
+		id := "p"
+		if variant != 0 {
+			id = fmt.Sprintf("p [probe%d.test]", variant)
+		}
+		activity := []event{
+			{Action: "start", Package: "p"},
+			{Action: "output", Package: "p", Test: "TestP", Output: "<test:unfinished>\n"},
+		}
+		var build []event
+		width := max(1, int(fragmentSize))
+		for i := 0; i < len(detail); i += width {
+			build = append(build, event{Action: "build-output", ImportPath: id, Output: detail[i:min(i+width, len(detail))]})
+		}
+		build = append(build, event{Action: "build-fail", ImportPath: id})
+		var terminal []event
+		buildRow := id
+		buildHeader := "BUILD FAIL\t" + id + "\n"
+		if referenced {
+			terminal = append(terminal, event{Action: "fail", Package: "q", FailedBuild: id})
+			buildRow = "q"
+			if buildFirst {
+				buildHeader = "FAIL \tq\t0.00s\n"
+			}
+		}
+		events := slices.Concat(activity, terminal, build)
+		if buildFirst {
+			events = slices.Concat(build, terminal, activity)
+		}
+		input := stream(t, events...)
+		if malformed {
+			input += "{"
+		}
+		code, stdout, stderr := report(t, input, "p")
+		if code != 1 {
+			t.Fatalf("exit status = %d, want 1", code)
+		}
+		requireOnce(t, stderr, "INCOMPLETE\tp\n--- INCOMPLETE: TestP\n<test:unfinished>\n",
+			buildHeader+detail, "<compiler:first>", "<compiler:last>")
+		requireAbsent(t, stderr, "FAIL \tp\t")
+		if malformed {
+			if stdout != "" || !strings.HasSuffix(stderr, "read go test events: unexpected EOF\n") {
+				t.Fatalf("malformed stream summary = %q, diagnostics = %q", stdout, stderr)
+			}
+			return
+		}
+		requireOnce(t, stdout, "| 0 | 0 | 1 | 0 | 1 |", "| p | no result | 0.00 |", "- p has no result\n",
+			"| "+buildRow+" | did not build | 0.00 |", "- "+buildRow+" did not build\n")
+		requireOnce(t, stderr, "testreport: p has no result\n", "testreport: "+buildRow+" did not build\n")
+		if referenced {
+			requireAbsent(t, stdout, "| "+id+" | did not build |", "- "+id+" did not build\n")
 		}
 	})
 }

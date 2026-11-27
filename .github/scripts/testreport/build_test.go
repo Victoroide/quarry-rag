@@ -1,9 +1,149 @@
 package main
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestIncompletePackageSurvivesReferencedBuildFailure(t *testing.T) {
+	const variant = "p [p.test]"
+	const first = "compiler: undefined "
+	const last = "probe\r\n"
+	activity := []event{
+		{Action: "start", Package: "p"},
+		{Action: "run", Package: "p", Test: "TestP"},
+		{Action: "output", Package: "p", Test: "TestP", Output: "partial test output\n"},
+	}
+	build := []event{
+		{Action: "build-output", ImportPath: variant, Output: first},
+		{Action: "build-fail", ImportPath: variant},
+		{Action: "fail", Package: "q", FailedBuild: variant},
+		{Action: "build-output", ImportPath: variant, Output: last},
+	}
+	for _, tc := range []struct {
+		name   string
+		events []event
+	}{
+		{"test activity before build failure", slices.Concat(activity, build)},
+		{"build failure before test activity", slices.Concat(build, activity)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := reportInBothModes(t, stream(t, tc.events...))
+			if code != 1 {
+				t.Fatalf("exit status = %d, want 1", code)
+			}
+			requireOnce(t, stdout, "| 0 | 0 | 1 | 0 | 1 |", "| p | no result | 0.00 |",
+				"| q | did not build | 0.00 |", "- p has no result\n", "- q did not build\n")
+			requireOnce(t, stderr, "INCOMPLETE\tp\n--- INCOMPLETE: TestP\npartial test output\n",
+				"FAIL \tq\t0.00s\n"+first, "BUILD FAIL\t"+variant+"\n"+last,
+				first, last, "testreport: p has no result\n", "testreport: q did not build\n")
+			requireAbsent(t, stdout, variant, "| p | did not build |", "- p did not build\n")
+			requireAbsent(t, stderr, "FAIL \tp\t", "testreport: p did not build\n", "testreport: "+variant)
+		})
+	}
+}
+
+func TestIncompletePackageAndStandaloneCompilerFailureShareName(t *testing.T) {
+	const variant = "p [p.test]"
+	const other = "p [other.test]"
+	const detail = "shared compiler diagnostic\n"
+	activity := []event{
+		{Action: "start", Package: "p"},
+		{Action: "run", Package: "p", Test: "TestP"},
+		{Action: "output", Package: "p", Test: "TestP", Output: "test output\n"},
+		{Action: "run", Package: "p", Test: "BenchmarkP"},
+		{Action: "output", Package: "p", Test: "BenchmarkP", Output: "benchmark output\n"},
+	}
+	for _, tc := range []struct {
+		name    string
+		ids     []string
+		withLog []string
+	}{
+		{name: "plain ID without text", ids: []string{"p"}},
+		{name: "variant ID with text", ids: []string{variant}, withLog: []string{variant}},
+		{name: "multiple IDs with repeated text", ids: []string{variant, "p", other}, withLog: []string{variant, "p"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var build []event
+			for _, id := range tc.ids {
+				if slices.Contains(tc.withLog, id) {
+					build = append(build, event{Action: "build-output", ImportPath: id, Output: detail})
+				}
+				seal := event{Action: "build-fail", ImportPath: id}
+				build = append(build, seal, seal)
+			}
+			for _, events := range [][]event{slices.Concat(activity, build), slices.Concat(build, activity)} {
+				code, stdout, stderr := reportInBothModes(t, stream(t, events...), "p")
+				if code != 1 {
+					t.Fatalf("exit status = %d, want 1", code)
+				}
+				requireOnce(t, stdout, fmt.Sprintf("| 0 | 0 | %d | 0 | 1 |", len(tc.ids)),
+					"| p | no result | 0.00 |", "- p has no result\n")
+				requireOnce(t, stderr, "INCOMPLETE\tp\n", "--- INCOMPLETE: TestP\ntest output\n",
+					"--- INCOMPLETE: BenchmarkP\nbenchmark output\n", "testreport: p has no result\n")
+				requireAbsent(t, stderr, "FAIL \tp\t")
+				if count := strings.Count(stderr, detail); count != len(tc.withLog) {
+					t.Errorf("count of shared compiler text = %d, want %d", count, len(tc.withLog))
+				}
+				for _, id := range tc.ids {
+					requireOnce(t, stdout, "| "+id+" | did not build | 0.00 |", "- "+id+" did not build\n")
+					header := "BUILD FAIL\t" + id + "\n"
+					requireOnce(t, stderr, header, "testreport: "+id+" did not build\n")
+					if slices.Contains(tc.withLog, id) {
+						requireOnce(t, stderr, header+detail)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestIncompletePackageWithOnlyFrameKeepsNoResult(t *testing.T) {
+	const variant = "p [p.test]"
+	for _, tc := range []struct {
+		name  string
+		frame event
+	}{
+		{"start", event{Action: "start", Package: "p"}},
+		{"test output", event{Action: "output", Package: "p", Test: "TestP", Output: "test output\n"}},
+		{"package output", event{Action: "output", Package: "p", Output: "package output\n"}},
+		{"no test files result line", event{Action: "output", Package: "p", Output: "?   \tp\t[no test files]\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := stream(t, tc.frame,
+				event{Action: "build-output", ImportPath: variant, Output: "compiler diagnostic\n"},
+				event{Action: "build-fail", ImportPath: variant},
+			)
+			diagnostics := "INCOMPLETE\tp\n"
+			if tc.frame.Test != "" {
+				diagnostics += "--- INCOMPLETE: TestP\n"
+			}
+			diagnostics += tc.frame.Output + "BUILD FAIL\t" + variant + "\ncompiler diagnostic\n"
+			code, stdout, stderr := reportInBothModes(t, input)
+			if code != 1 {
+				t.Fatalf("exit status = %d, want 1", code)
+			}
+			requireOnce(t, stderr, diagnostics, "testreport: p has no result\n", "testreport: "+variant+" did not build\n")
+			requireOnce(t, stdout, "| 0 | 0 | 1 | 0 | 1 |", "| p | no result | 0.00 |",
+				"| "+variant+" | did not build | 0.00 |", "- p has no result\n", "- "+variant+" did not build\n")
+			requireAbsent(t, stdout, "| p | no test files |", "| p | did not build |")
+			t.Run("malformed tail", func(t *testing.T) {
+				for _, args := range [][]string{nil, {"-diagnostic-spill"}} {
+					code, stdout, stderr := report(t, input+"{", args...)
+					if code != 1 {
+						t.Errorf("exit status with %v = %d, want 1", args, code)
+					}
+					if stdout != "" {
+						t.Errorf("malformed stream wrote a summary: %q", stdout)
+					}
+					requireOnce(t, stderr, diagnostics+"read go test events: ")
+				}
+			})
+		})
+	}
+}
 
 func TestSharedBuildDiagnosticAppearsOnce(t *testing.T) {
 	first, second := module+"/first", module+"/second"
@@ -201,7 +341,7 @@ func TestBuildDiagnosticFallback(t *testing.T) {
 		},
 		{
 			name:     "two build-only variants sharing a display name",
-			events:   []event{output(variant, "variant output\n"), output(pkg, "ordinary output\n"), seal(pkg), seal(variant)},
+			events:   []event{output(variant, "variant output\n"), output(pkg, "ordinary output\n"), seal(variant), seal(pkg)},
 			wantCode: 1, wantStderr: pkgHeader + "BUILD FAIL\t" + variant + "\nvariant output\n" +
 				buildHeader + "ordinary output\ntestreport: " + pkg + " did not build\n" +
 				"testreport: " + variant + " did not build\n",
@@ -215,6 +355,14 @@ func TestBuildDiagnosticFallback(t *testing.T) {
 				"\nvariant compiler failure\ntestreport: " + pkg + " failed\n" +
 				"testreport: " + variant + " did not build\n",
 			wantRows: []string{"| " + pkg + " | fail | 0.00 |", "| " + variant + " | did not build | 0.00 |"},
+		},
+		{
+			name: "final package outcome supersedes earlier build reference",
+			events: []event{output(pkg, "early\n"), seal(pkg), fail, pass, {Action: "pass", Package: app},
+				output(pkg, "late\n")},
+			wantCode: 1, wantStderr: appHeader + "early\n" + passHeader + "ok   \t" + app + "\t0.00s\n" + pkgHeader +
+				buildHeader + "late\ntestreport: " + pkg + " did not build\n",
+			wantRows: []string{"| 2 | 0 | 1 | 0 | 0 |", "| " + app + " | pass |", "| " + pkg + " | did not build |"},
 		},
 		{
 			name: "deferred compiler detail after a no-test diagnostic",
