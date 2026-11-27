@@ -14,9 +14,15 @@ func FuzzDecodeTestReportEvents(f *testing.F) {
 	f.Add(`{"Action":"start","Package":"a"}{"Action":"output","Package":"a","Test":"TestFault","Output":"partial"}{`)
 	f.Add(`{"Action":"run","Package":"a","Test":"TestA"}{"Action":"run","Package":"b","Test":"TestB"}{"Action":"pass","Package":"a"}`)
 	f.Add(strings.Repeat(`{"Action":"run","Package":"a","Test":"TestRepeated"}`, 129))
+	sharedBuild := fixture(f, "shared-build.json")
+	f.Add(sharedBuild)
+	f.Add(sharedBuild + `{"Action":"build-output"`)
+	f.Add(`{"Action":"fail","Package":"a","FailedBuild":"dep [dep.test]"}` +
+		`{"Action":"build-output","ImportPath":"dep [dep.test]","Output":"compiler diagnostic"}`)
 	f.Add("")
 
 	omission := regexp.MustCompile(`^--- INCOMPLETE OUTPUT OMITTED: \d+ bytes, \d+ tests$`)
+	fragment := regexp.MustCompile(`<build-fragment:\d+>`)
 	f.Fuzz(func(t *testing.T, input string) {
 		if len(input) > 64*1024 {
 			t.Skip("input exceeds 64 KiB")
@@ -36,30 +42,43 @@ func FuzzDecodeTestReportEvents(f *testing.F) {
 			t.Fatal("invalid summary heading")
 		}
 
-		if !strings.Contains(stderr, "--- INCOMPLETE OUTPUT OMITTED:") {
-			return
-		}
-		// Clear user-controlled strings before checking reporter-generated markers.
-		r := newRun()
+		// Clear user-controlled strings before checking generated markers.
+		var events []event
+		var tail string
 		eventStream := json.NewDecoder(strings.NewReader(input))
 		for {
 			var ev event
 			if err := eventStream.Decode(&ev); err != nil {
+				if stdout == "" {
+					tail = "{"
+				}
 				break
 			}
-			if ev.Output != "" {
+			switch {
+			case ev.Action == "build-output":
+				ev.Output = fmt.Sprintf("<build-fragment:%d>\n", len(events))
+			case ev.Output != "":
 				ev.Output = "sanitized output\n"
 			}
 			if ev.Test != "" {
 				ev.Test = fmt.Sprintf("Test%x", ev.Test)
 			}
-			r.add(ev)
+			ev.Package = fmt.Sprintf("%x", ev.Package)
+			ev.ImportPath = fmt.Sprintf("%x", ev.ImportPath)
+			ev.FailedBuild = fmt.Sprintf("%x", ev.FailedBuild)
+			events = append(events, ev)
 		}
-		for _, p := range r.packages {
-			for line := range strings.SplitSeq(r.failureDetails(p), "\n") {
-				if strings.HasPrefix(line, "--- INCOMPLETE OUTPUT OMITTED:") && !omission.MatchString(line) {
-					t.Fatalf("invalid omission marker %q", line)
-				}
+		_, _, sanitized := report(t, stream(t, events...)+tail)
+		seen := map[string]bool{}
+		for _, match := range fragment.FindAllString(sanitized, -1) {
+			if seen[match] {
+				t.Fatalf("build output fragment %q was emitted twice", match)
+			}
+			seen[match] = true
+		}
+		for line := range strings.SplitSeq(sanitized, "\n") {
+			if strings.HasPrefix(line, "--- INCOMPLETE OUTPUT OMITTED:") && !omission.MatchString(line) {
+				t.Fatalf("invalid omission marker %q", line)
 			}
 		}
 	})
