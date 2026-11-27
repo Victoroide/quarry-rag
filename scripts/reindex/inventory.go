@@ -244,7 +244,7 @@ func (d deps) countDocuments(ctx context.Context, rep *inventoryReport) error {
 		return rowsErr
 	}
 	return d.pg.Pool.QueryRow(ctx, `SELECT
- (SELECT count(*) FROM documents d WHERE d.status='completed' AND EXISTS (SELECT 1 FROM document_deletions x WHERE x.document_id=d.id AND (x.held OR NOT x.finalized))),
+ (SELECT count(*) FROM documents d WHERE d.status = 'deleting' OR EXISTS (SELECT 1 FROM document_deletions x WHERE x.document_id = d.id AND (x.held OR NOT x.finalized))),
  (SELECT count(*) FROM documents WHERE status='completed' AND s3_key IS NULL),
  (SELECT COALESCE(sum(octet_length(c.text)), 0) FROM chunks c JOIN documents d ON d.id=c.document_id WHERE d.status='completed')`).
 		Scan(&rep.Documents.Deleting, &rep.Documents.WithoutOriginal, &rep.TextBytes)

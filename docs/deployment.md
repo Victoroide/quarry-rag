@@ -451,7 +451,14 @@ serving and cleanup logins as part of the [serving role setup](grant-catalog.md#
 1. Write the profile of the target: provider, model, exact revision,
    dimensions, `cosine` and the extraction and chunk version of the stored
    chunks. Use the extraction and chunk settings that produced the stored text.
-   Run the inventory and resolve every blocker.
+   Run the inventory and resolve every blocker. The advisory
+   `documents.deleting_or_held` count includes each existing document once if
+   its status is `deleting` or its document UUID has a held or unfinalized
+   deletion receipt. A counted document can also appear in a status total.
+   `open_deletions` counts all unfinalized receipts, including those whose
+   document is absent. The `open_deletion_ids` cap below limits only the list.
+   Inventory reads the document and receipt counts in separate read-committed
+   statements, so concurrent cleanup can commit between the two reads.
 2. If you know what produced the legacy vectors, configure every legacy replica
    with that profile and record it with `-attest-source -apply`. Attestation
    waits for admitted transactions and rejects while running job attempts
