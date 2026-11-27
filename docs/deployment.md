@@ -787,6 +787,13 @@ Activation requires all four counts to be zero. Inventory counts are advisory
 for staging. Completed documents with active hosted revisions still need to
 meet the PostgreSQL corpus compatibility checks before staging.
 
+Apply migration 048 to enforce the drain before an unbound legacy generation
+first routes to PostgreSQL. The guard covers serving startup, cleanup startup,
+and registry inserts or updates that make PostgreSQL the effective store for
+the active legacy name.
+Use READ COMMITTED for the first binding. The database guard stays in place
+when rolling back the application binaries.
+
 Keep the original Pinecone index, host, namespace and credentials available
 until the drain is verified. Resume or settle writing attempts on that source.
 For an abandoned document, use the authorized, incarnation-qualified deletion
@@ -800,10 +807,13 @@ Keep the switch blocked during outages and while provider settlement or cleanup
 is unresolved. If previous hosted switches left work with uncertain index
 ownership, establish the original target before applying a sweep. Repair
 orphaned work on the proven original target without deleting journal rows
-directly. An installation that already switched and stranded work before the
-upgrade requires incident recovery on that target. Zero counts cover the
-current journal; work whose records were lost or previously declared converged
-requires separate verification.
+directly. If recovery establishes a legacy Pinecone binding, use the
+registered-generation cutover after draining. An installation that already
+switched or bound legacy to PostgreSQL and stranded work before the upgrade
+requires incident recovery on the original hosted target. Applying the
+migration leaves existing bindings and journal rows in place. Zero counts
+cover the current journal; work whose records were lost or previously declared
+converged requires separate verification.
 
 #### Vector reindex database privileges
 
