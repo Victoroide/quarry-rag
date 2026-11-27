@@ -932,23 +932,51 @@ support migration 015 to preserve original-byte identity matching.
 
 ### PDF Layout Analysis Rollout
 
-Every replica that claims PDF jobs must run a release with layout support
-before any upload replica sets `PDF_LAYOUT_MODE=textract`, with
-`textract:StartDocumentAnalysis` and `textract:GetDocumentAnalysis` granted.
-Because PDF job claims are not profile-filtered, an earlier replica with only
-mixed PDF support will claim layout jobs and fail them permanently with
-`unsupported PDF extraction profile`; recovering failed jobs requires an
-explicit `document_id` (UUID) retry on a layout-capable replica. Layout mode
-sends eligible new PDFs (including born-digital pages) to Textract
+Apply migration `040_layout_pdf_claim_capability.sql` before any upload replica
+sets `PDF_LAYOUT_MODE=textract`, and ensure the serving login holds the
+`document_pdf_extractions` `SELECT` grant from
+[role provisioning](grant-catalog.md#database-roles). Before applying migration
+`040`, pause layout admissions (`PDF_LAYOUT_MODE=plain`) and drain or release
+any running unexpired layout leases:
+
+```sql
+SELECT count(*) FROM ingest_jobs j
+JOIN document_pdf_extractions p ON p.document_id = j.document_id
+WHERE j.state = 'running' AND j.lease_until > clock_timestamp()
+  AND p.profile = 'quarry.pdf.layout.v1';
+```
+
+The migration takes the `ingest_jobs` table lock required for `ALTER TABLE` and
+aborts without modifying the schema or invalidating live attempts if any
+unexpired layout lease is still running; pending, failed, and expired rows do
+not block it.
+
+Worker claim filtering uses the OCR interfaces configured on each worker.
+`PDF_LAYOUT_MODE` controls new admissions. A worker with text detection
+support can skip queued layout jobs and continue claiming compatible mixed
+or ordinary jobs. Workers with neither text detection nor layout analysis
+remain subject to the queue-wide PDF guard. Pending layout work waits for a
+worker with layout analysis support. Processing that work requires
+`textract:StartDocumentAnalysis` and `textract:GetDocumentAnalysis` permissions.
+Layout admission fails closed while migration `040` is absent.
+
+In a mixed-version deployment after migration `040`, an older binary running the
+legacy pre-`040` claim query cannot lease layout jobs, including retries with
+saved checkpoints. Its update consumes no attempt or token, so it receives no
+job whenever a layout job sits at the head of its legacy query. Keep at least
+one upgraded layout-capable worker running so queued layout jobs make progress.
+Layout mode sends eligible new PDFs (including born-digital pages) to Textract
 `StartDocumentAnalysis` (`LAYOUT` and `TABLES`) and applies Textract's document
 analysis pricing per page. Offline execution (`GO_RAG_FAKE_MODE=true`) invokes
 neither S3 nor Textract.
 
-To roll back, set `PDF_LAYOUT_MODE=plain` on all upload replicas, let pending
-layout jobs finish (confirming `SELECT count(*) FROM ingest_jobs j JOIN
+To roll back without down-migrating, set `PDF_LAYOUT_MODE=plain` on all upload
+replicas, retain migration `040` (`layout_claim_attempt` and its trigger), and
+keep at least one layout-capable worker running until no queued layout jobs
+remain (confirming `SELECT count(*) FROM ingest_jobs j JOIN
 document_pdf_extractions p ON p.document_id = j.document_id WHERE
-j.pdf_required AND p.profile = 'quarry.pdf.layout.v1'` returns zero), and then
-roll back the worker binaries.
+p.profile = 'quarry.pdf.layout.v1'` returns zero) before rolling back worker
+binaries.
 
 For PostgreSQL vector storage, use a coordinated writer cutover for migration
 039. Pause ingestion, vector maintenance, and reindex and drain in-flight jobs
