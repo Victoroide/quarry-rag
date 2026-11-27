@@ -22,6 +22,7 @@ Notable changes are grouped by release.
 - The selective Pinecone staging check pins both index descriptions to the public controller.
 - Held deletion release recovers claims left by lost commit replies.
 - Vector reindex validates Pinecone chunk positions before copying vectors or accepting verification evidence.
+- Vector reindex rejects same-space verification seeds whose source identity disagrees with the canonical chunk.
 - The diagram generator rejects ambiguous placement JSON and names the source file in its error.
 - Scoped Pinecone backfill verifies and labels the active hosted revision before publishing imported grant readiness.
 - Held deletion release bounds finalization rollback so a stalled database connection cannot indefinitely delay claim cleanup and writer freeze.

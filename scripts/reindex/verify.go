@@ -80,9 +80,9 @@ type sampleReport struct {
 type scopeDoc struct{ id, chunkID, revisionID, collection string }
 
 type sampleChunk struct {
-	id, sourceKey, doc, collection string
-	index                          int
-	textHash                       [sha256.Size]byte
+	id, sourceKey, collection string
+	sourceIdentity            sourceChunkIdentity
+	textHash                  [sha256.Size]byte
 }
 
 // verifier compares a staged target with PostgreSQL, the authority, and with the
@@ -238,7 +238,11 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 		ids[i] = targetKey
 		sourceKeys[i] = sourceKey
 		expected[targetKey] = scopeDoc{id: snap.ID, chunkID: string(c.ID), revisionID: snap.ActiveRevisionID, collection: snap.Collection}
-		*sample = append(*sample, sampleChunk{id: targetKey, sourceKey: sourceKey, doc: snap.ID, collection: snap.Collection, index: c.Index, textHash: sha256.Sum256([]byte(c.Text))})
+		*sample = append(*sample, sampleChunk{
+			id: targetKey, sourceKey: sourceKey, collection: snap.Collection,
+			sourceIdentity: newSourceChunkIdentity(snap.DocumentRevision, c),
+			textHash:       sha256.Sum256([]byte(c.Text)),
+		})
 	}
 	got := make(map[string]domain.Chunk, len(ids))
 	for start := 0; start < len(ids); start += pcstore.FetchBatchSize {
@@ -561,14 +565,15 @@ func fetchAll(ctx context.Context, r vectorReader, ids []string) (map[string]dom
 // scopeFor returns the sample chunk's document plus a deterministic selection of
 // other documents of its collection, at most limit in all.
 func scopeFor(c sampleChunk, collectionDocs []string, limit int) []string {
+	doc := string(c.sourceIdentity.documentID)
 	others := make([]string, 0, len(collectionDocs))
 	for _, id := range collectionDocs {
-		if id != c.doc {
+		if id != doc {
 			others = append(others, id)
 		}
 	}
 	sort.Slice(others, func(i, j int) bool { return score(c.id, others[i]) < score(c.id, others[j]) })
-	return append([]string{c.doc}, others[:min(len(others), limit-1)]...)
+	return append([]string{doc}, others[:min(len(others), limit-1)]...)
 }
 
 // judge applies the declared cutover criteria; anything unmeasured counts as failed.
