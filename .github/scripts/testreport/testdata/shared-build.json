@@ -1,0 +1,9 @@
+{"Time":"2026-11-25T17:30:35.142324-04:00","Action":"start","Package":"example.test/jsonmod/first"}
+{"ImportPath":"example.test/jsonmod/dep","Action":"build-output","Output":"# example.test/jsonmod/dep\n"}
+{"Time":"2026-11-25T17:30:35.142500-04:00","Action":"start","Package":"example.test/jsonmod/second"}
+{"ImportPath":"example.test/jsonmod/dep","Action":"build-output","Output":"dep/dep.go:3:14: undefined: missingFixtureNumber\n"}
+{"ImportPath":"example.test/jsonmod/dep","Action":"build-fail"}
+{"Time":"2026-11-25T17:30:35.142955-04:00","Action":"output","Package":"example.test/jsonmod/first","Output":"FAIL\texample.test/jsonmod/first [build failed]\n","OutputType":"frame"}
+{"Time":"2026-11-25T17:30:35.142989-04:00","Action":"fail","Package":"example.test/jsonmod/first","Elapsed":0.001,"FailedBuild":"example.test/jsonmod/dep"}
+{"Time":"2026-11-25T17:30:35.143010-04:00","Action":"output","Package":"example.test/jsonmod/second","Output":"FAIL\texample.test/jsonmod/second [build failed]\n","OutputType":"frame"}
+{"Time":"2026-11-25T17:30:35.143022-04:00","Action":"fail","Package":"example.test/jsonmod/second","Elapsed":0.001,"FailedBuild":"example.test/jsonmod/dep"}
