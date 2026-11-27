@@ -82,6 +82,12 @@ func seedLegacyLayoutRequest(ctx context.Context, t *testing.T, c *Client, req d
 
 func failCheckpointedLayout(ctx context.Context, t *testing.T, c *Client, job *domain.Job, coverage domain.PDFCoverage) {
 	t.Helper()
+	storeLayoutCheckpoint(ctx, t, c, job, coverage)
+	require.NoError(t, c.FailJob(ctx, *job, "indexing failed"))
+}
+
+func storeLayoutCheckpoint(ctx context.Context, t *testing.T, c *Client, job *domain.Job, coverage domain.PDFCoverage) {
+	t.Helper()
 	const checkpoint = "Layout text saved before indexing failed"
 	state := "text"
 	if coverage == domain.PDFPartial {
@@ -97,7 +103,6 @@ func failCheckpointedLayout(ctx context.Context, t *testing.T, c *Client, job *d
 			Sections: []domain.LayoutSection{{Page: 1, Text: checkpoint}},
 		}},
 	}))
-	require.NoError(t, c.FailJob(ctx, *job, "indexing failed"))
 }
 
 // legacyRequeueLayoutCheckpoint uses the old explicit UUID retry writes for
