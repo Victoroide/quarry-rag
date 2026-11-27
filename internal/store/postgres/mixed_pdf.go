@@ -8,6 +8,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func validatePDFAdmission(req domain.AcceptRequest) error {
@@ -130,8 +131,8 @@ func findSharedPDF(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest) (id
 }
 
 func insertPDFJob(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest) error {
-	if req.PDF.Coverage == domain.PDFPending {
-		if err := requirePDFQueueCompatibility(ctx, tx); err != nil {
+	if req.PDF.Coverage == domain.PDFPending || req.PDF.Profile == domain.LayoutPDFProfile {
+		if err := requirePDFQueueCompatibility(ctx, tx, req.PDF.Profile); err != nil {
 			return err
 		}
 	}
@@ -144,12 +145,13 @@ func insertPDFJob(ctx context.Context, tx pgx.Tx, req domain.AcceptRequest) erro
 		id, req.PDF.Profile, manifest, req.PDF.Coverage); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id,pdf_required) VALUES($1,$2)`, id, req.PDF.Coverage == domain.PDFPending)
+	_, err = tx.Exec(ctx, `INSERT INTO ingest_jobs(document_id,pdf_required) VALUES($1,$2)`,
+		id, req.PDF.Coverage == domain.PDFPending || req.PDF.Profile == domain.LayoutPDFProfile)
 	return err
 }
 
-func requeuePDF(ctx context.Context, tx pgx.Tx, id string, rotateWindow bool) error {
-	if err := requirePDFQueueCompatibility(ctx, tx); err != nil {
+func requeuePDF(ctx context.Context, tx pgx.Tx, id, profile string, rotateWindow bool) error {
+	if err := requirePDFQueueCompatibility(ctx, tx, profile); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE document_pdf_extractions SET coverage='pending',page_results=NULL,
@@ -167,11 +169,20 @@ func requeuePDF(ctx context.Context, tx pgx.Tx, id string, rotateWindow bool) er
 	return err
 }
 
-func requirePDFQueueCompatibility(ctx context.Context, tx pgx.Tx) error {
+func requirePDFQueueCompatibility(ctx context.Context, tx pgx.Tx, profile string) error {
 	// Order the first mixed write against claims from older binaries as well as
 	// current callers. After the insert, the claim trigger protects the queue.
 	if _, err := tx.Exec(ctx, `LOCK TABLE ingest_jobs IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return err
+	}
+	if profile == domain.LayoutPDFProfile {
+		if _, err := tx.Exec(ctx, `SELECT layout_claim_attempt FROM ingest_jobs WHERE FALSE`); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "42703" {
+				return errors.New("postgres: layout PDF work requires layout claim capability migration 040")
+			}
+			return err
+		}
 	}
 	var incompatible bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ingest_jobs WHERE state='running' AND lease_until>clock_timestamp()

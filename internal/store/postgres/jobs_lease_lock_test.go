@@ -10,6 +10,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,9 +34,13 @@ func waitForLeaseExpiry(t *testing.T, c *Client, id domain.DocumentID, within ti
 	}, within, 15*time.Millisecond, "observe the lease expiring while the row is locked")
 }
 
-func hasAdvisoryWaiter(ctx context.Context, pool *pgxpool.Pool, advisoryKey int) (bool, error) {
+func hasAdvisoryWaiter(ctx context.Context, pool *pgxpool.Pool, advisoryKey int64) (bool, error) {
 	var waiting bool
-	err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT FROM pg_locks WHERE locktype='advisory' AND objid=$1 AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))`, advisoryKey).Scan(&waiting)
+	err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT FROM pg_locks
+		WHERE locktype='advisory' AND NOT granted
+		AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+		AND classid::bigint=$1 AND objid::bigint=$2 AND objsubid=1)`,
+		(advisoryKey>>32)&0xffffffff, advisoryKey&0xffffffff).Scan(&waiting)
 	return waiting, err
 }
 
@@ -48,7 +53,7 @@ func TestAdvisoryWaiterIsScopedToFixtureDatabase(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, foreign.Close(context.Background())) })
 
-	const advisoryKey = 731152
+	const advisoryKey = -ingestAdmissionLock
 	ctx := t.Context()
 	holder, err := foreign.Pool.Begin(ctx)
 	require.NoError(t, err)
@@ -67,11 +72,15 @@ func TestAdvisoryWaiterIsScopedToFixtureDatabase(t *testing.T) {
 		<-done
 	}()
 
-	require.Eventually(t, func() bool {
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
 		waiting, queryErr := hasAdvisoryWaiter(ctx, foreign.Pool, advisoryKey)
-		return queryErr == nil && waiting
+		assert.NoError(collect, queryErr)
+		assert.True(collect, waiting)
 	}, 5*time.Second, 10*time.Millisecond, "the sibling database must have a waiter")
-	waiting, err := hasAdvisoryWaiter(ctx, home.Pool, advisoryKey)
+	waiting, err := hasAdvisoryWaiter(ctx, foreign.Pool, advisoryKey^(1<<32))
+	require.NoError(t, err)
+	require.False(t, waiting, "a different upper half must identify a different lock")
+	waiting, err = hasAdvisoryWaiter(ctx, home.Pool, advisoryKey)
 	require.NoError(t, err)
 	require.False(t, waiting, "a waiter in the sibling database must not satisfy the lease test's probe")
 }
@@ -115,9 +124,10 @@ CREATE TRIGGER delay_fingerprint_insert BEFORE INSERT ON document_fingerprints F
 		ok, completeErr := c.CompleteJob(ctx, *job, []domain.Chunk{{ID: domain.ChunkID(uuid.NewString())}}, domain.IndexObservation{Visibility: domain.VisibilitySampleSeen, ObservedAt: &observedAt})
 		complete <- outcome{ok, completeErr}
 	}()
-	require.Eventually(t, func() bool {
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
 		waiting, queryErr := hasAdvisoryWaiter(ctx, c.Pool, advisoryKey)
-		return queryErr == nil && waiting
+		assert.NoError(collect, queryErr)
+		assert.True(collect, waiting)
 	}, 2*time.Second, 10*time.Millisecond, "completion reaches the fingerprint insert while the lease is live")
 
 	heartbeatCtx, cancel := context.WithTimeout(ctx, time.Second)
