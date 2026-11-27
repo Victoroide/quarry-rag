@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +17,44 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb"
 )
+
+func TestManifestRevisionCleanupMetadataGuide(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "deployment.md"))
+	require.NoError(t, err)
+	_, section, found := strings.Cut(string(guide), "#### Metadata Indexing\n")
+	require.True(t, found)
+	section, _, _ = strings.Cut(section, "\n#### ")
+	_, row, found := strings.Cut(section, "| Manifest revision cleanup using metadata |")
+	require.True(t, found, "the guide needs a row for metadata-based manifest revision cleanup")
+	row, _, _ = strings.Cut(row, "\n")
+	assertFilterFields := func(filter *structpb.Struct) {
+		t.Helper()
+		fields := filter.GetFields()
+		require.NotEmpty(t, fields)
+		for field := range fields {
+			require.Contains(t, row, "`"+field+"`")
+		}
+	}
+	queried := false
+	conn := &fakeIndexConn{
+		filterDelete: func(_ context.Context, filter *structpb.Struct) error {
+			assertFilterFields(filter)
+			return status.Error(codes.Unimplemented, "filter deletion unsupported")
+		},
+		list: func(context.Context, *pc.ListVectorsRequest) (*pc.ListVectorsResponse, error) {
+			return nil, status.Error(codes.Unimplemented, "prefix listing unsupported")
+		},
+		query: func(_ context.Context, req *pc.QueryByVectorValuesRequest) (*pc.QueryVectorsResponse, error) {
+			queried = true
+			assertFilterFields(req.MetadataFilter)
+			return &pc.QueryVectorsResponse{}, nil
+		},
+	}
+	require.NoError(t, testClient(conn).DeleteByManifestRevision(t.Context(), "doc-1", "rev-1", nil))
+	require.True(t, queried, "metadata query fallback must be exercised")
+}
 
 func TestSelectiveMetadataStagingConfig(t *testing.T) {
 	for _, tc := range []struct {

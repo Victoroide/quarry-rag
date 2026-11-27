@@ -271,6 +271,104 @@ the schema and enable `pgcrypto`.
 - **Deletion**: Before document cleanup, the adapter checks which ownership fields the default namespace indexes. If discovery fails, the next cleanup retries within `PINECONE_TIMEOUT`. On a selective index, it queries an indexed `doc_id` and every usable ownership predicate with bounded metadata pages, then deletes only verified physical IDs. Tagged cleanup can verify the exact prefix using listing. An unverified document predicate without exact prefix listing, remaining matches or an obscured full page leave cleanup pending for retry.
 - **Purpose**: High-dimensional vector search. Chunks are upserted only into the default namespace (`""`), which the SDK maps to `__default__` and the console displays as `__default__`, with `doc_id` metadata identifying each document. Per-document namespaces created by earlier versions are removed when their document is deleted. SDK namespace operations share one connection, which closes only when the client shuts down.
 
+#### Metadata Indexing
+
+Keep Pinecone's all-metadata indexing default for new deployments. If you
+select fields, make the following union filterable in `__default__` for the
+retrieval and cleanup modes you use:
+
+| Use | Filterable metadata |
+| --- | --- |
+| Service searches by document type or collection | `doc_type`, `collection` |
+| Document allowlist and document-set searches, canonical ID and collection backfills, and document cleanup | `doc_id` |
+| Grants searches by tenant and vector publication | `tenant_id`, `document_revision`, `revision_id`, `document_incarnation` |
+| Manifest revision cleanup using metadata | `doc_id`, `revision_id` |
+| Exact tagged revision and attempt cleanup | `doc_id`, `document_revision`, `vector_attempt` |
+
+Keep `document_incarnation` filterable when grants readers can encounter hosted
+manifests. The filter tests both the allowed stamp and its absence on historical
+records. Turning off manifest writes can leave those readers active. Manifest
+revision cleanup uses both fields in the table for delete-by-filter and its
+query fallback. This applies to historical manifests and current manifested
+writes, including deployments with grants retrieval or new manifest writes
+disabled. Cleanup can delete verified physical IDs directly or list and delete
+IDs under the exact revision prefix where listing is supported. Pinecone can
+return stored metadata for evidence checks independently of which fields are
+filterable.
+
+On compatible serverless vector indexes, a namespace schema overrides the index
+schema. If the namespace omits its schema, it inherits the index rules. An
+explicitly indexed metadata field has `filterable: true`. For a serverless
+target, inspect the provisioning API at version `2026-07`. The SDK still sends
+retrieval queries at `2025-10`, and the optional LSN path has its own data-plane
+version as described above.
+
+With `PINECONE_INDEX_NAME` and `PINECONE_API_KEY` set for the target, run:
+
+```sh
+index=$(curl -fsS --proto '=https' --proto-default https \
+  -H "Api-Key: ${PINECONE_API_KEY:?}" -H 'X-Pinecone-Api-Version: 2026-07' \
+  "api.pinecone.io/indexes/${PINECONE_INDEX_NAME:?}") &&
+host=$(printf '%s\n' "$index" | jq -er '.host') &&
+printf '%s\n' "$index" | jq '.schema' &&
+namespace=$(curl -fsS --proto '=https' --proto-default https \
+  -H "Api-Key: ${PINECONE_API_KEY:?}" -H 'X-Pinecone-Api-Version: 2026-07' \
+  "${host:?}/namespaces/__default__") &&
+printf '%s\n' "$namespace" | jq '.schema'
+```
+
+For a legacy pod target, inspect `spec.pod.metadata_config.indexed` on the index
+description. An omitted list uses the all-metadata default.
+
+```sh
+index=$(curl -fsS --proto '=https' --proto-default https \
+  -H "Api-Key: ${PINECONE_API_KEY:?}" -H 'X-Pinecone-Api-Version: 2025-10' \
+  "api.pinecone.io/indexes/${PINECONE_INDEX_NAME:?}") &&
+printf '%s\n' "$index" | jq '.spec.pod.metadata_config.indexed'
+```
+
+If discovery is denied, unsupported, or ambiguous, resolve the target's
+configuration with its owner and complete the staging check before promotion.
+An empty query result alone cannot establish compatibility. If the effective
+schema lacks a required field, provision a fresh index with the required fields
+or the all-metadata default. Use the writer freeze, reindex, verification, and
+cutover commands in [Changing Models or Vector Stores](#changing-models-or-vector-stores)
+to replace the target while preserving publication and authorization checks.
+
+For the staging check, source `PINECONE_API_KEY` from a staging credential and
+set `QUARRY_PINECONE_SELECTIVE_INCLUDED_INDEX` and
+`QUARRY_PINECONE_SELECTIVE_EXCLUDED_INDEX` to two separately provisioned,
+disposable serverless dense cosine vector indexes. Provision both through the
+same path with matching dimension, cloud, region, read capacity mode and
+configuration, and embedding model and settings where applicable. Use the full
+field list above for the included index and omit only
+`document_incarnation` for the excluded index. Confirm the resulting schemas
+in `__default__`, which Pinecone reserves as the default namespace. Selective
+indexing must be available on a provisioning path that supports Quarry's
+Vectors API.
+
+The check requires the SDK's `2025-10` index description to report an explicit,
+complete read capacity configuration for each target. For Dedicated capacity,
+both targets must report `Ready` and have matching node type, scaling strategy,
+and configured shard and replica counts. Retry after both targets are ready.
+
+```sh
+GOMAXPROCS=4 go test -p 2 -count=2 -v ./internal/store/pinecone -run '^TestStagingSelectiveMetadataIndexing$'
+```
+
+Each check confirms both schemas before writing and uses fresh synthetic IDs.
+Keep the provider status and sorted synthetic match IDs for the inclusion,
+absence, and complete grants filters. The included index must return exactly
+the expected controls. Transport, permission, throttling, and freshness
+failures leave the comparison inconclusive. Each check attempts exact ID deletion
+on every target it may have written to. Cleanup is confirmed after a fully
+acknowledged and visible write, followed by an acknowledged delete and an empty
+fetch. If cleanup is inconclusive, tear down the affected disposable indexes to
+remove any residual records. Tear down the remaining disposable indexes after
+both checks and manage the staging credential through your normal operator
+process. The effect of omitting
+`document_incarnation` is unverified on serverless and unmeasured on legacy pods.
+
 #### Index Visibility Rollout
 
 Deploy the readers and migration 012 before enabling `lsn` on all replicas that
@@ -305,8 +403,9 @@ that revision, including for documents configured to use scoped vectors.
 Manifest hits carry the hosted revision ID alone for publication identity.
 Evidence reads reject hits that also supply tagged revision or attempt fields.
 With explicit grants membership, Pinecone can exclude stamped manifest vectors
-from obsolete incarnations before ranking. It uses up to 10,000 incarnation
-values per existing request partition. Revisions from the same incarnation and
+from obsolete incarnations before ranking. See [Metadata Indexing](#metadata-indexing)
+for the namespace requirements. It uses up to 10,000 incarnation values per
+existing request partition. Revisions from the same incarnation and
 historical vectors without a stamp can still occupy candidate slots until SQL
 checks the active revision. Service queries without explicit grants membership
 apply the incarnation and revision checks in SQL.

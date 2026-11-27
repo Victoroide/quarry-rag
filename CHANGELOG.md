@@ -4,6 +4,10 @@ Notable changes are grouped by release.
 
 ## [Unreleased]
 
+### Documentation
+
+- Document the metadata fields Pinecone must index for hosted search and cleanup, with an opt-in selective-index staging check.
+
 ### Added
 
 - Added an opt-in pgvector document-set recall evaluation for precomputed embeddings, with HNSW and IVFFlat comparisons and an exact-scope threshold rule.
