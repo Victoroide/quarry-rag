@@ -217,10 +217,10 @@ func TestBuildDiagnosticFallback(t *testing.T) {
 			wantRows: []string{"| " + pkg + " | fail | 0.00 |", "| " + variant + " | did not build | 0.00 |"},
 		},
 		{
-			name: "compiler detail without an eligible package header",
+			name: "deferred compiler detail after a no-test diagnostic",
 			events: []event{{Action: "output", Package: app, Output: "[no test files]\n"}, fail,
 				output(pkg, "compiler diagnostic\n")},
-			wantCode: 1, wantStderr: "BUILD FAIL\t" + pkg + "\ncompiler diagnostic\ntestreport: " + app + " did not build\n",
+			wantCode: 1, wantStderr: appHeader + "BUILD FAIL\t" + pkg + "\ncompiler diagnostic\ntestreport: " + app + " did not build\n",
 			wantRows: []string{"| " + app + " | did not build | 0.00 |"},
 		},
 	} {

@@ -34,19 +34,23 @@ type testResult struct {
 }
 
 type packageResult struct {
-	name            string
-	outcome         string
-	elapsed         float64
-	noTests         bool
-	cached          bool
-	failedBuild     string
-	hasBuildFailure bool
-	observed        bool
-	standaloneBuild string
-	output          diagnosticOutput
-	currentTest     map[string]*testResult
-	testOrder       []*testResult
-	benchmarkPath   []*testResult
+	name             string
+	outcome          string
+	elapsed          float64
+	noTestLine       string
+	noTestLineMatch  int
+	noTestResultLine bool
+	noTests          bool
+	hasNamedTests    bool
+	cached           bool
+	failedBuild      string
+	hasBuildFailure  bool
+	observed         bool
+	standaloneBuild  string
+	output           diagnosticOutput
+	currentTest      map[string]*testResult
+	testOrder        []*testResult
+	benchmarkPath    []*testResult
 }
 
 func (p *packageResult) didNotBuild() bool {
@@ -171,6 +175,7 @@ func (r *run) add(ev event) *packageResult {
 	}
 	p := r.pkg(ev.Package)
 	p.observed = true
+	p.hasNamedTests = p.hasNamedTests || ev.Test != ""
 	switch ev.Action {
 	case "run":
 		if isBenchmarkName(ev.Test) {
@@ -199,6 +204,9 @@ func (r *run) add(ev event) *packageResult {
 			return nil
 		}
 		p.outcome, p.elapsed = ev.Action, ev.Elapsed
+		p.noTests = ev.Action == "skip" && p.noTestResultLine && !p.hasNamedTests
+		p.noTestResultLine = false
+		p.noTestLineMatch = 0
 		p.failedBuild = ""
 		if ev.Action == "fail" && ev.FailedBuild != "" {
 			p.failedBuild = ev.FailedBuild
@@ -248,6 +256,11 @@ func (r *run) addOutput(p *packageResult, ev event) {
 			}
 		}
 	}
+	if ev.Test == "" && ev.OutputType == "" {
+		p.matchNoTestOutput(ev.Output)
+	} else {
+		p.noTestLineMatch = 0
+	}
 	if ev.Test != "" {
 		t := p.test(ev.Test)
 		if t.outcome != "pass" && t.outcome != "skip" && ev.Output != "" {
@@ -268,8 +281,34 @@ func (r *run) addOutput(p *packageResult, ev event) {
 		}
 	}
 	r.appendOutput(&p.output, ev.Output)
-	p.noTests = p.noTests || strings.Contains(ev.Output, "[no test files]")
 	p.cached = p.cached || strings.Contains(ev.Output, "(cached)")
+}
+
+// matchNoTestOutput compares a logical line as it arrives. Go can split it
+// between events, so retain the matched byte count until LF or an output boundary.
+func (p *packageResult) matchNoTestOutput(output string) {
+	if p.noTestLine == "" {
+		if p.name == "" || strings.ContainsAny(p.name, "\t\r\n") {
+			return
+		}
+		p.noTestLine = "?   \t" + p.name + "\t[no test files]\r"
+	}
+	for output != "" {
+		fragment, rest, ended := strings.Cut(output, "\n")
+		if p.noTestLineMatch >= 0 {
+			if strings.HasPrefix(p.noTestLine[p.noTestLineMatch:], fragment) {
+				p.noTestLineMatch += len(fragment)
+			} else {
+				p.noTestLineMatch = -1 // Discard the rest of this line.
+			}
+		}
+		if ended {
+			// The final CR is optional, but LF must end the line.
+			p.noTestResultLine = p.noTestResultLine || p.noTestLineMatch >= len(p.noTestLine)-1
+			p.noTestLineMatch = 0
+		}
+		output = rest
+	}
 }
 
 // decode feeds every event of in to the run and calls onEnd for each package
