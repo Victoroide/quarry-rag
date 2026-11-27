@@ -313,29 +313,33 @@ func collectSchemaColumns(ds []diagram) (sqlSchema, error) {
 	return declared, nil
 }
 
+func readMigrationSchema(rootFS *os.Root) (sqlSchema, error) {
+	paths, err := fs.Glob(rootFS.FS(), "internal/store/postgres/migrations/*.sql")
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no SQL migrations")
+	}
+	var sql strings.Builder
+	for _, p := range paths {
+		b, readErr := rootFS.ReadFile(p)
+		if readErr != nil {
+			return nil, readErr
+		}
+		sql.Write(b)
+		sql.WriteByte('\n')
+	}
+	return parseSQL(sql.String())
+}
+
 func checkSources(root string, ds []diagram) (err error) {
 	rootFS, err := os.OpenRoot(root)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, rootFS.Close()) }()
-	paths, err := fs.Glob(rootFS.FS(), "internal/store/postgres/migrations/*.sql")
-	if err != nil {
-		return err
-	}
-	if len(paths) == 0 {
-		return fmt.Errorf("no SQL migrations")
-	}
-	var sql strings.Builder
-	for _, p := range paths {
-		b, readErr := rootFS.ReadFile(p)
-		if readErr != nil {
-			return readErr
-		}
-		sql.Write(b)
-		sql.WriteByte('\n')
-	}
-	actual, err := parseSQL(sql.String())
+	actual, err := readMigrationSchema(rootFS)
 	if err != nil {
 		return err
 	}

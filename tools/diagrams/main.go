@@ -8,7 +8,57 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 )
+
+var diagramSizeBudgets = map[string]int{
+	"system-architecture": 86000,
+	"database-schema":     88000,
+	"database-operations": 75000,
+	"repository-layout":   101000,
+}
+
+const combinedSizeBudget = 638000
+
+func checkSizeBudgets(outputs map[string][]byte, perScene map[string]int, combinedLimit int) error {
+	total := 0
+	paths := make([]string, 0, len(outputs))
+	for path := range outputs {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+	for _, path := range paths {
+		b := outputs[path]
+		base := filepath.Base(path)
+		scene := strings.TrimSuffix(strings.TrimSuffix(base, "-light.svg"), "-dark.svg")
+		limit, ok := perScene[scene]
+		if !ok || (base != scene+"-light.svg" && base != scene+"-dark.svg") {
+			return fmt.Errorf("unexpected diagram output %s", path)
+		}
+		if len(b) > limit {
+			return fmt.Errorf("%s size %d exceeds %d byte budget", path, len(b), limit)
+		}
+		total += len(b)
+	}
+	scenes := make([]string, 0, len(perScene))
+	for scene := range perScene {
+		scenes = append(scenes, scene)
+	}
+	slices.Sort(scenes)
+	for _, scene := range scenes {
+		for _, theme := range []string{"light", "dark"} {
+			want := filepath.Join("docs", "diagrams", scene+"-"+theme+".svg")
+			if _, ok := outputs[want]; !ok {
+				return fmt.Errorf("missing diagram output %s", want)
+			}
+		}
+	}
+	if total > combinedLimit {
+		return fmt.Errorf("combined SVGs size %d exceeds %d byte budget", total, combinedLimit)
+	}
+	return nil
+}
 
 func generate(root string, check bool) (err error) {
 	rootFS, err := os.OpenRoot(root)
@@ -28,7 +78,6 @@ func generate(root string, check bool) (err error) {
 		return err
 	}
 	outputs := map[string][]byte{}
-	total := 0
 	for _, d := range ds {
 		if err := validate(d, f); err != nil {
 			return err
@@ -42,11 +91,10 @@ func generate(root string, check bool) (err error) {
 				return fmt.Errorf("%s %s exceeds 250 KB", d.Name, theme)
 			}
 			outputs[filepath.Join("docs", "diagrams", d.Name+"-"+theme+".svg")] = b
-			total += len(b)
 		}
 	}
-	if total >= 640000 {
-		return fmt.Errorf("combined SVGs exceed 640 KB: %d", total)
+	if err := checkSizeBudgets(outputs, diagramSizeBudgets, combinedSizeBudget); err != nil {
+		return err
 	}
 	for path, b := range outputs {
 		if check {

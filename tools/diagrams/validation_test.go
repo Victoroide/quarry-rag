@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"errors"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -128,13 +129,14 @@ func TestSourcesMatchCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ds) != 3 {
+	if len(ds) != 4 {
 		t.Fatalf("diagrams: %d", len(ds))
 	}
 	if err := checkSources("../..", ds); err != nil {
 		t.Fatal(err)
 	}
-	ds[0].Nodes[0].Lines = append(ds[0].Nodes[0].Lines, "GET /new")
+	client := diagramNodeByID(t, diagramByName(t, ds, "system-architecture"), "client")
+	client.Lines = append(client.Lines, "GET /new")
 	// The comparison is bidirectional: nonexistent routes are also stale content.
 	if err := checkSources("../..", ds); err == nil {
 		t.Fatal("extra route accepted")
@@ -170,7 +172,7 @@ func TestSourceChangesInvalidateDiagram(t *testing.T) {
 		copyFile(strings.TrimPrefix(p, "../../"))
 	}
 	copyFile("internal/api/router.go")
-	for _, name := range []string{"system-architecture", "database-schema", "repository-layout"} {
+	for _, name := range []string{"system-architecture", "database-schema", "database-operations", "repository-layout"} {
 		copyFile("docs/diagrams/src/" + name + ".json")
 	}
 	trackDirectories(t, root, directoryDescriptions)
@@ -338,8 +340,14 @@ func TestCanvasAndInspectionTextSize(t *testing.T) {
 		if d.W > 960 {
 			t.Errorf("%s width %g > 960", d.Name, d.W)
 		}
-		if d.Name == "system-architecture" && d.H > 760 || d.Name == "database-schema" && d.H > 2220 {
-			t.Errorf("%s height %g", d.Name, d.H)
+		if d.H > d.MaxH {
+			t.Errorf("%s height %g > %g", d.Name, d.H, d.MaxH)
+		}
+		if want := math.Ceil(d.H/10) * 10; d.MaxH != want {
+			t.Errorf("%s MaxH %g, want %g", d.Name, d.MaxH, want)
+		}
+		if d.Name == "system-architecture" && d.MaxH != 760 {
+			t.Errorf("system-architecture MaxH %g, want 760", d.MaxH)
 		}
 		for _, l := range sceneLabels(d) {
 			if l.Size*880/d.W < 12 {
@@ -504,7 +512,7 @@ func TestArchitectureGridAndDirections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := ds[0]
+	d := diagramByName(t, ds, "system-architecture")
 	for _, n := range d.Nodes {
 		if math.Abs(n.Box.W-184) > .5 {
 			t.Errorf("%s width %g", n.ID, n.Box.W)
@@ -555,15 +563,16 @@ func TestArchitectureGridAndDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, kind := range []string{"column", "row"} {
-		bad, err := buildDiagrams("../..")
+		scenes, err := buildDiagrams("../..")
 		if err != nil {
 			t.Fatal(err)
 		}
+		bad := diagramByName(t, scenes, "system-architecture")
 		if kind == "column" {
-			bad[0].Nodes[0].Box.X += 0.6
+			diagramNodeByID(t, bad, "client").Box.X += 0.6
 		} else {
-			for i := range bad[0].Edges {
-				e := &bad[0].Edges[i]
+			for i := range bad.Edges {
+				e := &bad.Edges[i]
 				if e.ID == "ingest-sandbox" {
 					for j := range e.Points {
 						e.Points[j][1] += 0.6
@@ -571,7 +580,7 @@ func TestArchitectureGridAndDirections(t *testing.T) {
 				}
 			}
 		}
-		err = validate(bad[0], f)
+		err = validate(*bad, f)
 		if err == nil || !strings.Contains(err.Error(), kind+" alignment") {
 			t.Errorf("%s shift not caught: %v", kind, err)
 		}
@@ -583,43 +592,51 @@ func TestDataModelRowsAndPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := ds[1]
-	nodes := map[string]node{}
-	for _, n := range d.Nodes {
-		nodes[n.ID] = n
-	}
-	for i, e := range d.Edges {
-		parent := nodes[e.From]
-		child := nodes[e.To]
-		if e.From != "documents" || math.Abs(e.Points[0][1]-(parent.Box.Y+48+float64(i)*12)) > .5 {
-			t.Errorf("%s source must lie within the id row", e.ID)
+	for _, d := range ds {
+		if d.Name != "database-schema" && d.Name != "database-operations" {
+			continue
 		}
-		found := false
-		for j, c := range child.Columns {
-			if c.Reference == "documents.id" {
-				found = true
-				if math.Abs(e.Points[len(e.Points)-1][1]-(child.Box.Y+schemaColumnBaseline(j)-6)) > .5 {
-					t.Errorf("%s must point to its child FK row", e.ID)
+		nodes := map[string]node{}
+		for _, n := range d.Nodes {
+			nodes[n.ID] = n
+		}
+		for i, e := range d.Edges {
+			parent := nodes[e.From]
+			child := nodes[e.To]
+			if d.Name == "database-schema" {
+				if e.From != "documents" || math.Abs(e.Points[0][1]-(parent.Box.Y+48+float64(i)*12)) > .5 {
+					t.Errorf("%s source must lie within the id row", e.ID)
 				}
+			} else if e.From != "documents-ref" || math.Abs(e.Points[0][1]-(parent.Box.Y+parent.Box.H/2)) > .5 {
+				t.Errorf("%s source must center on the documents reference node", e.ID)
 			}
-		}
-		if !found {
-			t.Errorf("%s has no referencing key", e.ID)
-		}
-	}
-	for _, n := range d.Nodes {
-		for i, c := range n.Columns {
 			found := false
-			for _, l := range sceneLabels(d) {
-				if l.Owner == n.ID && l.Text == c.Name {
+			for j, c := range child.Columns {
+				if c.Reference == "documents.id" {
 					found = true
-					if math.Abs(l.Y-(n.Box.Y+schemaColumnBaseline(i))) > .5 {
-						t.Errorf("%s.%s row spacing", n.ID, c.Name)
+					if math.Abs(e.Points[len(e.Points)-1][1]-(child.Box.Y+schemaColumnBaseline(j)-6)) > .5 {
+						t.Errorf("%s must point to its child FK row", e.ID)
 					}
 				}
 			}
 			if !found {
-				t.Errorf("missing column %s.%s", n.ID, c.Name)
+				t.Errorf("%s has no referencing key", e.ID)
+			}
+		}
+		for _, n := range d.Nodes {
+			for i, c := range n.Columns {
+				found := false
+				for _, l := range sceneLabels(d) {
+					if l.Owner == n.ID && l.Text == c.Name {
+						found = true
+						if math.Abs(l.Y-(n.Box.Y+schemaColumnBaseline(i))) > .5 {
+							t.Errorf("%s.%s row spacing", n.ID, c.Name)
+						}
+					}
+				}
+				if !found {
+					t.Errorf("missing column %s.%s", n.ID, c.Name)
+				}
 			}
 		}
 	}
@@ -669,13 +686,13 @@ func TestCanvasFitsLastContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range ds {
-		if d.Name == "database-schema" {
+		if d.Name == "database-schema" || d.Name == "database-operations" {
 			bottom := 0.0
 			for _, n := range d.Nodes {
 				bottom = math.Max(bottom, n.Box.Y+n.Box.H)
 			}
 			if len(d.Labels) != 1 || d.Labels[0].Y != bottom+40 || d.H != bottom+62 {
-				t.Error("data-model legend and canvas must follow the last table")
+				t.Errorf("%s legend and canvas must follow the last table", d.Name)
 			}
 		}
 		if d.Name == "repository-layout" {
@@ -692,5 +709,444 @@ func TestCanvasFitsLastContent(t *testing.T) {
 				t.Errorf("%s title inset", d.Name)
 			}
 		}
+	}
+}
+
+func cloneDiagrams(src []diagram) []diagram {
+	out := make([]diagram, len(src))
+	for i, d := range src {
+		out[i] = d
+		out[i].Nodes = make([]node, len(d.Nodes))
+		for j, n := range d.Nodes {
+			out[i].Nodes[j] = n
+			out[i].Nodes[j].Lines = slices.Clone(n.Lines)
+			out[i].Nodes[j].Columns = slices.Clone(n.Columns)
+			out[i].Nodes[j].Times = slices.Clone(n.Times)
+		}
+		out[i].Edges = make([]edge, len(d.Edges))
+		for j, e := range d.Edges {
+			out[i].Edges[j] = e
+			out[i].Edges[j].Points = slices.Clone(e.Points)
+			out[i].Edges[j].Times = slices.Clone(e.Times)
+			if e.Label != nil {
+				lbl := *e.Label
+				out[i].Edges[j].Label = &lbl
+			}
+		}
+		out[i].Groups = slices.Clone(d.Groups)
+		out[i].Labels = slices.Clone(d.Labels)
+	}
+	return out
+}
+
+func diagramByName(t *testing.T, ds []diagram, name string) *diagram {
+	t.Helper()
+	i := slices.IndexFunc(ds, func(d diagram) bool { return d.Name == name })
+	if i < 0 {
+		t.Fatalf("scene %s is missing", name)
+	}
+	return &ds[i]
+}
+
+func diagramNodeByID(t *testing.T, d *diagram, id string) *node {
+	t.Helper()
+	i := slices.IndexFunc(d.Nodes, func(n node) bool { return n.ID == id })
+	if i < 0 {
+		t.Fatalf("scene %s is missing node %s", d.Name, id)
+	}
+	return &d.Nodes[i]
+}
+
+func TestSchemaSceneColumnsUniqueAndComplete(t *testing.T) {
+	ds, err := buildDiagrams("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = checkSources("../..", ds); err != nil {
+		t.Fatalf("main + migrations check failed: %v", err)
+	}
+	cols, err := collectSchemaColumns(ds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootFS, err := os.OpenRoot("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := readMigrationSchema(rootFS)
+	if closeErr := errors.Join(err, rootFS.Close()); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if got, want := slices.Sorted(maps.Keys(cols)), slices.Sorted(maps.Keys(migrated)); !slices.Equal(got, want) {
+		t.Fatalf("modeled tables %v, want migration tables %v", got, want)
+	}
+
+	ops := diagramByName(t, ds, "database-operations")
+	ref := diagramNodeByID(t, ops, "documents-ref")
+	if ref.Title != "documents.id" || !slices.Equal(ref.Lines, []string{"Document lifecycle"}) || len(ref.Columns) != 0 {
+		t.Fatalf("unexpected operations reference node: %+v", ref)
+	}
+
+	withRefCols := cloneDiagrams(ds)
+	diagramNodeByID(t, diagramByName(t, withRefCols, "database-operations"), "documents-ref").Columns = []column{{Name: "id", Type: "UUID"}}
+	if err = checkSources("../..", withRefCols); err == nil {
+		t.Fatal("reference node with columns was accepted")
+	}
+
+	for _, tc := range []struct {
+		scene, table, column string
+	}{
+		{"database-schema", "chunks", "document_id"},
+		{"database-schema", "documents", "untagged_since"},
+		{"database-operations", "vector_state", "active_cleanup_ids"},
+		{"database-operations", "vector_state", "active_cleanup_reservation"},
+	} {
+		t.Run("missing "+tc.table+"."+tc.column, func(t *testing.T) {
+			omitted := cloneDiagrams(ds)
+			n := diagramNodeByID(t, diagramByName(t, omitted, tc.scene), tc.table)
+			index := slices.IndexFunc(n.Columns, func(c column) bool { return c.Name == tc.column })
+			if index < 0 {
+				t.Fatalf("%s is absent from %s", tc.column, tc.table)
+			}
+			n.Columns = slices.Delete(n.Columns, index, index+1)
+			if checkErr := checkSources("../..", omitted); checkErr == nil || !strings.Contains(checkErr.Error(), "SQL columns, types or keys differ") {
+				t.Fatalf("checking omitted column: %v", checkErr)
+			}
+		})
+	}
+
+	dupCol := cloneDiagrams(ds)
+	chunks := diagramNodeByID(t, diagramByName(t, dupCol, "database-schema"), "chunks")
+	chunks.Columns = append(chunks.Columns, chunks.Columns[0])
+	if err = checkSources("../..", dupCol); err == nil || !strings.Contains(err.Error(), "duplicate schema column chunks.") {
+		t.Fatalf("checking duplicate column: %v", err)
+	}
+
+	dupTable := cloneDiagrams(ds)
+	dupOps := diagramByName(t, dupTable, "database-operations")
+	dupChunks := diagramNodeByID(t, diagramByName(t, dupTable, "database-schema"), "chunks")
+	dupOps.Nodes = append(dupOps.Nodes, *dupChunks)
+	if err = checkSources("../..", dupTable); err == nil || !strings.Contains(err.Error(), "duplicate schema table chunks") {
+		t.Fatalf("checking duplicate table: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		edit func(*column)
+	}{
+		{"retyped", func(c *column) { c.Type = "TEXT" }},
+		{"miskeyed", func(c *column) { c.Key = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := cloneDiagrams(ds)
+			n := diagramNodeByID(t, diagramByName(t, changed, "database-schema"), "documents")
+			index := slices.IndexFunc(n.Columns, func(c column) bool { return c.Name == "id" })
+			if index < 0 {
+				t.Fatal("documents.id is missing")
+			}
+			tc.edit(&n.Columns[index])
+			if checkErr := checkSources("../..", changed); checkErr == nil || !strings.Contains(checkErr.Error(), "SQL columns, types or keys differ") {
+				t.Fatalf("checking %s column: %v", tc.name, checkErr)
+			}
+		})
+	}
+
+	// Moved table with stale placement must fail buildDiagrams.
+	root := t.TempDir()
+	for p := range directoryDescriptions {
+		if mkErr := os.MkdirAll(filepath.Join(root, p), 0o750); mkErr != nil {
+			t.Fatal(mkErr)
+		}
+	}
+	for _, name := range []string{"system-architecture", "database-schema", "database-operations", "repository-layout"} {
+		rel := filepath.Join("docs", "diagrams", "src", name+".json")
+		b, readErr := readWithin("../..", rel)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if mkErr := os.MkdirAll(filepath.Join(root, filepath.Dir(rel)), 0o750); mkErr != nil {
+			t.Fatal(mkErr)
+		}
+		if wrErr := writeWithin(root, rel, b); wrErr != nil {
+			t.Fatal(wrErr)
+		}
+	}
+	trackDirectories(t, root, directoryDescriptions)
+	schemaPath := filepath.Join("docs", "diagrams", "src", "database-schema.json")
+	schemaJSON, err := readWithin(root, schemaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate moving source_uploads to the operations scene without updating placements.
+	staleSchema := strings.Replace(string(schemaJSON), `"source_uploads":`, `"moved_source_uploads":`, 1)
+	if err = writeWithin(root, schemaPath, []byte(staleSchema)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = buildDiagrams(root); err == nil {
+		t.Fatal("moved table with stale placement accepted")
+	}
+
+	// Preserve grant_catalog_* exclusions in parseSQL.
+	grantSchema, err := parseSQL(`CREATE TABLE documents (id UUID PRIMARY KEY); CREATE TABLE grant_catalog_roles (id UUID PRIMARY KEY); ALTER TABLE grant_catalog_roles ADD COLUMN role TEXT; ALTER TABLE documents ADD COLUMN grant_catalog_note TEXT;`)
+	if err != nil {
+		t.Fatalf("grant_catalog exclusion failed: %v", err)
+	}
+	if len(grantSchema) != 1 || len(grantSchema["documents"]) != 1 {
+		t.Fatalf("grant_catalog exclusion altered modeled schema: %#v", grantSchema)
+	}
+}
+
+func TestSchemaScenesFitAndPreserveRelationships(t *testing.T) {
+	f, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds, err := buildDiagrams("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archDoc, err := readWithin("../..", "docs/architecture.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemas []diagram
+	seenTargets := map[string]bool{}
+	for _, d := range ds {
+		if d.Name != "database-schema" && d.Name != "database-operations" {
+			continue
+		}
+		schemas = append(schemas, d)
+		if err := validate(d, f); err != nil {
+			t.Fatalf("%s failed validation: %v", d.Name, err)
+		}
+		if d.W != 840 || d.MaxW != 840 || d.H > d.MaxH {
+			t.Errorf("%s canvas (%g x %g) exceeds limits (%g x %g)", d.Name, d.W, d.H, d.MaxW, d.MaxH)
+		}
+		bottom := 0.0
+		for _, n := range d.Nodes {
+			bottom = math.Max(bottom, n.Box.Y+n.Box.H)
+		}
+		if len(d.Labels) != 1 || d.Labels[0].Y != bottom+40 || d.H != bottom+62 {
+			t.Errorf("%s legend/canvas spacing mismatch: bottom=%g labels=%+v H=%g", d.Name, bottom, d.Labels, d.H)
+		}
+		for _, l := range sceneLabels(d) {
+			if px := l.Size * 880 / d.W; px < 12 {
+				t.Errorf("%s label %q is %.2f px at 880", d.Name, l.Text, px)
+			}
+		}
+		if !strings.Contains(string(archDoc), `alt="`+d.Description+`" src="diagrams/`+d.Name+`-light.svg"`) {
+			t.Errorf("docs/architecture.md missing matching alt text for %s", d.Name)
+		}
+		for _, e := range d.Edges {
+			seenTargets[e.To] = true
+			if d.Name == "database-operations" {
+				if e.From != "documents-ref" || e.To != "hosted_vector_revisions" {
+					t.Errorf("unexpected ops edge: %+v", e)
+				}
+				if len(e.Points) < 4 || e.Points[1][0] <= 368 || e.Points[1][0] >= 484 {
+					t.Errorf("ops edge does not route through central gutter: %+v", e.Points)
+				}
+				for _, want := range []string{"0..1", "documents.id", "cascading deletion", "pending active cleanup reservation", "PK denotes primary key", "FK denotes foreign key", "SQL types appear beside every column"} {
+					if !strings.Contains(d.Description, want) {
+						t.Errorf("ops description missing %q", want)
+					}
+				}
+			}
+		}
+	}
+	if len(schemas) != 2 {
+		t.Fatalf("expected 2 schema scenes, got %d", len(schemas))
+	}
+	wantTargets := []string{"chunks", "document_fingerprints", "ingest_jobs", "document_pdf_extractions", "evaluation_fixtures", "source_uploads", "hosted_vector_revisions"}
+	for _, target := range wantTargets {
+		if !seenTargets[target] {
+			t.Errorf("missing documents.id relationship to %s across schema pair", target)
+		}
+	}
+}
+
+func TestSchemaScenesHaveCapacityForNewColumns(t *testing.T) {
+	f, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds, err := buildDiagrams("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	measure := func(scenes []diagram) (map[string]int, int) {
+		per := map[string]int{}
+		total := 0
+		for _, d := range scenes {
+			for _, theme := range []string{"light", "dark"} {
+				b, renderErr := render(d, theme, f)
+				if renderErr != nil {
+					t.Fatal(renderErr)
+				}
+				per[d.Name+"-"+theme] = len(b)
+				total += len(b)
+			}
+		}
+		return per, total
+	}
+	basePer, baseTotal := measure(ds)
+
+	extended := cloneDiagrams(ds)
+	additions := map[string][]column{
+		"documents":               {{Name: "retention_class_label", Type: "TEXT"}, {Name: "source_ingest_revision", Type: "TEXT"}},
+		"chunks":                  {{Name: "chunk_checksum_sha256", Type: "TEXT"}},
+		"ingest_jobs":             {{Name: "worker_affinity_zone", Type: "TEXT"}, {Name: "queue_priority_weight", Type: "INTEGER"}},
+		"source_uploads":          {{Name: "checksum_verified_at", Type: "TIMESTAMPTZ"}},
+		"document_deletions":      {{Name: "retention_grace_until", Type: "TIMESTAMPTZ"}, {Name: "deletion_audit_actor", Type: "TEXT"}},
+		"vector_generations":      {{Name: "generation_locked_at", Type: "TIMESTAMPTZ"}},
+		"hosted_vector_manifests": {{Name: "manifest_digest_sha256", Type: "TEXT"}, {Name: "retention_policy_name", Type: "TEXT"}},
+		"hosted_vector_cleanups":  {{Name: "cleanup_backoff_limit", Type: "INTEGER"}},
+	}
+	added := 0
+	repackSchema := func(d *diagram) {
+		var leftIdx, rightIdx []int
+		for i, n := range d.Nodes {
+			if cols, ok := additions[n.ID]; ok {
+				added += len(cols)
+				d.Nodes[i].Columns = append(d.Nodes[i].Columns, cols...)
+				d.Nodes[i].Box.H += float64(len(cols)) * schemaRowHeight
+			}
+			if d.Nodes[i].Box.X < 400 {
+				leftIdx = append(leftIdx, i)
+			} else {
+				rightIdx = append(rightIdx, i)
+			}
+		}
+		pack := func(idxs []int) float64 {
+			y := 78.0
+			for _, idx := range idxs {
+				d.Nodes[idx].Box.Y = y
+				y += d.Nodes[idx].Box.H + 8
+			}
+			if len(idxs) == 0 {
+				return 0
+			}
+			return y - 8
+		}
+		bottom := math.Max(pack(leftIdx), pack(rightIdx))
+		d.Labels[0].Y = bottom + 40
+		d.H = bottom + 62
+
+		nodesByID := map[string]node{}
+		for _, n := range d.Nodes {
+			nodesByID[n.ID] = n
+		}
+		for i := range d.Edges {
+			e := &d.Edges[i]
+			child := nodesByID[e.To]
+			for j, c := range child.Columns {
+				if c.Reference == "documents.id" {
+					y := child.Box.Y + schemaColumnBaseline(j) - 6
+					e.Points[len(e.Points)-2][1] = y
+					e.Points[len(e.Points)-1][1] = y
+					if e.Label != nil {
+						e.Label.Y = y - 14
+					}
+				}
+			}
+		}
+	}
+	projectedHeightLimits := map[string]float64{"database-schema": 1500, "database-operations": 1650}
+	for name, limit := range projectedHeightLimits {
+		d := diagramByName(t, extended, name)
+		repackSchema(d)
+		if d.H > limit {
+			t.Errorf("extended %s height %g > %g", name, d.H, limit)
+		}
+		d.MaxH = math.Ceil(d.H/10) * 10
+		if err := validate(*d, f); err != nil {
+			t.Fatalf("extended %s failed layout validation: %v", name, err)
+		}
+	}
+	if added != 12 {
+		t.Fatalf("growth fixture added %d columns, want 12", added)
+	}
+	extPer, extTotal := measure(extended)
+	t.Logf("baseline total=%d (schema=%d, ops=%d); +12 cols total=%d (schema=%d, ops=%d, delta=%+d)",
+		baseTotal, basePer["database-schema-light"], basePer["database-operations-light"],
+		extTotal, extPer["database-schema-light"], extPer["database-operations-light"], extTotal-baseTotal)
+	for _, key := range []string{"database-schema-light", "database-schema-dark", "database-operations-light", "database-operations-dark"} {
+		if extPer[key] >= 100000 {
+			t.Errorf("extended %s is %d >= 100000", key, extPer[key])
+		}
+	}
+	if extTotal >= 640000 {
+		t.Errorf("extended combined size is %d >= 640000", extTotal)
+	}
+}
+
+func TestParseSQLSchemaPanelColumnCoverage(t *testing.T) {
+	malformed := []string{
+		`CREATE TABLE broken (id UUID PRIMARY KEY`,
+		`CREATE TABLE broken (id UUID, CONSTRAINT pk PRIMARY KEY (id));`,
+		`CREATE TABLE broken (badcol);`,
+		`CREATE TABLE broken (id UUID PRIMARY KEY); ALTER TABLE broken ADD COLUMN;`,
+	}
+	for _, sql := range malformed {
+		if _, err := parseSQL(sql); err == nil {
+			t.Errorf("malformed SQL accepted: %s", sql)
+		}
+	}
+
+	valid := `CREATE TABLE alpha (id UUID PRIMARY KEY);
+ALTER TABLE alpha ADD COLUMN IF NOT EXISTS label_one TEXT, ADD COLUMN label_two TIMESTAMPTZ;`
+	got, err := parseSQL(valid)
+	if err != nil {
+		t.Fatalf("supported ADD COLUMN failed: %v", err)
+	}
+	if len(got["alpha"]) != 3 || got["alpha"]["label_two"].Type != "TIMESTAMPTZ" {
+		t.Fatalf("unexpected parsed columns: %#v", got)
+	}
+
+	// Verify ADD COLUMN surfaces through checkSources against split schema panels.
+	root := t.TempDir()
+	for p := range directoryDescriptions {
+		if mkErr := os.MkdirAll(filepath.Join(root, p), 0o750); mkErr != nil {
+			t.Fatal(mkErr)
+		}
+	}
+	for _, pattern := range []string{"internal/api/router.go", "internal/store/postgres/migrations/*.sql", "docs/diagrams/src/*.json"} {
+		matches, globErr := filepath.Glob(filepath.Join("..", "..", pattern))
+		if globErr != nil {
+			t.Fatal(globErr)
+		}
+		for _, p := range matches {
+			rel, relErr := filepath.Rel("../..", p)
+			if relErr != nil {
+				t.Fatal(relErr)
+			}
+			b, readErr := readWithin("../..", rel)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if mkErr := os.MkdirAll(filepath.Join(root, filepath.Dir(rel)), 0o750); mkErr != nil {
+				t.Fatal(mkErr)
+			}
+			if wrErr := writeWithin(root, rel, b); wrErr != nil {
+				t.Fatal(wrErr)
+			}
+		}
+	}
+	trackDirectories(t, root, directoryDescriptions)
+	ds, err := buildDiagrams(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mig := filepath.Join(root, "internal", "store", "postgres", "migrations", "999_ops_col.sql")
+	if err = os.WriteFile(mig, []byte("ALTER TABLE vector_state ADD COLUMN extra_state_flag BOOLEAN;"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = checkSources(root, ds); err == nil {
+		t.Fatal("missing operations column in diagram accepted")
+	}
+	state := diagramNodeByID(t, diagramByName(t, ds, "database-operations"), "vector_state")
+	state.Columns = append(state.Columns, column{Name: "extra_state_flag", Type: "BOOLEAN"})
+	if err = checkSources(root, ds); err != nil {
+		t.Fatalf("updated operations panel rejected: %v", err)
 	}
 }
