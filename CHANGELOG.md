@@ -12,6 +12,7 @@ Notable changes are grouped by release.
 ### Fixed
 
 - With `SOURCE_UPLOAD_JOURNAL=true`, owned multipart uploads journal each incarnation-scoped original before writing it, so reconciliation can reclaim originals that acceptance never adopted.
+- Vector reindex inventory includes documents marked `deleting` or blocked by a deletion receipt in `documents.deleting_or_held`.
 
 ### Fixed
 
