@@ -949,14 +949,17 @@ components:
           type: string
         pages:
           type: array
+          description: One-based PDF layout page numbers covered by the chunk; omitted for non-layout and legacy rows.
           items:
             type: integer
         table_ids:
           type: array
+          description: Document-scoped PDF layout table identifiers covered by the chunk; omitted for non-layout and legacy rows.
           items:
             type: string
         row_ids:
           type: array
+          description: Document-scoped PDF layout row identifiers covered by the chunk; omitted for non-layout and legacy rows.
           items:
             type: string
         excerpt:

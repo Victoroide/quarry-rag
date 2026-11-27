@@ -59,7 +59,9 @@ func scoredChunkResponse(sc domain.ScoredChunk, text string, excerpt int, trunca
 func metadataInts(md map[string]any, key string) []int {
 	switch v := md[key].(type) {
 	case []int:
-		return slices.Clone(v)
+		if len(v) > 0 {
+			return slices.Clone(v)
+		}
 	case []any:
 		out := make([]int, 0, len(v))
 		for _, item := range v {
@@ -80,7 +82,9 @@ func metadataInts(md map[string]any, key string) []int {
 func metadataStrings(md map[string]any, key string) []string {
 	switch v := md[key].(type) {
 	case []string:
-		return slices.Clone(v)
+		if len(v) > 0 {
+			return slices.Clone(v)
+		}
 	case []any:
 		out := make([]string, 0, len(v))
 		for _, item := range v {

@@ -492,9 +492,9 @@ tables, ambiguous table spans, and provider warnings mark the affected page
 `partial` with a stored reason. Extractor profile `quarry.pdf.layout.v1` and
 page provenance persist in `document_pdf_extractions` (`pdf_coverage`), and
 chunks carry document-scoped `pages`, `table_ids`, and `row_ids` coordinates in
-vector metadata and query responses. The in-memory and Pinecone vector stores
-return `pages`, `table_ids`, and `row_ids`; `VECTOR_STORE=postgres` omits them
-because `chunk_vectors` has no metadata column.
+vector metadata and query responses across the in-memory, Pinecone, and
+PostgreSQL (`VECTOR_STORE=postgres`) vector stores. Legacy rows and non-layout
+documents leave these fields unset and omit them from responses.
 
 Existing documents continue serving their previously indexed text. Reprocessing
 an existing document under `PDF_LAYOUT_MODE=textract` requires deleting the
@@ -639,9 +639,9 @@ A citation-shaped number inside a quotation can be literal text. When a quoted n
 | `text` | string | Generated mode returns a preview of up to 600 runes. Evidence mode returns the selected sanitized excerpt body within the context budget set by `SYNTHESIS_CONTEXT_TOKENS` |
 | `kind` | string | Classification category if populated during ingestion (optional) |
 | `quality` | string | Quality rating if populated during ingestion (optional) |
-| `pages` | []int | One-based page numbers covered by the chunk for [PDF layout analysis](#pdf-layout-analysis); returned by the in-memory and Pinecone stores, omitted by `VECTOR_STORE=postgres` (optional) |
-| `table_ids` | []string | Document-scoped logical table identifiers covered by the chunk; returned by the in-memory and Pinecone stores, omitted by `VECTOR_STORE=postgres` (optional) |
-| `row_ids` | []string | Document-scoped logical table row identifiers covered by the chunk; returned by the in-memory and Pinecone stores, omitted by `VECTOR_STORE=postgres` (optional) |
+| `pages` | []int | One-based page numbers covered by the chunk for [PDF layout analysis](#pdf-layout-analysis); omitted for non-layout and legacy rows (optional) |
+| `table_ids` | []string | Document-scoped logical table identifiers covered by the chunk; omitted for non-layout and legacy rows (optional) |
+| `row_ids` | []string | Document-scoped logical table row identifiers covered by the chunk; omitted for non-layout and legacy rows (optional) |
 | `excerpt` | int | One-based selection index. Omitted for chunks outside the selection |
 | `truncated` | bool | True when the context budget cuts the selected excerpt body. Omitted otherwise |
 
