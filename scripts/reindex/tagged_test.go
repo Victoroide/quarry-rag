@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"testing"
 
@@ -15,6 +17,163 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+func hostedPositionSnapshot(form string) (pgstore.DocumentSnapshot, []domain.Chunk) {
+	if form == "manifested" {
+		_, snap, live := manifestedSnapshot(uuid.NewString(), sourceModel)
+		return snap, live
+	}
+	doc := newDoc("alpha", "report", "Position zero is stored first.", "Position one is stored second.")
+	if form == "tagged" {
+		doc = newTaggedDoc(doc.Collection, doc.DocType, doc.Texts...)
+	} else {
+		doc.Incarnation = doc.ID
+	}
+	chunks := chunksOf(doc)
+	snap := snapshotOf(doc, chunks, "hosted-position-revision")
+	snap.ScopedVectors, snap.VectorAttempt = doc.Tagged, doc.Attempt
+	return snap, sourceChunks(doc, chunks, sourceModel)
+}
+
+func updateHostedRecord(t *testing.T, index *pcstore.MemoryIndex, key string, update func(*pinecone.Vector)) {
+	t.Helper()
+	response, err := index.FetchVectors(t.Context(), []string{key})
+	require.NoError(t, err)
+	vector := response.Vectors[key]
+	require.NotNil(t, vector)
+	update(vector)
+	_, err = index.UpsertVectors(t.Context(), []*pinecone.Vector{vector})
+	require.NoError(t, err)
+}
+
+func setHostedPosition(t *testing.T, index *pcstore.MemoryIndex, key string, value *structpb.Value) {
+	t.Helper()
+	updateHostedRecord(t, index, key, func(vector *pinecone.Vector) {
+		if value == nil {
+			delete(vector.Metadata.Fields, "chunk_index")
+		} else {
+			vector.Metadata.Fields["chunk_index"] = value
+		}
+	})
+}
+
+func TestStageHostedChunkPositionBeforeReuse(t *testing.T) {
+	for _, tc := range []struct {
+		name, form string
+		index      int
+		position   *structpb.Value
+	}{
+		{"missing", "tagged", 0, nil},
+		{"string zero", "manifested", 0, structpb.NewStringValue("0")},
+		{"NaN", "bare", 0, structpb.NewNumberValue(math.NaN())},
+		{"infinite", "tagged", 1, structpb.NewNumberValue(math.Inf(1))},
+		{"fraction at zero", "bare", 0, structpb.NewNumberValue(0.5)},
+		{"fraction at one", "manifested", 1, structpb.NewNumberValue(1.5)},
+		{"negative", "bare", 1, structpb.NewNumberValue(-1)},
+		{"out of range", "tagged", 1, structpb.NewNumberValue(math.MaxInt32 + 1)},
+		{"integer mismatch", "manifested", 1, structpb.NewNumberValue(0)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap, live := hostedPositionSnapshot(tc.form)
+			badKey, err := vectorKey(true, snap.DocumentRevision, snap.Chunks[tc.index])
+			require.NoError(t, err)
+			for i := range live {
+				live[i].Metadata[domain.LayoutPagesKey] = []int{i + 1}
+			}
+			// Older tagged writes use revision and attempt metadata without a separate incarnation stamp.
+			if tc.form == "tagged" {
+				for i := range live {
+					live[i].VectorIncarnation = ""
+				}
+			}
+			src, sourceIndex := memoryPinecone()
+			require.NoError(t, src.Upsert(t.Context(), "", live))
+			setHostedPosition(t, sourceIndex, badKey, tc.position)
+
+			dst, targetIndex := memoryPinecone()
+			ledger := newMemoryManifestLedger()
+			embed := &countingEmbedder{model: "replacement"}
+			s := stager{
+				corpus: snapshotCorpus{snap}, ledger: ledger, target: pineconeStore{dst}, opts: defaultOptions(),
+				generation: "g2", taggedTarget: true, copyFromTagged: true, profile: testProfile(sourceModel), copyFrom: src, embed: embed,
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			_, err = s.run(ctx)
+			require.ErrorIs(t, err, context.Canceled)
+			rep, err := s.run(t.Context())
+			require.NoError(t, err)
+			require.False(t, rep.Complete)
+			require.Equal(t, "embedding call budget", rep.Stopped)
+			require.Zero(t, rep.Copied)
+			require.Zero(t, embed.calls.Load())
+			require.Empty(t, targetIndex.IDs())
+			require.Empty(t, ledger.recorded)
+			require.Empty(t, ledger.checkpoints)
+
+			budgeted := s
+			budgeted.opts.MaxEmbedCalls = 1
+			budgetedTarget, _ := memoryPinecone()
+			budgeted.target, budgeted.ledger = pineconeStore{budgetedTarget}, newMemoryManifestLedger()
+			rep, err = budgeted.run(t.Context())
+			require.NoError(t, err)
+			require.True(t, rep.Complete)
+			require.Equal(t, 1, rep.Copied)
+			require.Equal(t, 1, rep.Embedded)
+			require.EqualValues(t, 1, embed.calls.Load())
+			other := 1 - tc.index
+			goodKey, err := vectorKey(true, snap.DocumentRevision, snap.Chunks[other])
+			require.NoError(t, err)
+			got, err := budgetedTarget.Fetch(t.Context(), []string{badKey, goodKey})
+			require.NoError(t, err)
+			require.Len(t, got, 2)
+			require.Equal(t, tc.index, got[badKey].Index)
+			require.Equal(t, embedWith("replacement", live[tc.index].Text), got[badKey].Embedding)
+			require.NotContains(t, got[badKey].Metadata, domain.LayoutPagesKey)
+			require.Equal(t, live[other].Embedding, got[goodKey].Embedding)
+			require.Equal(t, []int{other + 1}, got[goodKey].Metadata[domain.LayoutPagesKey])
+
+			setHostedPosition(t, sourceIndex, badKey, structpb.NewNumberValue(float64(tc.index)))
+			rep, err = s.run(t.Context())
+			require.NoError(t, err)
+			require.True(t, rep.Complete)
+			require.Equal(t, 2, rep.Copied)
+			require.Zero(t, rep.Embedded)
+			rep, err = s.run(t.Context())
+			require.NoError(t, err)
+			require.True(t, rep.Complete)
+			require.Equal(t, 1, rep.Skipped)
+			require.EqualValues(t, 1, embed.calls.Load())
+		})
+	}
+
+	t.Run("mixed documents", func(t *testing.T) {
+		first, firstLive := hostedPositionSnapshot("bare")
+		second, secondLive := hostedPositionSnapshot("bare")
+		if first.ID > second.ID {
+			first, second = second, first
+			firstLive, secondLive = secondLive, firstLive
+		}
+		src, sourceIndex := memoryPinecone()
+		require.NoError(t, src.Upsert(t.Context(), "", append(firstLive, secondLive...)))
+		setHostedPosition(t, sourceIndex, string(secondLive[0].ID), nil)
+		dst, targetIndex := memoryPinecone()
+		ledger := newMemoryManifestLedger()
+		s := stager{
+			corpus: newSnapshotsCorpus(first, second), ledger: ledger, target: pineconeStore{dst}, opts: defaultOptions(),
+			generation: "g2", taggedTarget: true, copyFromTagged: true, profile: testProfile(sourceModel), copyFrom: src,
+		}
+		rep, err := s.run(t.Context())
+		require.NoError(t, err)
+		require.False(t, rep.Complete)
+		require.Equal(t, first.ID, rep.NextAfter)
+		require.Equal(t, 1, rep.Staged)
+		require.Equal(t, 2, rep.Copied)
+		require.ElementsMatch(t, []string{string(firstLive[0].ID), string(firstLive[1].ID)}, targetIndex.IDs())
+		require.True(t, ledger.checkpoints[first.ID].Complete)
+		require.NotContains(t, ledger.recorded, second.ID)
+	})
+}
 
 func assignDocTenant(t *testing.T, pg *pgstore.Client, d docSpec, tenant, principal string) {
 	t.Helper()

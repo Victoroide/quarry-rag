@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -12,8 +13,132 @@ import (
 	pcstore "github.com/Victoroide/quarry-rag/internal/store/pinecone"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/google/uuid"
+	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 )
+
+func TestVerifyHostedChunkPositionBeforeCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name, form string
+		index      int
+		position   *structpb.Value
+	}{
+		{"missing", "tagged", 0, nil},
+		{"string zero", "manifested", 0, structpb.NewStringValue("0")},
+		{"NaN", "bare", 0, structpb.NewNumberValue(math.NaN())},
+		{"infinite", "manifested", 1, structpb.NewNumberValue(math.Inf(-1))},
+		{"fraction", "bare", 1, structpb.NewNumberValue(1.5)},
+		{"negative", "tagged", 0, structpb.NewNumberValue(-1)},
+		{"out of range", "manifested", 1, structpb.NewNumberValue(math.MaxInt32 + 1)},
+		{"integer mismatch", "tagged", 1, structpb.NewNumberValue(0)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap, live := hostedPositionSnapshot(tc.form)
+			for i := range live {
+				live[i].VectorIncarnation = snap.Incarnation
+			}
+			src, sourceIndex := memoryPinecone()
+			dst, targetIndex := memoryPinecone()
+			for _, client := range []*pcstore.Client{src, dst} {
+				require.NoError(t, client.Upsert(t.Context(), "", live))
+			}
+			key, err := vectorKey(true, snap.DocumentRevision, snap.Chunks[tc.index])
+			require.NoError(t, err)
+			v := hostedPositionVerifier(snap, src, dst)
+			setHostedPosition(t, targetIndex, key, tc.position)
+			rep, err := v.run(t.Context())
+			require.NoError(t, err)
+			require.False(t, rep.Passed)
+			require.Equal(t, 1.0, rep.Coverage.KeyCoverage)
+			require.Equal(t, 0.5, rep.Coverage.ProfileCoverage)
+			require.Equal(t, 1, rep.Coverage.Mismatched)
+			require.Zero(t, rep.Coverage.Missing)
+			require.Zero(t, rep.Coverage.BadVectors)
+			require.Equal(t, 2, rep.Sample.Queries)
+
+			setHostedPosition(t, targetIndex, key, structpb.NewNumberValue(float64(tc.index)))
+			setHostedPosition(t, sourceIndex, key, tc.position)
+			rep, err = v.run(t.Context())
+			require.NoError(t, err)
+			require.False(t, rep.Passed)
+			require.Equal(t, 1.0, rep.Coverage.ProfileCoverage)
+			require.Equal(t, 1, rep.Sample.Queries)
+			require.Equal(t, 1, rep.Sample.Skipped)
+
+			setHostedPosition(t, sourceIndex, key, structpb.NewNumberValue(float64(tc.index)))
+			rep, err = v.run(t.Context())
+			require.NoError(t, err)
+			require.True(t, rep.Passed, "%v", rep.Failures)
+			require.Equal(t, 1.0, rep.Coverage.ProfileCoverage)
+			require.Equal(t, 2, rep.Sample.Queries)
+		})
+	}
+
+	t.Run("corrupt snapshot position", func(t *testing.T) {
+		snap, live := hostedPositionSnapshot("bare")
+		snap.Chunks[0].Index = -1
+		for i := range live {
+			live[i].VectorIncarnation = snap.Incarnation
+		}
+		client, index := memoryPinecone()
+		require.NoError(t, client.Upsert(t.Context(), "", live))
+		setHostedPosition(t, index, string(live[0].ID), structpb.NewNumberValue(-1))
+		s := stager{profile: testProfile(sourceModel), copyFrom: client, opts: defaultOptions()}
+		_, _, _, err := s.vectors(t.Context(), &snap)
+		require.ErrorContains(t, err, "embedding call budget")
+		v := hostedPositionVerifier(snap, client, client)
+		rep, err := v.run(t.Context())
+		require.NoError(t, err)
+		require.False(t, rep.Passed)
+		require.Equal(t, 1, rep.Coverage.Mismatched)
+		require.Equal(t, 1, rep.Sample.Skipped)
+	})
+
+	t.Run("layout fallback and bad vector precedence", func(t *testing.T) {
+		snap, live := hostedPositionSnapshot("bare")
+		for i := range live {
+			live[i].VectorIncarnation = snap.Incarnation
+		}
+		live[0].Metadata[domain.LayoutPagesKey] = []int{1}
+		src, sourceIndex := memoryPinecone()
+		dst, targetIndex := memoryPinecone()
+		for _, client := range []*pcstore.Client{src, dst} {
+			require.NoError(t, client.Upsert(t.Context(), "", live))
+		}
+		key := string(live[0].ID)
+		setHostedPosition(t, sourceIndex, key, nil)
+		v := hostedPositionVerifier(snap, src, dst)
+		rep, err := v.run(t.Context())
+		require.NoError(t, err)
+		require.False(t, rep.Passed)
+		require.Equal(t, 1, rep.Coverage.Mismatched)
+		require.Equal(t, 1, rep.Sample.Skipped)
+
+		setHostedPosition(t, sourceIndex, key, structpb.NewNumberValue(0))
+		rep, err = v.run(t.Context())
+		require.NoError(t, err)
+		require.True(t, rep.Passed, "%v", rep.Failures)
+
+		setHostedPosition(t, targetIndex, key, nil)
+		updateHostedRecord(t, targetIndex, key, func(record *pinecone.Vector) { clear(*record.Values) })
+		rep, err = v.run(t.Context())
+		require.NoError(t, err)
+		require.False(t, rep.Passed)
+		require.Equal(t, 1, rep.Coverage.BadVectors)
+		require.Zero(t, rep.Coverage.Mismatched)
+	})
+}
+
+func hostedPositionVerifier(snap pgstore.DocumentSnapshot, source, target *pcstore.Client) verifier {
+	opts := defaultOptions()
+	opts.SampleSize, opts.ScopeDocuments, opts.MinRecall, opts.MaxP95, opts.TopK = 2, 1, 1, time.Second, 2
+	return verifier{
+		corpus: snapshotCorpus{snap}, ledger: currentCheckpointLedger{doc: snap.ID, revision: snap.Revision, incarnation: snap.Incarnation},
+		target: target, source: source, generation: "g2", taggedTarget: true, sourceTagged: true,
+		profile: testProfile(sourceModel), sourceProfile: testProfile(sourceModel), opts: opts, now: time.Now,
+	}
+}
 
 func TestVerifyTaggedSnapshotUnit(t *testing.T) {
 	doc := newTaggedDoc("alpha", "report", "Tagged verification chunk one.", "Tagged verification chunk two.")

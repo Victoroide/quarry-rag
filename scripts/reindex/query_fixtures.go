@@ -44,7 +44,7 @@ func (v *verifier) queryVectors(ctx context.Context, sample []sampleChunk, rep *
 		queries := make(map[string]queryVectors, len(source))
 		for i, c := range sample {
 			chunk, ok := source[sourceKeys[i]]
-			if !ok || string(chunk.DocumentID) != c.doc || chunk.Index != c.index || sha256.Sum256([]byte(chunk.Text)) != c.textHash {
+			if !ok || chunk.Index < 0 || chunk.Index != c.index || string(chunk.DocumentID) != c.doc || sha256.Sum256([]byte(chunk.Text)) != c.textHash {
 				continue
 			}
 			queries[c.id] = queryVectors{TextHash: fmt.Sprintf("%x", c.textHash), Source: chunk.Embedding, Target: chunk.Embedding}

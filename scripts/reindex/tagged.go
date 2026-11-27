@@ -46,7 +46,7 @@ func vectorKey(tagged bool, rev pgstore.DocumentRevision, c domain.Chunk) (strin
 // sourceIdentityMatches proves identity for a record fetched under vectorKey
 // with the source store policy before staging or verification uses its payload.
 func sourceIdentityMatches(sourceTagged bool, snap *pgstore.DocumentSnapshot, want, src domain.Chunk, found bool) bool {
-	if !found || src.DocumentID != want.DocumentID || src.ID != want.ID || src.Text != want.Text || src.Index != want.Index ||
+	if !found || src.Index < 0 || src.Index != want.Index || src.DocumentID != want.DocumentID || src.ID != want.ID || src.Text != want.Text ||
 		(src.VectorIncarnation != "" && src.VectorIncarnation != snap.Incarnation) || src.RevisionID != snap.ActiveRevisionID {
 		return false
 	}
