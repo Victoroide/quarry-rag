@@ -95,7 +95,9 @@ type Quiesce struct {
 type ActivationReadiness struct {
 	Active           string
 	FreezeGeneration string
+	FrozenAt         *time.Time
 	TargetState      string
+	PendingWrite     bool
 	CorpusDigest     string
 	Quiesce          Quiesce
 }
@@ -586,10 +588,11 @@ const writerQuiesceColumns = `frozen, COALESCE(frozen_at + make_interval(secs=>$
 // ReadActivationReadiness observes quiescence and the requested generation's verification together.
 func (c *Client) ReadActivationReadiness(ctx context.Context, name string, window time.Duration) (ActivationReadiness, error) {
 	var result ActivationReadiness
-	row := c.Pool.QueryRow(ctx, `SELECT active_generation, COALESCE(freeze_generation, ''),
- target.state, COALESCE(target.corpus_digest, ''), `+writerQuiesceColumns+`
+	row := c.Pool.QueryRow(ctx, `SELECT active_generation, COALESCE(freeze_generation, ''), frozen_at,
+ target.state, target.pending_write, COALESCE(target.corpus_digest, ''), `+writerQuiesceColumns+`
  FROM vector_state CROSS JOIN vector_generations AS target WHERE target.name=$3`, window.Seconds(), maxReportedOpenDeletions, name)
-	if err := scanWriterQuiesce(row, &result.Quiesce, &result.Active, &result.FreezeGeneration, &result.TargetState, &result.CorpusDigest); err != nil {
+	if err := scanWriterQuiesce(row, &result.Quiesce, &result.Active, &result.FreezeGeneration, &result.FrozenAt,
+		&result.TargetState, &result.PendingWrite, &result.CorpusDigest); err != nil {
 		return ActivationReadiness{}, fmt.Errorf("postgres: read activation readiness for generation %q: %w", name, err)
 	}
 	return result, nil

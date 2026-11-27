@@ -742,9 +742,13 @@ serving and cleanup logins as part of the [serving role setup](grant-catalog.md#
    or an unattested legacy target, [prepare matched query fixtures](development.md#vector-reindex-scriptsreindex).
    Preview with
    `make reindex ARGS="-activate -generation <name>"`. A report with `ready: true`
-   and `applied: false` indicates that the advisory checks passed. Rerun with
-   `-apply` to switch. The database checks again under lock. A confirmed switch
-   reports `ready: true` and `applied: true` and leaves the freeze in force.
+   and `applied: false` indicates that the advisory checks passed. Both preview
+   and apply report readiness blockers before scanning the corpus. Once those
+   checks pass, activation must prove the full corpus digest within
+   `-max-documents` and confirm that the freeze and active generation still
+   match. Rerun with `-apply` to switch. The database checks again under lock.
+   A confirmed switch reports `ready: true` and `applied: true` and leaves the
+   freeze in force.
 
    If activation reports `ready: false`, resolve the reported reasons before
    retrying. Freeze for the requested generation if it lacks a matching freeze.
