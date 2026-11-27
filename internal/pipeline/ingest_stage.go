@@ -20,8 +20,9 @@ var ErrNoChunks = errors.New("no chunks produced")
 
 // ChunkStage splits a raw document into chunks using the sliding window chunker.
 type ChunkStage struct {
-	chunker *chunker.Chunker
-	profile *embeddinginput.Profile
+	chunker                      *chunker.Chunker
+	profile                      *embeddinginput.Profile
+	preserveSourceLineBoundaries bool
 }
 
 // NewChunkStage creates a ChunkStage.
@@ -34,6 +35,12 @@ func NewChunkStageWithEmbeddingProfile(c *chunker.Chunker, p *embeddinginput.Pro
 	return &ChunkStage{chunker: c, profile: p}
 }
 
+// WithSourceLineBoundaries enables capture of retained source separators.
+func (s *ChunkStage) WithSourceLineBoundaries(enabled bool) *ChunkStage {
+	s.preserveSourceLineBoundaries = enabled
+	return s
+}
+
 // ID returns the stage identifier.
 func (s *ChunkStage) ID() StageID { return StageChunk }
 
@@ -41,9 +48,14 @@ func (s *ChunkStage) ID() StageID { return StageChunk }
 func (s *ChunkStage) Run(ctx context.Context, ic *IngestContext) error {
 	redact := tracing.RedactIdentifiers(ctx) || ic.Tenant != ""
 	var err error
-	if len(ic.LayoutSections) > 0 {
+	switch {
+	case len(ic.LayoutSections) > 0 && s.preserveSourceLineBoundaries:
+		ic.Chunks, err = s.chunker.ChunkLayoutWithLineBoundaries(ctx, ic.DocumentID, ic.LayoutSections, s.profile)
+	case len(ic.LayoutSections) > 0:
 		ic.Chunks, err = s.chunker.ChunkLayout(ctx, ic.DocumentID, ic.LayoutSections, s.profile)
-	} else {
+	case s.preserveSourceLineBoundaries:
+		ic.Chunks, err = s.chunker.ChunkForEmbeddingWithLineBoundaries(ctx, ic.DocumentID, ic.RawText, s.profile)
+	default:
 		ic.Chunks, err = s.chunker.ChunkForEmbedding(ctx, ic.DocumentID, ic.RawText, s.profile)
 	}
 	if err != nil {

@@ -451,6 +451,30 @@ func TestLoadPGVectorExactScopeMax(t *testing.T) {
 	}
 }
 
+func TestLoadPreserveSourceLineBoundaries(t *testing.T) {
+	awsConfigEnvironment(t)
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", false}, {"false", false}, {"true", true}, {" YES ", true},
+	} {
+		t.Setenv("PRESERVE_SOURCE_LINE_BOUNDARIES", tc.value)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.PreserveSourceLineBoundaries != tc.want {
+			t.Errorf("PRESERVE_SOURCE_LINE_BOUNDARIES=%q parsed as %t, want %t", tc.value, cfg.PreserveSourceLineBoundaries, tc.want)
+		}
+	}
+	t.Setenv("PRESERVE_SOURCE_LINE_BOUNDARIES", "sometimes")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "invalid PRESERVE_SOURCE_LINE_BOUNDARIES") {
+		t.Fatalf("expected invalid PRESERVE_SOURCE_LINE_BOUNDARIES error, got %v", err)
+	}
+}
+
 func TestLoadHostedVectorManifestConfig(t *testing.T) {
 	awsConfigEnvironment(t)
 	cfg, err := Load()

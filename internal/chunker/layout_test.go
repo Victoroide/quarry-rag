@@ -1,6 +1,7 @@
 package chunker
 
 import (
+	"context"
 	"testing"
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -79,7 +80,13 @@ func TestAttachLayoutProvenanceToChunksRestoresProvenance(t *testing.T) {
 	for i, ch := range expected {
 		reloaded[i] = domain.Chunk{ID: ch.ID, DocumentID: ch.DocumentID, Index: ch.Index, Text: ch.Text, TokenCount: ch.TokenCount}
 	}
-	AttachLayoutProvenanceToChunks(reloaded, sections)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, AttachLayoutProvenanceToChunks(ctx, reloaded, sections), context.Canceled)
+	for _, chunk := range reloaded {
+		require.Nil(t, chunk.Metadata)
+	}
+	require.NoError(t, AttachLayoutProvenanceToChunks(t.Context(), reloaded, sections))
 	for i := range expected {
 		require.Equal(t, expected[i].Metadata["pages"], reloaded[i].Metadata["pages"])
 		require.Equal(t, expected[i].Metadata["table_ids"], reloaded[i].Metadata["table_ids"])

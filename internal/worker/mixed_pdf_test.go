@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/extractor"
 	"github.com/Victoroide/quarry-rag/internal/ocr"
@@ -232,19 +233,28 @@ func TestMixedPDFWorkerCheckpointsBeforePipeline(t *testing.T) {
 			job.Document.Content = "Digital text for retry"
 			job.PDF = &domain.PDFExtraction{Profile: domain.MixedPDFProfile, Coverage: tc.coverage, Pages: domain.PDFPages{{Number: 1, Evidence: domain.PDFImage}, {Number: 2, Evidence: domain.PDFBlank}}}
 			calls, stages := 0, 0
-			wk := New(s, []pipeline.Stage{ocrStage{func(ic *pipeline.IngestContext) error {
+			chunk := chunker.NewChunker(64, 8)
+			capture := pipeline.NewChunkStage(chunk).WithSourceLineBoundaries(true)
+			wk := New(s, []pipeline.Stage{capture, ocrStage{func(ic *pipeline.IngestContext) error {
 				stages++
+				require.Len(t, ic.Chunks, 1)
 				if tc.coverage == domain.PDFPending {
 					require.NotNil(t, s.saved)
 					require.Equal(t, s.saved.Text, ic.RawText)
+					require.Equal(t, []domain.SourceLineBoundary{{Offset: 10, Kind: domain.SourceLineBreak}}, ic.Chunks[0].SourceLineBoundaries)
+				} else {
+					require.Equal(t, []domain.SourceLineBoundary{}, ic.Chunks[0].SourceLineBoundaries)
 				}
+				plain := ic.Chunks[0]
+				plain.SourceLineBoundaries = nil
+				require.Equal(t, []domain.Chunk{plain}, chunk.Chunk(ic.DocumentID, ic.RawText))
 				return nil
 			}}}, nil, Options{OCR: pdfTestDetector(func(_ context.Context, key, profile string, count int) (ocr.PageResults, error) {
 				calls++
 				require.Equal(t, *job.Document.S3Key, key)
 				require.Equal(t, domain.MixedPDFProfile, profile)
 				require.Equal(t, 2, count)
-				return ocr.PageResults{Pages: map[int]ocr.Page{1: {Present: true, Text: "Recognized scanned text"}}}, tc.providerErr
+				return ocr.PageResults{Pages: map[int]ocr.Page{1: {Present: true, Text: "Recognized\nscanned text"}}}, tc.providerErr
 			})})
 			wk.process(t.Context(), job)
 			require.Equal(t, tc.calls, calls)
@@ -290,9 +300,14 @@ func TestLayoutPDFWorkerUsesAnalyzePagesOnlyAndCarriesSections(t *testing.T) {
 	calls := 0
 	var gotSections []domain.LayoutSection
 	var gotText string
-	wk := New(s, []pipeline.Stage{ocrStage{func(ic *pipeline.IngestContext) error {
+	capture := pipeline.NewChunkStage(chunker.NewChunker(64, 8)).WithSourceLineBoundaries(true)
+	wk := New(s, []pipeline.Stage{capture, ocrStage{func(ic *pipeline.IngestContext) error {
 		gotSections = ic.LayoutSections
 		gotText = ic.RawText
+		require.Len(t, ic.Chunks, 1)
+		require.Equal(t, []domain.SourceLineBoundary{}, ic.Chunks[0].SourceLineBoundaries)
+		require.Equal(t, []string{"p1-t1"}, ic.Chunks[0].Metadata["table_ids"])
+		require.Equal(t, []string{"p1-t1-r1"}, ic.Chunks[0].Metadata["row_ids"])
 		return nil
 	}}}, nil, Options{OCR: layoutTestAnalyzer{fn: func(_ context.Context, key, profile, _ string, count int, _ func(context.Context) error) (ocr.LayoutResults, error) {
 		calls++

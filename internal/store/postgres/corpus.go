@@ -173,7 +173,9 @@ func (c *Client) LoadDocumentSnapshotBounded(ctx context.Context, id string, max
 		for _, page := range pages {
 			sections = append(sections, page.Sections...)
 		}
-		chunker.AttachLayoutProvenanceToChunks(snapshot.Chunks, sections)
+		if err = chunker.AttachLayoutProvenanceToChunks(ctx, snapshot.Chunks, sections); err != nil {
+			return nil, fmt.Errorf("postgres: attach layout provenance of document %s: %w", id, err)
+		}
 	}
 	return &snapshot, nil
 }

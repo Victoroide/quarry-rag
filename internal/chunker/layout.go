@@ -7,7 +7,6 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/embeddinginput"
-	"github.com/Victoroide/quarry-rag/internal/textutil"
 )
 
 const layoutChunkVersion = "quarry.chunk.layout.v1\x00"
@@ -20,19 +19,33 @@ type layoutSectionSpan struct {
 	rowID   string
 }
 
-func buildLayoutSectionSpans(sections []domain.LayoutSection) (string, []layoutSectionSpan) {
+func buildLayoutSectionSpans(ctx context.Context, sections []domain.LayoutSection, capture bool) (string, []layoutSectionSpan, []domain.SourceLineBoundary, error) {
 	var joined strings.Builder
+	var marks []domain.SourceLineBoundary
+	if capture {
+		marks = []domain.SourceLineBoundary{}
+	}
 	sectionSpans := make([]layoutSectionSpan, 0, len(sections))
 	for _, sec := range sections {
-		cleaned := textutil.NormalizeForIngest(stripHTML(sec.Text))
+		cleaned, sectionMarks, err := normalizeSource(ctx, sec.Text, capture)
+		if err != nil {
+			return "", nil, nil, err
+		}
 		if cleaned == "" {
 			continue
 		}
 		if joined.Len() > 0 {
+			if capture {
+				marks = append(marks, domain.SourceLineBoundary{Offset: joined.Len(), Kind: domain.SourceParagraphBreak})
+			}
 			joined.WriteString("\n\n")
 		}
 		start := joined.Len()
 		joined.WriteString(cleaned)
+		for _, mark := range sectionMarks {
+			mark.Offset += start
+			marks = append(marks, mark)
+		}
 		sectionSpans = append(sectionSpans, layoutSectionSpan{
 			start:   start,
 			end:     joined.Len(),
@@ -41,20 +54,32 @@ func buildLayoutSectionSpans(sections []domain.LayoutSection) (string, []layoutS
 			rowID:   sec.RowID,
 		})
 	}
-	return joined.String(), sectionSpans
+	return joined.String(), sectionSpans, marks, ctx.Err()
 }
 
 // ChunkLayout splits ordered layout sections into chunks and records the
 // document-scoped page, table, and logical row provenance covered by each chunk.
 func (c *Chunker) ChunkLayout(ctx context.Context, docID domain.DocumentID, sections []domain.LayoutSection, profile *embeddinginput.Profile) ([]domain.Chunk, error) {
+	return c.chunkLayout(ctx, docID, sections, profile, false)
+}
+
+// ChunkLayoutWithLineBoundaries also records retained source separators.
+func (c *Chunker) ChunkLayoutWithLineBoundaries(ctx context.Context, docID domain.DocumentID, sections []domain.LayoutSection, profile *embeddinginput.Profile) ([]domain.Chunk, error) {
+	return c.chunkLayout(ctx, docID, sections, profile, true)
+}
+
+func (c *Chunker) chunkLayout(ctx context.Context, docID domain.DocumentID, sections []domain.LayoutSection, profile *embeddinginput.Profile, capture bool) ([]domain.Chunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	joined, sectionSpans := buildLayoutSectionSpans(sections)
+	joined, sectionSpans, marks, err := buildLayoutSectionSpans(ctx, sections, capture)
+	if err != nil {
+		return nil, err
+	}
 	if joined == "" {
 		return nil, nil
 	}
-	chunks, spans, err := c.chunkNormalized(ctx, docID, joined, profile, layoutChunkVersion)
+	chunks, spans, err := c.chunkNormalized(ctx, docID, joined, profile, layoutChunkVersion, marks)
 	if err != nil {
 		return nil, err
 	}
@@ -67,16 +92,19 @@ func (c *Chunker) ChunkLayout(ctx context.Context, docID domain.DocumentID, sect
 // AttachLayoutProvenanceToChunks restores page, table, and row metadata onto
 // ordered chunks produced from sections, matching each chunk sequentially against
 // the normalized section text.
-func AttachLayoutProvenanceToChunks(chunks []domain.Chunk, sections []domain.LayoutSection) {
+func AttachLayoutProvenanceToChunks(ctx context.Context, chunks []domain.Chunk, sections []domain.LayoutSection) error {
 	if len(chunks) == 0 || len(sections) == 0 {
-		return
+		return ctx.Err()
 	}
-	joined, sectionSpans := buildLayoutSectionSpans(sections)
-	if joined == "" {
-		return
+	joined, sectionSpans, _, err := buildLayoutSectionSpans(ctx, sections, false)
+	if err != nil || joined == "" {
+		return err
 	}
 	searchFrom := 0
 	for i := range chunks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		text := chunks[i].Text
 		if text == "" {
 			continue
@@ -91,6 +119,7 @@ func AttachLayoutProvenanceToChunks(chunks []domain.Chunk, sections []domain.Lay
 			searchFrom = start + 1
 		}
 	}
+	return ctx.Err()
 }
 
 func attachLayoutProvenance(ch *domain.Chunk, span chunkSpan, sections []layoutSectionSpan) {
