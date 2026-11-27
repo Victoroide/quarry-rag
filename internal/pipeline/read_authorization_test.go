@@ -8,6 +8,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/subjectauth"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -260,6 +261,29 @@ func TestManifestEvidenceUsesPublicationIdentityWithoutAnUntaggedObservation(t *
 	hits := []domain.ScoredChunk{manifest, historical, tagged, contradictory, malformed}
 	historical.ObservedSnapshot = snapshot
 	require.Equal(t, []domain.ScoredChunk{manifest, historical, tagged}, qc.matchObservedEvidence(hits))
+}
+
+func TestFilterAuthorizedHitsManifestIncarnation(t *testing.T) {
+	doc, other := uuid.NewString(), uuid.NewString()
+	claim, otherClaim := uuid.NewString(), uuid.NewString()
+	scope := &domain.AuthorizedScope{
+		TenantID: uuid.NewString(), Incarnations: map[string]string{doc: claim, other: otherClaim},
+	}
+	manifest := func(stamp string) domain.ScoredChunk {
+		return domain.ScoredChunk{Chunk: domain.Chunk{
+			DocumentID: domain.DocumentID(doc), RevisionID: uuid.NewString(), VectorIncarnation: stamp,
+			Metadata: map[string]any{domain.VectorTenantKey: scope.TenantID},
+		}}
+	}
+	current, historical := manifest(claim), manifest("")
+	mismatched := manifest(otherClaim)
+	conflicting := manifest(claim)
+	conflicting.Chunk.Metadata[domain.VectorRevisionKey] = claim
+	hits := []domain.ScoredChunk{mismatched, historical, current, conflicting}
+	require.Equal(t, []domain.ScoredChunk{historical, current}, filterAuthorizedHits(scope, hits))
+	// A relational scope defers verification of the stamp to SQL.
+	scope.Incarnations = nil
+	require.Equal(t, hits, filterAuthorizedHits(scope, hits))
 }
 
 func TestStrictEvidenceRechecksManifestRevisionWithinScope(t *testing.T) {

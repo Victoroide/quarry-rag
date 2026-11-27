@@ -304,15 +304,33 @@ When a document has an active hosted revision, readers require hits to match
 that revision, including for documents configured to use scoped vectors.
 Manifest hits carry the hosted revision ID alone for publication identity.
 Evidence reads reject hits that also supply tagged revision or attempt fields.
-In grants mode, Pinecone searches for manifest vectors by revision ID presence
-within the authorized tenant and document membership. PostgreSQL confirms that
-each hit belongs to the active revision.
+With explicit grants membership, Pinecone can exclude stamped manifest vectors
+from obsolete incarnations before ranking. It uses up to 10,000 incarnation
+values per existing request partition. Revisions from the same incarnation and
+historical vectors without a stamp can still occupy candidate slots until SQL
+checks the active revision. Service queries without explicit grants membership
+apply the incarnation and revision checks in SQL.
 For documents without an active hosted revision, evidence reads continue to
 validate unrevisioned hits against the document's persisted vector format.
 Upgrade every replica to run the revision-aware readers before enabling
 `HOSTED_VECTOR_MANIFEST=true`.
 Enable the flag on one replica first and confirm that
 `quarry_hosted_vector_cleanups_total` reports completions.
+
+Revision-aware readers support both stamped and historical manifest vectors during
+a rolling upgrade or rollback. Historical unstamped hits can pass only if their
+active publication did not require a stamp. Rolling back to an older revision-aware
+reader retains SQL validation and gives up the pre-ranking manifest incarnation
+filter. Existing vectors need no rewrite. To stamp historical vectors, use the
+existing vector reindex workflow or publish a new ingestion
+revision. The incarnation field counts toward Pinecone's 40 KiB metadata limit
+per vector.
+
+To verify Pinecone's pre-ranking filter on a disposable vector index, set
+`QUARRY_PINECONE_STAGING_INDEX` and `PINECONE_API_KEY` and run
+`go test ./internal/store/pinecone -run '^TestStagingManifestIncarnationFilter$'`.
+The test writes and deletes two synthetic records and checks a full partition
+with top-K set to one.
 
 On both serverless and pod-based Pinecone indexes, a manifested retry of an
 unscoped ingestion can publish after an unacknowledged legacy upsert or an

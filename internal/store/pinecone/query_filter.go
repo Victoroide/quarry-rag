@@ -25,7 +25,8 @@ func buildFilter(docType string, ids []string, collection string) *structpb.Stru
 }
 
 // buildScopedFilter binds both vector formats to the same tenant and document
-// membership. Tagged vectors must also match one of the listed incarnations.
+// membership. Tagged vectors and stamped manifests must also match one of the
+// listed incarnations.
 func buildScopedFilter(docType string, ids []string, collection, tenant string, incarnations []string) *structpb.Struct {
 	fields := make(map[string]*structpb.Value)
 	if collection != "" {
@@ -47,30 +48,36 @@ func buildScopedFilter(docType string, ids []string, collection, tenant string, 
 		for i, incarnation := range incarnations {
 			values[i] = structpb.NewStringValue(incarnation)
 		}
-		tagged := map[string]*structpb.Value{
-			domain.VectorRevisionKey: structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$in": structpb.NewListValue(&structpb.ListValue{Values: values})}}),
-		}
-		manifest := map[string]*structpb.Value{
-			"revision_id":            structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$exists": structpb.NewBoolValue(true)}}),
-			domain.VectorRevisionKey: structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$exists": structpb.NewBoolValue(false)}}),
-		}
-		identity := structpb.NewListValue(&structpb.ListValue{Values: []*structpb.Value{
-			structpb.NewStructValue(&structpb.Struct{Fields: tagged}),
-			structpb.NewStructValue(&structpb.Struct{Fields: manifest}),
-		}})
+		allowed := structpb.NewListValue(&structpb.ListValue{Values: values})
+		tagged := filterField(domain.VectorRevisionKey, filterField("$in", allowed))
+		stamp := filterGroup("$or",
+			filterField(domain.VectorIncarnationKey, filterField("$exists", structpb.NewBoolValue(false))),
+			filterField(domain.VectorIncarnationKey, filterField("$in", allowed)))
+		manifest := filterGroup("$and",
+			filterField("revision_id", filterField("$exists", structpb.NewBoolValue(true))),
+			filterField(domain.VectorRevisionKey, filterField("$exists", structpb.NewBoolValue(false))),
+			stamp)
 		clauses := make([]*structpb.Value, 0, len(fields)+1)
 		for _, field := range []string{domain.VectorTenantKey, "doc_id", "collection", "doc_type"} {
 			if condition := fields[field]; condition != nil {
-				clauses = append(clauses, structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{field: condition}}))
+				clauses = append(clauses, filterField(field, condition))
 			}
 		}
-		clauses = append(clauses, structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{"$or": identity}}))
-		fields = map[string]*structpb.Value{"$and": structpb.NewListValue(&structpb.ListValue{Values: clauses})}
+		clauses = append(clauses, filterGroup("$or", tagged, manifest))
+		return filterGroup("$and", clauses...).GetStructValue()
 	}
 	if len(fields) == 0 {
 		return nil
 	}
 	return &structpb.Struct{Fields: fields}
+}
+
+func filterField(field string, value *structpb.Value) *structpb.Value {
+	return structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{field: value}})
+}
+
+func filterGroup(operator string, clauses ...*structpb.Value) *structpb.Value {
+	return filterField(operator, structpb.NewListValue(&structpb.ListValue{Values: clauses}))
 }
 
 // partitionCount is the number of requests a member list needs when each
@@ -247,7 +254,7 @@ func withinMembers(scope *domain.AuthorizedScope, members map[string]string, chu
 		incarnation, listed := members[string(sc.Chunk.DocumentID)]
 		revision, _ := sc.Chunk.Metadata[domain.VectorRevisionKey].(string)
 		tagged := sc.Chunk.RevisionID == "" && revision == incarnation
-		if listed && scope.SameTenant(sc.Chunk.Metadata) && (tagged || domain.ManifestIdentity(sc.Chunk)) {
+		if listed && scope.SameTenant(sc.Chunk.Metadata) && (tagged || domain.ManifestMatchesIncarnation(sc.Chunk, incarnation)) {
 			kept = append(kept, sc)
 		}
 	}

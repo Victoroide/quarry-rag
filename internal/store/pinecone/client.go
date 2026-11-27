@@ -955,7 +955,7 @@ func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
 	}
 	if v, ok := fields[domain.VectorIncarnationKey]; ok {
 		chunk.VectorIncarnation = v.GetStringValue()
-		if chunk.VectorIncarnation == "" {
+		if chunk.VectorIncarnation == "" || (chunk.RevisionID != "" && !domain.ValidManifestIncarnation(chunk.VectorIncarnation)) {
 			return chunk, false
 		}
 	}
@@ -971,6 +971,9 @@ func chunkFromMetadata(id string, md *structpb.Struct) (domain.Chunk, bool) {
 		chunk.Metadata[domain.VectorTenantKey] = tenant.AsInterface()
 	}
 	if value, tagged := fields[domain.VectorRevisionKey]; tagged {
+		if chunk.RevisionID != "" {
+			return chunk, false
+		}
 		target := vectorTarget{document: string(chunk.DocumentID), revision: value.GetStringValue()}
 		if attempt, present := fields[domain.VectorAttemptKey]; present {
 			target.attempt = attempt.GetStringValue()

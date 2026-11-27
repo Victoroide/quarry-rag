@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/config"
 	"github.com/Victoroide/quarry-rag/internal/domain"
+	"github.com/google/uuid"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -225,6 +227,102 @@ func TestRecordMetadataAt40KBIsAccepted(t *testing.T) {
 	if err := testClient(&fakeIndexConn{}).Upsert(t.Context(), "", chunks); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestChunkFromManifestIncarnationMetadata(t *testing.T) {
+	claim, revision := uuid.NewString(), uuid.NewString()
+	chunks := testChunks(3, 1024, 0)
+	for i := range chunks {
+		chunks[i].RevisionID = revision
+		chunks[i].VectorIncarnation = claim
+		chunks[i].VectorID = domain.FormatRevisionVectorID(chunks[i].DocumentID, revision, chunks[i].Index)
+	}
+	var encoded []*pinecone.Vector
+	var batches int
+	client := testClient(&fakeIndexConn{upsert: func(_ context.Context, vectors []*pinecone.Vector) (uint32, error) {
+		count := len(vectors)
+		if uint64(count) > math.MaxUint32 {
+			return 0, fmt.Errorf("batch contains too many vectors: %d", count)
+		}
+		batches++
+		encoded = append(encoded, vectors...)
+		return uint32(count), nil
+	}})
+	client.batchSize = 2
+	require.NoError(t, client.Upsert(t.Context(), "", chunks))
+	require.Equal(t, 2, batches)
+	require.Len(t, encoded, len(chunks))
+	for i, vector := range encoded {
+		require.Equal(t, claim, vector.Metadata.Fields[domain.VectorIncarnationKey].GetStringValue())
+		decoded, ok := chunkFromMetadata(vector.Id, vector.Metadata)
+		require.True(t, ok)
+		require.Equal(t, chunks[i].ID, decoded.ID)
+		require.Equal(t, chunks[i].VectorID, decoded.VectorID)
+		require.Equal(t, claim, decoded.VectorIncarnation)
+		require.Equal(t, revision, decoded.RevisionID)
+	}
+
+	vector := encoded[0]
+	for _, bad := range []*structpb.Value{
+		structpb.NewStringValue(""), structpb.NewStringValue("not-a-uuid"), structpb.NewStringValue(uuid.Nil.String()),
+		structpb.NewStringValue("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"), structpb.NewStringValue("urn:uuid:" + claim),
+		structpb.NewStringValue(string([]byte{0xff})), structpb.NewBoolValue(true), structpb.NewNumberValue(1),
+		structpb.NewNullValue(), structpb.NewListValue(&structpb.ListValue{}), structpb.NewStructValue(&structpb.Struct{}),
+	} {
+		vector.Metadata.Fields[domain.VectorIncarnationKey] = bad
+		_, ok := chunkFromMetadata(vector.Id, vector.Metadata)
+		require.False(t, ok, "reject supplied stamp %v", bad)
+	}
+	delete(vector.Metadata.Fields, domain.VectorIncarnationKey)
+	historical, ok := chunkFromMetadata(vector.Id, vector.Metadata)
+	require.True(t, ok)
+	require.Empty(t, historical.VectorIncarnation)
+	require.Equal(t, revision, historical.RevisionID)
+
+	// Even an otherwise valid physical tagged ID cannot carry both identities.
+	tagged := hostedHit(t, memberID(0), claim, scopeTenant, "tagged")
+	tagged.Vector.Metadata.Fields["revision_id"] = structpb.NewStringValue(revision)
+	_, ok = chunkFromMetadata(tagged.Vector.Id, tagged.Vector.Metadata)
+	require.False(t, ok)
+
+	last := encoded[len(encoded)-1]
+	metadata, err := json.Marshal(last.Metadata.AsMap())
+	require.NoError(t, err)
+	lastChunk := &chunks[len(chunks)-1]
+	lastChunk.Text = strings.Repeat("x", maxMetadataBytes-len(metadata))
+	require.NoError(t, client.Upsert(t.Context(), "", chunks))
+	require.Equal(t, 4, batches)
+	lastChunk.Text += "x"
+	require.ErrorIs(t, client.Upsert(t.Context(), "", chunks), ErrMetadataTooLarge)
+	require.Equal(t, 4, batches, "an oversized later record prevents every batch")
+}
+
+func FuzzManifestIncarnationMetadata(f *testing.F) {
+	const claim = "8a54a82c-4e81-43aa-95ea-c7ee1166b0d6"
+	for _, seed := range []string{`"` + claim + `"`, `""`, `null`, `true`, `1`, `[]`, `{}`, `"\ud800"`, "invalid JSON"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		var parsed any
+		if json.Unmarshal([]byte(input), &parsed) != nil {
+			return
+		}
+		stamp, err := structpb.NewValue(parsed)
+		if err != nil {
+			return
+		}
+		md := &structpb.Struct{Fields: map[string]*structpb.Value{
+			"revision_id": structpb.NewStringValue("revision"), domain.VectorIncarnationKey: stamp,
+		}}
+		got, ok := chunkFromMetadata("vector", md)
+		label, isString := parsed.(string)
+		id, parseErr := uuid.Parse(label)
+		want := isString && parseErr == nil && id != uuid.Nil && id.String() == label
+		require.Equal(t, want, ok)
+		if want {
+			require.Equal(t, label, got.VectorIncarnation)
+		}
+	})
 }
 
 func TestValidateIndexRejectsDimensionMismatch(t *testing.T) {

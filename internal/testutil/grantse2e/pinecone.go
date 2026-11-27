@@ -181,7 +181,12 @@ func (p *Pinecone) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && (path == "/query" || path == "/vectors/upsert" || path == "/vectors/delete"):
 		var body pineconePayload
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+		limit := int64(1 << 20)
+		if path == "/query" {
+			// Scoped queries can carry three lists of 10,000 UUIDs.
+			limit = 2 << 20
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 		dec.DisallowUnknownFields()
 		if err = dec.Decode(&body); err != nil || dec.Decode(new(any)) != io.EOF || body.Namespace != "" {
 			http.Error(w, "invalid data-plane request", http.StatusBadRequest)
@@ -413,7 +418,7 @@ func validateFilter(fields map[string]any) error {
 				}
 			}
 			continue
-		case "doc_id", "collection", "doc_type", "revision_id", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey:
+		case "doc_id", "collection", "doc_type", "revision_id", domain.VectorTenantKey, domain.VectorRevisionKey, domain.VectorAttemptKey, domain.VectorIncarnationKey:
 		default:
 			return errors.New("unknown filter field")
 		}
