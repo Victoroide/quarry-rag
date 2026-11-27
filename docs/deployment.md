@@ -347,10 +347,13 @@ in `__default__`, which Pinecone reserves as the default namespace. Selective
 indexing must be available on a provisioning path that supports Quarry's
 Vectors API.
 
-The check requires the SDK's `2025-10` index description to report an explicit,
-complete read capacity configuration for each target. For Dedicated capacity,
-both targets must report `Ready` and have matching node type, scaling strategy,
-and configured shard and replica counts. Retry after both targets are ready.
+The SDK index description and the provisioning fallback both use HTTPS on the
+public controller at `api.pinecone.io`. The SDK's `PINECONE_CONTROLLER_HOST`
+override does not apply to this comparison. The check requires the SDK's
+`2025-10` index description to report an explicit, complete read capacity
+configuration for each target. With Dedicated capacity, both targets must
+report `Ready` and have matching node type, scaling strategy, and configured
+shard and replica counts. Retry after both targets are ready.
 
 ```sh
 GOMAXPROCS=4 go test -p 2 -count=2 -v ./internal/store/pinecone -run '^TestStagingSelectiveMetadataIndexing$'
