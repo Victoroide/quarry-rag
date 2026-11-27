@@ -125,6 +125,12 @@ Text normalization first converts CRLF, CR and Unicode line separators to newlin
 
 Token estimates count each Han, Hiragana, Katakana, Hangul, Thai, Lao, Khmer, Myanmar and Tibetan character as one token. Dense characters separate words. The remaining estimate is the larger of the word count multiplied by 1.3 and the non-space, non-dense rune count divided by four, each rounded up. Chunk token counts use this same estimate. Paragraph breaks remain visible inside chunks, and fragments of a split word are joined without inserted spaces.
 
+With `PRESERVE_SOURCE_LINE_BOUNDARIES` enabled, PostgreSQL stores an optional sidecar with zero-based UTF-8 byte offsets into the canonical chunk body. Each entry identifies a space introduced by a source line break or the first newline of a retained paragraph separator. HTML and layout joins describe the extracted stream. PDF and OCR can supply line breaks only when the extraction output retains them. Trimmed and dehyphenated separators are omitted.
+
+The sidecar shares the chunk's publication and deletion lifetime across vector backends and generations. A null value means unknown and an empty array means capture found no retained separators. During a mixed rollout, older writers continue publishing chunks with unknown boundaries. Disabling capture stops new capture and lookup, while existing sidecars remain available when the flag is enabled again. Historical rows keep their unknown state until fresh chunk publication.
+
+Retrieval looks up the sidecar in the current evidence scope for selected full chunks. The offsets apply to those original bodies. The optional lookup uses a small share of the synthesis budget and is skipped when little time remains. If the lookup times out or the current row is unavailable, the boundaries stay unknown and the query continues within its original deadline.
+
 
 ---
 

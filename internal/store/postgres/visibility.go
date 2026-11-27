@@ -10,6 +10,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -57,10 +58,11 @@ func (v Visibility) ObserveEvidenceSnapshot(ctx context.Context) (string, error)
 }
 
 var (
-	_ domain.DocumentVisibility       = Visibility{}
-	_ domain.RevisionVisibility       = Visibility{}
-	_ domain.EvidenceVisibility       = Visibility{}
-	_ domain.EvidenceSnapshotObserver = Visibility{}
+	_ domain.DocumentVisibility           = Visibility{}
+	_ domain.RevisionVisibility           = Visibility{}
+	_ domain.EvidenceVisibility           = Visibility{}
+	_ domain.EvidenceSnapshotObserver     = Visibility{}
+	_ domain.SourceLineBoundaryVisibility = Visibility{}
 )
 
 // VisibleEvidence checks that vector hits match current completed chunks and
@@ -76,14 +78,25 @@ func (v Visibility) VisibleEvidence(ctx context.Context, candidates []domain.Sco
 // VisibleEvidenceWithPreviews checks current evidence and reads previews only
 // for visible probe documents using the same statement snapshot.
 func (v Visibility) VisibleEvidenceWithPreviews(ctx context.Context, candidates []domain.ScoredChunk, probeIDs []string) ([]domain.ScoredChunk, map[string]string, error) {
-	return v.visibleEvidence(ctx, v.Pool, candidates, probeIDs)
+	return v.visibleEvidenceProjection(ctx, v.Pool, candidates, probeIDs, false)
+}
+
+// VisibleEvidenceWithLineBoundaries reads the optional sidecar from the same
+// row and snapshot used to verify an evidence hit.
+func (v Visibility) VisibleEvidenceWithLineBoundaries(ctx context.Context, candidates []domain.ScoredChunk) ([]domain.ScoredChunk, error) {
+	visible, _, err := v.visibleEvidenceProjection(ctx, v.Pool, candidates, nil, true)
+	return visible, err
+}
+
+func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer, candidates []domain.ScoredChunk, probeIDs []string) ([]domain.ScoredChunk, map[string]string, error) {
+	return v.visibleEvidenceProjection(ctx, source, candidates, probeIDs, false)
 }
 
 type evidenceQueryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
-func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer, candidates []domain.ScoredChunk, probeIDs []string) ([]domain.ScoredChunk, map[string]string, error) {
+func (v Visibility) visibleEvidenceProjection(ctx context.Context, source evidenceQueryer, candidates []domain.ScoredChunk, probeIDs []string, withBoundaries bool) ([]domain.ScoredChunk, map[string]string, error) {
 	probeIDs = canonicalDocumentIDs(probeIDs)
 	chunkIDs := make([]string, 0, len(candidates))
 	docIDs := make([]string, 0, len(candidates))
@@ -161,9 +174,13 @@ func (v Visibility) visibleEvidence(ctx context.Context, source evidenceQueryer,
 	}
 
 	join, args := readableJoin(v.Subject, v.DocumentSetID, []any{chunkIDs, docIDs, indices, digests, revisions, observed, attempts, vectorIncarnations, v.Collection, v.DocType, previewIDs, revIDs, snapshots})
+	var projection string
+	if withBoundaries {
+		projection = ", c.source_line_boundaries"
+	}
 	rows, err := source.Query(ctx, `
 SELECT hit.ord, d.doc_type, COALESCE(d.incarnation,d.id)::text,
-       CASE WHEN d.id=ANY($11::uuid[]) THEN d.content_preview END
+       CASE WHEN d.id=ANY($11::uuid[]) THEN d.content_preview END`+projection+`
 FROM unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $12::uuid[], $13::text[])
 	WITH ORDINALITY AS hit(chunk_id, doc_id, idx, hash, revision, incarnation, attempt, vector_incarnation, rev_id, snapshot, ord)
 JOIN chunks c ON c.id=hit.chunk_id AND c.document_id=hit.doc_id AND c.chunk_index=hit.idx
@@ -196,7 +213,12 @@ ORDER BY hit.ord`, args...)
 		var ord int
 		var docType, incarnation string
 		var preview *string
-		if err := rows.Scan(&ord, &docType, &incarnation, &preview); err != nil {
+		var boundaries pgtype.Array[pgtype.Int4]
+		dest := []any{&ord, &docType, &incarnation, &preview}
+		if withBoundaries {
+			dest = append(dest, &boundaries)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, nil, fmt.Errorf("postgres: scan visible evidence: %w", err)
 		}
 		if preview != nil {
@@ -204,6 +226,9 @@ ORDER BY hit.ord`, args...)
 		}
 		candidate := input[ord-1]
 		candidate.ObservedIncarnation = incarnation
+		if withBoundaries {
+			candidate.Chunk.SourceLineBoundaries = decodeSourceLineBoundaries(candidate.Chunk.Text, boundaries)
+		}
 		if candidate.Chunk.Metadata["doc_type"] != docType {
 			metadata := make(map[string]any, len(candidate.Chunk.Metadata)+1)
 			maps.Copy(metadata, candidate.Chunk.Metadata)

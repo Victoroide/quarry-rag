@@ -23,6 +23,12 @@ type EvidenceVisibility interface {
 	VisibleEvidenceWithPreviews(ctx context.Context, candidates []ScoredChunk, probeIDs []string) ([]ScoredChunk, map[string]string, error)
 }
 
+// SourceLineBoundaryVisibility additionally reads optional source separators
+// from the same scoped evidence check and canonical chunk text.
+type SourceLineBoundaryVisibility interface {
+	VisibleEvidenceWithLineBoundaries(context.Context, []ScoredChunk) ([]ScoredChunk, error)
+}
+
 // EvaluationEvidenceVisibility checks the ownership of the entire fixture
 // scope and the currency of selected evidence in one storage snapshot.
 type EvaluationEvidenceVisibility interface {
