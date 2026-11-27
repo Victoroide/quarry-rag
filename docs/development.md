@@ -222,6 +222,17 @@ The race job runs `go test -race -count=1 -json ./...` against a PostgreSQL serv
 
 When a package fails or the event stream ends before its result, the reporter writes diagnostics for unfinished tests to standard error. It labels a nested benchmark `UNRESOLVED` when a later run shares its name prefix and the event stream leaves its completion ambiguous. The reporter lists up to 128 unfinished or unresolved tests and benchmarks per package in the order it first saw them. The 512 KiB per-package limit includes their headings, their most recent output fragments and any marker counting omitted output bytes and tests.
 
+For direct use, pipe Go's JSONL output into the reporter with `-diagnostic-spill`. The flag defaults to false and the legacy decoder accepts a stream of JSON values. Spill mode accepts one object per nonblank LF or CRLF line, including a final line without a newline. It limits each record to 4 MiB including its line ending, individual names to 8 KiB, package and build identities to 8,192 combined, test occurrences to 65,536, and distinct retained name bytes to 16 MiB.
+
+```bash
+set -o pipefail
+go test -race -count=1 -json ./... |
+  go run ./.github/scripts/testreport -diagnostic-spill
+```
+
+The reporter opens one file in the system temporary directory when it first receives diagnostic output, with owner-only access where Unix permissions apply. The 512 MiB file budget includes record headers. Within that budget, explicit failures keep their complete output. If storage fails, the reporter preserves readable output and up to 512 KiB of recent output shared across all diagnostics, reports omissions and a storage error, and exits with status 1 after attempting the summary. A report write failure also exits with status 1 after attempting output on the other stream. Invalid input stops decoding and emits available diagnostic evidence without a summary. The reporter closes and removes the file on return. Process termination before cleanup can leave the file in the runner's temporary directory.
+
+
 ### Runtime Image Job
 
 The image job builds the `runtime` target for `linux/amd64` and `linux/arm64` without publishing it. It checks the effective filesystem of each image after applying its layers. The server must be the sole entry point, match the target architecture and be executable by UID/GID `10001:10001`. The check also requires CA certificates and timezone data, and compares every installed license and notice against the project's license and the files collected for that target from the pinned build environment.

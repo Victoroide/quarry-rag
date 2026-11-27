@@ -28,14 +28,9 @@ type testResult struct {
 	name           string
 	outcome        string
 	elapsed        float64
-	output         []outputFragment
-	outputBytes    int
+	output         diagnosticOutput
+	measurement    *benchmarkMeasurement
 	hasPrefixedRun bool
-}
-
-type outputFragment struct {
-	text    string
-	ordinal int
 }
 
 type packageResult struct {
@@ -48,7 +43,7 @@ type packageResult struct {
 	hasBuildFailure bool
 	observed        bool
 	standaloneBuild string
-	output          []string
+	output          diagnosticOutput
 	currentTest     map[string]*testResult
 	testOrder       []*testResult
 	benchmarkPath   []*testResult
@@ -63,10 +58,10 @@ func (p *packageResult) reportable() bool {
 }
 
 type buildResult struct {
-	fragments    []string
-	nextFragment int
-	failed       bool
-	referenced   bool
+	output     diagnosticOutput
+	cursor     diagnosticCursor
+	failed     bool
+	referenced bool
 }
 
 // stat accumulates the durations a fixture step reported.
@@ -91,7 +86,9 @@ type run struct {
 	// Independent builds have no terminal package result or synthetic slot
 	// that accounts for their exact failure.
 	independentBuilds map[string]bool
-	outputOrder       int
+	outputOrder       uint64
+	store             *diagnosticStore
+	names             retainedNames
 	setup             stat
 	cleanup           stat
 }
@@ -122,6 +119,9 @@ func (r *run) build(id string) *buildResult {
 func (r *run) pkg(name string) *packageResult {
 	p, ok := r.packages[name]
 	if !ok {
+		if canonical := r.names.names[name]; canonical != "" {
+			name = canonical
+		}
 		p = &packageResult{name: name, currentTest: map[string]*testResult{}}
 		r.packages[name] = p
 		r.order = append(r.order, name)
@@ -145,7 +145,7 @@ func (p *packageResult) startTest(name string) *testResult {
 
 func (p *packageResult) completeBenchmark(t *testResult) {
 	t.outcome = "bench"
-	t.output, t.outputBytes = nil, 0
+	t.output, t.measurement = diagnosticOutput{}, nil
 	// Repeated benchmark measurements can produce more output without a run event.
 	delete(p.currentTest, t.name)
 }
@@ -156,9 +156,7 @@ func (r *run) add(ev event) *packageResult {
 	case "build-output":
 		if ev.ImportPath != "" {
 			b := r.build(ev.ImportPath)
-			if ev.Output != "" {
-				b.fragments = append(b.fragments, ev.Output)
-			}
+			r.appendOutput(&b.output, ev.Output)
 		}
 		return nil
 	case "build-fail":
@@ -196,7 +194,7 @@ func (r *run) add(ev event) *packageResult {
 			t := p.test(ev.Test)
 			t.outcome, t.elapsed = ev.Action, ev.Elapsed
 			if ev.Action != "fail" {
-				t.output, t.outputBytes = nil, 0
+				t.output, t.measurement = diagnosticOutput{}, nil
 			}
 			return nil
 		}
@@ -241,7 +239,6 @@ func (r *run) resolveBuildFailures() {
 }
 
 func (r *run) addOutput(p *packageResult, ev event) {
-	r.outputOrder++
 	if match := fixtureStep.FindStringSubmatch(ev.Output); match != nil {
 		if d, err := time.ParseDuration(match[2]); err == nil {
 			if match[1] == "setup" {
@@ -254,9 +251,8 @@ func (r *run) addOutput(p *packageResult, ev event) {
 	if ev.Test != "" {
 		t := p.test(ev.Test)
 		if t.outcome != "pass" && t.outcome != "skip" && ev.Output != "" {
-			t.output = append(t.output, outputFragment{text: ev.Output, ordinal: r.outputOrder})
-			t.outputBytes += len(ev.Output)
-			if t.outcome == "" && endsBenchmarkMeasurement(t) {
+			r.appendOutput(&t.output, ev.Output)
+			if t.outcome == "" && r.endsBenchmark(t, ev.Output) {
 				p.completeBenchmark(t)
 			}
 		}
@@ -271,7 +267,7 @@ func (r *run) addOutput(p *packageResult, ev event) {
 			p.advanceBenchmarks("")
 		}
 	}
-	p.output = append(p.output, ev.Output)
+	r.appendOutput(&p.output, ev.Output)
 	p.noTests = p.noTests || strings.Contains(ev.Output, "[no test files]")
 	p.cached = p.cached || strings.Contains(ev.Output, "(cached)")
 }
@@ -328,27 +324,22 @@ func (r *run) problems(expected []string) []string {
 	return out
 }
 
-// failureDetails returns diagnostic output for a failed or interrupted package.
-func (r *run) failureDetails(p *packageResult) string {
-	var b strings.Builder
+// writeFailureDetails streams diagnostics in the order of the report sections.
+func (r *run) writeFailureDetails(w *diagnosticWriter, p *packageResult) {
 	for _, t := range p.testOrder {
 		if t.outcome != "fail" {
 			continue
 		}
-		fmt.Fprintf(&b, "--- FAIL: %s\n", t.name)
-		for _, fragment := range t.output {
-			b.WriteString(fragment.text)
-		}
+		printf(w, "--- FAIL: %s\n", t.name)
+		r.writeOutput(w, &t.output, &diagnosticCursor{})
 	}
-	writeIncompleteDetails(&b, p.testOrder)
-	for _, line := range p.output {
-		b.WriteString(line)
-	}
-	return b.String()
+	r.writeIncompleteDetails(w, p.testOrder)
+	r.writeOutput(w, &p.output, &diagnosticCursor{})
 }
 
 type options struct {
 	slowest      int
+	spill        bool
 	moduleCache  string
 	buildCache   string
 	expectedList []string
@@ -416,12 +407,7 @@ func (r *run) summary(w io.Writer, o options, problems []string) {
 	writeTests(w, "Slowest top-level tests", top)
 	writeTests(w, "Slowest subtests", children)
 
-	if skipped := r.skippedTests(); len(skipped) > 0 {
-		printf(w, "\n### Skipped tests\n\n")
-		for _, name := range skipped {
-			printf(w, "- %s\n", name)
-		}
-	}
+	r.writeSkippedTests(w)
 	if len(noTests) > 0 {
 		printf(w, "\n### Packages without test files (%d)\n\n", len(noTests))
 		for _, name := range noTests {
@@ -475,17 +461,20 @@ func (r *run) slowTests(limit int) (top, children []timedTest) {
 	return top[:min(limit, len(top))], children[:min(limit, len(children))]
 }
 
-func (r *run) skippedTests() []string {
-	var out []string
+func (r *run) writeSkippedTests(w io.Writer) {
+	heading := "\n### Skipped tests\n\n"
 	for _, name := range r.order {
 		p := r.packages[name]
 		for _, t := range p.testOrder {
 			if t.outcome == "skip" {
-				out = append(out, p.name+" "+t.name)
+				if heading != "" {
+					printf(w, "%s", heading)
+					heading = ""
+				}
+				printf(w, "- %s %s\n", p.name, t.name)
 			}
 		}
 	}
-	return out
 }
 
 func writeTests(w io.Writer, title string, tests []timedTest) {

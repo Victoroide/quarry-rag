@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"container/heap"
 	"fmt"
 	"strings"
@@ -16,23 +17,28 @@ const (
 )
 
 type incompleteSection struct {
-	test          *testResult
-	heading       string
-	headingBytes  int
-	needsNewline  bool
-	firstFragment int
-	firstOffset   int
+	test         *testResult
+	heading      string
+	headingBytes int
+	needsNewline bool
+	tail         recentOutput
+	retained     int
+	payload      []byte
 }
 
-func writeIncompleteDetails(b *strings.Builder, tests []*testResult) {
+func (r *run) writeIncompleteDetails(w *diagnosticWriter, tests []*testResult) {
+	if w.failed() {
+		return
+	}
 	var sections []incompleteSection
-	var totalTests, totalBytes, fullSize int
+	var totalTests int
+	var totalBytes, fullSize uint64
 	for _, test := range tests {
 		if test.outcome != "" {
 			continue
 		}
 		totalTests++
-		totalBytes += test.outputBytes
+		totalBytes = saturatingAdd(totalBytes, test.output.bytes())
 		if len(sections) == maxIncompleteTests {
 			continue
 		}
@@ -41,12 +47,11 @@ func writeIncompleteDetails(b *strings.Builder, tests []*testResult) {
 			heading = unresolvedHeading
 		}
 		section := incompleteSection{test: test, heading: heading, headingBytes: len(heading) + len(test.name) + 1}
-		if len(test.output) > 0 {
-			section.needsNewline = !strings.HasSuffix(test.output[len(test.output)-1].text, "\n")
-		}
-		fullSize += section.headingBytes + test.outputBytes
+		section.needsNewline = test.output.bytes() != 0 && !test.output.endsLine()
+		fullSize = saturatingAdd(fullSize, uint64(len(heading))+uint64(len(test.name))+1)
+		fullSize = saturatingAdd(fullSize, test.output.bytes())
 		if section.needsNewline {
-			fullSize++
+			fullSize = saturatingAdd(fullSize, 1)
 		}
 		sections = append(sections, section)
 	}
@@ -55,54 +60,100 @@ func writeIncompleteDetails(b *strings.Builder, tests []*testResult) {
 	}
 
 	budget := maxIncompleteBytes
-	if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
-		b.WriteByte('\n')
+	if w.partialLine {
+		w.startLine()
 		budget--
 	}
-	var omittedBytes, omittedTests int
-	if totalTests > len(sections) || fullSize > budget {
-		// The totals give an upper bound on the marker's byte length.
-		budget -= len(fmt.Sprintf(omissionFormat, totalBytes, totalTests))
-		for i, section := range sections {
-			if section.headingBytes > budget {
-				sections = sections[:i]
+	markerSize := len(fmt.Sprintf(omissionFormat, totalBytes, totalTests))
+	payloadBudget := budget
+	if totalTests > len(sections) || fullSize > uint64(budget) || (r.store != nil && r.store.failure != "") {
+		payloadBudget -= markerSize
+	}
+	for i := range sections {
+		if sections[i].headingBytes > payloadBudget {
+			sections = sections[:i]
+			break
+		}
+		payloadBudget -= sections[i].headingBytes
+	}
+	retained := r.retainRecentOutput(sections, payloadBudget)
+
+	// Stage only the bounded unfinished payload. A read failure during forward
+	// replay can require an omission marker even when the healthy report fits.
+	stage := bytes.NewBuffer(make([]byte, 0, retained))
+	var written uint64
+	size, headings := 0, 0
+	for i := range sections {
+		section := &sections[i]
+		start := stage.Len()
+		section.tail.copyTo(stage, r.store, &section.test.output)
+		section.payload = stage.Bytes()[start:]
+		written += uint64(len(section.payload))
+		headings += section.headingBytes
+		size += section.headingBytes + framedSize(section.payload)
+	}
+	omittedTests := totalTests - len(sections)
+	if written < totalBytes || omittedTests > 0 {
+		for headings+markerSize > budget {
+			last := sections[len(sections)-1]
+			headings -= last.headingBytes
+			size -= last.headingBytes + framedSize(last.payload)
+			written -= uint64(len(last.payload))
+			sections = sections[:len(sections)-1]
+			omittedTests++
+		}
+		trim := size + markerSize - budget
+		for i := range sections {
+			if trim <= 0 {
 				break
 			}
-			budget -= section.headingBytes
+			section := &sections[i]
+			payload := section.payload
+			skip := runeBoundary(payload, min(trim, len(payload)))
+			section.payload = payload[skip:]
+			written -= uint64(len(payload[:skip]))
+			trim -= framedSize(payload) - framedSize(section.payload)
 		}
-		omittedTests = totalTests - len(sections)
-		omittedBytes = totalBytes - retainRecentOutput(sections, budget)
 	}
 
 	for _, section := range sections {
-		b.WriteString(section.heading)
-		b.WriteString(section.test.name)
-		b.WriteByte('\n')
-		fragments := section.test.output[section.firstFragment:]
-		for i, fragment := range fragments {
-			if i == 0 {
-				b.WriteString(fragment.text[section.firstOffset:])
-			} else {
-				b.WriteString(fragment.text)
-			}
-		}
-		if len(fragments) > 0 && section.needsNewline {
-			b.WriteByte('\n')
+		printf(w, "%s%s\n", section.heading, section.test.name)
+		_, _ = w.Write(section.payload)
+		if len(section.payload) != 0 {
+			w.startLine()
 		}
 	}
-	if omittedBytes > 0 || omittedTests > 0 {
-		fmt.Fprintf(b, omissionFormat, omittedBytes, omittedTests)
+	if written < totalBytes || omittedTests > 0 {
+		printf(w, omissionFormat, totalBytes-written, omittedTests)
 	}
 }
 
+func framedSize(payload []byte) int {
+	if len(payload) != 0 && payload[len(payload)-1] != '\n' {
+		return len(payload) + 1
+	}
+	return len(payload)
+}
+
+func runeBoundary(data []byte, start int) int {
+	for start < len(data) && !utf8.RuneStart(data[start]) {
+		start++
+	}
+	return start
+}
+
 // retainRecentOutput merges the selected tests' output in reverse event order.
-// Each heap entry points to one test's newest fragment still under consideration.
-func retainRecentOutput(sections []incompleteSection, budget int) int {
+// Each heap entry holds only one current fragment and the start of its suffix.
+func (r *run) retainRecentOutput(sections []incompleteSection, budget int) int {
 	queue := make(fragmentHeap, 0, len(sections))
 	for i := range sections {
 		section := &sections[i]
-		section.firstFragment = len(section.test.output)
-		if section.firstFragment > 0 {
+		tail := &section.tail
+		tail.init(r.store, &section.test.output)
+		if tail.ordinal != 0 {
+			if r.store != nil && r.store.failure != "" {
+				section.needsNewline = !tail.endsLine(r.store)
+			}
 			queue = append(queue, section)
 		}
 	}
@@ -110,28 +161,29 @@ func retainRecentOutput(sections []incompleteSection, budget int) int {
 	retained := 0
 	for len(queue) > 0 && budget > 0 {
 		section := queue[0]
-		index := section.firstFragment - 1
-		text := section.test.output[index].text
+		tail := &section.tail
 		available := budget
-		if section.firstFragment == len(section.test.output) && section.needsNewline {
+		if section.retained == 0 && section.needsNewline {
 			available--
 		}
-
-		offset := max(0, len(text)-available)
-		for offset < len(text) && !utf8.RuneStart(text[offset]) {
-			offset++
+		start, ok := tail.start(r.store, available)
+		switch {
+		case !ok:
+			tail.dropDisk()
+		case start == tail.length:
+			return retained
+		default:
+			tail.keep(start)
+			kept := tail.length - start
+			section.retained += kept
+			retained += kept
+			budget = available - kept
+			if start > 0 || budget == 0 {
+				return retained
+			}
 		}
-		if offset == len(text) {
-			break
-		}
-		section.firstFragment, section.firstOffset = index, offset
-		kept := len(text) - offset
-		retained += kept
-		budget = available - kept
-		if offset > 0 {
-			break
-		}
-		if index == 0 {
+		tail.older(r.store, &section.test.output)
+		if tail.ordinal == 0 {
 			heap.Pop(&queue)
 		} else {
 			heap.Fix(&queue, 0)
@@ -142,16 +194,10 @@ func retainRecentOutput(sections []incompleteSection, budget int) int {
 
 type fragmentHeap []*incompleteSection
 
-func (h fragmentHeap) Len() int { return len(h) }
-
-func (h fragmentHeap) Less(i, j int) bool {
-	a, b := h[i], h[j]
-	return a.test.output[a.firstFragment-1].ordinal > b.test.output[b.firstFragment-1].ordinal
-}
-
-func (h fragmentHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-
-func (h *fragmentHeap) Push(x any) { *h = append(*h, x.(*incompleteSection)) }
+func (h fragmentHeap) Len() int           { return len(h) }
+func (h fragmentHeap) Less(i, j int) bool { return h[i].tail.ordinal > h[j].tail.ordinal }
+func (h fragmentHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *fragmentHeap) Push(x any)        { *h = append(*h, x.(*incompleteSection)) }
 
 func (h *fragmentHeap) Pop() any {
 	last := len(*h) - 1
