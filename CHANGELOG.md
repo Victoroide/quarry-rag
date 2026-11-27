@@ -23,6 +23,7 @@ Notable changes are grouped by release.
 
 ### Fixed
 
+- The CI race report retains unfinished test output when a compiler failure shares the package name.
 - Vector reindex activation preserves the hosted-manifest refusal when writing its JSON report fails.
 - The CI race report shows package failures even when diagnostics mention `[no test files]`.
 - The CI race report prints each shared compiler diagnostic once, preserves standalone build failures, and flags expected packages with missing results.
