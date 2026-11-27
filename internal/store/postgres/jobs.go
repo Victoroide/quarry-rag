@@ -701,7 +701,7 @@ func (c *Client) CompleteJob(ctx context.Context, j domain.Job, chunks []domain.
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer rollbackIngestTx(ctx, tx)
 	// A leased job can publish during a vector freeze, but must still match
 	// the corpus authorization mode before taking document or job locks.
 	if modeErr := c.checkWriterAuthzMode(ctx, tx); modeErr != nil {
@@ -846,7 +846,7 @@ func (c *Client) changeJob(ctx context.Context, j domain.Job, query string, args
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer rollbackIngestTx(ctx, tx)
 	if lockErr := lockLiveJob(ctx, tx, j); lockErr != nil {
 		return lockErr
 	}
