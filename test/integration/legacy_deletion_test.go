@@ -66,9 +66,21 @@ func legacyReceiptOf(ctx context.Context, t *testing.T, c *pgstore.Client, id st
 	return r
 }
 
+func boundedLegacyReceiptOf(t *testing.T, c *pgstore.Client, id string) legacyReceiptRow {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	return legacyReceiptOf(ctx, t, c, id)
+}
+
 func admission(t *testing.T, c *pgstore.Client, id, content string) domain.AcceptOutcome {
 	t.Helper()
-	result, err := c.AcceptDocument(t.Context(), domain.AcceptRequest{
+	return admissionWithContext(t.Context(), t, c, id, content)
+}
+
+func admissionWithContext(ctx context.Context, t *testing.T, c *pgstore.Client, id, content string) domain.AcceptOutcome {
+	t.Helper()
+	result, err := c.AcceptDocument(ctx, domain.AcceptRequest{
 		Document: domain.Document{ID: domain.DocumentID(id), Content: content}, CallerSupplied: true,
 		Fingerprint: chunker.ScopedFingerprint("", content), MaxPending: 100,
 	})
@@ -480,12 +492,12 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	defer cancelActivation()
 	activated := make(chan error, 1)
 	go func() {
-		_, err := activator.ActivateDeletion(activationCtx)
-		activated <- err
+		_, activationErr := activator.ActivateDeletion(activationCtx)
+		activated <- activationErr
 	}()
 	select {
-	case err := <-activated:
-		require.NoError(t, err, "activation returned while the cleanup held the lock")
+	case activationErr := <-activated:
+		require.NoError(t, activationErr, "activation returned while the cleanup held the lock")
 		t.Fatal("a healthy activation committed under the cleanup")
 	case <-time.After(500 * time.Millisecond):
 	}
@@ -497,12 +509,15 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	require.NoError(t, siblingErr, "query the sibling fixture session holding the activation lock")
 	require.True(t, alive)
 	select {
-	case err := <-activated:
-		require.NoError(t, err, "activation after the lock disappeared")
+	case activationErr := <-activated:
+		require.NoError(t, activationErr, "activation after the lock disappeared")
 	case <-time.After(10 * time.Second):
 		t.Fatal("activation did not proceed after the lock disappeared")
 	}
-	require.Equal(t, domain.AcceptDeletionConflict, admission(t, activator, id, "replacement"), "the durable hold still blocks the identity")
+	admissionCtx, cancelAdmission := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelAdmission()
+	require.Equal(t, domain.AcceptDeletionConflict, admissionWithContext(admissionCtx, t, activator, id, "replacement"), "the durable hold still blocks the identity")
+	cancelAdmission()
 
 	unblock()
 	replyCtx, cancelReply := context.WithTimeout(t.Context(), 10*time.Second)
@@ -510,7 +525,7 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	cancelReply()
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, reply.code, reply.body)
-	receipt := legacyReceiptOf(t.Context(), t, c, id)
+	receipt := boundedLegacyReceiptOf(t, c, id)
 	require.True(t, receipt.finalized)
 	require.True(t, receipt.held)
 	require.Equal(t, domain.AcceptDeletionConflict, admission(t, c, id, "replacement"))
@@ -533,7 +548,7 @@ func smallPoolDatabase(t *testing.T, maxConns int) *pgstore.Client {
 
 // blockFirstCalls pauses the first n calls of a provider kind until unblocked,
 // signaling each arrival on entered.
-func blockFirstCalls(stores *deletionStores, kind string, n int) (entered <-chan struct{}, unblock func()) {
+func blockFirstCalls(fixtureCtx context.Context, stores *deletionStores, kind string, n int) (entered <-chan struct{}, unblock func()) {
 	arrivals, release := make(chan struct{}, n), make(chan struct{})
 	var calls atomic.Int32
 	stores.hook(kind, func(ctx context.Context) error {
@@ -544,22 +559,13 @@ func blockFirstCalls(stores *deletionStores, kind string, n int) (entered <-chan
 		select {
 		case <-release:
 		case <-ctx.Done():
-			return ctx.Err()
+			return context.Cause(ctx)
+		case <-fixtureCtx.Done():
+			return context.Cause(fixtureCtx)
 		}
 		return nil
 	})
 	return arrivals, sync.OnceFunc(func() { close(release) })
-}
-
-func awaitArrivals(t *testing.T, entered <-chan struct{}, n int) {
-	t.Helper()
-	for range n {
-		select {
-		case <-entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("a guarded deletion never reached its provider call")
-		}
-	}
 }
 
 func advisoryLocks(t *testing.T, c *pgstore.Client) int {
@@ -614,6 +620,16 @@ func TestLegacyDeletionProbesIgnoreSiblingActivationLock(t *testing.T) {
 	require.True(t, unlocked, "the sibling session still holds the activation lock")
 }
 
+func startGuardedDeletionBatch(ctx context.Context, server *httptest.Server, ids []string) <-chan deletionHTTPResult {
+	replies := make(chan deletionHTTPResult, len(ids))
+	for _, id := range ids {
+		startDeletionRequest(replies, "guarded DELETE "+id, func() (httpReply, error) {
+			return readDeleteReply(ctx, server, "token", id, "")
+		})
+	}
+	return replies
+}
+
 func TestGuardedIDOnlyDeleteRejectsBurstWith503BusyBeforeLocks(t *testing.T) {
 	c := durableDatabase(t)
 	c.SetLegacyDeletionConcurrency(2)
@@ -622,36 +638,57 @@ func TestGuardedIDOnlyDeleteRejectsBurstWith503BusyBeforeLocks(t *testing.T) {
 	for _, id := range ids {
 		acceptDeletable(t, c, id, "burst document "+id, false, "")
 	}
-	entered, unblock := blockFirstCalls(stores, "namespace", 2)
-	defer unblock()
-	server := deletionServer(t, c, "token", legacyRoutes(stores))
 	untouched := documentState(t, c, ids[2])
 	require.NotEmpty(t, untouched)
-	replies := make(chan httpReply, 2)
-	for _, id := range ids[:2] {
-		go func() { replies <- sendDelete(t, server, "token", id, "") }()
-	}
-	awaitArrivals(t, entered, 2)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	entered, unblock := blockFirstCalls(ctx, stores, "namespace", 2)
+	defer unblock()
+	server := deletionServer(t, c, "token", legacyRoutes(stores))
+	replies := startGuardedDeletionBatch(ctx, server, ids[:2])
+	entryCtx, cancelEntry := context.WithTimeout(ctx, 30*time.Second)
+	err := waitDeletionArrivals(entryCtx, entered, replies, 2, "before the burst DELETE provider calls")
+	cancelEntry()
+	require.NoError(t, err)
 	locks := advisoryLocks(t, c)
 	// Other fixtures can take locks on this server between samples.
 	holdSiblingActivationLock(t, c)
 
-	refused := sendDelete(t, server, "token", ids[2], "")
+	refusedCtx, cancelRefused := context.WithTimeout(t.Context(), 10*time.Second)
+	refused, err := readDeleteReply(refusedCtx, server, "token", ids[2], "")
+	cancelRefused()
+	require.NoError(t, err, "DELETE refused while both slots are occupied")
 	require.Equal(t, http.StatusServiceUnavailable, refused.code, refused.body)
 	require.Equal(t, "5", refused.retryAfter)
 	require.Contains(t, refused.body, `"busy"`)
 	require.Equal(t, 2, stores.count("namespace"), "the refused request made no provider call")
 	require.Equal(t, locks, advisoryLocks(t, c), "the refused request took no lock")
-	require.Equal(t, untouched, documentState(t, c, ids[2]), "the refused document is untouched")
+	stateCtx, cancelState := context.WithTimeout(t.Context(), 10*time.Second)
+	state, err := readDocumentState(stateCtx, c, ids[2])
+	cancelState()
+	require.NoError(t, err, "read the refused document state")
+	require.Equal(t, untouched, state, "the refused document is untouched")
 	var receipts int
-	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT count(*) FROM document_deletions WHERE document_id=$1`, ids[2]).Scan(&receipts))
+	receiptCtx, cancelReceipt := context.WithTimeout(t.Context(), 10*time.Second)
+	err = c.Pool.QueryRow(receiptCtx, `SELECT count(*) FROM document_deletions WHERE document_id=$1`, ids[2]).Scan(&receipts)
+	cancelReceipt()
+	require.NoError(t, err, "read the refused document receipt count")
 	require.Zero(t, receipts, "the refused request reserved nothing")
 
 	unblock()
+	replyCtx, cancelReply := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelReply()
 	for range 2 {
-		require.Equal(t, http.StatusOK, (<-replies).code)
+		reply, replyErr := waitDeletionReply(replyCtx, replies, "after releasing the burst DELETE providers")
+		require.NoError(t, replyErr)
+		require.Equal(t, http.StatusOK, reply.code, reply.body)
 	}
-	require.Equal(t, http.StatusOK, sendDelete(t, server, "token", ids[2], "").code, "a retry succeeds once a slot is free")
+	cancelReply()
+	retryCtx, cancelRetry := context.WithTimeout(t.Context(), 10*time.Second)
+	reply, err := readDeleteReply(retryCtx, server, "token", ids[2], "")
+	cancelRetry()
+	require.NoError(t, err, "retry DELETE after releasing a slot")
+	require.Equal(t, http.StatusOK, reply.code, "a retry succeeds once a slot is free: "+reply.body)
 }
 
 func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
@@ -662,41 +699,50 @@ func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
 	for _, id := range ids {
 		acceptDeletable(t, c, id, "slow document "+id, false, "")
 	}
-	entered, unblock := blockFirstCalls(stores, "namespace", 2)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	entered, unblock := blockFirstCalls(ctx, stores, "namespace", 2)
 	defer unblock()
 	server := deletionServer(t, c, "token", legacyRoutes(stores))
-	replies := make(chan httpReply, 2)
-	for _, id := range ids {
-		go func() { replies <- sendDelete(t, server, "token", id, "") }()
-	}
-	awaitArrivals(t, entered, 2)
+	replies := startGuardedDeletionBatch(ctx, server, ids)
+	entryCtx, cancelEntry := context.WithTimeout(ctx, 30*time.Second)
+	err := waitDeletionArrivals(entryCtx, entered, replies, 2, "before the small-pool DELETE provider calls")
+	cancelEntry()
+	require.NoError(t, err)
 
 	// Both guarded deletions are inside a provider call. Other traffic on the
-	// same two-connection pool finishes well inside its own deadline.
-	started := time.Now()
-	var wg sync.WaitGroup
-	results := make(chan httpReply, 6)
-	for range 2 {
-		wg.Go(func() {
-			results <- doRequest(t, server, http.MethodPost, "/ingest", "token", nil, `{"content":"admitted during slow deletions `+uuid.NewString()+`"}`)
+	// same two-connection pool shares one deadline across requests and replies.
+	trafficCtx, cancelTraffic := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelTraffic()
+	const batches = 2
+	results := make(chan deletionHTTPResult, 3*batches)
+	for i := range batches {
+		startDeletionRequest(results, fmt.Sprintf("POST /ingest %d", i+1), func() (httpReply, error) {
+			return readHTTPReply(trafficCtx, server, http.MethodPost, "/ingest", "token", nil, `{"content":"admitted during slow deletions `+uuid.NewString()+`"}`)
 		})
-		wg.Go(func() { results <- doRequest(t, server, http.MethodGet, "/documents", "token", nil, "") })
-		wg.Go(func() {
-			results <- doRequest(t, server, http.MethodGet, "/documents/"+uuid.NewString(), "token", nil, "")
+		startDeletionRequest(results, fmt.Sprintf("GET /documents %d", i+1), func() (httpReply, error) {
+			return readHTTPReply(trafficCtx, server, http.MethodGet, "/documents", "token", nil, "")
+		})
+		startDeletionRequest(results, fmt.Sprintf("GET document status %d", i+1), func() (httpReply, error) {
+			return readHTTPReply(trafficCtx, server, http.MethodGet, "/documents/"+uuid.NewString(), "token", nil, "")
 		})
 	}
-	wg.Wait()
-	close(results)
-	for reply := range results {
+	for range 3 * batches {
+		reply, err := waitDeletionReply(trafficCtx, results, "while the small-pool DELETE providers are paused")
+		require.NoError(t, err)
 		require.Less(t, reply.code, http.StatusInternalServerError, reply.body)
 		require.NotEqual(t, http.StatusServiceUnavailable, reply.code, reply.body)
 	}
-	require.Less(t, time.Since(started), 5*time.Second)
+	cancelTraffic()
 	require.Zero(t, c.Pool.Stat().AcquiredConns(), "the guarded deletions hold no pooled connection")
 
 	unblock()
+	replyCtx, cancelReply := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelReply()
 	for range 2 {
-		require.Equal(t, http.StatusOK, (<-replies).code)
+		reply, err := waitDeletionReply(replyCtx, replies, "after releasing the small-pool DELETE providers")
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, reply.code, reply.body)
 	}
 }
 
@@ -704,10 +750,23 @@ func TestSlowGuardedDeletionsDoNotExhaustSmallPool(t *testing.T) {
 // metadata removal, and leaves every other call to the real in-memory index.
 type pausedMemory struct {
 	*memory.FakeVectorStore
-	mu      sync.Mutex
-	calls   int
-	entered chan struct{}
-	release chan struct{}
+	fixtureDone  <-chan struct{}
+	fixtureCause func() error
+	mu           sync.Mutex
+	calls        int
+	entered      chan struct{}
+	release      chan struct{}
+}
+
+func newPausedMemory(ctx context.Context, index *memory.FakeVectorStore) (vectors *pausedMemory, release func()) {
+	vectors = &pausedMemory{
+		FakeVectorStore: index,
+		fixtureDone:     ctx.Done(),
+		fixtureCause:    func() error { return context.Cause(ctx) },
+		entered:         make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	return vectors, sync.OnceFunc(func() { close(vectors.release) })
 }
 
 func (v *pausedMemory) DeleteByDocID(ctx context.Context, id string) error {
@@ -717,7 +776,19 @@ func (v *pausedMemory) DeleteByDocID(ctx context.Context, id string) error {
 	v.mu.Unlock()
 	if call == 2 {
 		close(v.entered)
-		<-v.release
+		select {
+		case <-v.release:
+			if cause := v.fixtureCause(); cause != nil {
+				return cause
+			}
+			if cause := context.Cause(ctx); cause != nil {
+				return cause
+			}
+		case <-v.fixtureDone:
+			return v.fixtureCause()
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
 	}
 	return v.FakeVectorStore.DeleteByDocID(ctx, id)
 }
@@ -747,44 +818,70 @@ func TestPausedMemoryDeleteHoldsTheIdentityUntilItsOwnerFinishes(t *testing.T) {
 	w := durableWorker(c, index, e)
 	w.Start(t.Context())
 	t.Cleanup(w.Shutdown)
-	vectors := &pausedMemory{FakeVectorStore: index, entered: make(chan struct{}), release: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	vectors, release := newPausedMemory(ctx, index)
+	defer release()
 	stale := offlineAPI(t, c, w, vectors)
 	// Another API shares the database and the original worker but owns no index.
-	other := offlineAPI(t, second, w, &pausedMemory{FakeVectorStore: memory.NewFakeVectorStore(), entered: make(chan struct{}), release: make(chan struct{})})
+	otherVectors, releaseOther := newPausedMemory(ctx, memory.NewFakeVectorStore())
+	defer releaseOther()
+	other := offlineAPI(t, second, w, otherVectors)
 	id := uuid.NewString()
 	submit := func(server *httptest.Server, text string) httpReply {
-		return doRequest(t, server, http.MethodPost, "/ingest", "offline", nil, `{"document_id":"`+id+`","content":"`+text+`"}`)
+		submitCtx, cancelSubmit := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancelSubmit()
+		reply, err := readHTTPReply(submitCtx, server, http.MethodPost, "/ingest", "offline", nil, `{"document_id":"`+id+`","content":"`+text+`"}`)
+		require.NoError(t, err, "submit ingest for the memory deletion fixture")
+		return reply
 	}
 	reply := submit(stale, "The old policy says blue folders.")
 	require.Equal(t, http.StatusAccepted, reply.code, reply.body)
 	durableStatus(t, c, id, "completed")
 
-	deleted := make(chan httpReply, 1)
-	go func() { deleted <- sendDelete(t, stale, "offline", id, "") }()
-	<-vectors.entered
-	require.Empty(t, documentState(t, c, id), "metadata is gone while the local delete is outstanding")
-	receipt := legacyReceiptOf(t.Context(), t, c, id)
+	deleted := make(chan deletionHTTPResult, 1)
+	startDeletionRequest(deleted, "offline DELETE "+id, func() (httpReply, error) {
+		return readDeleteReply(ctx, stale, "offline", id, "")
+	})
+	entryCtx, cancelEntry := context.WithTimeout(ctx, 30*time.Second)
+	err := waitDeletionArrivals(entryCtx, vectors.entered, deleted, 1, "before the final offline DELETE provider call")
+	cancelEntry()
+	require.NoError(t, err)
+	stateCtx, cancelState := context.WithTimeout(t.Context(), 10*time.Second)
+	state, err := readDocumentState(stateCtx, c, id)
+	cancelState()
+	require.NoError(t, err, "read document state during the final offline DELETE provider call")
+	require.Empty(t, state, "metadata is gone while the local delete is outstanding")
+	receipt := boundedLegacyReceiptOf(t, c, id)
 	require.False(t, receipt.finalized)
 	require.False(t, receipt.held, "a clean memory cleanup needs no permanent hold")
 
 	// A concurrent bare caller neither starts a second mutation nor clears the hold.
-	require.Equal(t, http.StatusServiceUnavailable, sendDelete(t, stale, "offline", id, "").code)
-	require.False(t, legacyReceiptOf(t.Context(), t, c, id).finalized)
+	duplicateCtx, cancelDuplicate := context.WithTimeout(t.Context(), 10*time.Second)
+	duplicate, err := readDeleteReply(duplicateCtx, stale, "offline", id, "")
+	cancelDuplicate()
+	require.NoError(t, err, "duplicate DELETE while the memory owner is paused")
+	require.Equal(t, http.StatusServiceUnavailable, duplicate.code, duplicate.body)
+	require.False(t, boundedLegacyReceiptOf(t, c, id).finalized)
 
 	// The guarding session is lost and an operator activates from a second pool.
 	require.Equal(t, 1, terminateActivationHolders(t, second))
-	require.Eventually(t, func() bool {
-		_, err := second.ActivateDeletion(t.Context())
-		return err == nil
-	}, 10*time.Second, 25*time.Millisecond)
+	activationCtx, cancelActivation := context.WithTimeout(t.Context(), 10*time.Second)
+	_, err = second.ActivateDeletion(activationCtx)
+	cancelActivation()
+	require.NoError(t, err, "activate after the memory owner's session is lost")
 
 	require.Equal(t, http.StatusConflict, submit(stale, "The stale policy says red folders.").code, "the stale service")
 	require.Equal(t, http.StatusConflict, submit(other, "The other policy says red folders.").code, "another API")
-	require.False(t, legacyReceiptOf(t.Context(), t, c, id).finalized)
+	require.False(t, boundedLegacyReceiptOf(t, c, id).finalized)
 
-	close(vectors.release)
-	require.Equal(t, http.StatusOK, (<-deleted).code)
-	final := legacyReceiptOf(t.Context(), t, c, id)
+	release()
+	replyCtx, cancelReply := context.WithTimeout(ctx, 10*time.Second)
+	reply, err = waitDeletionReply(replyCtx, deleted, "after releasing the final offline DELETE provider call")
+	cancelReply()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, reply.code, reply.body)
+	final := boundedLegacyReceiptOf(t, c, id)
 	require.True(t, final.finalized, "the owner recorded the end of its last effect on a fresh connection")
 	require.False(t, final.held)
 
@@ -804,7 +901,10 @@ func TestPausedMemoryDeleteHoldsTheIdentityUntilItsOwnerFinishes(t *testing.T) {
 func TestMemoryOwnerCompletesOnlyItsOwnReservation(t *testing.T) {
 	c := durableDatabase(t)
 	index := memory.NewFakeVectorStore()
-	vectors := &pausedMemory{FakeVectorStore: index, entered: make(chan struct{}), release: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	vectors, release := newPausedMemory(ctx, index)
+	defer release()
 	id := uuid.NewString()
 	acceptDeletable(t, c, id, "offline document", false, "")
 	routes := deletionRoutes{vectors: vectors, options: []handler.DeleteOption{
@@ -816,15 +916,31 @@ func TestMemoryOwnerCompletesOnlyItsOwnReservation(t *testing.T) {
 	foreign := deletionServer(t, otherDatabaseClient(t, c), "token", deletionRoutes{vectors: foreignIndex, options: []handler.DeleteOption{
 		handler.WithLegacyReservations(), handler.WithCleanupTargets(cleanup.Targets{InMemory: true, Memory: foreignIndex}),
 	}})
-	deleted := make(chan httpReply, 1)
-	go func() { deleted <- sendDelete(t, owner, "token", id, "") }()
-	<-vectors.entered
+	deleted := make(chan deletionHTTPResult, 1)
+	startDeletionRequest(deleted, "memory owner DELETE "+id, func() (httpReply, error) {
+		return readDeleteReply(ctx, owner, "token", id, "")
+	})
+	entryCtx, cancelEntry := context.WithTimeout(ctx, 30*time.Second)
+	err := waitDeletionArrivals(entryCtx, vectors.entered, deleted, 1, "before the final memory owner DELETE provider call")
+	cancelEntry()
+	require.NoError(t, err)
 
-	require.Equal(t, http.StatusNotFound, sendDelete(t, foreign, "token", id, "").code, "the row is gone, and an empty index elsewhere proves nothing")
-	require.False(t, legacyReceiptOf(t.Context(), t, c, id).finalized)
-	require.Equal(t, domain.AcceptDeletionConflict, admission(t, c, id, "replacement"))
+	foreignCtx, cancelForeign := context.WithTimeout(t.Context(), 10*time.Second)
+	reply, err := readDeleteReply(foreignCtx, foreign, "token", id, "")
+	cancelForeign()
+	require.NoError(t, err, "foreign DELETE while the memory owner is paused")
+	require.Equal(t, http.StatusNotFound, reply.code, "the row is gone, and an empty index elsewhere proves nothing")
+	require.False(t, boundedLegacyReceiptOf(t, c, id).finalized)
+	admissionCtx, cancelAdmission := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelAdmission()
+	require.Equal(t, domain.AcceptDeletionConflict, admissionWithContext(admissionCtx, t, c, id, "replacement"))
+	cancelAdmission()
 
-	close(vectors.release)
-	require.Equal(t, http.StatusOK, (<-deleted).code)
-	require.True(t, legacyReceiptOf(t.Context(), t, c, id).finalized)
+	release()
+	replyCtx, cancelReply := context.WithTimeout(ctx, 10*time.Second)
+	reply, err = waitDeletionReply(replyCtx, deleted, "after releasing the final memory owner DELETE provider call")
+	cancelReply()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, reply.code, reply.body)
+	require.True(t, boundedLegacyReceiptOf(t, c, id).finalized)
 }
