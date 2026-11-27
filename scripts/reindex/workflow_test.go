@@ -523,6 +523,7 @@ func TestInventoryReportsOpenDeletionsWithoutBlockingStaging(t *testing.T) {
 	report, err := h.run(options{Generation: "g2", Profile: profile, TargetStore: "pinecone", TargetIndex: "quarry-g2"})
 	require.NoError(t, err)
 	require.Empty(t, report["blockers"])
+	require.EqualValues(t, 1, report["documents"].(map[string]any)["deleting_or_held"])
 	require.EqualValues(t, 2, report["open_deletions"])
 	wantIDs := []string{deletingDoc, retiredID}
 	slices.Sort(wantIDs)
@@ -531,4 +532,5 @@ func TestInventoryReportsOpenDeletionsWithoutBlockingStaging(t *testing.T) {
 	stageReport, err := h.run(options{Generation: "g2", Profile: profile, TargetStore: "pinecone", TargetIndex: "quarry-g2", Apply: true})
 	require.NoError(t, err)
 	require.Equal(t, true, stageReport["complete"])
+	require.EqualValues(t, 3, stageReport["staged_documents"])
 }
