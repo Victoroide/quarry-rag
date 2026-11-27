@@ -152,7 +152,7 @@ func (r *run) retainRecentOutput(sections []incompleteSection, budget int) int {
 		tail.init(r.store, &section.test.output)
 		if tail.ordinal != 0 {
 			if r.store != nil && r.store.failure != "" {
-				section.needsNewline = !tail.endsLine(r.store)
+				section.needsNewline = !tail.endsLine(r.store, &section.test.output.ref)
 			}
 			queue = append(queue, section)
 		}
@@ -166,7 +166,7 @@ func (r *run) retainRecentOutput(sections []incompleteSection, budget int) int {
 		if section.retained == 0 && section.needsNewline {
 			available--
 		}
-		start, ok := tail.start(r.store, available)
+		start, ok := tail.start(r.store, &section.test.output.ref, available)
 		switch {
 		case !ok:
 			tail.dropDisk()

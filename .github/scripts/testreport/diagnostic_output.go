@@ -113,7 +113,7 @@ func (s *diagnosticStore) replayCommitted(w *diagnosticWriter, ref *diagnosticRe
 			cursor.broken = true
 			return
 		}
-		n, err := s.copyPayload(w, offset, 0, int(header.length))
+		n, err := s.copyPayload(w, ref, offset, 0, int(header.length))
 		if n > 0 {
 			cursor.bytes += uint64(n)
 		}

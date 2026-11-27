@@ -83,16 +83,16 @@ func (t *recentOutput) older(s *diagnosticStore, out *diagnosticOutput) {
 	t.ordinal, t.length = t.diskNext, int(h.length)
 }
 
-func (t *recentOutput) endsLine(s *diagnosticStore) bool {
+func (t *recentOutput) endsLine(s *diagnosticStore, ref *diagnosticRef) bool {
 	if t.ordinal > spoolLimit {
 		return s.slot(t.ringNext).data[t.length-1] == '\n'
 	}
 	var suffix [1]byte
-	err := s.readAt(suffix[:], t.diskNext+spoolHeaderSize+uint64(t.diskHeader.length)-1)
+	err := s.readAt(ref, suffix[:], t.diskNext+spoolHeaderSize+uint64(t.diskHeader.length)-1)
 	return err == nil && suffix[0] == '\n'
 }
 
-func (t *recentOutput) start(s *diagnosticStore, available int) (int, bool) {
+func (t *recentOutput) start(s *diagnosticStore, ref *diagnosticRef, available int) (int, bool) {
 	start := max(0, t.length-available)
 	if start == 0 || start == t.length {
 		return start, true
@@ -108,7 +108,7 @@ func (t *recentOutput) start(s *diagnosticStore, available int) (int, bool) {
 	}
 	var prefix [utf8.UTFMax]byte
 	data := prefix[:min(len(prefix), t.length-start)]
-	if s.readAt(data, t.diskNext+spoolHeaderSize+uint64(start)) != nil {
+	if s.readAt(ref, data, t.diskNext+spoolHeaderSize+uint64(start)) != nil {
 		return 0, false
 	}
 	return start + runeBoundary(data, 0), true
@@ -146,7 +146,7 @@ func (t *recentOutput) copyTo(w *bytes.Buffer, s *diagnosticStore, out *diagnost
 			break
 		}
 		remaining -= length
-		if _, err := s.copyPayload(w, offset, skip, int(header.length)); err != nil {
+		if _, err := s.copyPayload(w, &out.ref, offset, skip, int(header.length)); err != nil {
 			break
 		}
 		if i+1 < t.diskCount {

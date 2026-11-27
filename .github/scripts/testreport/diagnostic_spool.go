@@ -137,13 +137,13 @@ func (s *diagnosticStore) appendSpool(ref *diagnosticRef, output string) {
 	binary.LittleEndian.PutUint64(header[0:8], ref.last)
 	binary.LittleEndian.PutUint32(header[16:20], uint32(length))
 	binary.LittleEndian.PutUint32(header[20:24], ref.id)
-	if !s.writeAt(header[:], s.end) {
+	if !s.writeAt(ref, header[:], s.end) {
 		return
 	}
 	offset := s.end + spoolHeaderSize
 	for output != "" {
 		n := copy(s.buffer[:], output)
-		if !s.writeAt(s.buffer[:n], offset) {
+		if !s.writeAt(ref, s.buffer[:n], offset) {
 			return
 		}
 		offset += uint64(len(s.buffer[:n]))
@@ -151,7 +151,7 @@ func (s *diagnosticStore) appendSpool(ref *diagnosticRef, output string) {
 	}
 	if ref.last != 0 {
 		binary.LittleEndian.PutUint64(header[8:16], s.end)
-		if !s.writeAt(header[8:16], ref.last+8) {
+		if !s.writeAt(ref, header[8:16], ref.last+8) {
 			s.uncommittedTail = ref.last
 			return
 		}
@@ -164,7 +164,7 @@ func (s *diagnosticStore) appendSpool(ref *diagnosticRef, output string) {
 	s.end = offset
 }
 
-func (s *diagnosticStore) writeAt(data []byte, offset uint64) bool {
+func (s *diagnosticStore) writeAt(_ *diagnosticRef, data []byte, offset uint64) bool {
 	if offset > math.MaxInt64 {
 		s.fail("write invalid offset")
 		return false
@@ -176,7 +176,7 @@ func (s *diagnosticStore) writeAt(data []byte, offset uint64) bool {
 	return true
 }
 
-func (s *diagnosticStore) readAt(data []byte, offset uint64) error {
+func (s *diagnosticStore) readAt(_ *diagnosticRef, data []byte, offset uint64) error {
 	if offset > math.MaxInt64 {
 		s.fail("read invalid offset")
 		return errSpoolRecord
@@ -194,7 +194,7 @@ func (s *diagnosticStore) header(ref *diagnosticRef, offset, index uint64) (spoo
 		s.fail("read invalid record")
 		return spoolHeader{}, errSpoolRecord
 	}
-	if err := s.readAt(raw[:], offset); err != nil {
+	if err := s.readAt(ref, raw[:], offset); err != nil {
 		return spoolHeader{}, err
 	}
 	prev := binary.LittleEndian.Uint64(raw[:8])
@@ -225,11 +225,11 @@ func (s *diagnosticStore) reciprocal(valid bool) error {
 	return nil
 }
 
-func (s *diagnosticStore) copyPayload(w io.Writer, offset uint64, start, limit int) (int, error) {
+func (s *diagnosticStore) copyPayload(w io.Writer, ref *diagnosticRef, offset uint64, start, limit int) (int, error) {
 	written := 0
 	for start >= 0 && start < limit {
 		data := s.buffer[:min(len(s.buffer), limit-start)]
-		if err := s.readAt(data, offset+spoolHeaderSize+uint64(start)); err != nil {
+		if err := s.readAt(ref, data, offset+spoolHeaderSize+uint64(start)); err != nil {
 			return written, err
 		}
 		if start+len(data) < limit {
