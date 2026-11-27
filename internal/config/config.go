@@ -222,11 +222,16 @@ type Config struct {
 	CitationSupportMaxPairs        int
 }
 
+// ConfiguredAuthzMode returns the effective authorization mode before validation.
+func ConfiguredAuthzMode() string {
+	return envOrDefault("AUTHZ_MODE", AuthzModeService)
+}
+
 // Load reads configuration from environment variables, applies defaults,
 // and validates required fields.
 func Load() (*Config, error) {
 	cfg := &Config{
-		AuthzMode:                 envOrDefault("AUTHZ_MODE", AuthzModeService),
+		AuthzMode:                 ConfiguredAuthzMode(),
 		MetricsAddr:               os.Getenv("METRICS_ADDR"),
 		ServerPort:                envOrDefault("SERVER_PORT", "8081"),
 		BedrockEmbedModel:         envOrDefault("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0"),
