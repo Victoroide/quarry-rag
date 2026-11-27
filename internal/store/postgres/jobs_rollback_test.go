@@ -139,27 +139,6 @@ func requireIngestRollback(parent context.Context, t *testing.T, trace *ingestTx
 	return rollback
 }
 
-func requireRecoveredIngestPool(ctx context.Context, t *testing.T, c *Client, observer *pgx.Conn, pid uint32, replaced bool) {
-	t.Helper()
-	require.Zero(t, c.Pool.Stat().AcquiredConns())
-	require.NoError(t, c.Pool.Ping(ctx))
-	var recoveredPID uint32
-	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&recoveredPID))
-	require.NotEqual(t, observer.PgConn().PID(), recoveredPID)
-	if replaced {
-		require.NotEqual(t, pid, recoveredPID)
-		// pgx discards the connection on a rollback error. Allow PostgreSQL
-		// to finish handling the disconnect before probing the released locks.
-		require.Eventually(t, func() bool {
-			var disconnected bool
-			err := c.Pool.QueryRow(ctx, `SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE pid=$1)`, pid).Scan(&disconnected)
-			return err == nil && disconnected
-		}, 3*time.Second, 10*time.Millisecond, "PostgreSQL must release the discarded session")
-	} else {
-		require.Equal(t, pid, recoveredPID)
-	}
-}
-
 func requireIngestRowLocks(ctx context.Context, t *testing.T, observer *pgx.Conn, id domain.DocumentID, held bool) {
 	t.Helper()
 	for _, query := range []string{
