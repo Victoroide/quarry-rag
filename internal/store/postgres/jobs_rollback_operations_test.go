@@ -247,6 +247,8 @@ func TestIngestClaimRollbackDeadlineAfterWriterGate(t *testing.T) {
 			require.Nil(t, next)
 		})
 	}
+	t.Run("empty and frozen queues", testIngestClaimReturnsWithoutWork)
+	t.Run("pre-layout schema", testIngestClaimRollbackBeforeLayoutMigration)
 }
 
 func TestIngestOCRRollbackDeadlineAfterLeaseLocks(t *testing.T) {
@@ -271,4 +273,7 @@ func TestIngestOCRRollbackDeadlineAfterLeaseLocks(t *testing.T) {
 	require.Equal(t, text, content)
 	require.Equal(t, strings.Repeat("界", 120), preview)
 	require.Equal(t, "ocr", source)
+	t.Run("lease and text outcomes", func(t *testing.T) {
+		testIngestOCROutcomes(ctx, t, c, observer, req, job)
+	})
 }
