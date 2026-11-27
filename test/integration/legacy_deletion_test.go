@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -27,13 +28,17 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/worker"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-const deletionLockOperationTimeout = 10 * time.Second
+const (
+	deletionLockOperationTimeout = 10 * time.Second
+	deletionLockCleanupTimeout   = 10 * time.Second
+)
 
 // legacyRoutes composes the production handlers with the reservation guard that
 // the server entry point enables.
@@ -120,15 +125,88 @@ func endDeletionActivationHolders(ctx context.Context, pool *pgxpool.Pool) (int,
 func holdSiblingActivationLock(t *testing.T, c *pgstore.Client) pgx.Tx {
 	t.Helper()
 	address := pgtest.Sibling(t, c.Pool.Config().ConnString())
-	conn, err := pgx.Connect(t.Context(), address)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, conn.Close(context.Background())) })
-	tx, err := conn.Begin(t.Context())
-	require.NoError(t, err)
-	_, err = tx.Exec(t.Context(), `SELECT pg_advisory_xact_lock_shared($1)`, pgstore.DeletionActivationLockID)
+	conn := openDeletionLockConn(t, address, "sibling")
+	tx, err := beginSiblingActivationLock(t.Context(), conn)
 	require.NoError(t, err)
 	return tx
 }
+
+func beginSiblingActivationLock(ctx context.Context, conn *pgx.Conn) (pgx.Tx, error) {
+	beginCtx, cancelBegin := context.WithTimeout(ctx, deletionLockOperationTimeout)
+	tx, err := conn.Begin(beginCtx)
+	cancelBegin()
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction in the sibling fixture: %w", err)
+	}
+
+	lockCtx, cancelLock := context.WithTimeout(ctx, deletionLockOperationTimeout)
+	_, err = tx.Exec(lockCtx, `SELECT pg_advisory_xact_lock_shared($1)`, pgstore.DeletionActivationLockID)
+	cancelLock()
+	if err == nil {
+		return tx, nil
+	}
+
+	lockErr := fmt.Errorf("acquire shared activation lock in the sibling fixture: %w", err)
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), deletionLockCleanupTimeout)
+	defer cancelCleanup()
+	if err := tx.Rollback(cleanupCtx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		return nil, errors.Join(lockErr, fmt.Errorf("roll back transaction in the sibling fixture: %w", err))
+	}
+	return nil, lockErr
+}
+
+func openDeletionLockConn(t *testing.T, address, label string) *pgx.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), deletionLockOperationTimeout)
+	conn, err := pgx.Connect(ctx, address)
+	cancel()
+	if err != nil {
+		t.Fatalf("dial %s fixture connection: %v", label, deletionLockConnectError{cause: err})
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), deletionLockCleanupTimeout)
+		defer cancel()
+		if err := conn.Close(cleanupCtx); err != nil {
+			t.Errorf("close %s fixture connection: %v", label, err)
+		}
+	})
+	return conn
+}
+
+func openDeletionLockClient(t *testing.T, address string, opts ...pgstore.Option) *pgstore.Client {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), deletionLockOperationTimeout)
+	client, err := pgstore.NewClient(ctx, address, opts...)
+	cancel()
+	if err != nil {
+		t.Fatalf("open local fixture client: %v", deletionLockConnectError{cause: err})
+	}
+	t.Cleanup(func() { require.NoError(t, client.Close(context.Background())) })
+	return client
+}
+
+// pgx connection errors can contain the DSN or user. Retain the cause for error
+// inspection and keep the diagnostics independent of the connection settings.
+type deletionLockConnectError struct{ cause error }
+
+func (e deletionLockConnectError) Error() string {
+	var configErr *pgconn.ParseConfigError
+	var pgErr *pgconn.PgError
+	switch {
+	case errors.Is(e.cause, context.DeadlineExceeded):
+		return context.DeadlineExceeded.Error()
+	case errors.Is(e.cause, context.Canceled):
+		return context.Canceled.Error()
+	case errors.As(e.cause, &configErr):
+		return "invalid connection configuration"
+	case errors.As(e.cause, &pgErr):
+		return "server rejected the connection (SQLSTATE " + pgErr.SQLState() + ")"
+	default:
+		return "connection failed"
+	}
+}
+
+func (e deletionLockConnectError) Unwrap() error { return e.cause }
 
 func TestBareDeleteBeforeActivationReservesFirstAndRepeatReportsAbsence(t *testing.T) {
 	c := durableDatabase(t)
@@ -441,7 +519,10 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	}
 	require.Equal(t, 1, terminateActivationHolders(t, activator), "only the guarding session ends")
 	var alive bool
-	require.NoError(t, sibling.QueryRow(t.Context(), `SELECT TRUE`).Scan(&alive), "the sibling session still holds its lock")
+	siblingCtx, cancelSibling := context.WithTimeout(t.Context(), deletionLockOperationTimeout)
+	siblingErr := sibling.QueryRow(siblingCtx, `SELECT TRUE`).Scan(&alive)
+	cancelSibling()
+	require.NoError(t, siblingErr, "query the sibling fixture session holding the activation lock")
 	require.True(t, alive)
 	select {
 	case err := <-activated:
@@ -526,40 +607,38 @@ func countDeletionAdvisoryLocks(ctx context.Context, pool *pgxpool.Pool) (int, e
 }
 
 func TestLegacyDeletionProbesIgnoreSiblingActivationLock(t *testing.T) {
-	ctx := t.Context()
 	address := startPostgres(t)
-	c, err := pgstore.NewClient(ctx, address)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
+	c := openDeletionLockClient(t, address)
 
-	sibling, err := pgx.Connect(ctx, pgtest.Sibling(t, address))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, sibling.Close(context.Background())) })
-	_, err = sibling.Exec(ctx, `SELECT pg_advisory_lock_shared($1)`, pgstore.DeletionActivationLockID)
-	require.NoError(t, err)
+	sibling := openDeletionLockConn(t, pgtest.Sibling(t, address), "sibling")
+	siblingLockCtx, cancelSiblingLock := context.WithTimeout(t.Context(), deletionLockOperationTimeout)
+	_, err := sibling.Exec(siblingLockCtx, `SELECT pg_advisory_lock_shared($1)`, pgstore.DeletionActivationLockID)
+	cancelSiblingLock()
+	require.NoError(t, err, "acquire shared activation lock in the sibling fixture")
 
 	require.Zero(t, advisoryLocks(t, c))
 	require.Zero(t, terminateActivationHolders(t, c))
 
-	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	local, err := pgx.Connect(lockCtx, address)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		require.NoError(t, local.Close(cleanupCtx))
-	})
+	local := openDeletionLockConn(t, address, "local")
+	lockCtx, cancelLock := context.WithTimeout(t.Context(), deletionLockOperationTimeout)
 	_, err = local.Exec(lockCtx, `SELECT pg_advisory_lock_shared($1)`, pgstore.DeletionActivationLockID)
-	require.NoError(t, err)
+	cancelLock()
+	require.NoError(t, err, "acquire shared activation lock in the local fixture")
 	require.Equal(t, 1, advisoryLocks(t, c), "only the fixture session's activation lock is counted")
+
 	var localUnlocked bool
-	require.NoError(t, local.QueryRow(lockCtx, `SELECT pg_advisory_unlock_shared($1)`, pgstore.DeletionActivationLockID).Scan(&localUnlocked))
+	unlockCtx, cancelUnlock := context.WithTimeout(t.Context(), deletionLockOperationTimeout)
+	err = local.QueryRow(unlockCtx, `SELECT pg_advisory_unlock_shared($1)`, pgstore.DeletionActivationLockID).Scan(&localUnlocked)
+	cancelUnlock()
+	require.NoError(t, err, "unlock shared activation lock in the local fixture")
 	require.True(t, localUnlocked, "the fixture session held the activation lock")
 	require.Zero(t, advisoryLocks(t, c), "only the sibling session still holds the activation lock")
 
 	var unlocked bool
-	require.NoError(t, sibling.QueryRow(ctx, `SELECT pg_advisory_unlock_shared($1)`, pgstore.DeletionActivationLockID).Scan(&unlocked))
+	siblingUnlockCtx, cancelSiblingUnlock := context.WithTimeout(t.Context(), deletionLockOperationTimeout)
+	err = sibling.QueryRow(siblingUnlockCtx, `SELECT pg_advisory_unlock_shared($1)`, pgstore.DeletionActivationLockID).Scan(&unlocked)
+	cancelSiblingUnlock()
+	require.NoError(t, err, "unlock shared activation lock in the sibling fixture")
 	require.True(t, unlocked, "the sibling session still holds the activation lock")
 }
 
