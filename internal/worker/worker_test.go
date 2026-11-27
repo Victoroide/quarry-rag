@@ -597,6 +597,19 @@ func TestCorpusModeMismatchReleasesOwnedLease(t *testing.T) {
 			require.NotNil(t, claimed)
 			require.Equal(t, []profileClaimCall{{method: "profiles", layout: tc.hosted}}, store.calls)
 			job := *claimed
+			var wantDeletes []revisionVectorDelete
+			if tc.hosted {
+				_, err := uuid.Parse(string(job.Document.ID))
+				require.NoError(t, err, "hosted cleanup must exercise a valid claimed document ID")
+				deletion := revisionVectorDelete{
+					documentID: string(job.Document.ID),
+					revisionID: revisionIDForAttempt(job, opts.Owner),
+				}
+				wantDeletes = append(wantDeletes, deletion)
+				if tc.deleted {
+					wantDeletes = append(wantDeletes, deletion)
+				}
+			}
 			w.process(t.Context(), job)
 			require.Equal(t, job.LeaseToken, store.completed.LeaseToken)
 			require.Equal(t, store.completed, store.released, "release must retain the exact attempt identity")
@@ -605,12 +618,7 @@ func TestCorpusModeMismatchReleasesOwnedLease(t *testing.T) {
 			}
 			require.Empty(t, base.events, "fenced publication must neither retry nor fail the job")
 			if tc.hosted {
-				deletion := revisionVectorDelete{documentID: string(job.Document.ID), revisionID: revisionIDForAttempt(job, "test")}
-				want := []revisionVectorDelete{deletion}
-				if tc.deleted {
-					want = append(want, deletion)
-				}
-				require.Equal(t, want, recorder.revDeletes)
+				require.Equal(t, wantDeletes, recorder.revDeletes, "cleanup must target the claimed document and revision")
 				require.Zero(t, recorder.docDeletes)
 			}
 		})
