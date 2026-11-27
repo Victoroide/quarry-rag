@@ -1,0 +1,26 @@
+{"Action":"start","Package":"example.com/benchmark-diagnostics"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkNested"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkNested","Output":"=== RUN   BenchmarkNested\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkNested","Output":"BenchmarkNested\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkNested/child"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkNested/child","Output":"=== RUN   BenchmarkNested/child\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkNested/child","Output":"BenchmarkNested/child\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkNested/child","Output":"BenchmarkNested/child           \t       1\t       209.0 ns/op\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"BenchmarkNested/child-2         \t       1\t       125.0 ns/op\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkPlain"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkPlain","Output":"=== RUN   BenchmarkPlain\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkPlain","Output":"BenchmarkPlain\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkPlain","Output":"BenchmarkPlain                  \t       1\t       125.0 ns/op\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"BenchmarkPlain-2                \t       1\t       125.0 ns/op\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkLast"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkLast","Output":"=== RUN   BenchmarkLast\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkLast","Output":"BenchmarkLast\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkLast/child"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkLast/child","Output":"=== RUN   BenchmarkLast/child\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkLast/child","Output":"BenchmarkLast/child\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkLast/child","Output":"BenchmarkLast/child             \t       1\t       125.0 ns/op\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"BenchmarkLast/child-2           \t       1\t        41.00 ns/op\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"PASS\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"exit status 3\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"FAIL\texample.com/benchmark-diagnostics\t0.225s\n","OutputType":"frame"}
+{"Action":"fail","Package":"example.com/benchmark-diagnostics","Elapsed":0.226}

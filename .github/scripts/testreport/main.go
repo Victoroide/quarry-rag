@@ -1,11 +1,10 @@
 // Command testreport reads the JSON events of a `go test` invocation from
 // standard input and reports on them. It writes a Markdown summary to
-// standard output, and to standard error a line for every package as it ends
-// with the output of whatever failed. The packages named as arguments must
-// all have a result.
+// standard output and package progress and failure diagnostics to standard
+// error. The packages observed or named as arguments must all have a result.
 //
 // The command exits with status 1 when a package failed or did not build,
-// when a named package has no result, or when a result came from the test
+// when a package has no result, or when a result came from the test
 // cache. The status of `go test` itself is not hidden: run the pipeline with
 // pipefail so that either failure fails the step.
 package main
@@ -33,9 +32,25 @@ func execute(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	o.expectedList = flags.Args()
 
 	r := newRun()
+	printedBuilds := map[string]bool{}
 	err := r.decode(in, func(p *packageResult) {
 		progress(stderr, r, p)
+		if p.failedBuild != "" && p.outcome == "fail" && !p.noTests {
+			printedBuilds[p.failedBuild] = true
+		}
 	})
+	for _, name := range r.order {
+		p := r.packages[name]
+		if p.outcome != "" {
+			continue
+		}
+		if p.failedBuild == "" {
+			printf(stderr, "INCOMPLETE\t%s\n%s", p.name, r.failureDetails(p))
+		} else if !printedBuilds[p.failedBuild] {
+			progress(stderr, r, p)
+			printedBuilds[p.failedBuild] = true
+		}
+	}
 	if err != nil {
 		printf(stderr, "%v\n", err)
 		return 1

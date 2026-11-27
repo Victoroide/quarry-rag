@@ -1,0 +1,37 @@
+{"Action":"start","Package":"example.test/jsonmod/timeout"}
+{"Action":"run","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"=== RUN   TestDeliberateTimeout\n","OutputType":"frame"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"panic: test timed out after 50ms\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\trunning tests:\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\t\tTestDeliberateTimeout (0s)\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"goroutine 20 [running]:\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"testing.(*M).startAlarm.func1()\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttesting/testing.go:2961 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"created by time.goFunc\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttime/sleep.go:182 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"goroutine 1 [chan receive]:\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"testing.(*T).Run(0x0, {0x0?, 0x0?}, 0x0)\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttesting/testing.go:2268 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"testing.runTests.func1(0x0)\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttesting/testing.go:2744 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"testing.tRunner(0x0, 0x0)\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttesting/testing.go:2195 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"testing.runTests({0x0, 0x0}, {0x0, 0x0}, 0x0, {0x0, 0x0, 0x0}, {0x0?, 0x0?, ...})\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttesting/testing.go:2742 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"testing.(*M).Run(0x0)\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttesting/testing.go:2602 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"main.main()\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\t_testmain.go:46 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"goroutine 35 [chan receive]:\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"example.test/jsonmod/timeout.TestDeliberateTimeout(0x0?)\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttimeoutcase/timeout_test.go:6 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"testing.tRunner(0x0, 0x0)\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttesting/testing.go:2195 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"created by testing.(*T).Run in goroutine 1\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"\ttesting/testing.go:2260 +0x0\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Test":"TestDeliberateTimeout","Output":"exit status 2\n"}
+{"Action":"output","Package":"example.test/jsonmod/timeout","Output":"FAIL\texample.test/jsonmod/timeout\t0.258s\n","OutputType":"frame"}
+{"Action":"fail","Package":"example.test/jsonmod/timeout","Elapsed":0.258}

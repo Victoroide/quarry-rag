@@ -1,0 +1,19 @@
+{"Action":"start","Package":"example.com/benchmark-diagnostics"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkError"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkError","Output":"=== RUN   BenchmarkError\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkError","Output":"BenchmarkError\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkError","Output":"    benchmark_test.go:25: explicit benchmark error\n","OutputType":"error"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkError","Output":"--- FAIL: BenchmarkError\n","OutputType":"frame"}
+{"Action":"fail","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkError"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkAfterError"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkAfterError","Output":"=== RUN   BenchmarkAfterError\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkAfterError","Output":"BenchmarkAfterError\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkAfterError/child"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkAfterError/child","Output":"=== RUN   BenchmarkAfterError/child\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkAfterError/child","Output":"BenchmarkAfterError/child\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkAfterError/child","Output":"BenchmarkAfterError/child           \t       1\t       209.0 ns/op\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"BenchmarkAfterError/child-2         \t       1\t       167.0 ns/op\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"FAIL\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"exit status 3\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"FAIL\texample.com/benchmark-diagnostics\t0.181s\n","OutputType":"frame"}
+{"Action":"fail","Package":"example.com/benchmark-diagnostics","Elapsed":0.181}

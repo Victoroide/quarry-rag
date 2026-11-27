@@ -1,0 +1,23 @@
+{"Action":"start","Package":"example.com/benchmark-diagnostics"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkInterrupted"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkInterrupted","Output":"=== RUN   BenchmarkInterrupted\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkInterrupted","Output":"BenchmarkInterrupted\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkInterrupted/child"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkInterrupted/child","Output":"=== RUN   BenchmarkInterrupted/child\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkInterrupted/child","Output":"BenchmarkInterrupted/child\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkInterrupted/child","Output":"BenchmarkInterrupted/child           \t       1\t       292.0 ns/op\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"BenchmarkInterrupted/child-2         \t       1\t       167.0 ns/op\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"panic: interrupt parent\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"goroutine 33 [running]:\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"example.com/benchmark-diagnostics_test.BenchmarkInterrupted(0x0?)\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"\tbenchmark_test.go:22 +0x0\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"testing.(*B).runN(0x0, 0x0)\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"\tbenchmark.go:219 +0x0\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"testing.(*B).run1.func1()\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"\tbenchmark.go:245 +0x0\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"created by testing.(*B).run1 in goroutine 1\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"\tbenchmark.go:238 +0x0\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"exit status 2\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"FAIL\texample.com/benchmark-diagnostics\t0.154s\n","OutputType":"frame"}
+{"Action":"fail","Package":"example.com/benchmark-diagnostics","Elapsed":0.154}

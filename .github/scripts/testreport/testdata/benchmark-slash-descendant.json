@@ -1,0 +1,32 @@
+{"Action":"start","Package":"example.com/benchmark-diagnostics"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"goos: darwin\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"goarch: arm64\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"pkg: example.com/benchmark-diagnostics\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"cpu: Apple M5\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree","Output":"=== RUN   BenchmarkTree\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree","Output":"BenchmarkTree\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group","Output":"=== RUN   BenchmarkTree/group\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group","Output":"BenchmarkTree/group\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/leaf"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/leaf","Output":"=== RUN   BenchmarkTree/group/leaf\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/leaf","Output":"BenchmarkTree/group/leaf\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/leaf","Output":"BenchmarkTree/group/leaf-4    \t       1\t       791.0 ns/op\n"}
+{"Action":"run","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"=== RUN   BenchmarkTree/group/diverged\n","OutputType":"frame"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"BenchmarkTree/group/diverged\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"panic: descendant interrupted\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"goroutine 35 [running]:\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"example.com/benchmark-diagnostics_test.BenchmarkTree.func1.2(0x0?)\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"\tbenchmark_test.go:8 +0x0\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"testing.(*B).runN(0x0, 0x0)\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"\tbenchmark.go:219 +0x0\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"testing.(*B).run1.func1()\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"\tbenchmark.go:245 +0x0\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"created by testing.(*B).run1 in goroutine 5\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"\tbenchmark.go:238 +0x0\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Test":"BenchmarkTree/group/diverged","Output":"exit status 2\n"}
+{"Action":"output","Package":"example.com/benchmark-diagnostics","Output":"FAIL\texample.com/benchmark-diagnostics\t0.233s\n","OutputType":"frame"}
+{"Action":"fail","Package":"example.com/benchmark-diagnostics","Elapsed":0.233}
