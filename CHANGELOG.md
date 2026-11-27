@@ -29,6 +29,7 @@ Notable changes are grouped by release.
 ### Security
 
 - Restrict the PostgreSQL serving audit writer to runtime actions and valid outcomes, reserving cutover and grant import events for operator transactions.
+- Scoped deletion now checks PostgreSQL transaction status, server identity, and the exact receipt after an uncertain intent `COMMIT`. A confirmed commit resumes detached cleanup. A confirmed rollback or precommit failure preserves the existing cancellation and expiry responses. Unconfirmed commits and postcommit cleanup failures return a retryable `500` and record `commit_unconfirmed` and `delete_failed`, respectively.
 
 ### Changed
 
