@@ -11,8 +11,10 @@ import (
 
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -691,6 +693,301 @@ func TestActivationBlockedByRunningLease(t *testing.T) {
 	require.NoError(t, c.ActivateGeneration(t.Context(), "g2", "digest", 0))
 }
 
+const insertCutoverManifest = `INSERT INTO hosted_vector_manifests
+	(revision_id, document_id, incarnation, attempt, collection, id_prefix, vector_ids, chunk_ids, state)
+	VALUES ($1, $2, $3, 1, $4, 'cutover', ARRAY['vector'], '{}', $5)`
+
+const updateCutoverGeneration = `UPDATE vector_state SET active_generation=$1`
+
+func requireCutoverRefusal(t *testing.T, err error) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "55000", pgErr.Code)
+	require.Equal(t, "hosted_manifest_cutover_guard", pgErr.ConstraintName)
+}
+
+func TestHostedManifestCutoverGuard(t *testing.T) {
+	c := jobsDatabase(t)
+	ctx := t.Context()
+	require.NoError(t, c.PinVectorGeneration(ctx, LegacyGeneration, "pinecone", "source", "source-host", generationProfile()))
+	abandoned := jobsAccept(t, c, "abandoned hosted write")
+	job, err := c.ClaimJob(ctx, "writer", time.Minute, 5)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	grantExec(t, c, `UPDATE ingest_jobs SET lease_until=NOW()-interval '1 second' WHERE document_id=$1`, abandoned)
+	failed := jobsAccept(t, c, "failed hosted write")
+	grantExec(t, c, `UPDATE documents SET status='failed' WHERE id=$1`, failed)
+	tagged, taggedIncarnation := uuid.NewString(), uuid.NewString()
+	grantExec(t, c, `INSERT INTO documents(id, incarnation, content, scoped_vectors) VALUES($1,$2,'tagged write',TRUE)`, tagged, taggedIncarnation)
+	verifiedGeneration(t, c, "g2", "digest")
+
+	for _, tc := range []struct {
+		name, manifest, cleanup, scope string
+		doc, incarnation               string
+		lease                          int
+		want                           HostedManifestCutoverCounts
+	}{
+		{name: "untagged expired job while frozen", manifest: "writing", doc: string(abandoned), incarnation: job.Incarnation, want: HostedManifestCutoverCounts{Writing: 1}},
+		{name: "tagged absent job", manifest: "writing", doc: tagged, incarnation: taggedIncarnation, scope: "classified", want: HostedManifestCutoverCounts{Writing: 1}},
+		{name: "active", manifest: "active", want: HostedManifestCutoverCounts{Active: 1}},
+		{name: "failed document without tombstone", manifest: "retired", doc: string(failed), want: HostedManifestCutoverCounts{Retired: 1}},
+		{name: "pending", manifest: "retired", cleanup: "pending", want: HostedManifestCutoverCounts{Retired: 1, Cleanups: 1}},
+		{name: "future verifying live lease", manifest: "retired", cleanup: "verifying", lease: 60, want: HostedManifestCutoverCounts{Retired: 1, Cleanups: 1}},
+		{name: "unresolved expired lease", manifest: "retired", cleanup: "unresolved", lease: -60, want: HostedManifestCutoverCounts{Retired: 1, Cleanups: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			subCtx := t.Context()
+			rev, doc, incarnation := uuid.NewString(), tc.doc, tc.incarnation
+			if doc == "" {
+				doc = uuid.NewString()
+			}
+			if incarnation == "" {
+				incarnation = doc
+			}
+			grantExec(t, c, insertCutoverManifest, rev, doc, incarnation, tc.scope, tc.manifest)
+			defer func() {
+				grantExec(t, c, `DELETE FROM hosted_vector_cleanups WHERE revision_id=$1`, rev)
+				grantExec(t, c, `DELETE FROM hosted_vector_manifests WHERE revision_id=$1`, rev)
+			}()
+			if tc.cleanup != "" {
+				grantExec(t, c, `INSERT INTO hosted_vector_cleanups
+					(revision_id, document_id, incarnation, id_prefix, vector_ids, state,
+					 next_attempt_at, lease_until, lease_owner, lease_token)
+					VALUES ($1, $2, $3, 'cutover', ARRAY['vector'], $4, NOW()+interval '1 hour',
+					NOW()+make_interval(secs=>NULLIF($5::int,0)), CASE WHEN $5 <> 0 THEN 'sweeper' END,
+					CASE WHEN $5 <> 0 THEN gen_random_uuid() END)`, rev, doc, incarnation, tc.cleanup, tc.lease)
+			}
+			got, countErr := c.HostedManifestCutoverCounts(subCtx)
+			require.NoError(t, countErr)
+			require.Equal(t, tc.want, got)
+			requireCutoverRefusal(t, c.ActivateGeneration(subCtx, "g2", "digest", 0))
+			state, stateErr := c.VectorState(subCtx)
+			require.NoError(t, stateErr)
+			require.Equal(t, LegacyGeneration, state.Active)
+			require.True(t, state.Frozen)
+			target, generationErr := c.Generation(subCtx, "g2")
+			require.NoError(t, generationErr)
+			require.Equal(t, StateVerified, target.State)
+		})
+	}
+	got, err := c.HostedManifestCutoverCounts(ctx)
+	require.NoError(t, err)
+	require.Empty(t, got)
+	require.NoError(t, c.ActivateGeneration(ctx, "g2", "digest", 0))
+}
+
+func TestHostedManifestCutoverSerializesIntent(t *testing.T) {
+	for _, tc := range []struct {
+		name                                 string
+		switchFirst, cancel, legacy, unbound bool
+		legacyFallback                       bool
+	}{
+		{name: "frozen insert before switch"},
+		{name: "unbound source insert before switch", unbound: true},
+		{name: "cancel switch", cancel: true},
+		{name: "switch before insert with newly registered target", switchFirst: true},
+		{name: "cancel insert", switchFirst: true, cancel: true},
+		{name: "registered legacy rollback before insert", switchFirst: true, legacy: true},
+		{name: "insert before legacy rollback", legacy: true},
+		{name: "insert before rollback to legacy binding", legacy: true, legacyFallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := jobsDatabase(t)
+			ctx, stop := context.WithTimeout(t.Context(), 15*time.Second)
+			defer stop()
+			destination, source := "g2", LegacyGeneration
+			if tc.legacy {
+				destination, source = LegacyGeneration, "hosted"
+				if tc.legacyFallback {
+					grantExec(t, c, `UPDATE vector_state SET legacy_store='postgres', legacy_target='chunk_vectors'`)
+				} else {
+					_, err := c.RegisterGeneration(ctx, stagingGeneration(destination))
+					require.NoError(t, err)
+				}
+				g := Generation{Name: source, Store: "pinecone", Target: "source", Host: "source-host", Profile: generationProfile(), Origin: OriginRecorded}
+				_, err := c.RegisterGeneration(ctx, g)
+				require.NoError(t, err)
+				grantExec(t, c, updateCutoverGeneration, source)
+			} else {
+				if !tc.unbound {
+					require.NoError(t, c.PinVectorGeneration(ctx, source, "pinecone", "source", "source-host", generationProfile()))
+				}
+				if !tc.switchFirst {
+					_, err := c.RegisterGeneration(ctx, stagingGeneration(destination))
+					require.NoError(t, err)
+				}
+			}
+			require.NoError(t, c.FreezeWriters(ctx, destination))
+			holder, err := c.Pool.Begin(ctx)
+			require.NoError(t, err)
+			defer func() { _ = holder.Rollback(context.WithoutCancel(ctx)) }()
+			waiter, err := c.Pool.Acquire(ctx)
+			require.NoError(t, err)
+			defer waiter.Release()
+			open, err := waiter.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			require.NoError(t, err)
+			defer func() { _ = open.Rollback(context.WithoutCancel(ctx)) }()
+			// Establish an earlier snapshot in the already-open transaction.
+			var prior string
+			require.NoError(t, open.QueryRow(ctx, `SELECT active_generation FROM vector_state`).Scan(&prior))
+			require.Equal(t, source, prior)
+			type executor interface {
+				Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+			}
+			insert := func(ctx context.Context, conn executor) error {
+				doc := uuid.NewString()
+				_, insertErr := conn.Exec(ctx, insertCutoverManifest, uuid.NewString(), doc, doc, "", "writing")
+				return insertErr
+			}
+			switchStore := func(ctx context.Context, conn executor) error {
+				_, switchErr := conn.Exec(ctx, updateCutoverGeneration, destination)
+				return switchErr
+			}
+			first, second := insert, switchStore
+			if tc.switchFirst {
+				first, second = switchStore, insert
+				if !tc.legacy {
+					g := stagingGeneration(destination)
+					_, err = holder.Exec(ctx, `INSERT INTO vector_generations(name,store,target,profile,profile_hash,profile_origin)
+						VALUES($1,$2,$3,'{}',$4,$5)`, g.Name, g.Store, g.Target, g.Profile.Hash(), g.Origin)
+					require.NoError(t, err)
+				}
+			}
+			require.NoError(t, first(ctx, holder))
+			waitCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			pid, holderPID := waiter.Conn().PgConn().PID(), holder.Conn().PgConn().PID()
+			done := make(chan error, 1)
+			go func() {
+				defer close(done)
+				done <- second(waitCtx, open)
+			}()
+			defer func() {
+				cancel()
+				// The transaction and pool connection must outlive the query.
+				for range done {
+				}
+			}()
+			require.EventuallyWithT(t, func(collect *assert.CollectT) {
+				var blocked bool
+				require.NoError(collect, c.Pool.QueryRow(ctx, `SELECT $1=ANY(pg_blocking_pids($2))`,
+					holderPID, pid).Scan(&blocked))
+				require.True(collect, blocked)
+			}, 5*time.Second, 10*time.Millisecond)
+			if tc.cancel {
+				cancel()
+			} else {
+				require.NoError(t, holder.Commit(ctx))
+			}
+			select {
+			case err = <-done:
+			case <-ctx.Done():
+				t.Fatal("waiting statement did not return")
+			}
+			switch {
+			case tc.cancel:
+				require.ErrorIs(t, err, context.Canceled)
+				require.NoError(t, holder.Rollback(ctx))
+			case tc.switchFirst:
+				require.ErrorContains(t, err, "PostgreSQL generation is active")
+			default:
+				requireCutoverRefusal(t, err)
+			}
+			state, err := c.VectorState(ctx)
+			require.NoError(t, err)
+			wantActive := source
+			if tc.switchFirst && !tc.cancel {
+				wantActive = destination
+			}
+			require.Equal(t, wantActive, state.Active)
+			require.True(t, state.Frozen)
+			counts, err := c.HostedManifestCutoverCounts(ctx)
+			require.NoError(t, err)
+			want := HostedManifestCutoverCounts{}
+			if !tc.switchFirst && !tc.cancel {
+				want.Writing = 1
+			}
+			require.Equal(t, want, counts)
+		})
+	}
+}
+
+func TestHostedManifestCutoverUpgrade(t *testing.T) {
+	ctx := t.Context()
+	dsn := startTestDatabase(t)
+	admin := migrationTestClient(t, dsn)
+	grantExec(t, admin, `CREATE SCHEMA cutover; CREATE SCHEMA cutover_shadow`)
+	c, err := NewClient(ctx, dsn, func(cfg *pgxpool.Config) {
+		cfg.ConnConfig.RuntimeParams["search_path"] = "cutover,public"
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
+	applyMigrationsExcept(t, c, 47)
+	require.NoError(t, c.PinVectorGeneration(ctx, LegacyGeneration, "pinecone", "source", "source-host", generationProfile()))
+	verifiedGeneration(t, c, "g2", "digest")
+	doc, rev := uuid.NewString(), uuid.NewString()
+	grantExec(t, c, insertCutoverManifest, rev, doc, doc, "", "writing")
+	_, err = c.HostedManifestCutoverCounts(ctx)
+	require.ErrorContains(t, err, "apply migration 047")
+
+	grantExec(t, c, updateCutoverGeneration, "g2")
+	grantExec(t, c, updateCutoverGeneration, LegacyGeneration)
+	require.NoError(t, c.RunMigrations(ctx))
+	require.NoError(t, c.RunMigrations(ctx))
+	grantExec(t, c, `CREATE TABLE cutover_shadow.vector_generations (name TEXT, store TEXT);
+		CREATE TABLE cutover_shadow.hosted_vector_manifests (state TEXT);
+		CREATE TABLE cutover_shadow.hosted_vector_cleanups ();
+		CREATE FUNCTION cutover_shadow.hosted_manifest_cutover_counts()
+			RETURNS TABLE(writing BIGINT, active BIGINT, retired BIGINT, cleanups BIGINT)
+			LANGUAGE SQL AS 'SELECT 0::BIGINT, 0::BIGINT, 0::BIGINT, 0::BIGINT';
+		CREATE FUNCTION cutover_shadow.vector_writer_state() RETURNS TABLE(store TEXT)
+			LANGUAGE SQL AS 'SELECT ''pinecone''::TEXT'`)
+	shadow, err := c.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = shadow.Rollback(ctx) }()
+	_, err = shadow.Exec(ctx, `SET LOCAL search_path = cutover_shadow, cutover, public`)
+	require.NoError(t, err)
+	_, err = shadow.Exec(ctx, `UPDATE cutover.vector_state SET active_generation='g2'`)
+	requireCutoverRefusal(t, err)
+	require.NoError(t, shadow.Rollback(ctx))
+	grantExec(t, c, `DELETE FROM hosted_vector_manifests WHERE revision_id=$1`, rev)
+
+	tx, err := c.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, updateCutoverGeneration, LegacyGeneration)
+	require.NoError(t, err, "a no-op is permitted")
+	_, err = tx.Exec(ctx, updateCutoverGeneration, "g2")
+	requireCutoverRefusal(t, err)
+	require.ErrorContains(t, err, "READ COMMITTED")
+	require.NoError(t, tx.Rollback(ctx))
+	state, err := c.VectorState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, LegacyGeneration, state.Active)
+	require.True(t, state.Frozen)
+
+	nonDefault, err := NewClient(ctx, c.Pool.Config().ConnString(), func(cfg *pgxpool.Config) {
+		cfg.ConnConfig.RuntimeParams["search_path"] = "cutover,public"
+		cfg.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, nonDefault.Close(context.Background())) })
+	require.NoError(t, nonDefault.ActivateGeneration(ctx, "g2", "digest", 0))
+	shadow, err = c.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = shadow.Rollback(ctx) }()
+	_, err = shadow.Exec(ctx, `SET LOCAL search_path = cutover_shadow, cutover, public`)
+	require.NoError(t, err)
+	_, err = shadow.Exec(ctx, strings.Replace(insertCutoverManifest, "INTO hosted_vector_manifests", "INTO cutover.hosted_vector_manifests", 1), rev, doc, doc, "", "writing")
+	require.ErrorContains(t, err, "PostgreSQL generation is active")
+	require.NoError(t, shadow.Rollback(ctx))
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err = c.HostedManifestCutoverCounts(canceled)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestActivationRetiresThePreviousGenerationAndPinsReplicas(t *testing.T) {
 	c := jobsDatabase(t)
 	legacy := Generation{Name: LegacyGeneration, Store: "postgres", Target: "chunk_vectors", Profile: generationProfile(), Origin: OriginAttested}
@@ -977,7 +1274,7 @@ func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
 	c := migrationTestClient(t, startTestDatabase(t))
 	// Admission and claims need later migrations. Defer the vector state
 	// and the migrations that depend on it until the upgrade.
-	applyMigrationsExcept(t, c, 16, 33, 39, 41, 42)
+	applyMigrationsExcept(t, c, 16, 33, 39, 41, 42, 47)
 	require.NoError(t, c.WritersOpen(t.Context()), "no record can freeze writers before migration 016")
 	accepted, err := c.AcceptDocument(t.Context(), jobsRequest("accepted before the generation records exist"))
 	require.NoError(t, err)
