@@ -254,6 +254,12 @@ func (idx *delayedHTTPIndex) idsInNamespace(ns string) []string {
 	return ids
 }
 
+func (idx *delayedHTTPIndex) vectorMetadata(ns, id string) map[string]any {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	return idx.vectors[idx.key(ns, id)].Metadata
+}
+
 type queryEmbedderFunc func(context.Context, string) ([]float32, error)
 
 func (f queryEmbedderFunc) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -385,6 +391,7 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 	// Partial batch uploaded before Attempt 1 crashes / loses its lease.
 	require.NoError(t, drv.Upsert(t.Context(), "", chunks1[:1]))
 	require.Equal(t, []string{chunks1[0].VectorID}, idx.idsInNamespace(""))
+	require.NotContains(t, idx.vectorMetadata("", chunks1[0].VectorID), domain.VectorIncarnationKey)
 
 	lease2 := uuid.NewString()
 	_, err = client.Pool.Exec(t.Context(), `UPDATE ingest_jobs SET attempts = 2, lease_owner = 'w2', lease_token = $2 WHERE document_id = $1`, docUUID, lease2)
@@ -411,10 +418,11 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 	}
 	stage := pipeline.NewPersistStage(drv)
 	pctx := &pipeline.IngestContext{
-		DocumentID: docID,
-		RawText:    "v2",
-		Collection: "archive",
-		RevisionID: rev2,
+		DocumentID:          docID,
+		RawText:             "v2",
+		Collection:          "archive",
+		RevisionID:          rev2,
+		ManifestIncarnation: job2.Incarnation,
 		PersistManifest: func(ctx context.Context, prepared []domain.Chunk) error {
 			vectorIDs := make([]string, len(prepared))
 			chunkIDs := make([]string, len(prepared))
@@ -425,7 +433,7 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 			return client.PersistVectorManifest(ctx, job2, domain.VectorManifest{
 				RevisionID:  rev2,
 				DocumentID:  docID,
-				Incarnation: incarnation1,
+				Incarnation: job2.Incarnation,
 				Attempt:     2,
 				LeaseToken:  lease2,
 				Collection:  "archive",
@@ -437,6 +445,9 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 		Chunks: chunks2,
 	}
 	require.NoError(t, stage.Run(t.Context(), pctx))
+	rev2VecID := domain.FormatRevisionVectorID(docID, rev2, 0)
+	rev2Metadata := idx.vectorMetadata("", rev2VecID)
+	require.Equal(t, job2.Incarnation, rev2Metadata[domain.VectorIncarnationKey])
 	completed, err = client.CompleteJob(t.Context(), job2, chunks2, pctx.IndexObservation)
 	require.NoError(t, err)
 	require.True(t, completed)
@@ -521,15 +532,16 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 		RevisionID:  rev3,
 	}
 	reusedCtx := &pipeline.IngestContext{
-		DocumentID: docID,
-		RawText:    "reused",
-		Collection: "archive",
-		RevisionID: rev3,
+		DocumentID:          docID,
+		RawText:             "reused",
+		Collection:          "archive",
+		RevisionID:          rev3,
+		ManifestIncarnation: reusedJob.Incarnation,
 		PersistManifest: func(ctx context.Context, prepared []domain.Chunk) error {
 			return client.PersistVectorManifest(ctx, reusedJob, domain.VectorManifest{
 				RevisionID:  rev3,
 				DocumentID:  docID,
-				Incarnation: incarnation2,
+				Incarnation: reusedJob.Incarnation,
 				Attempt:     1,
 				LeaseToken:  lease3,
 				Collection:  "archive",
@@ -541,12 +553,13 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 		Chunks: reusedChunks,
 	}
 	require.NoError(t, stage.Run(t.Context(), reusedCtx))
+	rev3VecID := domain.FormatRevisionVectorID(docID, rev3, 0)
+	require.Equal(t, reusedJob.Incarnation, idx.vectorMetadata("", rev3VecID)[domain.VectorIncarnationKey])
 	completed, err = client.CompleteJob(t.Context(), reusedJob, reusedChunks, reusedCtx.IndexObservation)
 	require.NoError(t, err)
 	require.True(t, completed)
 
-	rev2VecID := domain.FormatRevisionVectorID(docID, rev2, 0)
-	idx.flushLateWrite("", rev2VecID, []float32{1, 0, 0, 0}, map[string]any{"doc_id": docUUID, "revision_id": rev2, "chunk_id": string(chunk0ID)})
+	idx.flushLateWrite("", rev2VecID, []float32{1, 0, 0, 0}, rev2Metadata)
 
 	// The deleted revision outlived the document, its UUID reuse and a late write.
 	makeCleanupsDue(t, client)
@@ -557,7 +570,7 @@ func TestHostedVectorManifestLifecycleAndRecovery(t *testing.T) {
 	rep, err = sweeper.SweepOnce(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 1, rep.TasksCompleted)
-	require.Equal(t, []string{domain.FormatRevisionVectorID(docID, rev3, 0)}, idx.idsInNamespace(""))
+	require.Equal(t, []string{rev3VecID}, idx.idsInNamespace(""))
 	require.Zero(t, manifestCount(t, client, rev2))
 }
 

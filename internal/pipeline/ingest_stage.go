@@ -189,9 +189,13 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 	}
 
 	if ic.RevisionID != "" {
+		if !domain.ValidManifestIncarnation(ic.ManifestIncarnation) {
+			return errors.New("persist_stage: invalid manifest incarnation")
+		}
 		for i := range ic.Chunks {
 			ic.Chunks[i].RevisionID = ic.RevisionID
 			ic.Chunks[i].VectorID = domain.FormatRevisionVectorID(ic.DocumentID, ic.RevisionID, ic.Chunks[i].Index)
+			ic.Chunks[i].VectorIncarnation = ic.ManifestIncarnation
 		}
 		if ic.PersistManifest != nil {
 			if err := ic.PersistManifest(ctx, ic.Chunks); err != nil {
@@ -203,10 +207,12 @@ func (s *PersistStage) Run(ctx context.Context, ic *IngestContext) error {
 	// Upsert vectors to the default namespace with doc_id metadata.
 	var probe domain.VisibilityProbe
 	upsert := func(ctx context.Context) error {
-		incarnation := domain.VectorIncarnation(ctx)
-		for i := range ic.Chunks {
-			if len(ic.Chunks[i].Embedding) != 0 {
-				ic.Chunks[i].VectorIncarnation = incarnation
+		if ic.RevisionID == "" {
+			incarnation := domain.VectorIncarnation(ctx)
+			for i := range ic.Chunks {
+				if len(ic.Chunks[i].Embedding) != 0 {
+					ic.Chunks[i].VectorIncarnation = incarnation
+				}
 			}
 		}
 		call := func(ctx context.Context) error {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync/atomic"
+
+	"github.com/google/uuid"
 )
 
 // VectorRevisionKey identifies vectors written for a document incarnation.
@@ -17,6 +19,13 @@ const VectorAttemptKey = "vector_attempt"
 
 // VectorIncarnationKey records read provenance on an untagged hosted vector.
 const VectorIncarnationKey = "document_incarnation"
+
+// ValidManifestIncarnation reports whether a manifest stamp is a nonzero,
+// canonical UUID, as used by the claim and the authorization scope.
+func ValidManifestIncarnation(incarnation string) bool {
+	id, err := uuid.Parse(incarnation)
+	return err == nil && id != uuid.Nil && id.String() == incarnation
+}
 
 // ManifestIdentity reports whether a chunk carries only a hosted revision as
 // its publication identity. Its active revision still needs SQL verification.

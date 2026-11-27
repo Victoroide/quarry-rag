@@ -291,6 +291,7 @@ func (w *Worker) process(parent context.Context, job domain.Job) {
 	ic.Stopping = w.stop
 	if w.hostedManifestEnabled() {
 		ic.RevisionID = job.RevisionID
+		ic.ManifestIncarnation = job.Incarnation
 		if ms, ok := w.store.(domain.VectorManifestStore); ok {
 			ic.PersistManifest = func(mCtx context.Context, chunks []domain.Chunk) error {
 				return persistAttemptManifest(mCtx, ms, job, chunks)
@@ -525,7 +526,7 @@ func (w *Worker) removeJobVectors(ctx context.Context, job domain.Job) error {
 }
 
 func (w *Worker) deleteAttemptVectors(ctx context.Context, job domain.Job, chunks []domain.Chunk) error {
-	if w.vectors == nil {
+	if w.vectors == nil || !domain.ValidManifestIncarnation(job.Incarnation) {
 		return nil
 	}
 	revDeleter, ok := w.vectors.(domain.ManifestRevisionVectorDeleter)

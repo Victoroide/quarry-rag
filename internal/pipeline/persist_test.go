@@ -13,6 +13,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/Victoroide/quarry-rag/internal/metrics"
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -338,8 +339,57 @@ func TestPersistDefersTransactionalVectors(t *testing.T) {
 	}
 }
 
+func TestPersistManifestWritesClaimedIncarnation(t *testing.T) {
+	claim := uuid.NewString()
+	ambient := uuid.NewString()
+	for _, tc := range []struct {
+		name, incarnation string
+		wantErr           bool
+	}{
+		{"claimed", claim, false},
+		{"missing", "", true},
+		{"invalid", "invalid", true},
+		{"zero", uuid.Nil.String(), true},
+		{"uppercase", "8A54A82C-4E81-43AA-95EA-C7EE1166B0D6", true},
+		{"unhyphenated", strings.ReplaceAll(claim, "-", ""), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ic := visibilityIngest()
+			ic.RevisionID = "rev-new"
+			ic.ManifestIncarnation = tc.incarnation
+			intents := 0
+			check := func(chunks []domain.Chunk) {
+				require.Len(t, chunks, len(ic.Chunks))
+				for _, chunk := range chunks {
+					require.Equal(t, claim, chunk.VectorIncarnation)
+					require.Equal(t, ic.RevisionID, chunk.RevisionID)
+					require.Equal(t, domain.FormatRevisionVectorID(ic.DocumentID, ic.RevisionID, chunk.Index), chunk.VectorID)
+				}
+			}
+			ic.PersistManifest = func(_ context.Context, chunks []domain.Chunk) error {
+				intents++
+				check(chunks)
+				return nil
+			}
+			store := &persistVectorRecorder{}
+			err := NewPersistStage(store).Run(domain.WithVectorIncarnation(t.Context(), ambient), ic)
+			if tc.wantErr {
+				require.ErrorContains(t, err, "manifest incarnation")
+				require.Zero(t, intents)
+				require.Empty(t, store.writes)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 1, intents)
+			require.Len(t, store.writes, 1)
+			check(store.writes[0].chunks)
+		})
+	}
+}
+
 func TestPersistWritesManifestBeforeUpsertAndFiltersSampleByRevision(t *testing.T) {
 	var events []string
+	incarnation := uuid.NewString()
 	probeCalls := 0
 	vs := &persistFilteredStore{}
 	vs.query = func(context.Context, []float32, int, domain.VectorFilter) ([]domain.ScoredChunk, error) {
@@ -349,13 +399,14 @@ func TestPersistWritesManifestBeforeUpsertAndFiltersSampleByRevision(t *testing.
 			// Stale revision hit with the same public chunk ID must not satisfy the probe.
 			return []domain.ScoredChunk{{Chunk: domain.Chunk{ID: "target", DocumentID: "document-a", RevisionID: "rev-old"}}}, nil
 		}
-		return []domain.ScoredChunk{{Chunk: domain.Chunk{ID: "target", DocumentID: "document-a", RevisionID: "rev-new"}}}, nil
+		return []domain.ScoredChunk{{Chunk: domain.Chunk{ID: "target", DocumentID: "document-a", RevisionID: "rev-new", VectorIncarnation: incarnation}}}, nil
 	}
 	origUpsert := &persistVectorRecorder{}
 	vs.VectorStore = origUpsert
 
 	ic := visibilityIngest()
 	ic.RevisionID = "rev-new"
+	ic.ManifestIncarnation = incarnation
 	ic.PersistManifest = func(_ context.Context, chunks []domain.Chunk) error {
 		events = append(events, "manifest")
 		require.Equal(t, "document-a#rev-new#0", chunks[0].VectorID)
@@ -374,6 +425,7 @@ func TestPersistWritesManifestBeforeUpsertAndFiltersSampleByRevision(t *testing.
 	// Manifest failure must abort before any Upsert call.
 	icFail := visibilityIngest()
 	icFail.RevisionID = "rev-fail"
+	icFail.ManifestIncarnation = incarnation
 	upserted := 0
 	icFail.PersistManifest = func(context.Context, []domain.Chunk) error {
 		return domain.ErrJobNotOwned
