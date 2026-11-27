@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/testutil/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
@@ -97,24 +100,9 @@ func TestSupersededReconcileAfterManifestRetry(t *testing.T) {
 
 	pg.EnableHostedVectorManifests(true)
 	publish := func(id string) (chunk domain.Chunk, vectorID, incarnation string) {
-		t.Helper()
-		job, claimErr := pg.ClaimJob(ctx, "manifest-worker", time.Minute, 5)
-		require.NoError(t, claimErr)
-		require.NotNil(t, job)
-		require.Equal(t, domain.DocumentID(id), job.Document.ID)
-		job.RevisionID = uuid.NewString()
-		chunk = domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: job.Document.ID, RevisionID: job.RevisionID, Text: "published text", TokenCount: 2}
-		prefix := domain.RevisionVectorPrefix(job.Document.ID, job.RevisionID)
-		vectorID = domain.FormatRevisionVectorID(job.Document.ID, job.RevisionID, 0)
-		require.NoError(t, pg.PersistVectorManifest(ctx, *job, domain.VectorManifest{
-			RevisionID: job.RevisionID, DocumentID: job.Document.ID, Incarnation: job.Incarnation, Attempt: job.Attempts,
-			LeaseToken: job.LeaseToken, IDPrefix: prefix, VectorIDs: []string{vectorID}, ChunkIDs: []string{string(chunk.ID)},
-		}))
-		index.vectors[vectorID] = supersededTestVector(t, vectorID, map[string]any{"doc_id": id, "revision_id": job.RevisionID})
-		ok, completeErr := pg.CompleteJob(ctx, *job, []domain.Chunk{chunk}, domain.IndexObservation{})
-		require.NoError(t, completeErr)
-		require.True(t, ok)
-		return chunk, vectorID, job.Incarnation
+		chunk, vectorID, incarnation = publishSupersededTestDocument(t, pg, id)
+		index.vectors[vectorID] = supersededTestVector(t, vectorID, map[string]any{"doc_id": id, "revision_id": chunk.RevisionID})
+		return chunk, vectorID, incarnation
 	}
 	published, qualified, retryIncarnation := publish(doc)
 	require.Equal(t, originalIncarnation, retryIncarnation)
@@ -380,6 +368,237 @@ func TestSupersededReconcileAfterManifestRetry(t *testing.T) {
 	}
 	require.NoError(t, pg.ThawWriters(ctx))
 	require.NoError(t, pg.WritersOpen(ctx))
+}
+
+func publishSupersededTestDocument(t *testing.T, pg *pgstore.Client, id string) (chunk domain.Chunk, vectorID, incarnation string) {
+	t.Helper()
+	ctx := t.Context()
+	job, err := pg.ClaimJob(ctx, "manifest-worker", time.Minute, 5)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, domain.DocumentID(id), job.Document.ID)
+	job.RevisionID = uuid.NewString()
+	chunk = domain.Chunk{ID: domain.ChunkID(uuid.NewString()), DocumentID: job.Document.ID, RevisionID: job.RevisionID, Text: "published text", TokenCount: 2}
+	vectorID = domain.FormatRevisionVectorID(job.Document.ID, job.RevisionID, 0)
+	require.NoError(t, pg.PersistVectorManifest(ctx, *job, domain.VectorManifest{
+		RevisionID: job.RevisionID, DocumentID: job.Document.ID, Incarnation: job.Incarnation, Attempt: job.Attempts,
+		LeaseToken: job.LeaseToken, IDPrefix: domain.RevisionVectorPrefix(job.Document.ID, job.RevisionID),
+		VectorIDs: []string{vectorID}, ChunkIDs: []string{string(chunk.ID)},
+	}))
+	ok, err := pg.CompleteJob(ctx, *job, []domain.Chunk{chunk}, domain.IndexObservation{})
+	require.NoError(t, err)
+	require.True(t, ok)
+	return chunk, vectorID, job.Incarnation
+}
+
+func TestSupersededSplitFetchDoesNotReservePartialPage(t *testing.T) {
+	ctx := t.Context()
+	pg := newDatabase(t)
+	const host = "bound-host"
+	cfg := &config.Config{
+		VectorStore: "pinecone", PineconeIndexName: "bound", EmbeddingProvider: domain.EmbeddingProviderOpenAI,
+		OpenAIEmbeddingModel: "text-embedding-3-small", EmbeddingModelRevision: "rev-1",
+		ExtractionChunkVersion: "chunk-1", EmbeddingDimensions: 3, ChunkTokenSize: 512, ChunkOverlap: 64,
+	}
+	require.NoError(t, pg.PinVectorGeneration(ctx, pgstore.LegacyGeneration, "pinecone", "bound", host, cfg.EmbeddingSettings()))
+	pg.EnableHostedVectorManifests(true)
+	owner, content := uuid.NewString(), "manifested document"
+	accepted, err := pg.AcceptDocument(ctx, domain.AcceptRequest{
+		Document: domain.Document{ID: domain.DocumentID(owner), Content: content}, CallerSupplied: true,
+		Fingerprint: chunker.Fingerprint(content), MaxPending: 1000,
+	})
+	require.NoError(t, err)
+	require.Equal(t, domain.AcceptAccepted, accepted.Outcome)
+	chunk, qualified, _ := publishSupersededTestDocument(t, pg, owner)
+	require.NoError(t, pg.FreezeWriters(ctx, pgstore.LegacyGeneration))
+	_, err = pg.Pool.Exec(ctx, `UPDATE vector_state SET frozen_at=now()-interval '2 minutes'`)
+	require.NoError(t, err)
+
+	first, second := strings.Repeat("f", 32), bareTestID
+	revisioned, unowned, absent := strings.Repeat("a", 32), strings.Repeat("b", 32), strings.Repeat("c", 32)
+	eligible := []string{first, second}
+	page := []string{first, unowned, second, revisioned, absent}
+	index := &supersededTestIndex{vectors: map[string]*pinecone.Vector{
+		first:      supersededTestVector(t, first, map[string]any{"doc_id": owner}),
+		second:     supersededTestVector(t, second, map[string]any{"doc_id": owner}),
+		revisioned: supersededTestVector(t, revisioned, map[string]any{"doc_id": owner, domain.VectorRevisionKey: chunk.RevisionID}),
+		qualified:  supersededTestVector(t, qualified, map[string]any{"doc_id": owner, domain.VectorRevisionKey: chunk.RevisionID}),
+		unowned:    supersededTestVector(t, unowned, map[string]any{"doc_id": uuid.NewString()}),
+	}}
+	index.deleteHook = index.deleteVectors
+	index.list = func(_ context.Context, req *pinecone.ListVectorsRequest) (*pinecone.ListVectorsResponse, error) {
+		switch {
+		case req.PaginationToken == nil:
+			return supersededTestList("start", qualified), nil
+		case *req.PaginationToken == "start":
+			return supersededTestList("after", page...), nil
+		default:
+			require.Equal(t, "after", *req.PaginationToken)
+			return supersededTestList(""), nil
+		}
+	}
+	journal := func() ([]string, uuid.NullUUID) {
+		t.Helper()
+		var ids []string
+		var reservation uuid.NullUUID
+		require.NoError(t, pg.Pool.QueryRow(ctx, `SELECT active_cleanup_ids, active_cleanup_reservation FROM vector_state`).Scan(&ids, &reservation))
+		return ids, reservation
+	}
+	requireEmptyJournal := func() {
+		t.Helper()
+		ids, reservation := journal()
+		require.Empty(t, ids)
+		require.False(t, reservation.Valid)
+	}
+	start, err := runSuperseded(ctx, cfg, index, pg, host, options{SupersededUnrevisioned: true, Page: 1, Limit: 1, ScanLimit: 1}, io.Discard)
+	require.NoError(t, err)
+	require.True(t, strings.HasSuffix(start.NextPageToken, ".c3RhcnQ"))
+	preview := options{SupersededUnrevisioned: true, Page: 5, Limit: 5, ScanLimit: 5, PageToken: start.NextPageToken}
+	fitting, err := runSuperseded(ctx, cfg, index, pg, host, preview, io.Discard)
+	require.NoError(t, err)
+	require.Equal(t, eligible, fitting.Sample)
+
+	dsn := pg.Pool.Config().ConnString()
+	role := pgx.Identifier{pgtest.Role(t, dsn, "superseded_no_lookup")}.Sanitize()
+	_, err = pg.Pool.Exec(ctx, `CREATE ROLE `+role+`; GRANT USAGE ON SCHEMA public TO `+role)
+	require.NoError(t, err)
+	var denyNextLookup atomic.Bool
+	denied, err := pgstore.NewClient(ctx, dsn, func(pool *pgxpool.Config) {
+		pool.PrepareConn = func(ctx context.Context, conn *pgx.Conn) (bool, error) {
+			if !denyNextLookup.CompareAndSwap(true, false) {
+				return true, nil
+			}
+			_, roleErr := conn.Exec(ctx, `SET ROLE `+role)
+			return roleErr == nil, roleErr
+		}
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, denied.Close(context.WithoutCancel(ctx))) })
+	laterFailure := status.Error(codes.Unavailable, "later fetch unavailable")
+	var rightError error
+	var denyLookup bool
+	var fetches [][]string
+	index.fetch = func(_ context.Context, ids []string) (*pinecone.FetchVectorsResponse, error) {
+		fetches = append(fetches, slices.Clone(ids))
+		requireEmptyJournal()
+		switch {
+		case len(ids) == len(page):
+			return nil, supersededTestSizeError()
+		case ids[0] == second:
+			if rightError != nil {
+				return nil, rightError
+			}
+			if denyLookup {
+				denyNextLookup.Store(true)
+			}
+		}
+		return index.fetchListedVectors(ids), nil
+	}
+	split, err := runSuperseded(ctx, cfg, index, pg, host, preview, io.Discard)
+	require.NoError(t, err)
+	fittingJSON, err := json.Marshal(fitting)
+	require.NoError(t, err)
+	splitJSON, err := json.Marshal(split)
+	require.NoError(t, err)
+	require.JSONEq(t, string(fittingJSON), string(splitJSON))
+	for _, next := range []string{fitting.NextPageToken, split.NextPageToken} {
+		resume := preview
+		resume.PageToken = next
+		result, resumeErr := runSuperseded(ctx, cfg, index, pg, host, resume, io.Discard)
+		require.NoError(t, resumeErr)
+		require.Equal(t, supersededReport{}, result)
+	}
+
+	apply := preview
+	apply.Apply = true
+	t.Run("exclusive generation fence", func(t *testing.T) {
+		fence, fenceErr := pg.FenceGeneration(ctx, pgstore.LegacyGeneration)
+		require.NoError(t, fenceErr)
+		defer fence.Close(ctx)
+		fetches = nil
+		_, fenceErr = runSuperseded(ctx, cfg, index, pg, host, apply, io.Discard)
+		require.ErrorContains(t, fenceErr, "another operation owns generation")
+		require.Empty(t, fetches)
+		require.Empty(t, index.deleted)
+		requireEmptyJournal()
+	})
+	_, err = runSuperseded(ctx, cfg, index, pg, "different-host", apply, io.Discard)
+	require.ErrorIs(t, err, pgstore.ErrGenerationDrift)
+	rightError = laterFailure
+	fetches = nil
+	failed, err := runSuperseded(ctx, cfg, index, pg, host, apply, io.Discard)
+	require.ErrorIs(t, err, laterFailure)
+	require.Equal(t, supersededReport{Scanned: 5, NextPageToken: start.NextPageToken}, failed)
+	require.Equal(t, [][]string{page, page[:2], page[2:]}, fetches)
+	require.Empty(t, index.deleted)
+	requireEmptyJournal()
+
+	rightError, denyLookup, fetches = nil, true, nil
+	failed, err = runSuperseded(ctx, cfg, index, denied, host, apply, io.Discard)
+	var deniedLookup *pgconn.PgError
+	require.ErrorAs(t, err, &deniedLookup)
+	require.Equal(t, "42501", deniedLookup.Code)
+	require.ErrorContains(t, err, "superseded vector owners")
+	require.False(t, denyNextLookup.Load())
+	require.Equal(t, supersededReport{Scanned: 5, NextPageToken: start.NextPageToken}, failed)
+	require.Equal(t, [][]string{page, page[:2], page[2:]}, fetches)
+	require.Empty(t, index.deleted)
+	requireEmptyJournal()
+
+	var lastReservation uuid.UUID
+	index.onDelete = func() {
+		ids, reservation := journal()
+		require.Equal(t, eligible, ids)
+		require.True(t, reservation.Valid)
+		require.NotEqual(t, lastReservation, reservation.UUID)
+		lastReservation = reservation.UUID
+		require.ErrorIs(t, pg.WritersOpen(ctx), domain.ErrWritersFrozen)
+	}
+	denyLookup, fetches = false, nil
+	resumed, err := runSuperseded(ctx, cfg, index, pg, host, apply, io.Discard)
+	require.NoError(t, err)
+	want := fitting
+	want.Deleted = len(eligible)
+	require.Equal(t, want, resumed)
+	require.Equal(t, [][]string{page, page[:2], page[2:]}, fetches)
+	require.Equal(t, [][]string{eligible}, index.deleted)
+	require.NotContains(t, index.vectors, first)
+	require.NotContains(t, index.vectors, second)
+	requireEmptyJournal()
+
+	for _, id := range eligible {
+		index.vectors[id] = supersededTestVector(t, id, map[string]any{"doc_id": owner})
+	}
+	index.deleteErr = context.DeadlineExceeded
+	ambiguous, err := runSuperseded(ctx, cfg, index, pg, host, apply, io.Discard)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, ambiguous.Deleted)
+	require.Equal(t, start.NextPageToken, ambiguous.NextPageToken)
+	ids, pending := journal()
+	require.True(t, pending.Valid)
+	require.Equal(t, eligible, ids)
+	require.Equal(t, lastReservation, pending.UUID)
+	require.ErrorContains(t, pg.ThawWriters(ctx), "pending active vector cleanup")
+	_, err = runSuperseded(ctx, cfg, index, pg, host, apply, io.Discard)
+	require.ErrorContains(t, err, "unconfirmed active cleanup reservation")
+	require.Equal(t, [][]string{eligible, eligible}, index.deleted)
+	for _, id := range eligible {
+		delete(index.vectors, id)
+	}
+	index.deleteErr = nil
+	apply.PageToken = ""
+	apply.ScanLimit++
+	apply.ConfirmTargetDrained = pending.UUID
+	recovered, err := runSuperseded(ctx, cfg, index, pg, host, apply, io.Discard)
+	require.NoError(t, err)
+	require.Zero(t, recovered.Selected)
+	require.Zero(t, recovered.Deleted)
+	require.Equal(t, [][]string{eligible, eligible}, index.deleted)
+	requireEmptyJournal()
+	require.ErrorIs(t, pg.WritersOpen(ctx), domain.ErrWritersFrozen)
+	for _, id := range []string{revisioned, qualified, unowned} {
+		require.Contains(t, index.vectors, id)
+	}
 }
 
 type cleanupDiagnosticFunc func([]byte) (int, error)
