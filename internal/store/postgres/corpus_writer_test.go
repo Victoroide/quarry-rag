@@ -340,18 +340,26 @@ func TestCorpusCutoverWaitsForAcquiredWriter(t *testing.T) {
 	require.Equal(t, string(result.DocumentID), page.Documents[0].ID)
 }
 
+func corpusPublicationDatabase(t *testing.T, backend string) *Client {
+	t.Helper()
+	switch backend {
+	case "offline":
+		return jobsDatabase(t)
+	case "pgvector":
+		c, _ := vectorDatabase(t)
+		return c
+	case "hosted manifest":
+		return manifestDatabase(t)
+	default:
+		t.Fatalf("unknown publication backend %q", backend)
+		return nil
+	}
+}
+
 func TestCompleteJobCorpusCutoverFence(t *testing.T) {
 	for _, backend := range []string{"offline", "pgvector", "hosted manifest"} {
 		t.Run(backend, func(t *testing.T) {
-			var c *Client
-			switch backend {
-			case "offline":
-				c = jobsDatabase(t)
-			case "pgvector":
-				c, _ = vectorDatabase(t)
-			case "hosted manifest":
-				c = manifestDatabase(t)
-			}
+			c := corpusPublicationDatabase(t, backend)
 			c.SetAuthzMode("service")
 			makeAttempt := func(content string) (domain.Job, []domain.Chunk) {
 				t.Helper()
