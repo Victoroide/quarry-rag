@@ -495,6 +495,7 @@ func TestReindexActivateReportsHostedManifestWork(t *testing.T) {
 	require.NoError(t, holder.Commit(waitCtx))
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, <-done, &pgErr)
+	require.Equal(t, "55000", pgErr.Code)
 	require.Equal(t, "hosted_manifest_cutover_guard", pgErr.ConstraintName)
 	require.Equal(t, providerOpens, h.stores.opened, "raced activation needs no provider")
 	rep = nil
@@ -539,6 +540,8 @@ func TestReindexActivateReportsHostedManifestWorkBeyondCorpusLimit(t *testing.T)
 	revision := uuid.NewString()
 	_, err = f.pg.Pool.Exec(ctx, insertCutoverManifest, revision, uuid.NewString(), "writing")
 	require.NoError(t, err)
+	tracer := &activationTracer{}
+	h.deps = traceActivation(t, h.deps, tracer)
 	opts.MaxDocuments = 1
 	for _, apply := range []bool{false, true} {
 		opts.Apply = apply
@@ -553,6 +556,9 @@ func TestReindexActivateReportsHostedManifestWorkBeyondCorpusLimit(t *testing.T)
 		require.Equal(t, pgstore.LegacyGeneration, rep["active_generation"])
 		require.Equal(t, true, rep["frozen"])
 		require.Equal(t, opts.Generation, rep["freeze_generation"])
+		require.Zero(t, tracer.reads)
+		require.Zero(t, tracer.pages)
+		require.Zero(t, tracer.probes)
 	}
 
 	_, err = f.pg.Pool.Exec(ctx, `DELETE FROM hosted_vector_manifests WHERE revision_id=$1`, revision)

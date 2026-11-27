@@ -121,6 +121,10 @@ func TestBoundsAreValidated(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 500, opts.MaxEmbedCalls)
 	require.Equal(t, "8a3e792c-5df6-4b6e-a612-4f7db4959db2", opts.After)
+	for _, page := range []string{"-1", "0", "1001"} {
+		_, err := parse(t, "-activate", "-generation", "g2", "-page", page)
+		require.ErrorContains(t, err, "-page")
+	}
 }
 
 func TestVerificationThresholdsMustBeDeclared(t *testing.T) {
