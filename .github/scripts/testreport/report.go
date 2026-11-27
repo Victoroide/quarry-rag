@@ -44,7 +44,6 @@ type packageResult struct {
 	hasNamedTests    bool
 	cached           bool
 	failedBuild      string
-	hasBuildFailure  bool
 	observed         bool
 	standaloneBuild  string
 	output           diagnosticOutput
@@ -54,7 +53,7 @@ type packageResult struct {
 }
 
 func (p *packageResult) didNotBuild() bool {
-	return p.failedBuild != "" || (p.outcome == "" && p.hasBuildFailure)
+	return p.failedBuild != "" || p.standaloneBuild != ""
 }
 
 func (p *packageResult) reportable() bool {
@@ -166,7 +165,7 @@ func (r *run) add(ev event) *packageResult {
 	case "build-fail":
 		if ev.ImportPath != "" {
 			r.build(ev.ImportPath).failed = true
-			r.pkg(buildPackage(ev.ImportPath)).hasBuildFailure = true
+			r.pkg(buildPackage(ev.ImportPath)) // Keep the display slot in first-seen order.
 		}
 		return nil
 	}
@@ -218,8 +217,8 @@ func (r *run) add(ev event) *packageResult {
 }
 
 // resolveBuildFailures matches sealed builds to the final package results.
-// A package without a terminal result can represent one standalone build
-// under its display name. Any other standalone failure gets its own row.
+// A compiler-only package slot can represent one standalone build under
+// its display name. Any other standalone failure gets its own row.
 func (r *run) resolveBuildFailures() {
 	referenced := make(map[string]bool)
 	for _, name := range r.order {
@@ -234,7 +233,7 @@ func (r *run) resolveBuildFailures() {
 		p := r.packages[buildPackage(id)]
 		// Prefer the plain ID for this slot if an independent variant would
 		// otherwise share its name in the summary.
-		if p.outcome == "" && (p.standaloneBuild == "" || id == p.name) {
+		if !p.observed && p.outcome == "" && (p.standaloneBuild == "" || id == p.name) {
 			p.standaloneBuild = id
 		}
 	}
