@@ -95,7 +95,7 @@ func TestPostgresLayoutMigrationAndGrants(t *testing.T) {
 		require.NoError(t, c.RunMigrations(t.Context()))
 
 		for _, tbl := range []string{"chunk_vectors", "chunk_vectors_act", "chunk_vectors_ret", "chunk_vectors_unreg"} {
-			require.NoError(t, validateVectorLayoutColumns(t.Context(), c.Pool, tbl), tbl)
+			require.NoError(t, validateVectorLayoutSchema(t.Context(), c.Pool, tbl), tbl)
 		}
 
 		// Other schema and irrelevant table were not altered.
