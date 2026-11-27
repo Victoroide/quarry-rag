@@ -54,6 +54,10 @@ func layoutPDFRequest(collection, tag string) domain.AcceptRequest {
 	return req
 }
 
+func claimLayoutForCorpusTest(ctx context.Context, c *Client, owner string, maxAttempts int) (*domain.Job, error) {
+	return c.ClaimPDFProfilesForFixtureStore(ctx, owner, time.Minute, maxAttempts, "", false, true)
+}
+
 func seedLayoutDocumentPre040(t *testing.T, c *Client, collection, tag string) domain.DocumentID {
 	t.Helper()
 	req := layoutPDFRequest(collection, tag)
@@ -556,7 +560,7 @@ func TestProfileClaimsSkipIncompatibleHead(t *testing.T) {
 	require.Nil(t, det3)
 
 	// "both" also skips unknown and inconsistent rows after releasing layout head or when layout is claimed.
-	ana, err := c.ClaimPDFProfilesForFixtureStore(ctx, "analyzer", time.Minute, 5, "", false, true)
+	ana, err := claimLayoutForCorpusTest(ctx, c, "analyzer", 5)
 	require.NoError(t, err)
 	require.NotNil(t, ana)
 	require.Equal(t, layoutHead.DocumentID, ana.Document.ID)

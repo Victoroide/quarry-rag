@@ -61,15 +61,25 @@ func (a manifestAttempt) chunks(docID domain.DocumentID, text string) []domain.C
 
 func expireJobLease(t *testing.T, c *Client, docID domain.DocumentID) {
 	t.Helper()
-	_, err := c.Pool.Exec(t.Context(), `UPDATE ingest_jobs SET lease_until = NOW() - interval '1 second' WHERE document_id = $1`, string(docID))
+	expireJobLeaseContext(t.Context(), t, c, docID)
+}
+
+func expireJobLeaseContext(ctx context.Context, t *testing.T, c *Client, docID domain.DocumentID) {
+	t.Helper()
+	_, err := c.Pool.Exec(ctx, `UPDATE ingest_jobs SET lease_until = NOW() - interval '1 second' WHERE document_id = $1`, string(docID))
 	require.NoError(t, err)
 }
 
 // manifestState returns the stored state of a manifest, or "" once it is gone.
 func manifestState(t *testing.T, c *Client, revision string) string {
 	t.Helper()
+	return manifestStateContext(t.Context(), t, c, revision)
+}
+
+func manifestStateContext(ctx context.Context, t *testing.T, c *Client, revision string) string {
+	t.Helper()
 	var state string
-	err := c.Pool.QueryRow(t.Context(), `SELECT state FROM hosted_vector_manifests WHERE revision_id = $1`, revision).Scan(&state)
+	err := c.Pool.QueryRow(ctx, `SELECT state FROM hosted_vector_manifests WHERE revision_id = $1`, revision).Scan(&state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ""
 	}
@@ -80,8 +90,13 @@ func manifestState(t *testing.T, c *Client, revision string) string {
 // cleanupReason returns why a revision awaits cleanup, or "" when it does not.
 func cleanupReason(t *testing.T, c *Client, revision string) string {
 	t.Helper()
+	return cleanupReasonContext(t.Context(), t, c, revision)
+}
+
+func cleanupReasonContext(ctx context.Context, t *testing.T, c *Client, revision string) string {
+	t.Helper()
 	var reason string
-	err := c.Pool.QueryRow(t.Context(), `SELECT reason FROM hosted_vector_cleanups WHERE revision_id = $1`, revision).Scan(&reason)
+	err := c.Pool.QueryRow(ctx, `SELECT reason FROM hosted_vector_cleanups WHERE revision_id = $1`, revision).Scan(&reason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ""
 	}
@@ -125,8 +140,13 @@ func legacyMutation(t *testing.T, c *Client, job domain.Job, deletes bool, outco
 // well as the pointer so that rejected completions cannot hide partial writes.
 func publicationState(t *testing.T, c *Client, id domain.DocumentID) string {
 	t.Helper()
+	return publicationStateContext(t.Context(), t, c, id)
+}
+
+func publicationStateContext(ctx context.Context, t *testing.T, c *Client, id domain.DocumentID) string {
+	t.Helper()
 	var state string
-	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT jsonb_build_object(
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT jsonb_build_object(
 		'document', (SELECT to_jsonb(d) FROM documents d WHERE id=$1),
 		'job', (SELECT to_jsonb(j) FROM ingest_jobs j WHERE document_id=$1),
 		'pointer', (SELECT to_jsonb(r) FROM hosted_vector_revisions r WHERE document_id=$1),
