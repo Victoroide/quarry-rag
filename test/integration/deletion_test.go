@@ -190,8 +190,13 @@ type deletionReceiptRow struct {
 
 func receiptOf(t *testing.T, c *pgstore.Client, id string) deletionReceiptRow {
 	t.Helper()
+	return receiptOfWithContext(t.Context(), t, c, id)
+}
+
+func receiptOfWithContext(ctx context.Context, t *testing.T, c *pgstore.Client, id string) deletionReceiptRow {
+	t.Helper()
 	var r deletionReceiptRow
-	require.NoError(t, c.Pool.QueryRow(t.Context(), `SELECT step,finalized,held,source_key,claim::text FROM document_deletions WHERE document_id=$1`, id).
+	require.NoError(t, c.Pool.QueryRow(ctx, `SELECT step,finalized,held,source_key,claim::text FROM document_deletions WHERE document_id=$1`, id).
 		Scan(&r.step, &r.finalized, &r.held, &r.source, &r.claim))
 	return r
 }
@@ -264,11 +269,15 @@ func doRequest(t *testing.T, server *httptest.Server, method, path, token string
 }
 
 func readHTTPReply(ctx context.Context, server *httptest.Server, method, path, token string, headers map[string]string, body string) (httpReply, error) {
+	return readHTTPClientReply(ctx, server.Client(), server.URL, method, path, token, headers, body)
+}
+
+func readHTTPClientReply(ctx context.Context, httpClient *http.Client, address, method, path, token string, headers map[string]string, body string) (httpReply, error) {
 	var reader io.Reader = http.NoBody
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, server.URL+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, address+path, reader)
 	if err != nil {
 		return httpReply{}, fmt.Errorf("construct HTTP request: %w", err)
 	}
@@ -281,7 +290,7 @@ func readHTTPReply(ctx context.Context, server *httptest.Server, method, path, t
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}
-	resp, err := server.Client().Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return httpReply{}, fmt.Errorf("send HTTP request: %w", err)
 	}
@@ -307,11 +316,15 @@ func sendDelete(t *testing.T, server *httptest.Server, token, id, incarnation st
 }
 
 func readDeleteReply(ctx context.Context, server *httptest.Server, token, id, incarnation string) (httpReply, error) {
+	return readDeleteClientReply(ctx, server.Client(), server.URL, token, id, incarnation)
+}
+
+func readDeleteClientReply(ctx context.Context, httpClient *http.Client, address, token, id, incarnation string) (httpReply, error) {
 	headers := map[string]string{}
 	if incarnation != "" {
 		headers["X-Document-Incarnation"] = incarnation
 	}
-	return readHTTPReply(ctx, server, http.MethodDelete, "/documents/"+id, token, headers, "")
+	return readHTTPClientReply(ctx, httpClient, address, http.MethodDelete, "/documents/"+id, token, headers, "")
 }
 
 type deletionHTTPResult struct {
@@ -328,19 +341,28 @@ func startDeletionRequest(results chan<- deletionHTTPResult, operation string, r
 	}()
 }
 
-func waitDeletionReply(ctx context.Context, results <-chan deletionHTTPResult, phase string) (httpReply, error) {
+func waitDeletionResult[T any](ctx context.Context, results <-chan T, phase string) (T, error) {
 	select {
 	case result := <-results:
-		if result.err != nil {
-			return httpReply{}, fmt.Errorf("%s failed %s: %w", result.operation, phase, result.err)
-		}
-		if cause := context.Cause(ctx); cause != nil {
-			return httpReply{}, fmt.Errorf("%s exceeded the deadline or was canceled %s: %w", result.operation, phase, cause)
-		}
-		return result.reply, nil
+		return result, nil
 	case <-ctx.Done():
-		return httpReply{}, fmt.Errorf("waiting for HTTP results %s: %w", phase, context.Cause(ctx))
+		var zero T
+		return zero, fmt.Errorf("%s: %w", phase, context.Cause(ctx))
 	}
+}
+
+func waitDeletionReply(ctx context.Context, results <-chan deletionHTTPResult, phase string) (httpReply, error) {
+	result, err := waitDeletionResult(ctx, results, "waiting for HTTP results "+phase)
+	if err != nil {
+		return httpReply{}, err
+	}
+	if result.err != nil {
+		return httpReply{}, fmt.Errorf("%s failed %s: %w", result.operation, phase, result.err)
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return httpReply{}, fmt.Errorf("waiting for %s %s: %w", result.operation, phase, cause)
+	}
+	return result.reply, nil
 }
 
 func waitDeletionArrivals(ctx context.Context, entered <-chan struct{}, results <-chan deletionHTTPResult, count int, phase string) error {
@@ -1048,59 +1070,101 @@ func TestMultipartRestagesSourceAfterDeletion(t *testing.T) {
 	require.NotEqual(t, incarnation, storedIncarnation(t, c, id))
 }
 
+func serveDeletionFixture(ctx context.Context, t *testing.T, mux http.Handler) (server *http.Server, address string, served <-chan error) {
+	t.Helper()
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server = &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
+	t.Cleanup(func() { _ = server.Close() })
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	addr := url.URL{Scheme: "http", Host: listener.Addr().String()}
+	return server, addr.String(), done
+}
+
+func startDisconnectingDelete(ctx context.Context, address, token, id, incarnation string) <-chan deletionHTTPResult {
+	deleted := make(chan deletionHTTPResult, 1)
+	startDeletionRequest(deleted, "disconnecting DELETE "+id, func() (httpReply, error) {
+		return readDeleteClientReply(ctx, http.DefaultClient, address, token, id, incarnation)
+	})
+	return deleted
+}
+
+func waitDeletionServer(ctx context.Context, results <-chan error, phase string) error {
+	result, err := waitDeletionResult(ctx, results, phase)
+	if err != nil {
+		return err
+	}
+	if result != nil {
+		err = fmt.Errorf("%s: %w", phase, result)
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return fmt.Errorf("%s: %w", phase, cause)
+	}
+	return err
+}
+
+func startDeletionDrain(drainCtx context.Context, t *testing.T, server *http.Server, served <-chan error) <-chan error {
+	t.Helper()
+	probeCtx, cancelProbe := context.WithCancel(drainCtx)
+	defer cancelProbe()
+	probe := make(chan error, 1)
+	go func() { probe <- server.Shutdown(probeCtx) }()
+	serveCtx, cancelServe := context.WithTimeout(drainCtx, 10*time.Second)
+	defer cancelServe()
+	require.ErrorIs(t, waitDeletionServer(serveCtx, served, "waiting for Serve to exit during Shutdown"), http.ErrServerClosed)
+
+	// Keep the source paused until Shutdown itself confirms it was still draining.
+	cancelProbe()
+	probeResultCtx, cancelProbeResult := context.WithTimeout(drainCtx, 10*time.Second)
+	defer cancelProbeResult()
+	probeErr, err := waitDeletionResult(probeResultCtx, probe, "waiting for Shutdown while the source is paused")
+	require.NoError(t, err)
+	require.ErrorIs(t, probeErr, context.Canceled, "Shutdown while the source is paused")
+
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- server.Shutdown(drainCtx) }()
+	return shutdown
+}
+
 func TestDeleteSurvivesClientDisconnectAndGracefulShutdown(t *testing.T) {
 	c := durableDatabase(t)
 	activateDeletion(t, c)
 	stores := newDeletionStores()
 	id, key := uuid.NewString(), "disconnect-source"
 	incarnation := acceptDeletable(t, c, id, "disconnect", true, key)
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	stores.hook("source", func(ctx context.Context) error {
-		once.Do(func() { close(entered) })
-		<-release
-		return ctx.Err()
-	})
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	server := &http.Server{Handler: deletionMux(c, "token", fullRoutes(stores)), ReadHeaderTimeout: time.Second}
-	served := make(chan error, 1)
-	go func() { served <- server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close() })
+	fixture, cancelFixture := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancelFixture()
+	entered, release := blockFirstCalls(fixture, stores, "source", 1)
+	defer release()
+	server, address, served := serveDeletionFixture(fixture, t, deletionMux(c, "token", fullRoutes(stores)))
 
-	ctx, disconnect := context.WithCancel(t.Context())
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, "http://"+listener.Addr().String()+"/documents/"+id, http.NoBody)
+	clientCtx, disconnect := context.WithCancel(fixture)
+	defer disconnect()
+	deleted := startDisconnectingDelete(clientCtx, address, "token", id, incarnation)
+	entryCtx, cancelEntry := context.WithTimeout(fixture, 10*time.Second)
+	err := waitDeletionArrivals(entryCtx, entered, deleted, 1, "before disconnecting at the source gate")
+	cancelEntry()
 	require.NoError(t, err)
-	req.Header.Set("X-Service-Token", "token")
-	req.Header.Set("X-Document-Incarnation", incarnation)
-	clientDone := make(chan error, 1)
-	go func() {
-		resp, doErr := http.DefaultClient.Do(req)
-		if doErr == nil {
-			_ = resp.Body.Close()
-		}
-		clientDone <- doErr
-	}()
-	select {
-	case <-entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("cleanup never reached the source store")
-	}
 	disconnect()
-	require.Error(t, <-clientDone)
-	shutdown := make(chan error, 1)
-	go func() {
-		drain, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		shutdown <- server.Shutdown(drain)
-	}()
-	require.Equal(t, 2, receiptOf(t, c, id).step, "the source step is the one in flight")
-	close(release)
-	require.NoError(t, <-shutdown, "the drain waits for the deletion to finish")
+	clientReplyCtx, cancelClientReply := context.WithTimeout(fixture, 10*time.Second)
+	_, err = waitDeletionReply(clientReplyCtx, deleted, "after disconnecting the DELETE client")
+	cancelClientReply()
+	require.ErrorIs(t, err, context.Canceled)
+
+	receiptCtx, cancelReceipt := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelReceipt()
+	require.Equal(t, 2, receiptOfWithContext(receiptCtx, t, c, id).step, "the source step is the one in flight")
+	cancelReceipt()
+	drainCtx, cancelDrain := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancelDrain()
+	shutdown := startDeletionDrain(drainCtx, t, server, served)
+	release()
+	require.NoError(t, waitDeletionServer(drainCtx, shutdown, "waiting for Shutdown after the source call"))
 	require.Equal(t, 1, stores.count("source"))
 	require.Empty(t, documentState(t, c, id))
 	require.True(t, receiptOf(t, c, id).finalized)
-	require.ErrorIs(t, <-served, http.ErrServerClosed)
 }
 
 const duplicateDeletionRequests = 8
