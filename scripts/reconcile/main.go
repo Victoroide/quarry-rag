@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pinecone-io/go-pinecone/v5/pinecone"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -296,7 +297,7 @@ func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Cl
 	if err != nil {
 		return fmt.Errorf("describe index: %w", err)
 	}
-	conn, err := pc.Index(pinecone.NewIndexConnParams{Host: idx.Host})
+	conn, err := pc.Index(pinecone.NewIndexConnParams{Host: idx.Host}, reconcileIndexDialOptions(opts)...)
 	if err != nil {
 		return fmt.Errorf("connect to index: %w", err)
 	}
@@ -312,6 +313,13 @@ func reconcileConfigured(ctx context.Context, cfg *config.Config, pg *pgstore.Cl
 	return pinAndRunMaintenance(ctx, startupCtx, cfg, pg, idx.Host, opts, func() error {
 		return reconcileIndex(ctx, cfg, conn, pg, collectionDocuments, documentIDs, opts)
 	})
+}
+
+func reconcileIndexDialOptions(opts options) []grpc.DialOption {
+	if opts.SupersededUnrevisioned {
+		return []grpc.DialOption{grpc.WithChainUnaryInterceptor(validateSupersededReadNamespace)}
+	}
+	return nil
 }
 
 func reconcileIndex(ctx context.Context, cfg *config.Config, conn *pinecone.IndexConnection, pg *pgstore.Client, collectionDocuments []collectionDocument, documentIDs []string, opts options) error {

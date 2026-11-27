@@ -670,6 +670,13 @@ GRANT EXECUTE ON FUNCTION public.vector_writer_state(), public.document_deletion
 3. Preview with `make reconcile ARGS="-superseded-unrevisioned"`, then use
    `make reconcile ARGS="-superseded-unrevisioned -apply"` to delete exact IDs.
    The cleanup holds the generation lock and leaves the freeze as it found it.
+   `-page` bounds both the number of IDs listed and the number selected per
+   page. A response that exceeds the receive limit triggers smaller exact-ID
+   fetches, which can add billed requests to that page. A failed listing,
+   fetch, or ownership lookup stops the scan and preserves the input cursor
+   in `next_page_token`. Fetching stops on an oversized single record, a
+   quota error, or any other provider error. A smaller page can reduce
+   multi-record response sizes and the amount of work per page.
 4. If deletion or its checkpoint fails, the next apply reports any pending
    batch with its reservation UUID and exact IDs. Keep writers stopped and
    confirm with Pinecone that the request for that reservation can no longer

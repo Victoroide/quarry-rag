@@ -221,37 +221,25 @@ func isDefaultVectorNamespace(namespace string) bool {
 }
 
 func selectSupersededPage(ctx context.Context, index vectorIndex, lookup supersededLookup, listed []*string, seen map[string]bool) ([]string, error) {
-	requested := make(map[string]bool)
 	var ids []string
 	for _, id := range listed {
 		if id == nil || !isBareChunkID(*id) || seen[*id] {
 			continue
 		}
 		seen[*id] = true
-		requested[*id] = true
 		ids = append(ids, *id)
 	}
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	response, err := index.FetchVectors(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("fetch active vector metadata: %w", err)
-	}
-	if response == nil || !isDefaultVectorNamespace(response.Namespace) {
-		return nil, errors.New("invalid vector fetch for the bound default namespace")
-	}
-	for id, vector := range response.Vectors {
-		if !requested[id] || vector == nil || vector.Id != id {
-			return nil, errors.New("vector fetch returned an unexpected record")
-		}
+	owners := make(map[string]string, len(ids))
+	if err := fetchSupersededOwners(ctx, index, ids, owners); err != nil {
+		return nil, err
 	}
 
-	documents := make([]string, 0, len(ids))
-	owners := make(map[string]string, len(ids))
+	documents := make([]string, 0, len(owners))
 	for _, id := range ids {
-		if doc := supersededVectorDocument(id, response.Vectors[id]); doc != "" {
-			owners[id] = doc
+		if doc, known := owners[id]; known {
 			documents = append(documents, doc)
 		}
 	}
