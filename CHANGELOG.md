@@ -19,6 +19,7 @@ Notable changes are grouped by release.
 
 ### Fixed
 
+- The selective Pinecone staging check pins both index descriptions to the public controller.
 - Held deletion release recovers claims left by lost commit replies.
 - Vector reindex validates Pinecone chunk positions before copying vectors or accepting verification evidence.
 - The diagram generator rejects ambiguous placement JSON and names the source file in its error.
