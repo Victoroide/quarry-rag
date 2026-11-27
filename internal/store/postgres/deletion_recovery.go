@@ -308,11 +308,15 @@ func (h heldRelease) release(ctx context.Context, id domain.DocumentID, incarnat
 		return context.DeadlineExceeded
 	}
 	claim := uuid.NewString()
-	receipt, err := h.claimHeldDeletion(ctx, id, incarnation, claim, remaining, ops)
+	receipt, uncertainCommit, err := h.claimHeldDeletion(ctx, id, incarnation, claim, remaining, ops)
 	if err != nil {
+		if uncertainCommit {
+			// The claim transaction has unwound, so cleanup can use the pool again.
+			h.releaseClaim(ctx, id, incarnation, claim)
+		}
 		return err
 	}
-	defer h.releaseClaim(ctx, id, claim)
+	defer h.releaseClaim(ctx, id, incarnation, claim)
 
 	if cleanupErr := h.executeReleaseCleanup(ctx, id, incarnation, claim, receipt, ops); cleanupErr != nil {
 		return cleanupErr
@@ -320,9 +324,9 @@ func (h heldRelease) release(ctx context.Context, id domain.DocumentID, incarnat
 	return h.finalizeRelease(ctx, id, incarnation, claim)
 }
 
-func (h heldRelease) releaseClaim(ctx context.Context, id domain.DocumentID, claim string) {
+func (h heldRelease) releaseClaim(ctx context.Context, id domain.DocumentID, incarnation, claim string) {
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deletionClaimReleaseTimeout)
-	err := clearDeletionClaim(releaseCtx, h.db, id, claim)
+	err := clearHeldDeletionClaim(releaseCtx, h.db, id, incarnation, claim)
 	cancel()
 	if err == nil || h.claimConnConfig == nil {
 		return
@@ -336,53 +340,69 @@ func (h heldRelease) releaseClaim(ctx context.Context, id domain.DocumentID, cla
 	if err != nil {
 		return
 	}
-	defer func() { _ = conn.Close(retryCtx) }()
-	_ = clearDeletionClaim(retryCtx, conn, id, claim)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deletionClaimReleaseTimeout)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
+	_ = clearHeldDeletionClaim(retryCtx, conn, id, incarnation, claim)
 }
 
-func (h heldRelease) claimHeldDeletion(ctx context.Context, id domain.DocumentID, incarnation, claim string, remaining time.Duration, ops domain.DeleteOperations) (releaseReceipt, error) {
+func clearHeldDeletionClaim(ctx context.Context, db deletionExecer, id domain.DocumentID, incarnation, claim string) error {
+	_, err := db.Exec(ctx, `UPDATE document_deletions SET claim=NULL,claim_until=NULL
+		WHERE document_id=$1 AND incarnation=$2 AND claim=$3`, string(id), incarnation, claim)
+	return err
+}
+
+// claimHeldDeletion reports whether COMMIT returned an error that leaves
+// ownership of the claim uncertain.
+func (h heldRelease) claimHeldDeletion(ctx context.Context, id domain.DocumentID, incarnation, claim string, remaining time.Duration, ops domain.DeleteOperations) (releaseReceipt, bool, error) {
 	tx, err := h.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
-		return releaseReceipt{}, err
+		return releaseReceipt{}, false, err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deletionClaimReleaseTimeout)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 	// An unfinished or held exact legacy receipt already blocks admission.
 	// Taking the admission lock here would invert the order used by freeze.
 	if !h.legacyOnly {
 		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ingestAdmissionLock); err != nil {
-			return releaseReceipt{}, err
+			return releaseReceipt{}, false, err
 		}
 	}
 	if absentErr := requireAbsentReleaseDocument(ctx, tx, id); absentErr != nil {
-		return releaseReceipt{}, absentErr
+		return releaseReceipt{}, false, absentErr
 	}
 
 	r, err := scanReleaseReceipt(tx.QueryRow(ctx, `SELECT `+releaseReceiptColumns+`
 		FROM document_deletions WHERE document_id=$1 AND incarnation=$2 FOR UPDATE`, string(id), incarnation))
 	if err != nil {
-		return releaseReceipt{}, err
+		return releaseReceipt{}, false, err
 	}
 	if eligibilityErr := r.checkEligibility(h.legacyOnly); eligibilityErr != nil {
-		return releaseReceipt{}, eligibilityErr
+		return releaseReceipt{}, false, eligibilityErr
 	}
 	if h.legacyOnly && ops.VectorIndex == "" {
-		return releaseReceipt{}, domain.ErrDeletionTargetMismatch
+		return releaseReceipt{}, false, domain.ErrDeletionTargetMismatch
 	}
 	if targetErr := checkReleaseTarget(r, ops); targetErr != nil {
-		return releaseReceipt{}, targetErr
+		return releaseReceipt{}, false, targetErr
 	}
 	tag, err := tx.Exec(ctx, `UPDATE document_deletions SET claim=$3, claim_until=clock_timestamp()+make_interval(secs=>$4)
 		WHERE document_id=$1 AND incarnation=$2`, string(id), incarnation, claim, remaining.Seconds())
 	if err != nil {
-		return releaseReceipt{}, fmt.Errorf("claim held deletion: %w", err)
+		return releaseReceipt{}, false, fmt.Errorf("claim held deletion: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return releaseReceipt{}, domain.ErrDeletionBusy
+		return releaseReceipt{}, false, domain.ErrDeletionBusy
 	}
 	if commitErr := tx.Commit(ctx); commitErr != nil {
-		return releaseReceipt{}, commitErr
+		return releaseReceipt{}, !errors.Is(commitErr, pgx.ErrTxCommitRollback), commitErr
 	}
-	return r, nil
+	return r, false, nil
 }
 
 func requireAbsentReleaseDocument(ctx context.Context, tx pgx.Tx, id domain.DocumentID) error {
