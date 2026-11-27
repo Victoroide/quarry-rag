@@ -404,57 +404,19 @@ func TestHostedFinalCallOutcomesKeepTheIdentityReserved(t *testing.T) {
 	}
 }
 
-type hostedDeleteResult struct {
-	reply httpReply
-	err   error
-}
-
-func startHostedDelete(ctx context.Context, server *httptest.Server, id string) <-chan hostedDeleteResult {
-	results := make(chan hostedDeleteResult, 1)
-	go func() {
-		reply, err := readHTTPReply(ctx, server, http.MethodDelete, "/documents/"+id, "token", nil, "")
-		results <- hostedDeleteResult{reply: reply, err: err}
-	}()
-	return results
-}
-
-func waitForHostedDeleteBarrier(ctx context.Context, entered <-chan struct{}, results <-chan hostedDeleteResult) error {
-	select {
-	case <-entered:
-		return nil
-	case result := <-results:
-		if result.err != nil {
-			return fmt.Errorf("DELETE failed before the final hosted call: %w", result.err)
-		}
-		return fmt.Errorf("DELETE replied before the final hosted call: HTTP %d", result.reply.code)
-	case <-ctx.Done():
-		return fmt.Errorf("waiting for the final hosted call: %w", ctx.Err())
-	}
-}
-
-func waitForHostedDeleteReply(ctx context.Context, results <-chan hostedDeleteResult) (httpReply, error) {
-	select {
-	case result := <-results:
-		if result.err != nil {
-			return httpReply{}, fmt.Errorf("DELETE failed after releasing the final hosted call: %w", result.err)
-		}
-		return result.reply, nil
-	case <-ctx.Done():
-		return httpReply{}, fmt.Errorf("waiting for DELETE after releasing the final hosted call: %w", ctx.Err())
-	}
-}
-
 func blockFinalHostedCall(requestCtx context.Context, stores *deletionStores) (entered <-chan struct{}, unblock func()) {
 	arrival, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
-	stores.hook("vectors", func(context.Context) error {
+	stores.hook("vectors", func(ctx context.Context) error {
 		if calls.Add(1) == 2 {
 			close(arrival)
 			// The handler detaches cleanup from cancellation of the HTTP request.
 			select {
 			case <-release:
 			case <-requestCtx.Done():
-				return requestCtx.Err()
+				return context.Cause(requestCtx)
+			case <-ctx.Done():
+				return context.Cause(ctx)
 			}
 		}
 		return nil
@@ -469,14 +431,17 @@ func TestHostedDeleteReportsEarlyVectorFailure(t *testing.T) {
 	acceptDeletable(t, c, id, "hosted legacy document with an early provider failure", false, "")
 	stores.hook("namespace", failOnce("first hosted call failed"))
 
-	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	requestCtx, cancelRequest := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancelRequest()
 	entered, unblock := blockFinalHostedCall(requestCtx, stores)
 	defer unblock()
 	server := deletionServer(t, c, "token", legacyRoutes(stores))
-	results := startHostedDelete(requestCtx, server, id)
+	results := make(chan deletionHTTPResult, 1)
+	startDeletionRequest(results, "hosted DELETE "+id, func() (httpReply, error) {
+		return readDeleteReply(requestCtx, server, "token", id, "")
+	})
 	entryCtx, cancelEntry := context.WithTimeout(t.Context(), 30*time.Second)
-	err := waitForHostedDeleteBarrier(entryCtx, entered, results)
+	err := waitDeletionArrivals(entryCtx, entered, results, 1, "before the final hosted call")
 	cancelEntry()
 
 	require.ErrorContains(t, err, "before the final hosted call")
@@ -491,19 +456,26 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 	stores := newDeletionStores()
 	id := uuid.NewString()
 	acceptDeletable(t, c, id, "hosted legacy document", false, "")
-	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	requestCtx, cancelRequest := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancelRequest()
 	entered, unblock := blockFinalHostedCall(requestCtx, stores)
 	defer unblock()
 	server := deletionServer(t, c, "token", legacyRoutes(stores))
-	results := startHostedDelete(requestCtx, server, id)
+	results := make(chan deletionHTTPResult, 1)
+	startDeletionRequest(results, "hosted DELETE "+id, func() (httpReply, error) {
+		return readDeleteReply(requestCtx, server, "token", id, "")
+	})
 	entryCtx, cancelEntry := context.WithTimeout(t.Context(), 30*time.Second)
-	entryErr := waitForHostedDeleteBarrier(entryCtx, entered, results)
+	entryErr := waitDeletionArrivals(entryCtx, entered, results, 1, "before the final hosted call")
 	cancelEntry()
 	require.NoError(t, entryErr)
 
 	// The row is retired and the last call has not been sent.
-	require.Empty(t, documentState(t, c, id))
+	stateCtx, cancelState := context.WithTimeout(t.Context(), 10*time.Second)
+	state, err := readDocumentState(stateCtx, c, id)
+	cancelState()
+	require.NoError(t, err)
+	require.Empty(t, state)
 	activationCtx, cancelActivation := context.WithCancel(t.Context())
 	defer cancelActivation()
 	activated := make(chan error, 1)
@@ -534,7 +506,7 @@ func TestLostSessionBeforeTheFinalHostedCallKeepsTheHold(t *testing.T) {
 
 	unblock()
 	replyCtx, cancelReply := context.WithTimeout(t.Context(), 10*time.Second)
-	reply, err := waitForHostedDeleteReply(replyCtx, results)
+	reply, err := waitDeletionReply(replyCtx, results, "after releasing the final hosted call")
 	cancelReply()
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, reply.code, reply.body)

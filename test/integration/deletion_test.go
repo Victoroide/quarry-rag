@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Victoroide/quarry-rag/client"
@@ -33,6 +34,7 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/store/memory"
 	pgstore "github.com/Victoroide/quarry-rag/internal/store/postgres"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -203,11 +205,18 @@ func receiptCount(t *testing.T, c *pgstore.Client) int {
 
 func documentState(t *testing.T, c *pgstore.Client, id string) string {
 	t.Helper()
-	var state string
-	if err := c.Pool.QueryRow(t.Context(), `SELECT status FROM documents WHERE id=$1`, id).Scan(&state); err != nil {
-		return ""
-	}
+	state, err := readDocumentState(t.Context(), c, id)
+	require.NoError(t, err)
 	return state
+}
+
+func readDocumentState(ctx context.Context, c *pgstore.Client, id string) (string, error) {
+	var state string
+	err := c.Pool.QueryRow(ctx, `SELECT status FROM documents WHERE id=$1`, id).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return state, err
 }
 
 // deletionRoutes names the stores behind the document routes; a nil member
@@ -292,11 +301,220 @@ func readHTTPReply(ctx context.Context, server *httptest.Server, method, path, t
 
 func sendDelete(t *testing.T, server *httptest.Server, token, id, incarnation string) httpReply {
 	t.Helper()
+	reply, err := readDeleteReply(t.Context(), server, token, id, incarnation)
+	require.NoError(t, err)
+	return reply
+}
+
+func readDeleteReply(ctx context.Context, server *httptest.Server, token, id, incarnation string) (httpReply, error) {
 	headers := map[string]string{}
 	if incarnation != "" {
 		headers["X-Document-Incarnation"] = incarnation
 	}
-	return doRequest(t, server, http.MethodDelete, "/documents/"+id, token, headers, "")
+	return readHTTPReply(ctx, server, http.MethodDelete, "/documents/"+id, token, headers, "")
+}
+
+type deletionHTTPResult struct {
+	operation string
+	reply     httpReply
+	err       error
+}
+
+// The fixture owns results and reserves one slot per publisher.
+func startDeletionRequest(results chan<- deletionHTTPResult, operation string, run func() (httpReply, error)) {
+	go func() {
+		reply, err := run()
+		results <- deletionHTTPResult{operation: operation, reply: reply, err: err}
+	}()
+}
+
+func waitDeletionReply(ctx context.Context, results <-chan deletionHTTPResult, phase string) (httpReply, error) {
+	select {
+	case result := <-results:
+		if result.err != nil {
+			return httpReply{}, fmt.Errorf("%s failed %s: %w", result.operation, phase, result.err)
+		}
+		if cause := context.Cause(ctx); cause != nil {
+			return httpReply{}, fmt.Errorf("%s exceeded the deadline or was canceled %s: %w", result.operation, phase, cause)
+		}
+		return result.reply, nil
+	case <-ctx.Done():
+		return httpReply{}, fmt.Errorf("waiting for HTTP results %s: %w", phase, context.Cause(ctx))
+	}
+}
+
+func waitDeletionArrivals(ctx context.Context, entered <-chan struct{}, results <-chan deletionHTTPResult, count int, phase string) error {
+	for i := range count {
+		select {
+		case <-entered:
+		case result := <-results:
+			if result.err != nil {
+				return fmt.Errorf("%s failed %s: %w", result.operation, phase, result.err)
+			}
+			return fmt.Errorf("%s replied %s: HTTP %d", result.operation, phase, result.reply.code)
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for HTTP requests %s (%d/%d arrivals): %w", phase, i, count, context.Cause(ctx))
+		}
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return fmt.Errorf("waiting for HTTP requests %s: %w", phase, cause)
+	}
+	return nil
+}
+
+func TestDeletionHTTPWaits(t *testing.T) {
+	const operation = "DELETE doc"
+	const entryPhase = "before the provider gate"
+	const replyPhase = "after releasing the provider gate"
+
+	t.Run("read_error_before_gate", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "short")
+			_ = http.NewResponseController(w).Flush()
+		}))
+		defer server.Close()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		results := make(chan deletionHTTPResult, 1)
+		startDeletionRequest(results, operation, func() (httpReply, error) {
+			return readDeleteReply(ctx, server, "token", "doc", "")
+		})
+		err := waitDeletionArrivals(ctx, nil, results, 1, entryPhase)
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+		require.ErrorContains(t, err, "read HTTP response body")
+		require.ErrorContains(t, err, operation)
+		require.ErrorContains(t, err, entryPhase)
+	})
+
+	t.Run("close_error_after_release", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		server := httptest.NewServer(http.NotFoundHandler())
+		defer server.Close()
+		entered, release := make(chan struct{}), make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		defer unblock()
+		cause := errors.New("synthetic body close failure")
+		body := &deleteReplyBody{Reader: strings.NewReader("response"), closeErr: cause}
+		server.Client().Transport = deleteRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			close(entered)
+			select {
+			case <-release:
+				return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
+			case <-req.Context().Done():
+				return nil, context.Cause(req.Context())
+			}
+		})
+		results := make(chan deletionHTTPResult, 1)
+		startDeletionRequest(results, operation, func() (httpReply, error) {
+			return readDeleteReply(ctx, server, "token", "doc", "")
+		})
+		require.NoError(t, waitDeletionArrivals(ctx, entered, results, 1, entryPhase))
+		unblock()
+		_, err := waitDeletionReply(ctx, results, replyPhase)
+		require.ErrorIs(t, err, cause)
+		require.ErrorContains(t, err, "close HTTP response body")
+		require.ErrorContains(t, err, operation)
+		require.ErrorContains(t, err, replyPhase)
+		require.True(t, body.closed)
+	})
+
+	t.Run("early_status", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		results := make(chan deletionHTTPResult, 1)
+		startDeletionRequest(results, operation, func() (httpReply, error) {
+			return httpReply{code: http.StatusInternalServerError}, nil
+		})
+		err := waitDeletionArrivals(ctx, nil, results, 1, entryPhase)
+		require.ErrorContains(t, err, "HTTP 500")
+		require.ErrorContains(t, err, operation)
+		require.ErrorContains(t, err, entryPhase)
+	})
+
+	for _, tc := range []struct {
+		name  string
+		phase string
+		wait  func(context.Context) error
+	}{
+		{"entry_deadline", entryPhase, func(ctx context.Context) error {
+			entered := make(chan struct{}, 1)
+			entered <- struct{}{}
+			return waitDeletionArrivals(ctx, entered, nil, 2, entryPhase)
+		}},
+		{"reply_deadline", replyPhase, func(ctx context.Context) error {
+			_, err := waitDeletionReply(ctx, nil, replyPhase)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			watchdog, stop := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stop()
+			ctx, cancel := context.WithTimeout(watchdog, 10*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- tc.wait(ctx) }()
+			select {
+			case err := <-done:
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				require.ErrorContains(t, err, tc.phase)
+			case <-watchdog.Done():
+				t.Fatal("phase wait did not honor its own deadline")
+			}
+		})
+	}
+
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cause := errors.New("fixture stopped")
+		cancel(cause)
+		require.ErrorIs(t, waitDeletionArrivals(ctx, nil, nil, 1, entryPhase), cause)
+		_, err := waitDeletionReply(ctx, nil, replyPhase)
+		require.ErrorIs(t, err, cause)
+	})
+
+	t.Run("full_batch_after_receiver_exit", func(t *testing.T) {
+		checkAbandonedDeletionBatch(t, 2)
+	})
+
+	t.Run("concurrent_publishers", func(t *testing.T) {
+		const requests = 6
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		results := make(chan deletionHTTPResult, requests)
+		for i := range requests {
+			startDeletionRequest(results, fmt.Sprintf("request %d", i), func() (httpReply, error) {
+				return httpReply{code: http.StatusOK, body: fmt.Sprint(i)}, nil
+			})
+		}
+		bodies := make([]string, 0, requests)
+		for range requests {
+			reply, err := waitDeletionReply(ctx, results, "waiting for concurrent HTTP requests")
+			require.NoError(t, err)
+			bodies = append(bodies, reply.body)
+		}
+		require.ElementsMatch(t, []string{"0", "1", "2", "3", "4", "5"}, bodies)
+	})
+}
+
+func checkAbandonedDeletionBatch(t *testing.T, requests int) {
+	t.Helper()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		results := make(chan deletionHTTPResult, requests)
+		_, err := waitDeletionReply(ctx, results, "waiting for abandoned batch")
+		require.ErrorIs(t, err, context.Canceled)
+		for range requests {
+			startDeletionRequest(results, "abandoned DELETE", func() (httpReply, error) {
+				return httpReply{}, context.Canceled
+			})
+		}
+		synctest.Wait()
+		require.Len(t, results, requests, "every result fit before any receive")
+	})
 }
 
 func TestHTTPDeleteRetryCannotRemoveReplacement(t *testing.T) {
