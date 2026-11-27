@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const module = "example.test/jsonmod"
@@ -38,6 +40,18 @@ func report(t *testing.T, input string, args ...string) (code int, stdout, stder
 	var out, errOut bytes.Buffer
 	code = execute(args, strings.NewReader(input), &out, &errOut)
 	return code, out.String(), errOut.String()
+}
+
+func execute(args []string, in io.Reader, stdout, stderr io.Writer) int {
+	return executeWithSpool(args, in, stdout, stderr, createDiagnosticSpool)
+}
+
+func executeWithSpool(args []string, in io.Reader, stdout, stderr io.Writer, factory spoolFactory) int {
+	o, ok := parseOptions(args, stderr)
+	if !ok {
+		return 2
+	}
+	return runReport(o, in, stdout, stderr, factory)
 }
 
 // section returns the part of a summary from the heading title up to the
@@ -514,4 +528,82 @@ func TestInterruptedPackageDiagnostics(t *testing.T) {
 			t.Errorf("exit = %d, stderr = %q, want exit 1 and %q", code, stderr, want)
 		}
 	})
+}
+
+func TestDiagnosticSpillMatchesLegacyReport(t *testing.T) {
+	fixtures, err := fs.Glob(os.DirFS("testdata"), "*.json")
+	if err != nil || len(fixtures) == 0 {
+		t.Fatalf("fixtures = %v, %v", fixtures, err)
+	}
+	for _, name := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			input := fixture(t, name)
+			wantCode, wantOut, wantErr := report(t, input)
+			gotCode, gotOut, gotErr := report(t, input, "-diagnostic-spill")
+			if gotCode != wantCode || gotOut != wantOut || gotErr != wantErr {
+				t.Fatalf("spilled exit %d, want %d\nstdout:\n%s\nwant:\n%s\nstderr:\n%s\nwant:\n%s",
+					gotCode, wantCode, gotOut, wantOut, gotErr, wantErr)
+			}
+		})
+	}
+}
+
+func TestDiagnosticSpillKeepsNewestUnfinishedTail(t *testing.T) {
+	const pkg = "example.test/bounded"
+	const root = "BenchmarkTree"
+	const parent = root + "/group"
+	const leaf = parent + "/pending"
+	events := []event{
+		{Action: "run", Package: pkg, Test: root},
+		{Action: "run", Package: pkg, Test: parent},
+		{Action: "run", Package: pkg, Test: leaf},
+	}
+	for range 126 {
+		events = append(events, event{Action: "run", Package: pkg, Test: "TestRepeat"})
+	}
+	raw := strings.Repeat("界", maxIncompleteBytes/2) + "stack tail!\n"
+	events = append(events,
+		event{Action: "output", Package: pkg, Test: leaf, Output: "preceding output\n"},
+		event{Action: "output", Package: pkg, Test: leaf, Output: raw},
+	)
+	input := stream(t, events...)
+	wantCode, wantOut, wantErr := report(t, input)
+	code, stdout, stderr := report(t, input, "-diagnostic-spill")
+	if code != wantCode || stdout != wantOut || stderr != wantErr {
+		t.Fatalf("spill changed unfinished report: exit %d, stdout bytes %d, stderr bytes %d", code, len(stdout), len(stderr))
+	}
+	details := strings.TrimPrefix(stderr, "INCOMPLETE\t"+pkg+"\n")
+	details = strings.TrimSuffix(details, "testreport: "+pkg+" has no result\n")
+	if len(details) > maxIncompleteBytes || !utf8.ValidString(details) {
+		t.Fatalf("unfinished details have %d bytes, valid UTF-8 = %t", len(details), utf8.ValidString(details))
+	}
+	requireContains(t, "details", details, "--- UNRESOLVED: "+parent+"\n", "stack tail!\n", "bytes, 1 tests\n")
+	if count := strings.Count(details, "--- INCOMPLETE: ") + strings.Count(details, "--- UNRESOLVED: "); count != 128 {
+		t.Fatalf("unfinished headings = %d", count)
+	}
+}
+
+func TestDiagnosticSpillInterleavesBuildsAndRepeatedTests(t *testing.T) {
+	input := stream(t,
+		event{Action: "output", Package: "first", Test: "TestRepeat", Output: "ré"},
+		event{Action: "build-output", ImportPath: "shared [shared.test]", Output: "comp"},
+		event{Action: "output", Package: "second", Test: "TestA", Output: "other package\n"},
+		event{Action: "output", Package: "first", Test: "TestRepeat"},
+		event{Action: "output", Package: "first", Test: "TestRepeat", Output: "sultat\n"},
+		event{Action: "fail", Package: "first", Test: "TestRepeat"},
+		event{Action: "run", Package: "first", Test: "TestRepeat"},
+		event{Action: "output", Package: "first", Test: "TestRepeat", Output: "second occurrence\n"},
+		event{Action: "build-fail", ImportPath: "shared [shared.test]"},
+		event{Action: "output", Package: "first", Output: "package tail\n"},
+		event{Action: "fail", Package: "first"},
+		event{Action: "fail", Package: "consumer", FailedBuild: "shared [shared.test]"},
+		event{Action: "build-output", ImportPath: "shared [shared.test]", Output: "iler late\n"},
+		event{Action: "fail", Package: "consumer2", FailedBuild: "shared [shared.test]"},
+	)
+	wantCode, wantOut, wantErr := report(t, input)
+	code, stdout, stderr := report(t, input, "-diagnostic-spill")
+	if code != wantCode || stdout != wantOut || stderr != wantErr {
+		t.Fatalf("spill changed interleaved report: exit %d\n%s\nwant:\n%s", code, stderr, wantErr)
+	}
+	requireOnce(t, stderr, "résultat\n", "second occurrence\n", "other package\n", "package tail\n", "comp\n", "iler late\n")
 }

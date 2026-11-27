@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"math"
+	"strconv"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestAmbiguousBenchmarkDiagnostics(t *testing.T) {
 	const pkg = "example.com/benchmark-diagnostics"
@@ -85,5 +90,30 @@ func TestOverlappingBenchmarkPaths(t *testing.T) {
 			requireOnce(t, stderr, result+"\n")
 			requireAbsent(t, stderr, "--- INCOMPLETE:", "--- UNRESOLVED:", "diagnostic", "ns/op")
 		})
+	}
+}
+
+func TestDiagnosticSpillClassifiesSplitBenchmarkMeasurements(t *testing.T) {
+	const name = "BenchmarkÉtage"
+	tests := []string{
+		name + "-12  \t 120  \t" + strconv.FormatFloat(math.MaxFloat64, 'f', 0, 64) + " unités\t-0.5 ns/op\r\n",
+		name + "\t1\n",
+		name + "\t1\tinvalid ns/op\n",
+		name + "-1\t1 2\n",
+		name + "\t1\t1 unit extra\n",
+		name + "\t1\t1\u2003unit\rend\n",
+	}
+	for _, line := range tests {
+		for split := 1; split < len(line); split++ {
+			if !utf8.RuneStart(line[split]) {
+				continue
+			}
+			state := benchmarkMeasurement{}
+			state.consume(name, line[:split])
+			state.consume(name, line[split:len(line)-1])
+			if got, want := state.complete(), isBenchmarkMeasurement(name, line); got != want {
+				t.Fatalf("split %d in %q: completed %t, want %t", split, line, got, want)
+			}
+		}
 	}
 }

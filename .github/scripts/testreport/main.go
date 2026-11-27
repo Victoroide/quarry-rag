@@ -13,37 +13,75 @@ import (
 	"flag"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
-	os.Exit(execute(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	o, ok := parseOptions(os.Args[1:], os.Stderr)
+	if !ok {
+		os.Exit(2)
+	}
+	if o.spill {
+		// A closed standard stream must reach the writer and spool cleanup.
+		signal.Ignore(syscall.SIGPIPE)
+	}
+	os.Exit(runReport(o, os.Stdin, os.Stdout, os.Stderr, createDiagnosticSpool))
 }
 
-func execute(args []string, in io.Reader, stdout, stderr io.Writer) int {
+func parseOptions(args []string, stderr io.Writer) (options, bool) {
 	flags := flag.NewFlagSet("testreport", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	o := options{}
+	flags.BoolVar(&o.spill, "diagnostic-spill", false, "bound JSONL input and spool test diagnostics to temporary storage")
 	flags.IntVar(&o.slowest, "slowest", 10, "number of slowest tests to list")
 	flags.StringVar(&o.moduleCache, "module-cache", "", "state of the module cache, shown in the summary")
 	flags.StringVar(&o.buildCache, "build-cache", "", "state of the build cache, shown in the summary")
 	if err := flags.Parse(args); err != nil {
-		return 2
+		return options{}, false
+	}
+	if o.spill && o.slowest < 0 {
+		printf(stderr, "testreport: slowest must be nonnegative\n")
+		return options{}, false
 	}
 	o.expectedList = flags.Args()
+	return o, true
+}
 
+func runReport(o options, in io.Reader, stdout, stderr io.Writer, factory spoolFactory) (status int) {
 	r := newRun()
 	diagnostics := &diagnosticWriter{Writer: stderr}
-	err := r.decode(in, func(p *packageResult) {
+	decode := r.decode
+	if o.spill {
+		summary := &stickyWriter{Writer: stdout}
+		delivery := &stickyWriter{Writer: stderr}
+		stdout, diagnostics.Writer = summary, delivery
+		r.store = newDiagnosticStore(factory)
+		defer func() {
+			r.store.close()
+			if r.store.failure != "" {
+				diagnostics.startLine()
+				printf(diagnostics, "testreport: diagnostic storage: %s\n", r.store.failure)
+				status = 1
+			}
+			if summary.err != nil || delivery.err != nil {
+				status = 1
+			}
+		}()
+		r.names.names = make(map[string]string)
+		decode = r.decodeSpill
+	}
+	err := decode(in, func(p *packageResult) {
 		if !progress(diagnostics, p) {
 			return
 		}
 		if p.failedBuild == "" {
-			printf(diagnostics, "%s", r.failureDetails(p))
+			r.writeFailureDetails(diagnostics, p)
 			return
 		}
 		b := r.builds[p.failedBuild]
 		if b.failed {
-			b.writeRemaining(diagnostics)
+			r.writeOutput(diagnostics, &b.output, &b.cursor)
 		}
 	})
 	r.resolveBuildFailures()
@@ -88,6 +126,11 @@ func (w *diagnosticWriter) WriteString(s string) (int, error) {
 	return n, err
 }
 
+func (w *diagnosticWriter) failed() bool {
+	delivery, ok := w.Writer.(*stickyWriter)
+	return ok && delivery.err != nil
+}
+
 func (w *diagnosticWriter) startLine() {
 	if w.partialLine {
 		_, _ = w.WriteString("\n")
@@ -121,7 +164,8 @@ func (r *run) writeFallbacks(w *diagnosticWriter) {
 			progress(w, p)
 		case !p.didNotBuild():
 			w.startLine()
-			printf(w, "INCOMPLETE\t%s\n%s", p.name, r.failureDetails(p))
+			printf(w, "INCOMPLETE\t%s\n", p.name)
+			r.writeFailureDetails(w, p)
 		}
 	}
 	for _, id := range r.buildOrder {
@@ -131,18 +175,11 @@ func (r *run) writeFallbacks(w *diagnosticWriter) {
 		if b.hasPendingOutput() || r.independentBuilds[id] || standaloneVariant {
 			w.startLine()
 			printf(w, "BUILD FAIL\t%s\n", id)
-			b.writeRemaining(w)
+			r.writeOutput(w, &b.output, &b.cursor)
 		}
 	}
 }
 
 func (b *buildResult) hasPendingOutput() bool {
-	return (b.failed || b.referenced) && b.nextFragment < len(b.fragments)
-}
-
-func (b *buildResult) writeRemaining(w io.Writer) {
-	for _, fragment := range b.fragments[b.nextFragment:] {
-		_, _ = io.WriteString(w, fragment)
-	}
-	b.nextFragment = len(b.fragments)
+	return (b.failed || b.referenced) && b.cursor.bytes < b.output.bytes()
 }
