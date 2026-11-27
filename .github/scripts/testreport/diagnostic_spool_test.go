@@ -514,3 +514,46 @@ func TestDiagnosticSpillUnfinishedReadFailureKeepsAvailableEvidence(t *testing.T
 	)
 	requireAbsent(t, stderr.String(), missing)
 }
+
+func TestDiagnosticSpillChunkBoundariesOnReadFailure(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("corrupt=%t", corrupt), func(t *testing.T) {
+			f, err := os.CreateTemp(t.TempDir(), "spool-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			const head = spoolHeaderSize + 1
+			probe := &spoolProbe{spoolFile: f}
+			s := newDiagnosticStore(func() (spoolFile, func() error, error) {
+				return probe, func() error { return os.Remove(f.Name()) }, nil
+			})
+			defer s.close()
+			prefix := strings.Repeat("x", len(s.buffer)-1)
+			var ref diagnosticRef
+			s.append(&ref, prefix+"界unfinished\n")
+			if corrupt {
+				probe.read = func(p *spoolProbe, data []byte, at int64) (int, error) {
+					n, readErr := p.spoolFile.ReadAt(data, at)
+					if at == head && n == len(s.buffer) {
+						for i := n - utf8.UTFMax; i < n; i++ {
+							data[i] = 0x80
+						}
+					}
+					return n, readErr
+				}
+			} else {
+				probe.read = shortReadAt(int64(head+len(prefix)), 1)
+			}
+			var out bytes.Buffer
+			s.replay(&diagnosticWriter{Writer: &out}, &ref, &diagnosticCursor{})
+			wantText, wantFailure, missing := prefix+"\n", "read failed", len("界unfinished\n")
+			if corrupt {
+				wantText, wantFailure, missing = "", "read invalid payload", len(prefix)+missing
+			}
+			want := wantText + fmt.Sprintf("--- DIAGNOSTIC OUTPUT OMITTED: %d bytes\n", missing)
+			if s.failure != wantFailure || !bytes.Equal(out.Bytes(), []byte(want)) || !utf8.Valid(out.Bytes()) {
+				t.Fatalf("failure %q, output size %d, valid UTF-8 = %t", s.failure, out.Len(), utf8.Valid(out.Bytes()))
+			}
+		})
+	}
+}
