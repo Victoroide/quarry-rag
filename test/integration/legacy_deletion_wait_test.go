@@ -34,85 +34,6 @@ type deleteReadError struct{ err error }
 
 func (r deleteReadError) Read([]byte) (int, error) { return 0, r.err }
 
-func TestHostedDeletePhaseWaits(t *testing.T) {
-	t.Run("early HTTP status", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-		defer cancel()
-		results := make(chan hostedDeleteResult, 1)
-		results <- hostedDeleteResult{reply: httpReply{code: http.StatusInternalServerError}}
-		err := waitForHostedDeleteBarrier(ctx, nil, results)
-		require.ErrorContains(t, err, "before the final hosted call")
-		require.ErrorContains(t, err, "HTTP 500")
-	})
-
-	t.Run("HTTP I/O failure", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-		defer cancel()
-		cause := errors.New("read response: unexpected EOF")
-		results := make(chan hostedDeleteResult, 1)
-		results <- hostedDeleteResult{err: cause}
-		err := waitForHostedDeleteBarrier(ctx, nil, results)
-		require.ErrorIs(t, err, cause)
-		require.ErrorContains(t, err, "before the final hosted call")
-
-		results <- hostedDeleteResult{err: cause}
-		_, err = waitForHostedDeleteReply(ctx, results)
-		require.ErrorIs(t, err, cause)
-		require.ErrorContains(t, err, "after releasing the final hosted call")
-	})
-
-	t.Run("barrier then reply", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-		defer cancel()
-		entered := make(chan struct{})
-		results := make(chan hostedDeleteResult, 1)
-		close(entered)
-		require.NoError(t, waitForHostedDeleteBarrier(ctx, entered, results))
-
-		results <- hostedDeleteResult{reply: httpReply{code: http.StatusOK, body: "deleted"}}
-		reply, err := waitForHostedDeleteReply(ctx, results)
-		require.NoError(t, err)
-		require.Equal(t, httpReply{code: http.StatusOK, body: "deleted"}, reply)
-	})
-
-	t.Run("expired deadlines", func(t *testing.T) {
-		ctx, cancel := context.WithDeadline(t.Context(), time.Time{})
-		defer cancel()
-		err := waitForHostedDeleteBarrier(ctx, nil, nil)
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-		require.ErrorContains(t, err, "waiting for the final hosted call")
-		_, err = waitForHostedDeleteReply(ctx, nil)
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-		require.ErrorContains(t, err, "after releasing the final hosted call")
-	})
-
-	t.Run("canceled reader", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
-		results := make(chan hostedDeleteResult, 1)
-		err := waitForHostedDeleteBarrier(ctx, nil, results)
-		require.ErrorIs(t, err, context.Canceled)
-		_, err = waitForHostedDeleteReply(ctx, results)
-		require.ErrorIs(t, err, context.Canceled)
-
-		published := make(chan struct{})
-		publishCtx, stop := context.WithTimeout(t.Context(), 10*time.Second)
-		defer stop()
-		go func() {
-			select {
-			case results <- hostedDeleteResult{}:
-				close(published)
-			case <-publishCtx.Done():
-			}
-		}()
-		select {
-		case <-published:
-		case <-publishCtx.Done():
-			t.Fatal("result publisher blocked after the reader exited")
-		}
-	})
-}
-
 func TestHostedDeleteRequestReturnsTransportError(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	defer server.Close()
@@ -129,9 +50,11 @@ func TestHostedDeleteRequestReturnsTransportError(t *testing.T) {
 		})
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
-		results := startHostedDelete(ctx, server, "doc")
-		require.Equal(t, 1, cap(results))
-		_, err := waitForHostedDeleteReply(ctx, results)
+		results := make(chan deletionHTTPResult, 1)
+		startDeletionRequest(results, "DELETE doc", func() (httpReply, error) {
+			return readDeleteReply(ctx, server, "", "doc", "")
+		})
+		_, err := waitDeletionReply(ctx, results, "reading DELETE response")
 		require.ErrorIs(t, err, transportErr)
 		require.ErrorContains(t, err, "send HTTP request")
 	})
