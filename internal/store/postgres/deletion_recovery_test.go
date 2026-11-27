@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +13,8 @@ import (
 	"github.com/Victoroide/quarry-rag/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -872,23 +876,452 @@ func testLegacyHostedReleaseSourceRetry(t *testing.T, c *Client, finalizationSQL
 	require.Equal(t, []string{doc.key}, keys)
 }
 
-type lostReleaseReplyDB struct{ heldReleaseDatabase }
-
-func (db lostReleaseReplyDB) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
-	tx, err := db.heldReleaseDatabase.BeginTx(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	return lostReleaseReplyTx{Tx: tx}, nil
+type heldClaimTestDB struct {
+	heldReleaseDatabase
+	begin func(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	exec  func(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
-type lostReleaseReplyTx struct{ pgx.Tx }
-
-func (tx lostReleaseReplyTx) Commit(ctx context.Context) error {
-	if err := tx.Tx.Commit(ctx); err != nil {
-		return err
+func (db heldClaimTestDB) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+	if db.begin != nil {
+		return db.begin(ctx, opts)
 	}
-	return errors.New("final release reply lost")
+	return db.heldReleaseDatabase.BeginTx(ctx, opts)
+}
+
+func (db heldClaimTestDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if db.exec != nil {
+		return db.exec(ctx, sql, args...)
+	}
+	return db.heldReleaseDatabase.Exec(ctx, sql, args...)
+}
+
+type heldClaimTestTx struct {
+	pgx.Tx
+	commit func(context.Context, pgx.Tx) error
+	exec   func(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func (tx heldClaimTestTx) Commit(ctx context.Context) error { return tx.commit(ctx, tx.Tx) }
+
+func (tx heldClaimTestTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if tx.exec != nil {
+		return tx.exec(ctx, sql, args...)
+	}
+	return tx.Tx.Exec(ctx, sql, args...)
+}
+
+func interceptFirstHeldReleaseCommit(h heldRelease, commit func(context.Context, pgx.Tx) error) heldRelease {
+	db := h.db
+	first := true
+	h.db = heldClaimTestDB{heldReleaseDatabase: db, begin: func(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+		tx, err := db.BeginTx(ctx, opts)
+		if err != nil || !first {
+			return tx, err
+		}
+		first = false
+		return heldClaimTestTx{Tx: tx, commit: commit}, nil
+	}}
+	return h
+}
+
+type heldClaimContextKey struct{}
+
+func TestHeldClaimCleanupUsesBoundedDetachedContexts(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		dedicated, fail, wantConnect bool
+	}{
+		{name: "pooled failure", fail: true},
+		{name: "dedicated failure", dedicated: true, fail: true, wantConnect: true},
+		{name: "dedicated zero rows", dedicated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := context.WithValue(t.Context(), heldClaimContextKey{}, "held claim")
+			ctx, cancel := context.WithDeadline(parent, time.Now().Add(-time.Second))
+			defer cancel()
+			require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+
+			checkContext := func(ctx context.Context) time.Time {
+				t.Helper()
+				require.NoError(t, ctx.Err())
+				require.Equal(t, "held claim", ctx.Value(heldClaimContextKey{}))
+				deadline, ok := ctx.Deadline()
+				require.True(t, ok)
+				require.Positive(t, time.Until(deadline))
+				require.LessOrEqual(t, time.Until(deadline), deletionClaimReleaseTimeout)
+				return deadline
+			}
+
+			id, incarnation, claim := domain.DocumentID(uuid.NewString()), uuid.NewString(), uuid.NewString()
+			var firstCtx context.Context
+			var firstDeadline time.Time
+			clears, connects := 0, 0
+			failed := errors.New("claim cleanup unavailable")
+			h := heldRelease{db: heldClaimTestDB{exec: func(clearCtx context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+				clears++
+				firstCtx = clearCtx
+				firstDeadline = checkContext(clearCtx)
+				require.Equal(t, []any{string(id), incarnation, claim}, args)
+				if tc.fail {
+					return pgconn.CommandTag{}, failed
+				}
+				return pgconn.NewCommandTag("UPDATE 0"), nil
+			}}}
+			if tc.dedicated {
+				config, err := pgx.ParseConfig("host=127.0.0.1 sslmode=disable")
+				require.NoError(t, err)
+				config.ConnectTimeout = 0
+				config.DialFunc = func(connectCtx context.Context, _, _ string) (net.Conn, error) {
+					connects++
+					require.ErrorIs(t, firstCtx.Err(), context.Canceled)
+					require.True(t, checkContext(connectCtx).After(firstDeadline))
+					return nil, failed
+				}
+				h.claimConnConfig = config
+			}
+
+			h.releaseClaim(ctx, id, incarnation, claim)
+			require.Equal(t, 1, clears)
+			require.Equal(t, tc.wantConnect, connects == 1)
+			require.LessOrEqual(t, connects, 1)
+			require.ErrorIs(t, firstCtx.Err(), context.Canceled)
+		})
+	}
+}
+
+func pendingHeldSource(t *testing.T, owner *Client) (id domain.DocumentID, incarnation, key string) {
+	t.Helper()
+	id, incarnation, key = domain.DocumentID(uuid.NewString()), uuid.NewString(), "source/"+uuid.NewString()
+	_, err := owner.Pool.Exec(t.Context(), `INSERT INTO document_deletions
+		(document_id, incarnation, kind, vector_mode, vector_index, source_bucket, source_key, step, held)
+		VALUES ($1,$2,'legacy_reservation','legacy','retired-index','originals',$3,$4,TRUE)`,
+		string(id), incarnation, key, stepSource)
+	require.NoError(t, err)
+	return id, incarnation, key
+}
+
+type heldClaimRow struct {
+	full, payload string
+	claim         *string
+	until         *time.Time
+}
+
+func snapshotHeldClaim(ctx context.Context, t *testing.T, owner *Client, id domain.DocumentID) heldClaimRow {
+	t.Helper()
+	var row heldClaimRow
+	require.NoError(t, owner.Pool.QueryRow(ctx, `SELECT to_jsonb(r)::text,
+		(to_jsonb(r)-'claim'-'claim_until')::text, claim::text, claim_until
+		FROM document_deletions r WHERE document_id=$1`, string(id)).Scan(&row.full, &row.payload, &row.claim, &row.until))
+	return row
+}
+
+func dedicatedHeldClaim(t *testing.T, c *Client) (heldRelease, *pgx.Conn, func()) {
+	t.Helper()
+	guard, closeGuard, err := c.AcquireHeldRecoveryWriter(t.Context())
+	require.NoError(t, err)
+	closeGuard = sync.OnceFunc(closeGuard)
+	t.Cleanup(closeGuard)
+	config := c.Pool.Config().ConnConfig
+	conn, err := pgx.ConnectConfig(t.Context(), config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close(context.Background())) })
+	return heldRelease{db: conn, outcome: guard, legacyOnly: true, claimConnConfig: config}, conn, closeGuard
+}
+
+func heldSourceOps(t *testing.T, keys *[]string) domain.DeleteOperations {
+	t.Helper()
+	vector := func(context.Context, string) error {
+		t.Error("held source release called a vector provider")
+		return nil
+	}
+	return domain.DeleteOperations{
+		VectorIndex: "retired-index", SourceBucket: "originals",
+		LegacyNamespace: vector, LegacyVectors: vector,
+		RevisionVectors: func(ctx context.Context, id, _ string) error { return vector(ctx, id) },
+		Source: func(_ context.Context, key string) error {
+			*keys = append(*keys, key)
+			return nil
+		},
+	}
+}
+
+func TestHeldReleaseAbandonsUncertainClaimCommit(t *testing.T) {
+	owner, observer := sessionTestClientWithPool(t, 1)
+	serving, _ := publishedServingClient(t, owner)
+	widePool, err := NewClient(t.Context(), owner.Pool.Config().ConnString(), func(cfg *pgxpool.Config) { cfg.MaxConns = 2 })
+	require.NoError(t, err)
+	t.Cleanup(widePool.Pool.Close)
+	require.EqualValues(t, 1, serving.Pool.Config().MaxConns)
+
+	for _, tc := range []struct {
+		name                         string
+		client                       *Client
+		dedicated, cancel, closeConn bool
+		rollback, leaveOpen          bool
+	}{
+		{name: "pool commit", client: widePool},
+		{name: "pool rollback", client: widePool, rollback: true},
+		{name: "single pooled connection commit", client: serving},
+		{name: "single pooled connection rollback", client: serving, rollback: true},
+		{name: "single pooled connection unwind before clear", client: serving, leaveOpen: true, cancel: true},
+		{name: "dedicated commit", client: owner, dedicated: true},
+		{name: "dedicated rollback", client: owner, dedicated: true, rollback: true},
+		{name: "canceled with lost dedicated connection", client: owner, dedicated: true, cancel: true, closeConn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, incarnation, key := pendingHeldSource(t, owner)
+			before := snapshotHeldClaim(t.Context(), t, owner, id)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var keys []string
+			ops := heldSourceOps(t, &keys)
+			retry := tc.client.ReleaseHeldDeletion
+			h := heldRelease{db: tc.client.Pool, outcome: tc.client.Pool}
+			var conn *pgx.Conn
+			done := func() {}
+			if tc.dedicated {
+				retry = tc.client.ReleaseLegacyHostedHold
+				h, conn, done = dedicatedHeldClaim(t, tc.client)
+			}
+			lostReply := errors.New("claim commit reply lost")
+			commits := 0
+			h = interceptFirstHeldReleaseCommit(h, func(commitCtx context.Context, tx pgx.Tx) error {
+				commits++
+				switch {
+				case tc.rollback:
+					require.NoError(t, tx.Rollback(commitCtx))
+				case !tc.leaveOpen:
+					require.NoError(t, tx.Commit(commitCtx))
+					var active bool
+					require.NoError(t, observer.QueryRow(commitCtx, `SELECT claim IS NOT NULL AND claim_until>clock_timestamp()
+						FROM document_deletions WHERE document_id=$1`, string(id)).Scan(&active))
+					require.True(t, active)
+				}
+				if tc.cancel {
+					cancel()
+				}
+				if tc.closeConn {
+					closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(commitCtx), deletionClaimReleaseTimeout)
+					defer cancelClose()
+					require.NoError(t, conn.Close(closeCtx))
+				}
+				return lostReply
+			})
+			clears := 0
+			db := h.db
+			h.db = heldClaimTestDB{heldReleaseDatabase: db, exec: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				clears++
+				return db.Exec(ctx, sql, args...)
+			}}
+
+			require.Same(t, lostReply, h.release(ctx, id, incarnation, ops))
+			done()
+			require.Equal(t, 1, commits)
+			require.Equal(t, 1, clears)
+			require.Empty(t, keys)
+			require.Equal(t, before, snapshotHeldClaim(t.Context(), t, owner, id))
+			require.NoError(t, retry(t.Context(), id, incarnation, ops))
+			require.Equal(t, []string{key}, keys)
+			released := readReceipt(t, owner, id)
+			require.True(t, released.finalized)
+			require.False(t, released.held)
+			require.Equal(t, stepDone, released.step)
+			require.Nil(t, released.source)
+			require.Nil(t, released.claim)
+		})
+	}
+}
+
+func TestHeldReleaseSkipsClaimCleanupBeforeUncertainCommit(t *testing.T) {
+	c := jobsDatabase(t)
+	for _, tc := range []struct {
+		name, fault string
+		want        error
+	}{
+		{name: "begin", fault: "begin"},
+		{name: "receipt selection", fault: "selection", want: domain.ErrDeletionPreconditionFailed},
+		{name: "ineligible active claim", fault: "eligibility", want: domain.ErrDeletionBusy},
+		{name: "target mismatch", fault: "target", want: domain.ErrDeletionTargetMismatch},
+		{name: "update", fault: "update"},
+		{name: "zero updated rows", fault: "row count", want: domain.ErrDeletionBusy},
+		{name: "definite rollback", fault: "commit", want: pgx.ErrTxCommitRollback},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, incarnation, _ := pendingHeldSource(t, c)
+			if tc.fault == "eligibility" {
+				_, err := c.Pool.Exec(t.Context(), `UPDATE document_deletions SET claim=$2,claim_until=clock_timestamp()+interval '1 minute'
+					WHERE document_id=$1`, string(id), uuid.NewString())
+				require.NoError(t, err)
+			}
+			before := snapshotHeldClaim(t.Context(), t, c, id)
+			failure := errors.New("claim statement failed")
+			var keys []string
+			ops := heldSourceOps(t, &keys)
+			if tc.fault == "selection" {
+				incarnation = uuid.NewString()
+			}
+			if tc.fault == "target" {
+				ops.VectorIndex = "different-index"
+			}
+			commits := 0
+			var commitErr error
+			db := heldClaimTestDB{
+				begin: func(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+					if tc.fault == "begin" {
+						return nil, failure
+					}
+					tx, err := c.Pool.BeginTx(ctx, opts)
+					require.NoError(t, err)
+					return heldClaimTestTx{Tx: tx, commit: func(ctx context.Context, tx pgx.Tx) error {
+						commits++
+						_, err := tx.Exec(ctx, "SELECT 1/0")
+						requireSQLState(t, err, "22012")
+						err = tx.Commit(ctx)
+						require.ErrorIs(t, err, pgx.ErrTxCommitRollback)
+						commitErr = fmt.Errorf("commit rejected: %w", err)
+						return commitErr
+					}, exec: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+						if strings.HasPrefix(sql, "UPDATE document_deletions SET claim=") {
+							switch tc.fault {
+							case "update":
+								return pgconn.CommandTag{}, failure
+							case "row count":
+								return pgconn.NewCommandTag("UPDATE 0"), nil
+							}
+						}
+						return tx.Exec(ctx, sql, args...)
+					}}, nil
+				},
+				exec: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+					t.Error("non-ambiguous claim failure attempted cleanup")
+					return pgconn.CommandTag{}, failure
+				},
+			}
+			err := (heldRelease{db: db}).release(t.Context(), id, incarnation, ops)
+			want := tc.want
+			if want == nil {
+				want = failure
+			}
+			require.ErrorIs(t, err, want)
+			if tc.fault == "commit" {
+				require.Equal(t, 1, commits)
+				require.Same(t, commitErr, err)
+			} else {
+				require.Zero(t, commits)
+			}
+			require.Empty(t, keys)
+			require.Equal(t, before, snapshotHeldClaim(t.Context(), t, c, id))
+		})
+	}
+}
+
+func TestHeldClaimCleanupPreservesOtherOwnership(t *testing.T) {
+	owner, serving, _ := restrictedDatabase(t)
+	reindex, role := provisionReindexRole(t, owner)
+	grantExec(t, owner, replaceReindexRole(readPublishedReindexGrantBlocks(t).base, role, ""))
+
+	for _, tc := range []string{"other token", "other incarnation", "other document"} {
+		t.Run(tc, func(t *testing.T) {
+			id, incarnation, _ := pendingHeldSource(t, owner)
+			onOtherDocument, _, _ := pendingHeldSource(t, owner)
+			before := snapshotHeldClaim(t.Context(), t, owner, id)
+			lostReply := errors.New("claim commit reply lost")
+			var abandoned string
+			var preserved heldClaimRow
+			var preservedID domain.DocumentID
+			h := interceptFirstHeldReleaseCommit(heldRelease{db: serving.Pool}, func(ctx context.Context, tx pgx.Tx) error {
+				require.NoError(t, tx.Commit(ctx))
+				claimed := snapshotHeldClaim(ctx, t, owner, id)
+				require.NotNil(t, claimed.claim)
+				abandoned = *claimed.claim
+				require.Equal(t, before.payload, claimed.payload)
+				preservedID = id
+
+				// Apply a concurrent ownership change after COMMIT and before the
+				// intercepted outcome returns to the releasing caller.
+				var err error
+				switch tc {
+				case "other token":
+					_, err = owner.Pool.Exec(ctx, `UPDATE document_deletions SET claim=$2,claim_until=clock_timestamp()+interval '1 minute'
+						WHERE document_id=$1`, string(id), uuid.NewString())
+				case "other incarnation":
+					_, err = owner.Pool.Exec(ctx, `UPDATE document_deletions SET incarnation=$2,source_key=$3,vector_index=$4
+						WHERE document_id=$1`, string(id), uuid.NewString(), "source/reused", "other-index")
+				case "other document":
+					preservedID = onOtherDocument
+					_, err = owner.Pool.Exec(ctx, `UPDATE document_deletions SET claim=$2,claim_until=clock_timestamp()+interval '1 minute',
+						source_key=$3,vector_index=$4 WHERE document_id=$1`, string(preservedID), abandoned, "source/other", "other-index")
+				}
+				require.NoError(t, err)
+				preserved = snapshotHeldClaim(ctx, t, owner, preservedID)
+				return lostReply
+			})
+			var keys []string
+			require.Same(t, lostReply, h.release(t.Context(), id, incarnation, heldSourceOps(t, &keys)))
+			require.Empty(t, keys)
+			require.Equal(t, preserved, snapshotHeldClaim(t.Context(), t, owner, preservedID))
+			if preservedID != id {
+				require.Equal(t, before, snapshotHeldClaim(t.Context(), t, owner, id))
+			}
+
+			// The reindex role can inspect receipts but cannot abandon claims.
+			var preservedIncarnation, preservedToken string
+			require.NoError(t, reindex.Pool.QueryRow(t.Context(), `SELECT incarnation::text,claim::text
+				FROM document_deletions WHERE document_id=$1`, string(preservedID)).Scan(&preservedIncarnation, &preservedToken))
+			requireSQLState(t, clearHeldDeletionClaim(t.Context(), reindex.Pool, preservedID, preservedIncarnation, preservedToken), "42501")
+			require.NoError(t, clearHeldDeletionClaim(t.Context(), serving.Pool, id, incarnation, abandoned))
+			require.Equal(t, preserved, snapshotHeldClaim(t.Context(), t, owner, preservedID))
+			if preservedID != id {
+				require.Equal(t, before, snapshotHeldClaim(t.Context(), t, owner, id))
+			}
+		})
+	}
+
+	t.Run("both attempts fail then claim expires", func(t *testing.T) {
+		id, incarnation, key := pendingHeldSource(t, owner)
+		before := snapshotHeldClaim(t.Context(), t, owner, id)
+		h, _, closeGuard := dedicatedHeldClaim(t, owner)
+		lostReply := errors.New("claim commit reply lost")
+		var persisted heldClaimRow
+		h = interceptFirstHeldReleaseCommit(h, func(ctx context.Context, tx pgx.Tx) error {
+			require.NoError(t, tx.Commit(ctx))
+			persisted = snapshotHeldClaim(ctx, t, owner, id)
+			require.NotNil(t, persisted.claim)
+			_, err := uuid.Parse(*persisted.claim)
+			require.NoError(t, err)
+			return lostReply
+		})
+		unavailable := errors.New("claim cleanup unavailable")
+		clears, connects := 0, 0
+		h.db = heldClaimTestDB{heldReleaseDatabase: h.db, exec: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+			clears++
+			return pgconn.CommandTag{}, unavailable
+		}}
+		h.claimConnConfig.DialFunc = func(context.Context, string, string) (net.Conn, error) {
+			connects++
+			return nil, unavailable
+		}
+		var keys []string
+		ops := heldSourceOps(t, &keys)
+		require.Same(t, lostReply, h.release(t.Context(), id, incarnation, ops))
+		closeGuard()
+		require.Equal(t, 1, clears)
+		require.Positive(t, connects)
+		require.Equal(t, before.payload, persisted.payload)
+		require.NotNil(t, persisted.until)
+		require.Equal(t, persisted, snapshotHeldClaim(t.Context(), t, owner, id))
+		require.ErrorIs(t, owner.ReleaseLegacyHostedHold(t.Context(), id, incarnation, ops), domain.ErrDeletionBusy)
+		require.Empty(t, keys)
+
+		// Advance the persisted lease past its boundary without a wall-clock wait.
+		_, err := owner.Pool.Exec(t.Context(), `UPDATE document_deletions SET claim_until=clock_timestamp()-interval '1 second'
+			WHERE document_id=$1 AND incarnation=$2 AND claim=$3`, string(id), incarnation, *persisted.claim)
+		require.NoError(t, err)
+		require.NoError(t, owner.ReleaseLegacyHostedHold(t.Context(), id, incarnation, ops))
+		require.Equal(t, []string{key}, keys)
+		require.Nil(t, snapshotHeldClaim(t.Context(), t, owner, id).claim)
+	})
 }
 
 func TestLegacyHostedReleaseChecksLostFinalReply(t *testing.T) {
@@ -903,9 +1336,13 @@ func TestLegacyHostedReleaseChecksLostFinalReply(t *testing.T) {
 	claim := uuid.NewString()
 	ops := domain.DeleteOperations{VectorIndex: hold.VectorIndex}
 	h := heldRelease{db: c.Pool, outcome: guard, legacyOnly: true}
-	_, err = h.claimHeldDeletion(ctx, id, hold.Incarnation, claim, time.Minute, ops)
+	_, uncertainCommit, err := h.claimHeldDeletion(ctx, id, hold.Incarnation, claim, time.Minute, ops)
 	require.NoError(t, err)
-	h.db = lostReleaseReplyDB{h.db}
+	require.False(t, uncertainCommit)
+	h = interceptFirstHeldReleaseCommit(h, func(ctx context.Context, tx pgx.Tx) error {
+		require.NoError(t, tx.Commit(ctx))
+		return errors.New("final release reply lost")
+	})
 	require.NoError(t, h.finalizeRelease(ctx, id, hold.Incarnation, claim))
 	r := readReceipt(t, c, id)
 	require.True(t, r.finalized)
