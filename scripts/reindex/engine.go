@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 
 	"github.com/Victoroide/quarry-rag/internal/chunker"
 	"github.com/Victoroide/quarry-rag/internal/domain"
@@ -341,19 +340,7 @@ func (s *stager) vectors(ctx context.Context, snap *pgstore.DocumentSnapshot) (c
 			sourceKey = sourceKeys[i]
 		}
 		src, ok := reusable[sourceKey]
-		srcTenant, _ := src.Metadata[domain.VectorTenantKey].(string)
-		identityMatches := ok && src.DocumentID == c.DocumentID && src.ID == c.ID && src.Text == c.Text && src.Index == c.Index &&
-			(src.VectorIncarnation == "" || src.VectorIncarnation == snap.Incarnation) &&
-			(srcTenant == "" || srcTenant == snap.TenantID) && src.RevisionID == c.RevisionID
-		if identityMatches && s.copyFromTagged && isTagged(snap.DocumentRevision) {
-			tenant, tenantPresent := src.Metadata[domain.VectorTenantKey]
-			// A matching tagged key and revision identify the incarnation.
-			// The separate incarnation tag is mandatory only when the row requires it.
-			identityMatches = (!snap.VectorIncarnationRequired || src.VectorIncarnation == snap.Incarnation) &&
-				src.Metadata[domain.VectorRevisionKey] == snap.Incarnation &&
-				src.Metadata[domain.VectorAttemptKey] == snap.VectorAttempt &&
-				(tenant == snap.TenantID || !tenantPresent && snap.TenantID == "")
-		}
+		identityMatches := sourceIdentityMatches(s.copyFromTagged, snap, c, src, ok)
 		if identityMatches {
 			copyLayoutMetadata(chunks[i].Metadata, src.Metadata)
 		}
@@ -409,21 +396,7 @@ func chunkMetadata(tagged bool, snap *pgstore.DocumentSnapshot, c domain.Chunk) 
 }
 
 func copyLayoutMetadata(dst, src map[string]any) {
-	if len(src) == 0 {
-		return
-	}
-	if pages, ok := src["pages"].([]int); ok && len(pages) > 0 {
-		if _, exists := dst["pages"]; !exists {
-			dst["pages"] = slices.Clone(pages)
-		}
-	}
-	for _, key := range []string{"table_ids", "row_ids"} {
-		if items, ok := src[key].([]string); ok && len(items) > 0 {
-			if _, exists := dst[key]; !exists {
-				dst[key] = slices.Clone(items)
-			}
-		}
-	}
+	domain.CopyValidLayoutProvenance(dst, src)
 }
 
 // prune removes target keys of documents that are no longer eligible sources.

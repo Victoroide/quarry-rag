@@ -42,3 +42,28 @@ func vectorKey(tagged bool, rev pgstore.DocumentRevision, c domain.Chunk) (strin
 	}
 	return string(c.ID), nil
 }
+
+// sourceIdentityMatches proves identity for a record fetched under vectorKey
+// with the source store policy before staging or verification uses its payload.
+func sourceIdentityMatches(sourceTagged bool, snap *pgstore.DocumentSnapshot, want, src domain.Chunk, found bool) bool {
+	if !found || src.DocumentID != want.DocumentID || src.ID != want.ID || src.Text != want.Text || src.Index != want.Index ||
+		(src.VectorIncarnation != "" && src.VectorIncarnation != snap.Incarnation) || src.RevisionID != snap.ActiveRevisionID {
+		return false
+	}
+	// Hosted records carry their own incarnation stamp. PostgreSQL source
+	// rows are associated with the document by the relational snapshot.
+	if sourceTagged && snap.VectorIncarnationRequired && src.VectorIncarnation == "" {
+		return false
+	}
+	tenant, present := src.Metadata[domain.VectorTenantKey]
+	tenantID, valid := tenant.(string)
+	if present && (!valid || tenantID != "" && tenantID != snap.TenantID) {
+		return false
+	}
+	if !sourceTagged || !isTagged(snap.DocumentRevision) {
+		return true
+	}
+	return src.Metadata[domain.VectorRevisionKey] == snap.Incarnation &&
+		src.Metadata[domain.VectorAttemptKey] == snap.VectorAttempt &&
+		tenantID == snap.TenantID
+}

@@ -165,6 +165,22 @@ deletion receipt for a tagged document.
 GRANT SELECT (document_id, incarnation, state) ON public.hosted_vector_manifests TO quarry_service;
 ```
 
+Whole-table `SELECT, INSERT, UPDATE, DELETE` grants on `chunk_vectors` and
+`chunk_vectors_<generation>` automatically cover the `pages`, `table_ids`, and
+`row_ids` columns added by migration `039_vector_layout_provenance.sql`.
+Installations that grant column-level privileges instead of whole-table access
+must grant `SELECT`, `INSERT`, and `UPDATE` on the layout columns (alongside
+`DELETE` on the table) for serving and maintenance roles before starting
+upgraded binaries:
+
+```sql
+-- Column-restricted serving or maintenance upgrade for migration 039
+GRANT SELECT (chunk_id, document_id, chunk_index, doc_type, collection, text, kind, quality, token_count, embedding, pages, table_ids, row_ids),
+  INSERT (chunk_id, document_id, chunk_index, doc_type, collection, text, kind, quality, token_count, embedding, pages, table_ids, row_ids),
+  UPDATE (document_id, chunk_index, doc_type, collection, text, kind, quality, token_count, embedding, pages, table_ids, row_ids),
+  DELETE ON public.chunk_vectors TO quarry_service;
+```
+
 The metadata owner applies the vector function grants after migrating a new or
 existing corpus. On first startup, the serving process opens the configured
 target and binds its identity through the owner-installed initialization

@@ -225,6 +225,7 @@ scan:
 // returns how many keys are present and how many hold a valid, matching record.
 func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSnapshot, rep *verifyReport, expected map[string]scopeDoc, sample *[]sampleChunk) (present, valid int, err error) {
 	ids := make([]string, len(snap.Chunks))
+	sourceKeys := make([]string, len(snap.Chunks))
 	for i, c := range snap.Chunks {
 		targetKey, keyErr := vectorKey(v.taggedTarget, snap.DocumentRevision, c)
 		if keyErr != nil {
@@ -235,6 +236,7 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 			return 0, 0, keyErr
 		}
 		ids[i] = targetKey
+		sourceKeys[i] = sourceKey
 		expected[targetKey] = scopeDoc{id: snap.ID, chunkID: string(c.ID), revisionID: snap.ActiveRevisionID, collection: snap.Collection}
 		*sample = append(*sample, sampleChunk{id: targetKey, sourceKey: sourceKey, doc: snap.ID, collection: snap.Collection, index: c.Index, textHash: sha256.Sum256([]byte(c.Text))})
 	}
@@ -249,6 +251,12 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 		}
 	}
 	tagged := v.taggedTarget && isTagged(snap.DocumentRevision)
+	type fallbackCheck struct {
+		chunkIdx int
+		want     layoutLists
+		got      layoutLists
+	}
+	var fallbackChecks []fallbackCheck
 	for i, want := range snap.Chunks {
 		record, ok := got[ids[i]]
 		if !ok {
@@ -270,10 +278,110 @@ func (v *verifier) compareDocument(ctx context.Context, snap *pgstore.DocumentSn
 			tagged && (revision != snap.Incarnation || attempt != snap.VectorAttempt):
 			rep.Coverage.Mismatched++
 		default:
+			wantLayout, wantErr := extractLayoutLists(want.Metadata)
+			gotLayout, gotErr := extractLayoutLists(record.Metadata)
+			if wantErr != nil || gotErr != nil {
+				rep.Coverage.Mismatched++
+				continue
+			}
+			mismatch, needsFallback := compareCanonicalLayout(wantLayout, gotLayout)
+			if mismatch {
+				rep.Coverage.Mismatched++
+				continue
+			}
+			if needsFallback {
+				fallbackChecks = append(fallbackChecks, fallbackCheck{chunkIdx: i, want: wantLayout, got: gotLayout})
+				continue
+			}
+			valid++
+		}
+	}
+	for start := 0; start < len(fallbackChecks); start += pcstore.FetchBatchSize {
+		batch := fallbackChecks[start:min(start+pcstore.FetchBatchSize, len(fallbackChecks))]
+		var sourceRecords map[string]domain.Chunk
+		if v.source != nil {
+			needed := make([]string, len(batch))
+			for i, check := range batch {
+				needed[i] = sourceKeys[check.chunkIdx]
+			}
+			var fetchErr error
+			sourceRecords, fetchErr = v.source.Fetch(ctx, needed)
+			if fetchErr != nil {
+				return present, valid, fmt.Errorf("read source layout evidence: %w", fetchErr)
+			}
+		}
+		for _, check := range batch {
+			want := snap.Chunks[check.chunkIdx]
+			src, ok := sourceRecords[sourceKeys[check.chunkIdx]]
+			if !sourceIdentityMatches(v.sourceTagged, snap, want, src, ok) || !layoutFallbackMatches(check.want, check.got, src.Metadata) {
+				rep.Coverage.Mismatched++
+				continue
+			}
 			valid++
 		}
 	}
 	return present, valid, nil
+}
+
+type layoutLists struct {
+	pages    []int
+	tableIDs []string
+	rowIDs   []string
+}
+
+func extractLayoutLists(md map[string]any) (layoutLists, error) {
+	lp, err := domain.ExtractLayoutProvenance(md)
+	if err != nil {
+		return layoutLists{}, err
+	}
+	return layoutLists{pages: lp.Pages, tableIDs: lp.TableIDs, rowIDs: lp.RowIDs}, nil
+}
+
+func compareCanonicalLayout(want, got layoutLists) (mismatch, needsFallback bool) {
+	if len(want.pages) > 0 {
+		if !slices.Equal(want.pages, got.pages) {
+			return true, false
+		}
+	} else if len(got.pages) > 0 {
+		needsFallback = true
+	}
+	if len(want.tableIDs) > 0 {
+		if !slices.Equal(want.tableIDs, got.tableIDs) {
+			return true, false
+		}
+	} else if len(got.tableIDs) > 0 {
+		needsFallback = true
+	}
+	if len(want.rowIDs) > 0 {
+		if !slices.Equal(want.rowIDs, got.rowIDs) {
+			return true, false
+		}
+	} else if len(got.rowIDs) > 0 {
+		needsFallback = true
+	}
+	return false, needsFallback
+}
+
+func layoutFallbackMatches(want, got layoutLists, srcMD map[string]any) bool {
+	if len(want.pages) == 0 && len(got.pages) > 0 {
+		srcPages, err := domain.ExtractLayoutPages(srcMD)
+		if err != nil || !slices.Equal(srcPages, got.pages) {
+			return false
+		}
+	}
+	if len(want.tableIDs) == 0 && len(got.tableIDs) > 0 {
+		srcTables, err := domain.ExtractLayoutTableIDs(srcMD)
+		if err != nil || !slices.Equal(srcTables, got.tableIDs) {
+			return false
+		}
+	}
+	if len(want.rowIDs) == 0 && len(got.rowIDs) > 0 {
+		srcRows, err := domain.ExtractLayoutRowIDs(srcMD)
+		if err != nil || !slices.Equal(srcRows, got.rowIDs) {
+			return false
+		}
+	}
+	return true
 }
 
 // listUnexpected enumerates the target's keys; any key outside the expected set is out of scope.
@@ -491,7 +599,7 @@ func (v *verifier) judge(rep *verifyReport) {
 		v.fail(rep, "%d vectors have the wrong dimension or an invalid value", c.BadVectors)
 	}
 	if c.Mismatched > 0 {
-		v.fail(rep, "%d records differ from PostgreSQL in document, chunk, position, text, token count, type, collection, tenant, revision or incarnation", c.Mismatched)
+		v.fail(rep, "%d records differ from PostgreSQL in document, chunk, position, text, token count, type, collection, tenant, revision, incarnation or layout provenance", c.Mismatched)
 	}
 	if rep.Unexpected.Records > 0 {
 		v.fail(rep, "%d records in the target are outside the expected set", rep.Unexpected.Records)
