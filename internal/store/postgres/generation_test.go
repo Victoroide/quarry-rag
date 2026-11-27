@@ -937,7 +937,7 @@ func TestHostedManifestCutoverUpgrade(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, c.Close(context.Background())) })
-	applyMigrationsExcept(t, c, 47)
+	applyMigrationsExcept(t, c, 47, 48)
 	require.NoError(t, c.PinVectorGeneration(ctx, LegacyGeneration, "pinecone", "source", "source-host", generationProfile()))
 	verifiedGeneration(t, c, "g2", "digest")
 	doc, rev := uuid.NewString(), uuid.NewString()
@@ -1295,7 +1295,7 @@ func TestGateToleratesASchemaThatPredatesVectorState(t *testing.T) {
 	c := migrationTestClient(t, startTestDatabase(t))
 	// Admission and claims need later migrations. Defer the vector state
 	// and the migrations that depend on it until the upgrade.
-	applyMigrationsExcept(t, c, 16, 33, 39, 41, 42, 47)
+	applyMigrationsExcept(t, c, 16, 33, 39, 41, 42, 47, 48)
 	require.NoError(t, c.WritersOpen(t.Context()), "no record can freeze writers before migration 016")
 	accepted, err := c.AcceptDocument(t.Context(), jobsRequest("accepted before the generation records exist"))
 	require.NoError(t, err)
